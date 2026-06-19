@@ -1244,7 +1244,7 @@ package.json / src/mcp/server/server.ts   (1.71.1 → 1.71.2)
 ```
 
 > After installing, `qodex --version` should finally report 1.71.2. If it still shows 1.22.0, the
-> global `qodex` is pointing at an old install — `npm link` from /Users/sevengum/qodex (or check
+> global `qodex` is pointing at an old install — `npm link` from /Users/you/qodex (or check
 > `which qodex`) to repoint it at this build.
 
 ## v1.71.1 — 2026-06-05
@@ -6465,7 +6465,7 @@ vscode-extension/README.md                (NEW)       — install / usage
 ### Install (development)
 
 ```bash
-cd /Users/sevengum/qodex/vscode-extension
+cd /Users/you/qodex/vscode-extension
 npm install
 npm run compile
 # F5 in VS Code → launches Extension Development Host
@@ -6575,7 +6575,7 @@ nothing wrote to it. v1.6.0 ships the recording layer + stats commands.
 
 ```
 /stats
-Stats — last 30 day(s), /Users/sevengum/projects/seven-gum
+Stats — last 30 day(s), /Users/you/projects/seven-gum
 
 Top tools:
   edit_text                       127x  98% ok  avg 142ms
@@ -8170,7 +8170,7 @@ Before (v0.5.4):
 > what files are in this directory?
 
   ✓ ls
-  Contents of /Users/sevengum/qodex:
+  Contents of /Users/you/qodex:
     📁 bin/
     📄 README.md  (7.9K)
     ...
@@ -8191,7 +8191,7 @@ After (v0.5.5):
 > what files are in this directory?
 
   ✓ ls
-  Contents of /Users/sevengum/qodex:
+  Contents of /Users/you/qodex:
     📁 bin/
     📄 README.md  (7.9K)
     ...

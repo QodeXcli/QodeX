@@ -4,8 +4,8 @@ import { extractAttachedDir } from '../src/agent/attached-dir.js';
 describe('extractAttachedDir', () => {
   it('pulls the path from the attached-directory marker', () => {
     const prompt =
-      'make it animated [Attached directory: /Users/sevengum/Desktop/cctv_project/cctv_frontend] — treat this folder as the project/codebase to work on.';
-    expect(extractAttachedDir(prompt)).toBe('/Users/sevengum/Desktop/cctv_project/cctv_frontend');
+      'make it animated [Attached directory: /Users/you/Desktop/cctv_project/cctv_frontend] — treat this folder as the project/codebase to work on.';
+    expect(extractAttachedDir(prompt)).toBe('/Users/you/Desktop/cctv_project/cctv_frontend');
   });
 
   it('handles the marker alone', () => {
