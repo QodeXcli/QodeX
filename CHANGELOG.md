@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.3.0 — 2026-06-19
+
+**Artifacts — Layer 2: render in a real browser.** Builds on the Layer 1 store. The new
+`artifact_preview` tool turns any artifact into a self-contained HTML page and serves it on
+a local static server, so it can be opened in QodeX's real Chromium and screenshotted. This
+is the bridge to Layer 3 (vision self-correction): once an artifact renders in a browser,
+the model can SEE it.
+
+The notable part: `react` and `vue` artifacts preview with NO local bundler. The source is
+wrapped in an in-browser harness that pulls React + Babel-standalone (or Vue + vue3-sfc-loader)
+from a CDN, so a freshly-created JSX component renders the moment the page loads — no
+`npm install`, no vite config, no build step. `html`/`svg` render directly, `markdown` via
+marked.js, `text` in a <pre>.
+
+Flow: `artifact_preview id=...` → writes `__preview__.html` next to the version, starts a
+`python3 -m http.server` on a deterministic per-artifact port, returns the URL → the model
+follows with `browser_navigate` + `browser_screenshot`. Degrades gracefully: if python3 is
+absent, it returns the page path + a manual serve command instead of failing.
+
+The preview builder is a pure function (string in, HTML out) and is fully unit-tested
+without a browser.
+
+```
+src/artifacts/preview.ts              (new — pure preview-HTML builder + harnesses)
+src/tools/artifacts/artifact-tools.ts (artifact_preview tool — serve + hand off to browser)
+test/artifact-preview.test.ts         (new — 27 assertions, all pass)
+```
+
 ## v2.2.0 — 2026-06-19
 
 **Artifacts — Layer 1: a versioned store for self-contained outputs.** The first layer

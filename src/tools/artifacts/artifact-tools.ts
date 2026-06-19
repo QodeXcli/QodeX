@@ -12,11 +12,14 @@
  * them.
  */
 import { z } from 'zod';
+import * as path from 'path';
 import { Tool, ToolContext, ToolResult } from '../base.js';
 import {
   createArtifact, updateArtifact, listArtifacts, getArtifact, rollbackArtifact,
   isArtifactType, type ArtifactType,
 } from '../../artifacts/store.js';
+import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort } from '../../artifacts/preview.js';
+import * as processRegistry from '../browser/process-registry.js';
 
 const TYPE_VALUES = ['html', 'react', 'svg', 'markdown', 'vue', 'text'] as const;
 
@@ -147,6 +150,67 @@ export class ArtifactRollbackTool extends Tool<z.infer<typeof RollbackArgs>> {
   }
 }
 
+const PreviewArgs = z.object({
+  id: z.string().describe('The artifact id to preview.'),
+  version: z.number().int().positive().optional().describe('Version to preview (defaults to current).'),
+});
+
+export class ArtifactPreviewTool extends Tool<z.infer<typeof PreviewArgs>> {
+  name = 'artifact_preview';
+  description = 'Render an artifact in a real browser: builds a self-contained preview page (React/Vue render via an in-browser harness, no build step) and starts a local static server. Returns a URL — follow with browser_navigate then browser_screenshot to SEE the result. Needs python3 for the static server.';
+  argsSchema = PreviewArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof PreviewArgs>, ctx: ToolContext): Promise<ToolResult> {
+    let manifest, version, content, absFile;
+    try {
+      ({ manifest, version, content, absFile } = await getArtifact(ctx.cwd, args.id, args.version));
+    } catch (e: any) {
+      return { content: e?.message ?? String(e), isError: true };
+    }
+
+    // Build + write the preview page next to the artifact's version file.
+    const html = buildPreviewHtml(manifest.type, content);
+    const versionDir = path.dirname(absFile);
+    const previewPath = path.join(versionDir, PREVIEW_FILE);
+    await ctx.transaction.write(previewPath, html);
+
+    const port = previewPort(manifest.id);
+    const name = previewServerName(manifest.id);
+    const url = `http://localhost:${port}/${PREVIEW_FILE}`;
+
+    // Serve the version dir statically. python3 is near-universal on macOS/Linux and needs
+    // no project deps. If it isn't available, hand back the page path + a manual fallback.
+    try {
+      await processRegistry.start({
+        name,
+        command: `python3 -m http.server ${port} --bind 127.0.0.1 --directory ${JSON.stringify(versionDir)}`,
+        cwd: versionDir,
+        replace: true,
+      });
+    } catch (e: any) {
+      return {
+        content:
+          `Preview page written to ${previewPath}, but the static server could not start ` +
+          `(${e?.message ?? e}). Serve it yourself, e.g.:\n` +
+          `  dev_server_start name="${name}" command="python3 -m http.server ${port}" cwd="${versionDir}"\n` +
+          `then browser_navigate ${url} and browser_screenshot.`,
+        metadata: { artifactId: manifest.id, version, previewPath, url, served: false },
+      };
+    }
+
+    ctx.emit({ type: 'progress', message: `Serving artifact "${manifest.id}" v${version} at ${url}` });
+    return {
+      content:
+        `Preview of "${manifest.id}" v${version} (${manifest.type}) is live at ${url}\n` +
+        `Next: browser_navigate to that URL, then browser_screenshot to see how it rendered. ` +
+        `Stop the server later with dev_server_stop name="${name}".`,
+      metadata: { artifactId: manifest.id, version, type: manifest.type, url, server: name, served: true },
+    };
+  }
+}
+
 export const ARTIFACT_TOOLS = [
-  ArtifactCreateTool, ArtifactUpdateTool, ArtifactListTool, ArtifactGetTool, ArtifactRollbackTool,
+  ArtifactCreateTool, ArtifactUpdateTool, ArtifactListTool, ArtifactGetTool, ArtifactRollbackTool, ArtifactPreviewTool,
 ];

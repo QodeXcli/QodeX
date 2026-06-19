@@ -2,9 +2,7 @@
 
 > **Local-first agentic coding CLI.** Runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A local-first take on the agentic coding assistant — built so a model running on *your* machine can do real, multi-step engineering work, fully offline if you want.
 
-**Version 2.2.0** · 100+ built-in tools · English & Persian · Apache-2.0
-
-[![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
+**Version 2.1.1** · 100+ built-in tools · English & Persian · Apache-2.0
 
 ---
 
@@ -58,7 +56,7 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 > Requires **Node 20+**. `dist/` is built locally (not committed) — the `npm run build` step is **required**.
 
 ```bash
-git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
+git clone https://github.com/batisexpress/QodeX.git qodex && cd qodex
 npm install
 npm run build
 npm link   # makes `qodex` and `qx` available on PATH
