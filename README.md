@@ -2,7 +2,7 @@
 
 > **Local-first agentic coding CLI.** Built on Qwen3-Coder + Ollama by default, with Claude/GPT/DeepSeek as optional cloud fallbacks. Designed to match Claude Code's capabilities while running fully offline if you want.
 
-**Current version: 0.9.2** · 52 built-in tools · Apache-2.0
+**Current version: 2.1.1** · 100+ built-in tools · Apache-2.0
 
 ## What it can do
 
@@ -26,7 +26,7 @@ QodeX drives a real agent loop. Give it a task in natural language (English or P
 ## Install
 
 ```bash
-git clone <repo> qodex && cd qodex
+git clone https://github.com/batisexpress/QodeX.git qodex && cd qodex
 npm install
 npm run build
 npm link   # makes `qx` and `qodex` available on PATH
