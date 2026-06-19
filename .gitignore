@@ -7,3 +7,5 @@ dist/
 .env.local
 test-output/
 coverage/
+qodex/
+.qodex/
