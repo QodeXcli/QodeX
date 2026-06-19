@@ -1,6 +1,6 @@
 {
   "name": "@qodex/cli",
-  "version": "2.3.0",
+  "version": "2.3.2",
   "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
   "license": "Apache-2.0",
   "author": "7 SEVEN <REPLACE_WITH_YOUR_EMAIL>",

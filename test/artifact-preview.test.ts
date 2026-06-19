@@ -44,7 +44,7 @@ console.log('— buildPreviewHtml per type —');
   check('react pulls React from CDN', react.includes('react@18') && react.includes('react-dom@18'));
   check('react includes Babel', react.includes('@babel/standalone'));
   check('react strips the import', !react.includes("import React"));
-  check('react mounts the component', react.includes('createRoot') && react.includes('React.createElement(App)'));
+  check('react mounts the component', react.includes('createRoot') && react.includes('React.createElement(__Art)') && react.includes('__art_default'));
   check('react uses text/babel script', react.includes('type="text/babel"'));
 
   const vue = buildPreviewHtml('vue', '<template><div>hi</div></template>');
@@ -65,6 +65,47 @@ console.log('— server helpers —');
   check('port is deterministic', previewPort('landing-page') === p);
   check('different ids → (usually) different ports', previewPort('aaa') !== previewPort('zzzzzz') || true);
 }
+
+
+// ── regression: real model-generated import/export shapes (the localhost:4995 bug) ──
+console.log('— stripModuleSyntax: real-world shapes —');
+{
+  // multi-line import like Gemini produced
+  const multi = `import React, {\n  useState,\n  useEffect,\n} from 'react';\nfunction Counter(){ return null; }`;
+  const out = stripModuleSyntax(multi);
+  check('strips multi-line import', !/\bimport\b/.test(out));
+  check('keeps the component after multi-line import', /function Counter/.test(out));
+
+  // single-line import with named + default
+  const single = stripModuleSyntax(`import React, { useState } from 'react';\nconst App = () => null;`);
+  check('strips single-line named+default import', !/\bimport\b/.test(single));
+
+  // bare side-effect import
+  check('strips bare import', !/\bimport\b/.test(stripModuleSyntax(`import './styles.css';\nconst App=()=>null;`)));
+
+  // export default function
+  const edf = stripModuleSyntax(`export default function Counter(){ return null; }`);
+  check('export default function -> function', /^function Counter/.test(edf.trim()) && !/\bexport\b/.test(edf));
+
+  // export default anonymous arrow -> assigned to window.__art_default
+  const eda = stripModuleSyntax(`export default () => null;`);
+  check('export default arrow -> __art_default', /window\.__art_default\s*=/.test(eda) && !/\bexport\b/.test(eda));
+
+  // named export declaration
+  check('export const -> const', /^const x/.test(stripModuleSyntax('export const x = 1;').trim()));
+
+  // standalone named export statement
+  check('drops `export { A, B };`', stripModuleSyntax('function A(){}\nexport { A };').includes('export') === false);
+
+  // re-export with from
+  check('drops `export { x } from "y";`', !/\bexport\b/.test(stripModuleSyntax(`export { x } from './y';`)));
+
+  // the FULL harness for a Gemini-style component must not contain a bare import/export
+  const harness = buildPreviewHtml('react', `import React, { useState } from 'react';\nexport default function Counter(){\n  const [n,setN]=useState(0);\n  return <button onClick={()=>setN(n+1)}>{n}</button>;\n}`);
+  check('full react harness has no leftover import', !/\bimport\b\s+[A-Za-z{]/.test(harness));
+  check('full react harness references a mount root', harness.includes('__art_root'));
+}
+
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

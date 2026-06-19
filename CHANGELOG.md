@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.3.2 — 2026-06-19
+
+**Fix: React/Vue artifact previews now render real model-generated components.** Live
+testing surfaced a bug the unit tests missed: when a model created a React artifact with
+a normal `import React, { useState } from 'react';` + `export default function Counter`,
+the preview page threw "Cannot use import statement outside a module" and rendered blank.
+The in-browser Babel harness can't process ES module syntax, and the old `stripModuleSyntax`
+only caught simple single-line imports.
+
+Hardened `stripModuleSyntax` to handle the shapes models actually emit: multi-line imports,
+bare side-effect imports, `export default function/class`, anonymous `export default () => …`
+(now captured and mounted), named export declarations, and standalone `export { … }` /
+re-export statements. The harness resolves the component to mount in priority order
+(`export default` → detected named component → global `App`) so anonymous default exports
+render too. Added 10 regression tests built from the exact component shape that failed live.
+
+```
+src/artifacts/preview.ts          (stripModuleSyntax + reactHarness hardened)
+test/artifact-preview.test.ts     (37 -> 38 assertions; real import/export shapes)
+```
+
+## v2.3.1 — 2026-06-19
+
+**Fix: the `artifacts` skill now drives the real artifact tools.** The bundled
+`artifacts` skill predated the Living Artifact system and still told the model to
+hand-write a file with `write_file` and end with "open <path>" — so when asked to
+"create a React component as an artifact and preview it", the model wrote a plain
+HTML file and never touched `artifact_create` / `artifact_preview`. Rewrote the
+skill (v0.2.0) to direct the model through the real flow: `artifact_create`
+(type=react, just the component — no HTML/CDN/Babel boilerplate) → `artifact_preview`
+→ `browser_navigate` + `browser_screenshot` → `artifact_update` to iterate. The
+tools themselves were already correct; the stale skill was hijacking the path.
+
+```
+examples/skills/artifacts/SKILL.md   (rewritten v0.1.0 → v0.2.0)
+```
+
 ## v2.3.0 — 2026-06-19
 
 **Artifacts — Layer 2: render in a real browser.** Builds on the Layer 1 store. The new

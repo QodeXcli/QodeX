@@ -57,23 +57,40 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>]/g, c => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
 }
 
-/** Strip ES module noise so source can run inside an in-browser <script> harness. */
+/**
+ * Strip ES module syntax so source can run inside an in-browser `<script type="text/babel">`
+ * harness. Babel-standalone with the `react` preset does NOT understand `import`/`export`
+ * (that needs a real module loader), so any surviving `import`/`export` throws
+ * "Cannot use import statement outside a module" and the component never mounts.
+ *
+ * Models emit these in many shapes, so we handle them broadly:
+ *  - single-line and MULTI-LINE imports (`import React, {\n  useState,\n} from 'react';`)
+ *  - bare side-effect imports (`import './styles.css';`)
+ *  - `export default function/class/const` and `export default <expr>;`
+ *  - named export declarations (`export const x = …`, `export function f …`)
+ *  - re-export / named export statements (`export { A, B };`, `export { x } from '…';`)
+ */
 export function stripModuleSyntax(src: string): string {
   return src
-    // drop `import ... from '...';` and bare `import '...';`
-    .replace(/^\s*import\s+[^;]*?;\s*$/gm, '')
-    .replace(/^\s*import\s+['"][^'"]+['"];?\s*$/gm, '')
-    // `export default function App` -> `function App`; `export default class` -> `class`
-    .replace(/^\s*export\s+default\s+/gm, '')
-    // drop remaining `export ` keywords on declarations
-    .replace(/^\s*export\s+(?=(const|let|var|function|class)\b)/gm, '');
+    // multi-line or single-line `import ... from '...';` (non-greedy up to the first ;)
+    .replace(/\bimport\b[\s\S]*?\bfrom\b\s*['"][^'"]+['"]\s*;?/g, '')
+    // bare side-effect import: `import 'x';`
+    .replace(/\bimport\s+['"][^'"]+['"]\s*;?/g, '')
+    // dynamic-ish default export of an expression: `export default <expr>;`
+    // (run BEFORE the keyword-strip so `export default function` is handled by the next rule)
+    .replace(/^\s*export\s+default\s+(?=(function|class)\b)/gm, '')
+    .replace(/^\s*export\s+default\s+/gm, 'window.__art_default = ')
+    // `export const/let/var/function/class` -> drop just the `export `
+    .replace(/^\s*export\s+(?=(const|let|var|function|class|async)\b)/gm, '')
+    // standalone named export / re-export statements: `export { A, B };` or `export { A } from '…';`
+    .replace(/^\s*export\s*\{[^}]*\}\s*(from\s*['"][^'"]+['"])?\s*;?\s*$/gm, '');
 }
 
 /** Best-effort: find the root React component name to mount (defaults to "App"). */
 export function detectReactComponent(src: string): string {
   const m =
     src.match(/function\s+([A-Z][A-Za-z0-9_]*)\s*\(/) ||
-    src.match(/(?:const|let|var)\s+([A-Z][A-Za-z0-9_]*)\s*=\s*\(/) ||
+    src.match(/(?:const|let|var)\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:\(|function|React\.memo|memo)/) ||
     src.match(/class\s+([A-Z][A-Za-z0-9_]*)\s+extends/);
   return m ? m[1] : 'App';
 }
@@ -86,13 +103,19 @@ function reactHarness(src: string): string {
     `<script crossorigin src="${CDN.reactDom}"></script>` +
     `<script src="${CDN.babel}"></script>`;
   // The component source + a bootstrap, both transpiled by Babel-in-the-browser.
+  // Mount priority: an `export default` (captured as window.__art_default) wins, else the
+  // detected named component, else a global named `App`. This covers named components,
+  // `export default function Foo`, and anonymous `export default () => …`.
   const body =
     `<div id="__art_root"></div>` +
     `<script type="text/babel" data-presets="react">\n` +
     `const { useState, useEffect, useRef, useMemo, useCallback, useReducer } = React;\n` +
     `${code}\n` +
     `try {\n` +
-    `  ReactDOM.createRoot(document.getElementById('__art_root')).render(React.createElement(${comp}));\n` +
+    `  var __Art = (typeof window.__art_default !== 'undefined' && window.__art_default)\n` +
+    `    || (typeof ${comp} !== 'undefined' ? ${comp} : (typeof App !== 'undefined' ? App : null));\n` +
+    `  if (!__Art) throw new Error('No React component found to render (expected a component named ${comp} or a default export).');\n` +
+    `  ReactDOM.createRoot(document.getElementById('__art_root')).render(React.createElement(__Art));\n` +
     `} catch (e) {\n` +
     `  document.getElementById('__art_root').innerHTML = '<pre class=\\'__art_text\\'>Render error: ' + (e && e.message) + '</pre>';\n` +
     `}\n` +
