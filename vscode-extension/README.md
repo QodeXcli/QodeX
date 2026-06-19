@@ -38,7 +38,7 @@ Thin launcher that connects QodeX (local-first agentic coding CLI) to VS Code's 
 For local development:
 
 ```bash
-cd /Users/you/qodex/vscode-extension
+cd /Users/sevengum/qodex/vscode-extension
 npm install
 npm run compile
 # Press F5 in VS Code with this folder open to launch the Extension Development Host

@@ -3,6 +3,7 @@ import type { ToolSchema } from '../llm/types.js';
 import { coerceArgsToSchema, type JsonSchemaNode } from '../llm/constrained.js';
 import { ReadFileTool } from './filesystem/read.js';
 import { WriteFileTool } from './filesystem/write.js';
+import { ARTIFACT_TOOLS } from './artifacts/artifact-tools.js';
 import { EditTextTool } from './filesystem/edit.js';
 import { MultiEditTool } from './filesystem/multi-edit.js';
 import { MultiFileEditTool } from './filesystem/multi-file-edit.js';
@@ -192,6 +193,7 @@ export class ToolRegistry {
       new CsvReadTool(),
       new CsvWriteTool(),
       new XlsxReadTool(),
+      ...ARTIFACT_TOOLS.map(T => new T()),
       new LsTool(),
       new GlobTool(),
       new GrepTool(),

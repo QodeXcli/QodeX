@@ -7,19 +7,5 @@ dist/
 .env.local
 test-output/
 coverage/
-
-# safety: never commit local config (may contain API keys), tarballs, models
-config.yaml
-config.local.yaml
-*.local.yaml
-.qodex/
 *.tar.gz
-*.gguf
-*.safetensors
-*.bin
-finetune/.venv/
-finetune/adapters/
-finetune/wandb/
-services/reranker/.venv/
-vscode-extension/out/
-*.vsix
+.qodex/

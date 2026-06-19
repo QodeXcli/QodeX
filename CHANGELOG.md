@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.2.0 — 2026-06-19
+
+**Artifacts — Layer 1: a versioned store for self-contained outputs.** The first layer
+of the "Living Artifact" system. Instead of dumping a large standalone file (a web page,
+React component, SVG, doc) into the chat, the model can now create a named, VERSIONED
+artifact that the user keeps and iterates on. Every revision is preserved under
+`.qodex/artifacts/<id>/vN/`, so you can diff or roll back.
+
+Five tools: `artifact_create` (writes v1), `artifact_update` (saves a new version, old
+ones kept), `artifact_list`, `artifact_get` (read any version), `artifact_rollback`
+(repoint "current" to an earlier version, nothing lost). Writes go through the journaled
+transaction, so artifacts are undoable like any other edit.
+
+Design: the store is I/O-light — file writes go through a `WriteFn` (the journaled
+`transaction.write` in production, a plain write in tests), and the pure logic (id
+slugging — Persian-safe, version math, type→extension mapping, manifest shaping) is
+separated and unit-tested. Artifact types: html, react, svg, markdown, vue, text.
+
+This is the foundation. Layer 2 (auto-open web artifacts in the real Playwright browser +
+screenshot) and Layer 3 (the unique part — `vision_analyze` critiques the rendered output
+and the model self-corrects in a closed visual loop) build ON these tools. Crucially the
+base degrades gracefully: an artifact works fully with no browser or vision available.
+
+```
+src/artifacts/store.ts                (new — versioned store + pure helpers)
+src/tools/artifacts/artifact-tools.ts (new — 5 model-facing tools)
+src/tools/registry.ts                 (register artifact tools)
+test/artifact-store.test.ts           (new — 26 assertions, all pass)
+```
+
 ## v2.1.1 — 2026-06-17
 
 **Build fix.** `src/agent/tool-relevance.ts` (added in v1.95) imported `ToolSchema` from
@@ -1244,7 +1274,7 @@ package.json / src/mcp/server/server.ts   (1.71.1 → 1.71.2)
 ```
 
 > After installing, `qodex --version` should finally report 1.71.2. If it still shows 1.22.0, the
-> global `qodex` is pointing at an old install — `npm link` from /Users/you/qodex (or check
+> global `qodex` is pointing at an old install — `npm link` from /Users/sevengum/qodex (or check
 > `which qodex`) to repoint it at this build.
 
 ## v1.71.1 — 2026-06-05
@@ -6465,7 +6495,7 @@ vscode-extension/README.md                (NEW)       — install / usage
 ### Install (development)
 
 ```bash
-cd /Users/you/qodex/vscode-extension
+cd /Users/sevengum/qodex/vscode-extension
 npm install
 npm run compile
 # F5 in VS Code → launches Extension Development Host
@@ -6575,7 +6605,7 @@ nothing wrote to it. v1.6.0 ships the recording layer + stats commands.
 
 ```
 /stats
-Stats — last 30 day(s), /Users/you/projects/seven-gum
+Stats — last 30 day(s), /Users/sevengum/projects/seven-gum
 
 Top tools:
   edit_text                       127x  98% ok  avg 142ms
@@ -8170,7 +8200,7 @@ Before (v0.5.4):
 > what files are in this directory?
 
   ✓ ls
-  Contents of /Users/you/qodex:
+  Contents of /Users/sevengum/qodex:
     📁 bin/
     📄 README.md  (7.9K)
     ...
@@ -8191,7 +8221,7 @@ After (v0.5.5):
 > what files are in this directory?
 
   ✓ ls
-  Contents of /Users/you/qodex:
+  Contents of /Users/sevengum/qodex:
     📁 bin/
     📄 README.md  (7.9K)
     ...

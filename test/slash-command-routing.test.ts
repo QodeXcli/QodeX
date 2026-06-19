@@ -8,7 +8,7 @@ import { handleSlashCommand } from '../src/cli/slash-commands.js';
  */
 describe('slash-command routing vs file paths', () => {
   const cases = [
-    '/Users/you/Desktop/Screenshot 2026-05-22 at 10.56.21.png please analyze',
+    '/Users/sevengum/Desktop/Screenshot 2026-05-22 at 10.56.21.png please analyze',
     '/tmp/diagram.png',
     '/home/user/notes.md what is this',
     '/var/log/system.log',
