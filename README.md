@@ -4,6 +4,8 @@
 
 **Version 2.2.0** · 100+ built-in tools · English & Persian · Apache-2.0
 
+[![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
+
 ---
 
 ## What makes it different
