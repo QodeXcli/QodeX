@@ -25,6 +25,14 @@ import * as processRegistry from '../browser/process-registry.js';
 
 const TYPE_VALUES = ['html', 'react', 'svg', 'markdown', 'vue', 'text'] as const;
 
+/** Resolve the artifact id from either `id` or the `name` alias some models send. */
+function resolveArtifactId(args: { id?: string; name?: string }): string {
+  const id = (args.id ?? args.name ?? '').trim();
+  if (!id) throw new Error('Missing artifact id. Pass id="<artifact-id>" (the id returned by artifact_create).');
+  return id;
+}
+
+
 const CreateArgs = z.object({
   title: z.string().describe('Human title for the artifact, e.g. "Pricing page" — also seeds its id.'),
   type: z.enum(TYPE_VALUES).describe('Artifact kind: html, react (JSX), svg, markdown, vue, or text.'),
@@ -57,7 +65,8 @@ export class ArtifactCreateTool extends Tool<z.infer<typeof CreateArgs>> {
 }
 
 const UpdateArgs = z.object({
-  id: z.string().describe('The artifact id returned by artifact_create.'),
+  id: z.string().optional().describe('The artifact id returned by artifact_create.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
   content: z.string().describe('The full file content of the NEW version (not a diff).'),
   note: z.string().optional().describe('What changed in this version.'),
 });
@@ -73,7 +82,7 @@ export class ArtifactUpdateTool extends Tool<z.infer<typeof UpdateArgs>> {
     try {
       const { manifest, absFile, version } = await updateArtifact(
         ctx.cwd,
-        { id: args.id, content: args.content, note: args.note },
+        { id: resolveArtifactId(args), content: args.content, note: args.note },
         (p, c) => ctx.transaction.write(p, c),
       );
       ctx.emit({ type: 'progress', message: `Updated artifact "${manifest.id}" → v${version}` });
@@ -105,7 +114,8 @@ export class ArtifactListTool extends Tool<z.infer<typeof ListArgs>> {
 }
 
 const GetArgs = z.object({
-  id: z.string().describe('The artifact id.'),
+  id: z.string().optional().describe('The artifact id.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
   version: z.number().int().positive().optional().describe('Version to read (defaults to current).'),
 });
 
@@ -118,7 +128,7 @@ export class ArtifactGetTool extends Tool<z.infer<typeof GetArgs>> {
 
   async execute(args: z.infer<typeof GetArgs>, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const { manifest, version, content } = await getArtifact(ctx.cwd, args.id, args.version);
+      const { manifest, version, content } = await getArtifact(ctx.cwd, resolveArtifactId(args), args.version);
       return {
         content: `Artifact "${manifest.id}" v${version} (${manifest.type}):\n\n${content}`,
         metadata: { artifactId: manifest.id, version, type: manifest.type },
@@ -130,7 +140,8 @@ export class ArtifactGetTool extends Tool<z.infer<typeof GetArgs>> {
 }
 
 const RollbackArgs = z.object({
-  id: z.string().describe('The artifact id.'),
+  id: z.string().optional().describe('The artifact id.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
   version: z.number().int().positive().describe('The earlier version number to make current.'),
 });
 
@@ -143,7 +154,7 @@ export class ArtifactRollbackTool extends Tool<z.infer<typeof RollbackArgs>> {
 
   async execute(args: z.infer<typeof RollbackArgs>, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const manifest = await rollbackArtifact(ctx.cwd, args.id, args.version, (p, c) => ctx.transaction.write(p, c));
+      const manifest = await rollbackArtifact(ctx.cwd, resolveArtifactId(args), args.version, (p, c) => ctx.transaction.write(p, c));
       ctx.emit({ type: 'progress', message: `Rolled "${manifest.id}" back to v${args.version}` });
       return { content: `"${manifest.id}" current version is now v${args.version}.`, metadata: { artifactId: manifest.id, current: args.version } };
     } catch (e: any) {
@@ -153,7 +164,8 @@ export class ArtifactRollbackTool extends Tool<z.infer<typeof RollbackArgs>> {
 }
 
 const PreviewArgs = z.object({
-  id: z.string().describe('The artifact id to preview.'),
+  id: z.string().optional().describe('The artifact id to preview.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
   version: z.number().int().positive().optional().describe('Version to preview (defaults to current).'),
 });
 
@@ -167,7 +179,7 @@ export class ArtifactPreviewTool extends Tool<z.infer<typeof PreviewArgs>> {
   async execute(args: z.infer<typeof PreviewArgs>, ctx: ToolContext): Promise<ToolResult> {
     let manifest, version, content, absFile;
     try {
-      ({ manifest, version, content, absFile } = await getArtifact(ctx.cwd, args.id, args.version));
+      ({ manifest, version, content, absFile } = await getArtifact(ctx.cwd, resolveArtifactId(args), args.version));
     } catch (e: any) {
       return { content: e?.message ?? String(e), isError: true };
     }
@@ -214,7 +226,8 @@ export class ArtifactPreviewTool extends Tool<z.infer<typeof PreviewArgs>> {
 }
 
 const ReviewArgs = z.object({
-  id: z.string().describe('The artifact id to review.'),
+  id: z.string().optional().describe('The artifact id to review.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
   screenshot_path: z.string().min(1).describe('Path to a screenshot of the rendered preview (from browser_screenshot). Required — the review judges what actually rendered.'),
   intent: z.string().optional().describe('What the artifact is supposed to look like / do, so the review can judge against it.'),
   console_errors: z.array(z.string()).optional().describe('Console error strings from browser_console, if any.'),
@@ -233,7 +246,7 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
     // Resolve the artifact (also validates the id + version and gives us type/title for the prompt).
     let manifest, version;
     try {
-      ({ manifest, version } = await getArtifact(ctx.cwd, args.id, args.version));
+      ({ manifest, version } = await getArtifact(ctx.cwd, resolveArtifactId(args), args.version));
     } catch (e: any) {
       return { content: e?.message ?? String(e), isError: true };
     }

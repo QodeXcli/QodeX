@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.3.8 — 2026-06-19
+
+**Two fixes so the artifact flow survives real model behavior.**
+
+1. **Architecture gate no longer blocks `artifact_*`.** The plan-before-you-build gate (which
+   asks for a plan before the first code change on a build task) was firing on `artifact_create`
+   and derailing the create→preview→review flow. Artifacts are standalone deliverables, not
+   refactors of the project codebase, so they're now exempt from the gate.
+
+2. **Artifact tools accept a `name` alias for `id`.** Models sometimes call `artifact_preview`
+   /`artifact_get`/etc. with `{name: "..."}` instead of `{id: "..."}` and hit a hard
+   ARGUMENT_VALIDATION_ERROR. The id-taking tools now also accept `name` (and `artifact_id` /
+   `artifactId`) and resolve it to the id, with `id` taking precedence when both are present.
+
+```
+src/agent/loop.ts                      (exempt artifact_* from the architecture gate)
+src/tools/artifacts/artifact-tools.ts  (id<-name alias resolver on id-taking tools)
+```
+
 ## v2.3.7 — 2026-06-19
 
 **Fix: React preview rendered blank when the model declared its own hooks.** Live testing a

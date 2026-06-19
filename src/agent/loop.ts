@@ -1968,6 +1968,10 @@ export class AgentLoop {
       if (this.planGateComplex && tool && !tool.isReadOnly) {
         if (isPlanningToolCall(tc.function.name, args)) {
           this.planGateSatisfied = true; // good — the model is planning; let it through
+        } else if (tc.function.name.startsWith('artifact_')) {
+          // Artifact tools produce a standalone deliverable (a page/component the user keeps),
+          // not a refactor of the project codebase — the architecture-plan discipline doesn't
+          // apply, and gating them just derails the create→preview→review flow. Let them through.
         } else if (!this.planGateSatisfied && !this.planGateFired) {
           this.planGateFired = true; // fire at most once per run
           logger.info('Pre-flight gate: requiring a plan before the first build action', { tool: tc.function.name });
