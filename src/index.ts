@@ -507,6 +507,116 @@ mcpCmd
     process.exit(0);
   });
 
+const providerCmd = program
+  .command('provider')
+  .description('Manage LLM providers (list known gateways, add one, remove one)');
+
+providerCmd
+  .command('list')
+  .description('List known OpenAI-compatible gateways you can add (OpenRouter, Gemini, Groq, …)')
+  .action(async () => {
+    const { KNOWN_GATEWAYS, listGatewayIds } = await import('./setup/gateways.js');
+    console.log('\nKnown gateways (add with `qodex provider add <id>`):\n');
+    for (const id of listGatewayIds()) {
+      const g = KNOWN_GATEWAYS[id];
+      console.log(`  ${id.padEnd(12)} ${g.title}`);
+      console.log(`  ${' '.repeat(12)} key: ${g.apiKeyEnv}  ·  ${g.baseUrl}`);
+      if (g.note) console.log(`  ${' '.repeat(12)} note: ${g.note}`);
+      console.log('');
+    }
+    console.log('Not listed? Add any OpenAI-compatible endpoint:');
+    console.log('  qodex provider add <name> --base-url <url> --key-env <ENV_VAR> [--model <id>]\n');
+    process.exit(0);
+  });
+
+providerCmd
+  .command('add <id>')
+  .description('Add a provider to ~/.qodex/config.yaml without overwriting your other providers')
+  .option('--base-url <url>', 'OpenAI-compatible base URL (for a gateway not in the known list)')
+  .option('--key-env <ENV_VAR>', 'Env var holding the API key (for an unlisted gateway)')
+  .option('--model <id>', 'Pin a specific model id (otherwise the gateway default / auto-discovery is used)')
+  .option('--context <n>', 'Context window for the pinned model', (v) => parseInt(v, 10))
+  .option('--no-tools', 'Mark the pinned model as NOT supporting tool calls')
+  .option('--default', 'Also set this provider+model as the default')
+  .action(async (id: string, opts: { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean }) => {
+    const { findGateway, buildCustomEntry } = await import('./setup/gateways.js');
+    const { addProviderToConfig } = await import('./setup/provider-writer.js');
+
+    const spec = findGateway(id);
+    let entry;
+    try {
+      if (spec) {
+        entry = buildCustomEntry({
+          spec,
+          modelId: opts.model,
+          contextWindow: opts.context,
+          toolCalls: opts.tools,
+        });
+      } else {
+        // Unlisted gateway — require the explicit fields.
+        if (!opts.baseUrl || !opts.keyEnv) {
+          console.error(`✗ "${id}" isn't a known gateway. Either pick one from \`qodex provider list\`,`);
+          console.error(`  or add it explicitly:`);
+          console.error(`  qodex provider add ${id} --base-url <url> --key-env <ENV_VAR> [--model <id>]`);
+          process.exit(1);
+        }
+        entry = buildCustomEntry({
+          name: id,
+          baseUrl: opts.baseUrl,
+          apiKeyEnv: opts.keyEnv,
+          modelId: opts.model,
+          contextWindow: opts.context,
+          toolCalls: opts.tools,
+        });
+      }
+    } catch (e: any) {
+      console.error(`✗ ${e?.message ?? e}`);
+      process.exit(1);
+    }
+
+    const res = await addProviderToConfig(entry, {
+      setDefault: opts.default,
+      defaultModel: opts.model,
+    });
+
+    console.log(`\n✓ Added provider "${res.name}" to ${res.configPath} (your other providers are untouched).`);
+    const keyEnv = entry.apiKeyEnv;
+    console.log(`\n  Export your key so QodeX can read it:`);
+    console.log(`    export ${keyEnv}="your-key-here"      # add to ~/.zshrc to persist`);
+    if (spec?.keyHint) console.log(`    ${spec.keyHint}`);
+    if (spec?.note) console.log(`\n  Note: ${spec.note}`);
+    if (res.setDefault) {
+      console.log(`\n  Default model is now ${entry.models?.[0]?.id ?? entry.name}.`);
+    } else {
+      console.log(`\n  Use it with:  qodex --model ${entry.name}/${entry.models?.[0]?.id ?? '<model-id>'}`);
+    }
+    console.log(`\n  Verify with:  qodex --list-models\n`);
+    process.exit(0);
+  });
+
+providerCmd
+  .command('remove <name>')
+  .alias('rm')
+  .description('Remove a custom provider from ~/.qodex/config.yaml')
+  .action(async (name: string) => {
+    const fs = await import('fs/promises');
+    const yaml = await import('js-yaml');
+    const { QODEX_CONFIG_FILE } = await import('./config/defaults.js');
+    let raw = '';
+    try { raw = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8'); } catch {
+      console.log('(no config file yet)'); process.exit(0);
+    }
+    const cfg: any = raw.trim() ? (yaml.load(raw) ?? {}) : {};
+    const custom = cfg?.providers?.custom;
+    if (!Array.isArray(custom) || !custom.some((c: any) => c?.name === name)) {
+      console.log(`(no custom provider "${name}" in config)`); process.exit(0);
+    }
+    cfg.providers.custom = custom.filter((c: any) => c?.name !== name);
+    await fs.writeFile(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }), 'utf-8');
+    console.log(`✓ Removed custom provider "${name}".`);
+    process.exit(0);
+  });
+
 program
   .command('speculative')
   .alias('spec')

@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.3.5 — 2026-06-19
+
+**`qodex provider add` — add any OpenAI-compatible gateway in one command.** Adding a cloud
+provider (OpenRouter, Gemini, Groq, Mistral, GitHub Models, Together, DeepInfra, Fireworks,
+xAI, Perplexity, …) used to mean hand-writing a `providers.custom[]` block in config.yaml —
+and the natural `cat > config.yaml` overwrote every OTHER provider you had. Now:
+
+```
+qodex provider list                 # see known gateways + their key env vars
+qodex provider add openrouter       # adds it WITHOUT touching your other providers
+qodex provider add gemini --default # add + make it the default model
+qodex provider add mygw --base-url https://x/v1 --key-env MYGW_KEY --model foo  # unlisted gateway
+qodex provider remove groq          # remove one
+```
+
+The writer reads your existing config, splices in (or replaces in place) just that one
+provider, and writes it back — your other providers, defaults, and settings are preserved.
+A known-gateway registry seeds the base URL, key env var, a sensible default model, and any
+caveats (e.g. free-tier rate limits, vision support). Unlisted gateways work too via
+--base-url/--key-env. Each add prints the exact `export VAR=...` line and a `--list-models`
+verification step.
+
+```
+src/setup/gateways.ts          (new — known-gateway registry + non-destructive merge logic)
+src/setup/provider-writer.ts   (new — read-merge-write config without clobbering)
+src/index.ts                   (new `provider` command group: list / add / remove)
+test/gateways.test.ts          (new — 20 assertions)
+```
+
 ## v2.3.4 — 2026-06-19
 
 **Clearer provider errors (esp. 429 rate limits).** When a model endpoint refused requests,
