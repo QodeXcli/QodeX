@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QodeX — your laptop is the datacenter now</title>
+<meta name="description" content="A coding agent that runs entirely on your machine. No API keys, no usage bills, no code leaving your laptop. Ship real engineering work with a local model — free and offline." />
+
+<meta property="og:title" content="QodeX — your laptop is the datacenter now" />
+<meta property="og:description" content="A coding agent that runs 100% on your machine. No keys, no bills, no data leaving your laptop. Open source, Apache-2.0." />
+<meta property="og:type" content="website" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    /* Deepened the background for better contrast */
+    --bg: #030712;
+    --bg-soft: #111827;
+    
+    /* Glassy panels */
+    --panel: rgba(17, 24, 39, 0.6);
+    --panel-line: #374151;
+    
+    /* Fixed text colors for maximum readability */
+    --ink: #f9fafb;       /* Bright white for headings */
+    --ink-soft: #9ca3af;  /* Clean gray for paragraphs */
+    --ink-faint: #6b7280; /* Subtle gray for micro text */
+    
+    /* Vibrant modern accents */
+    --signal: #10b981;    /* Emerald green */
+    --signal-dim: #059669;
+    --hot: #ef4444;       /* Clear red */
+    --cyan: #06b6d4;      /* Bright cyan */
+    
+    --maxw: 1120px;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .type-caret { display: none !important; }
+  }
+
+  body { 
+    background: var(--bg); 
+    color: var(--ink); 
+    font-family: var(--sans); 
+    line-height: 1.6; 
+    -webkit-font-smoothing: antialiased; 
+    overflow-x: hidden; 
+  }
+  
+  /* Upgraded background glow */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(800px circle at 15% -10%, rgba(16, 185, 129, 0.08), transparent 60%),
+      radial-gradient(800px circle at 85% 15%, rgba(6, 182, 212, 0.05), transparent 60%);
+  }
+  
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+
+  nav { position: sticky; top: 0; z-index: 60; backdrop-filter: blur(16px); background: rgba(3, 7, 18, 0.75); border-bottom: 1px solid var(--panel-line); }
+  .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 70px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 700; font-size: 18px; letter-spacing: -0.5px; }
+  .brand .glyph { color: var(--signal); text-shadow: 0 0 12px rgba(16, 185, 129, 0.4); }
+  .nav-links { display: flex; align-items: center; gap: 32px; font-size: 14.5px; font-weight: 500; color: var(--ink-soft); }
+  .nav-links a:hover { color: var(--ink); text-shadow: 0 0 8px rgba(249, 250, 251, 0.3); transition: all 0.2s; }
+  .nav-cta { font-family: var(--mono); font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: var(--signal); padding: 8px 18px; border-radius: 8px; border: 1px solid var(--signal-dim); transition: all .2s; }
+  .nav-cta:hover { transform: translateY(-1px); background: var(--signal); color: #022c22; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.2); }
+  @media (max-width: 720px) { .nav-links a:not(.nav-cta) { display: none; } }
+
+  .hero { padding: 90px 0 50px; text-align: center; }
+  .badge-row { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin-bottom: 35px; }
+  .badge { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink-soft); border: 1px solid var(--panel-line); border-radius: 100px; padding: 6px 16px; display: inline-flex; align-items: center; gap: 8px; background: var(--panel); backdrop-filter: blur(8px); }
+  .badge .bd { width: 6px; height: 6px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 8px var(--signal); }
+
+  h1 { font-size: clamp(44px, 7.5vw, 88px); line-height: 1.05; font-weight: 700; letter-spacing: -2.5px; margin: 0 auto 28px; max-width: 16ch; }
+  h1 .grad { background: linear-gradient(135deg, #34d399, #06b6d4); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  
+  .subhead { font-size: clamp(18px, 2.5vw, 22px); color: var(--ink-soft); max-width: 65ch; margin: 0 auto 16px; line-height: 1.7; }
+  .subhead strong { color: var(--ink); font-weight: 600; }
+  .kicker { font-family: var(--mono); font-size: 15px; color: var(--signal); margin-bottom: 40px; font-weight: 500; }
+
+  .cta-row { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px; }
+  .btn { font-family: var(--mono); font-size: 15px; font-weight: 600; padding: 15px 28px; border-radius: 12px; transition: all .2s cubic-bezier(0.4, 0, 0.2, 1); display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+  .btn-primary { background: var(--signal); color: #022c22; border: 1px solid transparent; }
+  .btn-primary:hover { transform: translateY(-2px); background: #34d399; box-shadow: 0 15px 35px -5px rgba(16, 185, 129, 0.4); }
+  .btn-ghost { border: 1px solid var(--panel-line); color: var(--ink); background: var(--panel); backdrop-filter: blur(8px); }
+  .btn-ghost:hover { border-color: var(--signal-dim); background: rgba(16, 185, 129, 0.05); color: var(--signal); }
+  .micro { font-family: var(--mono); font-size: 13px; color: var(--ink-faint); margin-top: 10px; }
+
+  /* Upgraded Terminal (Warp Style) */
+  .stage { margin-top: 60px; perspective: 1000px; }
+  .terminal { background: rgba(17, 24, 39, 0.75); backdrop-filter: blur(20px); border: 1px solid var(--panel-line); border-radius: 16px; overflow: hidden; box-shadow: 0 25px 80px -10px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05); text-align: left; max-width: 880px; margin: 0 auto; transform: rotateX(2deg); transition: transform 0.4s ease; }
+  .terminal:hover { transform: rotateX(0deg); }
+  .term-bar { display: flex; align-items: center; gap: 9px; padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(10, 15, 25, 0.5); }
+  .tdot { width: 12px; height: 12px; border-radius: 50%; }
+  .tdot.r { background: #ff5f56; box-shadow: 0 0 5px rgba(255,95,86,0.3); } 
+  .tdot.y { background: #ffbd2e; box-shadow: 0 0 5px rgba(255,189,46,0.3); } 
+  .tdot.g { background: #27c93f; box-shadow: 0 0 5px rgba(39,201,63,0.3); }
+  .term-title { margin-left: 12px; font-family: var(--mono); font-size: 13px; color: var(--ink-faint); font-weight: 500; }
+  .term-badge { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--signal); border: 1px solid rgba(16, 185, 129, 0.3); background: rgba(16, 185, 129, 0.05); border-radius: 6px; padding: 4px 10px; font-weight: 600; }
+  .term-body { padding: 28px 24px 32px; font-family: var(--mono); font-size: 14.5px; line-height: 2; min-height: 360px; }
+  .term-body .ln { white-space: pre-wrap; word-break: break-word; }
+  .c-prompt { color: var(--signal); font-weight: 700; } .c-cmd { color: var(--ink); font-weight: 500; } .c-comment { color: var(--ink-faint); font-style: italic; }
+  .c-out { color: var(--ink-soft); } .c-ok { color: var(--signal); } .c-tool { color: var(--cyan); } .c-warn { color: #f59e0b; }
+  .type-caret { display: inline-block; width: 8px; height: 18px; background: var(--signal); vertical-align: -3px; animation: blink 1s steps(2) infinite; box-shadow: 0 0 8px rgba(16, 185, 129, 0.5); }
+  @keyframes blink { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+
+  section { padding: 100px 0; position: relative; }
+  .center { text-align: center; }
+  .eyebrow { font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 16px; }
+  .eyebrow.pain { color: var(--hot); }
+  .eyebrow.win { color: var(--signal); }
+  h2 { font-size: clamp(32px, 5vw, 52px); letter-spacing: -1.5px; line-height: 1.1; margin-bottom: 24px; font-weight: 700; }
+  .lead { color: var(--ink-soft); max-width: 65ch; font-size: 18px; line-height: 1.7; margin: 0 auto 60px; }
+
+  /* Upgraded Grid Cards */
+  .pain-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; max-width: 940px; margin: 0 auto; }
+  @media (max-width: 680px) { .pain-grid { grid-template-columns: 1fr; } }
+  .pain-card { border: 1px solid var(--panel-line); border-radius: 16px; padding: 32px 28px; background: var(--panel); backdrop-filter: blur(12px); position: relative; overflow: hidden; text-align: left; transition: transform 0.2s, border-color 0.2s; }
+  .pain-card:hover { transform: translateY(-4px); border-color: rgba(239, 68, 68, 0.4); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
+  .pain-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--hot); opacity: 0.8; box-shadow: 0 0 15px var(--hot); }
+  .pain-card .pc-icon { font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--hot); margin-bottom: 16px; background: rgba(239, 68, 68, 0.1); display: inline-block; padding: 6px 12px; border-radius: 6px; }
+  .pain-card h4 { font-size: 20px; font-weight: 600; margin-bottom: 12px; letter-spacing: -0.5px; color: var(--ink); }
+  .pain-card p { color: var(--ink-soft); font-size: 15px; line-height: 1.65; }
+
+  .turn { text-align: center; margin: 70px auto 0; max-width: 58ch; }
+  .turn .arrow { font-family: var(--mono); color: var(--signal); font-size: 28px; display: block; margin-bottom: 16px; animation: bounce 2s infinite; }
+  @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
+  .turn p { font-size: clamp(22px, 3.5vw, 32px); font-weight: 600; letter-spacing: -0.8px; line-height: 1.35; }
+  .turn .grad { background: linear-gradient(135deg, var(--signal), var(--cyan)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+  .wins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 860px) { .wins { grid-template-columns: 1fr; } }
+  .win-card { border: 1px solid var(--panel-line); border-radius: 16px; padding: 36px 28px; background: linear-gradient(180deg, rgba(16, 185, 129, 0.03), rgba(17, 24, 39, 0.8)); backdrop-filter: blur(12px); transition: all .3s ease; text-align: left; }
+  .win-card:hover { transform: translateY(-6px); border-color: rgba(16, 185, 129, 0.4); box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5), inset 0 0 20px rgba(16, 185, 129, 0.05); }
+  .win-card .w-tag { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--signal); margin-bottom: 16px; }
+  .win-card h3 { font-size: 22px; font-weight: 600; letter-spacing: -0.6px; margin-bottom: 12px; color: var(--ink); }
+  .win-card p { color: var(--ink-soft); font-size: 15px; line-height: 1.7; }
+
+  .rails { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--panel-line); border: 1px solid var(--panel-line); border-radius: 16px; overflow: hidden; max-width: 1000px; margin: 0 auto; box-shadow: 0 20px 50px -10px rgba(0,0,0,0.5); }
+  @media (max-width: 860px) { .rails { grid-template-columns: 1fr; } }
+  .rail { background: var(--bg-soft); padding: 32px 28px; transition: background .3s; text-align: left; }
+  .rail:hover { background: rgba(31, 41, 55, 0.8); }
+  .rail-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .rail-num { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--signal-dim); }
+  .rail-name { font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--ink); }
+  .rail-desc { color: var(--ink-soft); font-size: 14.5px; line-height: 1.65; }
+  .rail-desc code { background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 6px; font-size: 13px; color: var(--cyan); border: 1px solid var(--panel-line); font-family: var(--mono); }
+
+  .final { text-align: center; }
+  .final-box { border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 24px; padding: 64px 40px; background: linear-gradient(180deg, rgba(16, 185, 129, 0.08), rgba(17, 24, 39, 0.6)); backdrop-filter: blur(16px); box-shadow: 0 20px 60px -15px rgba(0,0,0,0.6); }
+  .final h2 { margin-bottom: 16px; }
+  .install-mini { font-family: var(--mono); font-size: 14px; background: rgba(3, 7, 18, 0.8); border: 1px solid var(--panel-line); border-radius: 12px; padding: 18px 24px; max-width: 720px; margin: 32px auto 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; text-align: left; overflow-x: auto; box-shadow: inset 0 2px 10px rgba(0,0,0,0.5); }
+  .install-mini code { color: var(--ink-soft); white-space: nowrap; }
+  .install-mini code .tok { color: var(--signal); font-weight: 600; }
+  .copy-btn { font-family: var(--mono); font-size: 13px; font-weight: 600; color: #022c22; background: var(--signal); padding: 8px 16px; border-radius: 8px; cursor: pointer; border: none; flex-shrink: 0; transition: all .2s; }
+  .copy-btn:hover { background: #34d399; transform: scale(1.05); }
+
+  footer { border-top: 1px solid var(--panel-line); padding: 50px 0 60px; margin-top: 40px; background: rgba(3, 7, 18, 0.5); }
+  .foot-inner { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 32px; }
+  .foot-brand { font-family: var(--mono); font-weight: 700; font-size: 18px; color: var(--ink); }
+  .foot-brand .glyph { color: var(--signal); }
+  .foot-tag { color: var(--ink-soft); font-size: 14.5px; margin-top: 12px; max-width: 45ch; line-height: 1.6; }
+  .foot-links { display: flex; gap: 50px; flex-wrap: wrap; }
+  .foot-col h5 { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 16px; }
+  .foot-col a { display: block; color: var(--ink-soft); font-size: 14.5px; padding: 6px 0; transition: color 0.2s; }
+  .foot-col a:hover { color: var(--signal); }
+  .foot-bottom { margin-top: 45px; padding-top: 24px; border-top: 1px solid var(--panel-line); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; font-size: 13.5px; color: var(--ink-faint); font-family: var(--mono); }
+
+  .reveal { opacity: 0; transform: translateY(25px); transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
+  .reveal.in { opacity: 1; transform: none; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top"><span class="glyph">✦</span> QodeX</a>
+    <div class="nav-links">
+      <a href="#pain">The problem</a>
+      <a href="#why">Why trust it</a>
+      <a href="#install">Install</a>
+      <a class="nav-cta" href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Star on GitHub ★</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div class="badge-row">
+      <span class="badge"><span class="bd"></span> 100% LOCAL</span>
+      <span class="badge"><span class="bd"></span> ZERO API KEYS</span>
+      <span class="badge"><span class="bd"></span> OPEN SOURCE · APACHE-2.0</span>
+    </div>
+    <h1>Your laptop is the <span class="grad">datacenter</span> now.</h1>
+    <p class="subhead">
+      QodeX is an agentic coding CLI that does real, multi-step engineering work using a model running <strong>on your own machine</strong>. No cloud. No usage bills. No code ever leaving your laptop.
+    </p>
+    <p class="kicker">$ the AI coding agent that doesn't phone home</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#install">Run it in 60 seconds →</a>
+      <a class="btn btn-ghost" href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">See the code</a>
+    </div>
+    <p class="micro">git clone · npm install · done. Nothing to sign up for.</p>
+
+    <div class="stage reveal">
+      <div class="terminal">
+        <div class="term-bar">
+          <span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span>
+          <span class="term-title">qodex — ~/your-project</span>
+          <span class="term-badge">● running locally</span>
+        </div>
+        <div class="term-body" id="termBody"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="pain">
+  <div class="wrap center">
+    <div class="eyebrow pain">The problem</div>
+    <h2>Cloud coding agents make you pay — twice.</h2>
+    <p class="lead">Every keystroke goes to someone else's server. You pay in money, in privacy, and in being throttled the moment you get productive.</p>
+    <div class="pain-grid">
+      <div class="pain-card reveal">
+        <div class="pc-icon">$ / month</div>
+        <h4>The meter never stops</h4>
+        <p>Monthly subscriptions plus per-token bills. Costs scale with exactly how much you use it — so the more useful it is, the more it stings.</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pc-icon">⤴ uploaded</div>
+        <h4>Your code leaves the building</h4>
+        <p>Proprietary source, secrets, internal logic — all shipped to a third-party API to be processed. For a lot of teams that's a hard no.</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pc-icon">429</div>
+        <h4>Rate limits at the worst moment</h4>
+        <p>You hit flow, the agent hits a quota. "Too many requests." Wait, retry, lose your train of thought.</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pc-icon">✗ weak model</div>
+        <h4>Swap the model, watch it fall apart</h4>
+        <p>Most agents only behave with a frontier model. Point them at a cheaper or local one and they loop, half-finish edits, and lie about being done.</p>
+      </div>
+    </div>
+
+    <div class="turn">
+      <span class="arrow">↓</span>
+      <p>So we built the opposite: <span class="grad">an agent that lives on your machine — and is engineered to stay trustworthy even on a small local model.</span></p>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top: 0;">
+  <div class="wrap center">
+    <div class="eyebrow win">The dream</div>
+    <h2>Ship code without asking anyone's permission.</h2>
+    <p class="lead">No account. No key. No connection required. Just your machine, your model, and an agent that actually finishes the job.</p>
+    <div class="wins">
+      <div class="win-card reveal">
+        <div class="w-tag">// free forever</div>
+        <h3>$0, not $20/mo</h3>
+        <p>It runs on a model you already host with Ollama or LM Studio. No subscription, no token meter, no surprise invoice. Use it all day.</p>
+      </div>
+      <div class="win-card reveal">
+        <div class="w-tag">// air-gapped</div>
+        <h3>Works on a plane</h3>
+        <p>Fully offline. Your source never touches a third-party server, because there is no server. Perfect for private codebases and locked-down environments.</p>
+      </div>
+      <div class="win-card reveal">
+        <div class="w-tag">// any model</div>
+        <h3>Bring your own brain</h3>
+        <p>Local by default — or drop in a cloud key (OpenAI, Claude, Gemini, DeepSeek, Groq, OpenRouter…) and switch per command. One config line for anything OpenAI-compatible.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="why" style="padding-top: 0;">
+  <div class="wrap center">
+    <div class="eyebrow win">Why you can trust it</div>
+    <h2>It doesn't trust the model. So you can.</h2>
+    <p class="lead">Here's the trick that makes a small local model usable: deterministic guardrails run <em>around</em> the model loop — real code, not a prompt asking nicely. This is what stops the "confidently wrong" behavior that wrecks other local-model agents.</p>
+    <div class="rails">
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">01</span><span class="rail-name">Syntax gate</span></div><p class="rail-desc">Every edit is parsed before it's written. Broken syntax is rejected and never hits disk — the model gets the error back and retries.</p></div>
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">02</span><span class="rail-name">Completion gate</span></div><p class="rail-desc">It can't claim "tests pass" unless a test actually ran. Unsupported "I fixed it" gets bounced back for correction.</p></div>
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">03</span><span class="rail-name">Auto-verify</span></div><p class="rail-desc">When the model thinks it's done, QodeX runs the real checker — <code>tsc</code>, <code>ruff</code>, <code>go vet</code>, <code>cargo</code> — and force-feeds errors back.</p></div>
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">04</span><span class="rail-name">Git sandbox</span></div><p class="rail-desc">Risky work runs on a hidden branch with checkpoints. Auto-snapshot before destructive commands, one command to undo.</p></div>
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">05</span><span class="rail-name">Skill scanner</span></div><p class="rail-desc">Skills from GitHub are scanned for prompt injection, secret exfiltration, and destructive shell <em>before</em> they touch disk.</p></div>
+      <div class="rail reveal"><div class="rail-head"><span class="rail-num">06</span><span class="rail-name">Read-before-write</span></div><p class="rail-desc">No editing an existing file from stale assumptions — a mutation is refused unless the file was actually read this session.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="final" style="padding-top: 0;">
+  <div class="wrap">
+    <div class="final-box reveal">
+      <div class="eyebrow win">60 seconds, no signup</div>
+      <h2>Take your codebase off the cloud.</h2>
+      <p class="lead" style="margin-bottom:0;">Clone it, build it, point it at a local model. It's a normal Node project — every push is verified from a clean checkout in CI.</p>
+      <div class="install-mini">
+        <code>git <span class="tok">clone</span> https://github.com/QodeXcli/QodeX.git &amp;&amp; <span class="tok">cd</span> QodeX &amp;&amp; npm <span class="tok">i</span> &amp;&amp; npm <span class="tok">run</span> build &amp;&amp; npm <span class="tok">link</span></code>
+        <button class="copy-btn" id="copyBtn" type="button">Copy</button>
+      </div>
+      <div class="cta-row" style="margin-top:35px;">
+        <a class="btn btn-primary" href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Star it on GitHub ★</a>
+        <a class="btn btn-ghost" href="https://github.com/QodeXcli/QodeX/blob/main/README.md" target="_blank" rel="noopener">Read the docs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-inner">
+      <div>
+        <div class="foot-brand"><span class="glyph">✦</span> QodeX</div>
+        <p class="foot-tag">The agentic coding CLI that runs on your machine — free, offline, and engineered to stay trustworthy on a local model.</p>
+      </div>
+      <div class="foot-links">
+        <div class="foot-col">
+          <h5>Project</h5>
+          <a href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Source</a>
+          <a href="https://github.com/QodeXcli/QodeX/blob/main/README.md" target="_blank" rel="noopener">README</a>
+          <a href="https://github.com/QodeXcli/QodeX/actions" target="_blank" rel="noopener">CI status</a>
+        </div>
+        <div class="foot-col">
+          <h5>Get involved</h5>
+          <a href="https://github.com/QodeXcli/QodeX/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/QodeXcli/QodeX/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 7 SEVEN · Apache-2.0</span>
+      <span>No cloud. No keys. Your machine.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const lines = [
+    { t: 'cmd',    html: '<span class="c-prompt">❯</span> <span class="c-cmd">qodex "add rate-limit guard to the API client"</span>', type: true },
+    { t: 'out',    html: '<span class="c-comment">  model: qwen2.5-coder · running locally · no network</span>' },
+    { t: 'tool',   html: '<span class="c-tool">  ◆ reading</span> <span class="c-out">src/api/client.ts</span>' },
+    { t: 'tool',   html: '<span class="c-tool">  ◆ editing</span> <span class="c-out">src/api/client.ts</span>' },
+    { t: 'warn',   html: '<span class="c-warn">  ⚠ syntax gate</span> <span class="c-out">rejected — unbalanced brace, not written</span>' },
+    { t: 'tool',   html: '<span class="c-tool">  ◆ editing</span> <span class="c-out">src/api/client.ts  (corrected)</span>' },
+    { t: 'tool',   html: '<span class="c-tool">  ◆ auto-verify</span> <span class="c-out">tsc — 1 type error → fed back to model</span>' },
+    { t: 'tool',   html: '<span class="c-tool">  ◆ editing</span> <span class="c-out">src/api/client.ts  (fix type)</span>' },
+    { t: 'ok',     html: '<span class="c-ok">  ✓ auto-verify</span> <span class="c-out">tsc clean · 0 errors</span>' },
+    { t: 'ok',     html: '<span class="c-ok">  ✓ done</span> <span class="c-out">— guard added, verified, snapshotted to sandbox branch</span>' },
+    { t: 'prompt', html: '<span class="c-prompt">❯</span> ', caret: true },
+  ];
+
+  const body = document.getElementById('termBody');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function renderAll() {
+    body.innerHTML = lines.map(l => `<div class="ln">${l.html}${l.caret ? '<span class="type-caret"></span>' : ''}</div>`).join('');
+  }
+
+  function typeLine(idx) {
+    if (idx >= lines.length) return;
+    const l = lines[idx];
+    const div = document.createElement('div');
+    div.className = 'ln';
+    body.appendChild(div);
+
+    if (l.type) {
+      const tmp = document.createElement('div'); tmp.innerHTML = l.html;
+      const text = tmp.textContent;
+      let i = 2;
+      const tick = () => {
+        i++;
+        div.innerHTML = `<span class="c-prompt">❯</span> <span class="c-cmd">${text.slice(2, i)}</span><span class="type-caret"></span>`;
+        if (i < text.length) { setTimeout(tick, 30); }
+        else { div.innerHTML = l.html; setTimeout(() => typeLine(idx + 1), 400); }
+      };
+      setTimeout(tick, 200);
+    } else {
+      div.innerHTML = l.html + (l.caret ? '<span class="type-caret"></span>' : '');
+      const delay = l.t === 'ok' ? 450 : (l.t === 'warn' ? 500 : 250);
+      setTimeout(() => typeLine(idx + 1), delay);
+    }
+  }
+
+  if (reduced) { renderAll(); }
+  else {
+    const stage = document.querySelector('.stage');
+    let started = false;
+    const obs = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting && !started) { started = true; typeLine(0); obs.disconnect(); } });
+    }, { threshold: 0.3 });
+    obs.observe(stage);
+  }
+
+  const copyBtn = document.getElementById('copyBtn');
+  const cmd = 'git clone https://github.com/QodeXcli/QodeX.git && cd QodeX && npm i && npm run build && npm link';
+  copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(cmd); const p = copyBtn.textContent; copyBtn.textContent = '✓ Copied'; setTimeout(() => copyBtn.textContent = p, 2000); }
+    catch { copyBtn.textContent = '⌘C'; }
+  });
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+</script>
+
+</body>
+</html>
