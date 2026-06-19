@@ -3,7 +3,7 @@
   "version": "2.2.0",
   "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
   "license": "Apache-2.0",
-  "author": "7 SEVEN <hamedmousavi67@gmail.com>",
+  "author": "7 SEVEN",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QodeXcli/QodeX.git"
