@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # npm install (not `npm ci`) so a slightly out-of-sync package-lock.json
+      # doesn't hard-fail the run. Switch to `npm ci` once the lockfile is known
+      # to be committed and in sync.
+      - name: Install dependencies
+        run: npm install
+
+      # `npm run build` runs tsc over the whole project — this is the check that
+      # catches the real breakages (bad imports, type errors) before they land.
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+  # NOTE: a `test` job is intentionally omitted for now. The suite currently mixes
+  # 99 vitest-style files with 14 standalone (process.exit) files, so `vitest run`
+  # would report false failures. Once the suite is unified, add:
+  #
+  #   test:
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #       - uses: actions/setup-node@v4
+  #         with: { node-version: '20', cache: 'npm' }
+  #       - run: npm install
+  #       - run: npm test
