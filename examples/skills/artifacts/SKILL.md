@@ -1,7 +1,7 @@
 ---
 name: artifacts
 description: Produce a standalone, versioned deliverable (web page, React/Vue component, SVG, diagram, doc) the user will keep and iterate on. Use the built-in artifact_* tools — NOT write_file — so the artifact is versioned, undoable, and previewable in a real browser. Load whenever the user asks for "an artifact", "a file", "a mockup", "a component", a one-off page, a chart, or anything they'll take away and refine.
-version: 0.2.0
+version: 0.3.0
 author: QodeX
 triggers:
   - artifact
@@ -22,6 +22,7 @@ allowed-tools:
   - artifact_get
   - artifact_rollback
   - artifact_preview
+  - artifact_review
   - browser_navigate
   - browser_screenshot
   - vision_analyze
@@ -54,9 +55,14 @@ versioning, rollback, undo, and one-step browser preview for free.
    render call, or a default export) — no boilerplate HTML.
 2. **Preview**: call `artifact_preview` with the returned `id`. It returns a URL.
 3. **See it**: call `browser_navigate` with that URL, then `browser_screenshot`.
-   Optionally `vision_analyze` the screenshot to check it actually looks right.
-4. **Iterate**: if something's off, call `artifact_update` with the fixed content
-   (a new version), then preview again.
+   Read page errors with `browser_console`.
+4. **Review it** (the visual feedback loop): call `artifact_review` with the
+   artifact `id`, the `screenshot_path`, and any `console_errors` / `page_errors`.
+   It returns a verdict — LOOKS_GOOD, NEEDS_WORK, or BROKEN — with concrete issues.
+5. **Iterate**: if the verdict is NEEDS_WORK or BROKEN, call `artifact_update`
+   with the fixed content (a new version), then preview + review again. Repeat
+   until LOOKS_GOOD. This is how you self-correct from what actually rendered,
+   not from guessing.
 
 ## Type-specific notes
 

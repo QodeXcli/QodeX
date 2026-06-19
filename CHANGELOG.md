@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.3.3 — 2026-06-19
+
+**Layer 3 — the visual self-correction loop.** This is the part that makes QodeX artifacts
+unlike a blind-iframe renderer: the model can SEE what its artifact rendered and fix it from
+evidence. New `artifact_review` tool takes a screenshot of the live preview (from
+browser_screenshot), sends it to a vision model for a focused critique, folds in any
+page/console errors, and returns a structured verdict — LOOKS_GOOD / NEEDS_WORK / BROKEN —
+with concrete issues. Runtime errors are authoritative: if the page threw, the verdict is
+BROKEN even if the screenshot looked fine (a blank page can fool a weak vision model).
+
+The full loop is now: `artifact_create` -> `artifact_preview` -> `browser_navigate` +
+`browser_screenshot` + `browser_console` -> `artifact_review` -> (if not LOOKS_GOOD)
+`artifact_update` -> review again, until it renders correctly. Degrades gracefully: with no
+vision backend it reports runtime errors only.
+
+```
+src/artifacts/review.ts                  (new — pure critique logic: prompt, classify, report)
+src/tools/artifacts/artifact-tools.ts    (new ArtifactReviewTool wiring vision + review logic)
+examples/skills/artifacts/SKILL.md       (v0.2.0 -> v0.3.0: adds the review step to the flow)
+test/artifact-review.test.ts             (new — 28 assertions)
+```
+
 ## v2.3.2 — 2026-06-19
 
 **Fix: React/Vue artifact previews now render real model-generated components.** Live

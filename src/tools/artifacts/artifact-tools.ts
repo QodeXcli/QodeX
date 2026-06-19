@@ -19,6 +19,8 @@ import {
   isArtifactType, type ArtifactType,
 } from '../../artifacts/store.js';
 import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort } from '../../artifacts/preview.js';
+import { buildReviewPrompt, buildReviewReport, formatReviewReport } from '../../artifacts/review.js';
+import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import * as processRegistry from '../browser/process-registry.js';
 
 const TYPE_VALUES = ['html', 'react', 'svg', 'markdown', 'vue', 'text'] as const;
@@ -211,6 +213,73 @@ export class ArtifactPreviewTool extends Tool<z.infer<typeof PreviewArgs>> {
   }
 }
 
+const ReviewArgs = z.object({
+  id: z.string().describe('The artifact id to review.'),
+  screenshot_path: z.string().min(1).describe('Path to a screenshot of the rendered preview (from browser_screenshot). Required — the review judges what actually rendered.'),
+  intent: z.string().optional().describe('What the artifact is supposed to look like / do, so the review can judge against it.'),
+  console_errors: z.array(z.string()).optional().describe('Console error strings from browser_console, if any.'),
+  page_errors: z.array(z.string()).optional().describe('Uncaught page error strings from browser_console, if any.'),
+  version: z.number().int().positive().optional().describe('Artifact version under review (defaults to current).'),
+});
+
+export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
+  name = 'artifact_review';
+  description = 'Visually review a rendered artifact (Layer 3 of the artifact loop): sends a screenshot of the live preview to a vision model, folds in any page/console errors, and returns a structured verdict (LOOKS_GOOD / NEEDS_WORK / BROKEN) with concrete issues. Use after artifact_preview + browser_navigate + browser_screenshot. If the verdict is not LOOKS_GOOD, fix with artifact_update and review again. Degrades gracefully when no vision backend is configured (falls back to runtime errors only).';
+  argsSchema = ReviewArgs;
+  isReadOnly = true;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof ReviewArgs>, ctx: ToolContext): Promise<ToolResult> {
+    // Resolve the artifact (also validates the id + version and gives us type/title for the prompt).
+    let manifest, version;
+    try {
+      ({ manifest, version } = await getArtifact(ctx.cwd, args.id, args.version));
+    } catch (e: any) {
+      return { content: e?.message ?? String(e), isError: true };
+    }
+
+    // Ask a vision model to critique the screenshot. We reuse the vision_analyze tool so all
+    // the backend-selection + graceful "[VISION_NOT_CONFIGURED]" handling lives in one place.
+    const prompt = buildReviewPrompt({ type: manifest.type, title: manifest.title, intent: args.intent });
+    let visionAnswer = '';
+    let sawScreenshot = false;
+    try {
+      const vision = new VisionAnalyzeTool();
+      const res = await vision.execute({ image_path: args.screenshot_path, prompt } as any, ctx);
+      const text = typeof res.content === 'string' ? res.content : '';
+      if (res.isError || text.startsWith('[VISION_NOT_CONFIGURED]')) {
+        // Vision unavailable — we can still report runtime errors, just not a visual verdict.
+        visionAnswer = '';
+        sawScreenshot = false;
+      } else {
+        visionAnswer = text;
+        sawScreenshot = true;
+      }
+    } catch {
+      visionAnswer = '';
+      sawScreenshot = false;
+    }
+
+    const report = buildReviewReport({
+      visionAnswer,
+      consoleErrors: args.console_errors ?? [],
+      pageErrors: args.page_errors ?? [],
+      sawScreenshot,
+    });
+
+    const out = formatReviewReport(manifest.id, version, report);
+    const extra = !sawScreenshot && (args.console_errors?.length || args.page_errors?.length || 0) === 0
+      ? '\n(No vision backend configured and no runtime errors captured — set QODEX_OLLAMA_VISION_MODEL / ANTHROPIC_API_KEY / OPENAI_API_KEY for a visual verdict.)'
+      : '';
+
+    return {
+      content: out + extra,
+      metadata: { artifactId: manifest.id, version, verdict: report.verdict, issueCount: report.issues.length, sawScreenshot },
+    };
+  }
+}
+
 export const ARTIFACT_TOOLS = [
   ArtifactCreateTool, ArtifactUpdateTool, ArtifactListTool, ArtifactGetTool, ArtifactRollbackTool, ArtifactPreviewTool,
+  ArtifactReviewTool,
 ];
