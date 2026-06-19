@@ -1,0 +1,55 @@
+#!/usr/bin/env node
+/**
+ * {{NAME}} — MCP server scaffolded by QodeX.
+ *
+ * Transport: {{TRANSPORT}}
+ *
+ * Run:  npm run build && npm start
+ * Dev:  npm run dev
+ *
+ * Wire into QodeX (~/.qodex/config.yaml):
+ *   mcp:
+ *     servers:
+ *       {{NAME}}:
+ *         command: node
+ *         args: ["{{ABSOLUTE_DIST_PATH}}/index.js"]
+ *         enabled: true
+ */
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+import { exampleTool, exampleHandler } from './tools/example.js';
+
+const server = new Server(
+  { name: '{{NAME}}', version: '0.1.0' },
+  { capabilities: { tools: {} } },
+);
+
+// All tools the server advertises. Add new ones in src/tools/ and register here.
+const TOOLS: Tool[] = [exampleTool];
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const { name, arguments: args } = req.params;
+  try {
+    switch (name) {
+      case exampleTool.name:
+        return await exampleHandler(args ?? {});
+      default:
+        return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
+    }
+  } catch (e: any) {
+    return { content: [{ type: 'text', text: `Tool ${name} failed: ${e.message}` }], isError: true };
+  }
+});
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
+
+// Stdio servers stay alive until stdin closes; that's the client disconnecting.
+process.stdin.on('close', () => process.exit(0));

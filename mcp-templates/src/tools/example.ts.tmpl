@@ -1,0 +1,29 @@
+/**
+ * Example tool. Replace this with your real tool(s).
+ *
+ * Each tool is a pair: a `Tool` schema (advertised in tools/list) and a handler
+ * function that the server dispatches to when tools/call comes in.
+ */
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+
+const ExampleArgs = z.object({
+  message: z.string().describe('What to echo back'),
+});
+
+export const exampleTool: Tool = {
+  name: 'example',
+  description: 'Echoes the provided message. Replace with your real tool.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      message: { type: 'string', description: 'What to echo back' },
+    },
+    required: ['message'],
+  },
+};
+
+export async function exampleHandler(rawArgs: Record<string, unknown>): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  const args = ExampleArgs.parse(rawArgs);
+  return { content: [{ type: 'text', text: `echo: ${args.message}` }] };
+}

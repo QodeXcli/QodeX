@@ -1,0 +1,54 @@
+# MLX-LM LoRA config — Apple Silicon (your M3 Ultra / 256 GB).
+# Run:  python -m mlx_lm lora --config mlx-lora.yaml
+# Docs: https://github.com/ml-explore/mlx-lm  (lora)
+#
+# Tuned for HIGH capability — your unified memory affords a big adapter.
+
+# Base model: an MLX-format Qwen3-Coder. Use a HF repo (mlx-community/...) OR a local
+# path. To reuse your LM Studio model, point at its folder, e.g.
+#   ~/.cache/lm-studio/models/<publisher>/<qwen3-coder-next-mlx>
+# If unsure, an mlx-community Qwen3-Coder repo works: it'll download once.
+model: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+
+train: true
+fine_tune_type: lora          # lora | dora | full  (dora ≈ slightly higher quality, slower)
+data: "data"                  # dir with train.jsonl + valid.jsonl (from export-dataset.mjs)
+adapter_path: "adapters"
+
+# ── Capacity (the "highest capability" knobs) ───────────────────────────────
+num_layers: -1                # -1 = fine-tune ALL transformer layers (not just top 16)
+max_seq_length: 8192          # fit multi-file agent traces; lower to 4096 if OOM
+lora_parameters:
+  # Target every linear projection, not just q/v — much stronger adapter.
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+  rank: 64                    # high-rank adapter
+  scale: 20.0                 # LoRA scaling (alpha-equivalent)
+  dropout: 0.05
+# NOTE: if your base is a Mixture-of-Experts variant, the MLP keys live under
+# `mlp.experts.*` (e.g. switch_mlp). Run `python -m mlx_lm lora --help` / inspect the
+# model to confirm the right key suffixes, then adjust the list above.
+
+# ── Optimization ────────────────────────────────────────────────────────────
+batch_size: 4                 # raise on 256 GB if throughput allows
+iters: 2000                   # ~ epochs * (train_examples / batch_size); tune to your set size
+learning_rate: 1.0e-5
+grad_checkpoint: true         # memory headroom for all-layer + long context
+optimizer: adamw
+lr_schedule:
+  name: cosine_decay
+  warmup: 100
+  arguments: [1.0e-5, 2000, 1.0e-7]   # [peak_lr, decay_steps, end_lr]
+
+# ── Reporting / checkpoints ─────────────────────────────────────────────────
+seed: 0
+steps_per_report: 10
+steps_per_eval: 200
+save_every: 200
+val_batches: 25

@@ -1,0 +1,17 @@
+{
+  "id": "04-edit-json",
+  "description": "Make a precise edit to an existing config file.",
+  "prompt": "In config.json, change the value of the \"version\" field from 1.0.0 to 2.0.0. Leave everything else unchanged.",
+  "setup": {
+    "files": {
+      "config.json": "{\n  \"name\": \"demo\",\n  \"version\": \"1.0.0\",\n  \"private\": true\n}\n"
+    }
+  },
+  "check": {
+    "fileChecks": [
+      { "path": "config.json", "contains": "\"version\": \"2.0.0\"" },
+      { "path": "config.json", "contains": "\"name\": \"demo\"" }
+    ]
+  },
+  "maxIterations": 10
+}

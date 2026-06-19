@@ -1,0 +1,95 @@
+{
+  "name": "@qodex/cli",
+  "version": "2.1.1",
+  "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
+  "license": "Apache-2.0",
+  "author": "7 SEVEN <REPLACE_WITH_YOUR_EMAIL>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex.git"
+  },
+  "homepage": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex#readme",
+  "bugs": {
+    "url": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "local-first",
+    "llm",
+    "lm-studio",
+    "ollama",
+    "qwen",
+    "claude",
+    "mcp",
+    "tui"
+  ],
+  "type": "module",
+  "bin": {
+    "qx": "./bin/qodex.mjs",
+    "qodex": "./bin/qodex.mjs"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json && chmod +x bin/qodex.mjs",
+    "start": "node bin/qodex.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "eval": "npm run build && node eval/run.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "better-sqlite3": "^11.5.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "cross-spawn": "^7.0.6",
+    "diff": "^7.0.0",
+    "ink": "^5.0.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "js-yaml": "^4.1.0",
+    "openai": "^4.73.0",
+    "react": "^18.3.1",
+    "simple-git": "^3.27.0",
+    "undici": "^6.26.0",
+    "uuid": "^11.0.3",
+    "web-tree-sitter": "^0.25.10",
+    "zod": "^3.23.8"
+  },
+  "optionalDependencies": {
+    "mysql2": "^3.11.4",
+    "pg": "^8.13.1",
+    "playwright": "^1.49.0",
+    "xlsx": "^0.18.5",
+    "gpt-tokenizer": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/diff": "^6.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.6"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "grammars",
+    "prompts",
+    "mcp-templates",
+    "examples/skills",
+    "examples/commands",
+    "README.md",
+    "LICENSE"
+  ]
+}

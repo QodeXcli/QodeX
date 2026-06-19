@@ -1,0 +1,62 @@
+# {{NAME}}
+
+{{DESCRIPTION}}
+
+Scaffolded by [QodeX](https://github.com/sevengum/qodex). Transport: **{{TRANSPORT}}**.
+
+## Install
+
+```bash
+npm install
+npm run build
+```
+
+## Run
+
+```bash
+npm start
+```
+
+For development with auto-reload:
+
+```bash
+npm run dev
+```
+
+## Add to QodeX
+
+Edit `~/.qodex/config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    {{NAME}}:
+      command: node
+      args: ["{{ABSOLUTE_DIST_PATH}}/index.js"]
+      enabled: true
+```
+
+Then restart QodeX or run `/mcp-restart {{NAME}}`.
+
+## Tools
+
+| Name | Description |
+|------|-------------|
+| `example` | Echoes the provided message — replace with your real tool. |
+
+## Adding tools
+
+1. Create `src/tools/<your-tool>.ts` exporting a `Tool` schema and a handler.
+2. Import it in `src/index.ts`, add to the `TOOLS` array, and add a dispatch case.
+3. `npm test` — write a vitest that exercises the handler directly.
+
+## Layout
+
+```
+src/
+  index.ts            Server entry — sets up transport + dispatcher
+  tools/
+    example.ts        One file per tool (schema + handler)
+test/
+  example.test.ts     Pure unit tests on the handler
+```

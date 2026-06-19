@@ -1,0 +1,21 @@
+{
+  "id": "07-typed-repository",
+  "description": "Multi-file generic repository + service that must SATISFY a pre-defined generic interface. Missing a method or returning the wrong type fails tsc — a classic weak-model slip the auto-verify gate catches.",
+  "prompt": "Strict TypeScript project. src/types.ts already defines a generic `Repository<T>` interface and a `Product` type — read it, do not change it. (1) Create src/product-repo.ts exporting class `InMemoryProductRepository` that `implements Repository<Product>` — implement EVERY method of the interface with the exact signatures (an in-memory Map is fine). (2) Create src/product-service.ts exporting class `ProductService` whose constructor takes a `Repository<Product>` and which has `addProduct(p: Product): void`, `getProduct(id: string): Product | undefined`, and `totalInventoryValue(): number` (sum of price*stock over all products). Everything must pass `npx tsc --noEmit` with zero errors. Do not use `any` or `@ts-ignore` to silence errors — make the types actually correct.",
+  "setup": {
+    "files": {
+      "package.json": "{\n  \"name\": \"eval-repo\",\n  \"private\": true,\n  \"version\": \"1.0.0\"\n}\n",
+      "tsconfig.json": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"target\": \"ES2020\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"bundler\",\n    \"noEmit\": true,\n    \"skipLibCheck\": true,\n    \"noImplicitOverride\": true\n  },\n  \"include\": [\"src\"]\n}\n",
+      "src/types.ts": "export interface Product {\n  id: string;\n  name: string;\n  price: number;\n  stock: number;\n}\n\nexport interface Repository<T> {\n  getAll(): T[];\n  getById(id: string): T | undefined;\n  add(item: T): void;\n  remove(id: string): boolean;\n}\n"
+    }
+  },
+  "check": {
+    "filesExist": ["src/product-repo.ts", "src/product-service.ts"],
+    "command": { "command": "npx --no-install tsc --noEmit", "expectExitZero": true },
+    "fileChecks": [
+      { "path": "src/product-repo.ts", "matches": "implements\\s+Repository<Product>" },
+      { "path": "src/product-service.ts", "matches": "totalInventoryValue" }
+    ]
+  },
+  "maxIterations": 22
+}

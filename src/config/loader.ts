@@ -1,0 +1,123 @@
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import yaml from 'js-yaml';
+import { DEFAULT_CONFIG, QODEX_CONFIG_FILE, QODEX_HOME, type QodexConfig } from './defaults.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * Deep merge two configuration objects.
+ * Rules:
+ *  - If override is undefined, keep base.
+ *  - If types mismatch (array vs object, primitive vs object), override wins outright — no merging.
+ *  - Arrays are NEVER merged element-by-element — override array replaces base array.
+ *  - Plain objects are merged recursively per-key.
+ *  - Primitives: override wins.
+ */
+function deepMerge<T>(base: T, override: any): T {
+  if (override === undefined) return base;
+  if (override === null) return null as unknown as T;
+
+  const baseIsArray = Array.isArray(base);
+  const overrideIsArray = Array.isArray(override);
+
+  // Arrays never merge — override replaces. Same when types mismatch.
+  if (baseIsArray || overrideIsArray) {
+    return overrideIsArray ? (override as T) : (override as T);
+  }
+
+  const baseIsObj = typeof base === 'object' && base !== null;
+  const overrideIsObj = typeof override === 'object' && override !== null;
+
+  // Type mismatch (e.g., user wrote a string where default is an object) → override wins
+  if (!baseIsObj || !overrideIsObj) {
+    return override as T;
+  }
+
+  // Both are plain objects → recurse per key
+  const result: any = { ...(base as any) };
+  for (const key of Object.keys(override)) {
+    const ov = override[key];
+    if (ov === undefined) continue;
+    result[key] = deepMerge((base as any)[key], ov);
+  }
+  return result as T;
+}
+
+export async function ensureQodexHome(): Promise<void> {
+  try {
+    await fs.mkdir(QODEX_HOME, { recursive: true });
+  } catch (e: any) {
+    // Common failure: HOME is unset or wrong → QODEX_HOME resolves to a path
+    // we can't write to. Print a diagnostic with the resolved values so the
+    // user knows what to fix, then rethrow.
+    const os = await import('os');
+    process.stderr.write(
+      `\n[QodeX] Cannot create config directory: ${QODEX_HOME}\n` +
+      `  os.homedir() = ${os.homedir()}\n` +
+      `  HOME env     = ${process.env.HOME ?? '(unset)'}\n` +
+      `  USER env     = ${process.env.USER ?? '(unset)'}\n` +
+      `  Error: ${e?.message ?? e}\n\n` +
+      `If you launched QodeX from VS Code or a GUI without proper env,\n` +
+      `try: cd ~ && qodex   (or set HOME=/Users/$(whoami) before launching)\n\n`,
+    );
+    throw e;
+  }
+}
+
+export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConfig> {
+  await ensureQodexHome();
+
+  let config = { ...DEFAULT_CONFIG };
+
+  // User-level config
+  try {
+    const userYaml = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8');
+    const userCfg = yaml.load(userYaml) as Partial<QodexConfig>;
+    if (userCfg) config = deepMerge(config, userCfg);
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      logger.warn('Failed to load user config', { err: err.message });
+    }
+  }
+
+  // Project-level config
+  const projectConfig = path.join(cwd, '.qodex', 'config.yaml');
+  try {
+    const projectYaml = await fs.readFile(projectConfig, 'utf-8');
+    const projCfg = yaml.load(projectYaml) as Partial<QodexConfig>;
+    if (projCfg) config = deepMerge(config, projCfg);
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      logger.warn('Failed to load project config', { err: err.message });
+    }
+  }
+
+  return config;
+}
+
+export async function saveUserConfig(config: Partial<QodexConfig>): Promise<void> {
+  await ensureQodexHome();
+  const yamlText = yaml.dump(config, { indent: 2, lineWidth: 100 });
+  await fs.writeFile(QODEX_CONFIG_FILE, yamlText, 'utf-8');
+}
+
+export async function configExists(): Promise<boolean> {
+  try {
+    await fs.access(QODEX_CONFIG_FILE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Active-config singleton.
+//
+// Tools that need to read user config (e.g. `web_search` choosing a backend) can call
+// `getActiveConfig()` instead of receiving config through their constructor — this keeps
+// the Tool base class's surface minimal. Bootstrap calls `setActiveConfig(cfg)` once
+// during startup; thereafter every caller sees the same instance.
+
+let _active: QodexConfig | null = null;
+export function setActiveConfig(cfg: QodexConfig): void { _active = cfg; }
+export function getActiveConfig(): QodexConfig | null { return _active; }

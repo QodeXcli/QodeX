@@ -1,0 +1,566 @@
+import * as os from 'os';
+import * as path from 'path';
+
+/**
+ * Resolve the user's home directory robustly.
+ *
+ * Why this exists: `os.homedir()` reads `$HOME` first on POSIX and falls back
+ * to `getpwuid(uid)` if HOME is unset. But if HOME is set to a wrong value
+ * (e.g. '/' when VS Code is launched from Spotlight and a child process
+ * inherits a broken env), Node returns the wrong value silently.
+ *
+ * The downstream bug — `mkdir '/.qodex'` failing with ENOENT/EACCES — is
+ * hostile to diagnose. So we sanity-check and fall back to /Users/$USER on
+ * macOS, /home/$USER on Linux, when the result looks bogus.
+ */
+function resolveHomedir(): string {
+  const reported = os.homedir();
+  // A real home is at least 2 chars (e.g. `/X`) AND not just `/`.
+  if (reported && reported !== '/' && reported !== '' && reported.length > 1) {
+    return reported;
+  }
+  // Fallback: derive from username
+  const user = process.env.USER || process.env.LOGNAME || process.env.USERNAME;
+  if (user) {
+    if (process.platform === 'darwin') return `/Users/${user}`;
+    if (process.platform === 'linux') return `/home/${user}`;
+    if (process.platform === 'win32') return `C:\\Users\\${user}`;
+  }
+  // Last resort: use the reported value even if it looks weird, so we don't
+  // silently throw away the user's actual setting if it happens to be
+  // intentional (rare; basically only matters in containers).
+  return reported || '/tmp';
+}
+
+export const QODEX_HOME = path.join(resolveHomedir(), '.qodex');
+export const QODEX_LOG_FILE = path.join(QODEX_HOME, 'qodex.log');
+export const QODEX_CONFIG_FILE = path.join(QODEX_HOME, 'config.yaml');
+export const QODEX_TXN_DB = path.join(QODEX_HOME, 'transactions.db');
+export const QODEX_SESSION_DB = path.join(QODEX_HOME, 'sessions.db');
+export const QODEX_TELEMETRY_DB = path.join(QODEX_HOME, 'telemetry.db');
+export const QODEX_BLOBS_DIR = path.join(QODEX_HOME, 'blobs');
+
+/**
+ * Per-role model assignment. A role is a named slot the parent agent can target
+ * via the `task` tool (e.g. `task({ role: "vision", prompt: "..." })`) — the
+ * dispatcher then runs that work with the configured provider/model and an
+ * optional role-specific system prompt.
+ *
+ * Built-in roles: see comment on `QodexConfig.roles`.
+ */
+export interface RoleConfig {
+  /** Provider + model. Optional: when omitted (e.g. an imported Claude Code agent that
+   *  inherits), the role inherits roles.subagent → parent default. */
+  provider?: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+  model?: string;
+  /** Per-sub-agent iteration cap. Defaults to subagents.budgetPerSubagent.maxIterations. */
+  maxIterations?: number;
+  /** Override system prompt for this role. If unset, role-specific default is used. */
+  systemPrompt?: string;
+  /** Which tools this role can call. If unset, all tools (minus task itself) are available. */
+  allowedTools?: string[];
+  /** One-line description (used for listings / model awareness). */
+  description?: string;
+  /** Where this role came from. 'plugin' = imported from a Claude Code agent. */
+  origin?: 'config' | 'plugin';
+}
+
+export interface QodexConfig {
+  defaults: {
+    provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+    model: string;
+    preferLocal: boolean;
+    /** Preload the local default model at startup so the first prompt isn't a cold load.
+     *  Local backends only; no effect on cloud models. Default true. */
+    warmOnStart?: boolean;
+    maxIterations: number;
+    /** Web search backend. 'duckduckgo' (default, no auth), 'tavily' (TAVILY_API_KEY),
+     *  'brave' (BRAVE_SEARCH_API_KEY), or 'firecrawl' (FIRECRAWL_API_KEY; set
+     *  FIRECRAWL_SCRAPE_CONTENT=1 to return full page markdown inline and skip follow-up
+     *  fetches). web_search auto-falls-back to any other backend whose key is present. */
+    web_search_backend?: 'duckduckgo' | 'tavily' | 'brave' | 'firecrawl';
+  };
+  providers: {
+    ollama: {
+      baseUrl: string;
+      /** Ollama `keep_alive` — how long the model stays resident after a request.
+       *  Longer avoids a cold reload (and full prefill) between turns. Default '30m'. */
+      keepAlive?: string;
+      /** Extra Ollama runtime `options` merged into every request (num_ctx, num_batch,
+       *  num_gpu, …). `num_ctx` defaults to the routed model's context window so long
+       *  sessions aren't silently truncated by the server's default 2k/4k window. */
+      options?: Record<string, number>;
+      /** Draft model for speculative decoding, if the local server supports it. Passed
+       *  through verbatim; servers that don't read it ignore it. */
+      draftModel?: string;
+    };
+    anthropic: {
+      apiKeyEnv: string;
+      /** Enable prompt caching via cache_control headers. Free to enable; first call full price, subsequent calls within 5 min get ~90% discount on cached portion. */
+      useCaching?: boolean;
+    };
+    openai: {
+      apiKeyEnv: string;
+      baseUrl?: string;
+      /** Additional model ids the gateway exposes that aren't in the built-in catalog. */
+      extraModels?: Array<{
+        id: string;
+        contextWindow: number;
+        maxOutput: number;
+        inputCostPerMillion: number;
+        outputCostPerMillion: number;
+        supportsToolCalls?: boolean;
+        supportsStreaming?: boolean;
+      }>;
+      /** Extra HTTP headers, e.g. for gateways needing non-Bearer auth schemes. */
+      defaultHeaders?: Record<string, string>;
+      /** Draft model for speculative decoding on an OpenAI-compatible local server
+       *  (LM Studio). Sent as an extra `draft_model` body field; vanilla OpenAI and
+       *  servers that don't support speculation ignore the unknown field. On an
+       *  M3 Ultra a 0.5–1.5B draft against a large primary commonly yields 2–4× tok/s. */
+      draftModel?: string;
+      /** Sampling overrides for local-server backends (LM Studio, llama.cpp).
+       *  Useful to combat repetition collapse on quantized models during long generation.
+       *  Defaults (when unset): temperature=0.3, top_p=1.0, frequency_penalty=0, presence_penalty=0.
+       *  For prose generation on quantized models, try:
+       *    temperature: 0.7, top_p: 0.9, frequency_penalty: 0.5, presence_penalty: 0.3
+       */
+      samplingOptions?: {
+        temperature?: number;
+        top_p?: number;
+        frequency_penalty?: number;
+        presence_penalty?: number;
+      };
+    };
+    deepseek: {
+      apiKeyEnv: string;
+      baseUrl: string;
+      extraModels?: Array<{
+        id: string;
+        contextWindow: number;
+        maxOutput: number;
+        inputCostPerMillion: number;
+        outputCostPerMillion: number;
+        supportsToolCalls?: boolean;
+        supportsStreaming?: boolean;
+      }>;
+      defaultHeaders?: Record<string, string>;
+    };
+    /** User-defined OpenAI-compatible providers. Each needs a unique name (not one
+     *  of the built-ins), an env var holding the key, and a baseUrl. `models` is
+     *  optional: omit it and QodeX discovers the catalog from GET {baseUrl}/models. */
+    custom?: Array<{
+      name: string;
+      apiKeyEnv: string;
+      baseUrl: string;
+      models?: Array<{
+        id: string;
+        contextWindow?: number;
+        maxOutput?: number;
+        inputCostPerMillion?: number;
+        outputCostPerMillion?: number;
+        supportsToolCalls?: boolean;
+        supportsStreaming?: boolean;
+      }>;
+      defaultHeaders?: Record<string, string>;
+      samplingOptions?: Record<string, number>;
+      /** Extra guidance appended to the full system prompt for this provider's models.
+       *  Tunes behavior (e.g. "you have 1M context, read whole files freely"); it does
+       *  not raise the model's reasoning ceiling. */
+      systemPromptAppend?: string;
+      /** Full replacement of the system-prompt body for this provider (power-user).
+       *  QodeX still re-states identity + the available tool list around it. */
+      systemPromptOverride?: string;
+    }>;
+  };
+  routing: {
+    planning: string;
+    toolDecision: string;
+    codeGeneration: string;
+    reflection: string;
+  };
+  budget: {
+    dailyLimitUsd: number;
+    perTaskLimitUsd: number;
+    perTaskMaxTokens: number;
+    perTaskMaxWallSeconds: number;
+    toolTimeoutSeconds: number;
+  };
+  security: {
+    autoApprove: string[];
+    autoReject: string[];
+    /**
+     * Commands that ALWAYS require explicit user consent — even when session
+     * auto-approve (`/auto on`) is active and even if an autoApprove pattern
+     * would otherwise match. For system-mutating commands (changing global OS
+     * settings, package installs, ownership/permission changes) where silent
+     * execution risks destabilizing the user's machine. Unlike autoReject these
+     * are not blocked outright — the user is asked and may approve. Optional for
+     * back-compat; defaults applied at load.
+     */
+    alwaysAsk?: string[];
+    sandboxShell: boolean;
+  };
+  ui: {
+    theme: 'dark' | 'light';
+    showThinking: boolean;
+    showTokenCount: boolean;
+    showCost: boolean;
+  };
+  mcp: {
+    servers: Record<string, {
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+      enabled?: boolean;
+      destructive?: boolean;
+      startupTimeoutSeconds?: number;
+    }>;
+  };
+  /**
+   * Auto-compaction tuning. When the conversation exceeds `threshold` of the
+   * context window, older turns are summarized into a single system message and
+   * recent turns are kept verbatim. All optional — sane defaults apply.
+   */
+  compaction?: {
+    /** Master switch. Default true. */
+    enabled?: boolean;
+    /** Fraction of the context window that triggers compaction. Default 0.75. */
+    threshold?: number;
+    /**
+     * Context window in tokens for the threshold math. When unset, QodeX uses
+     * the routed model's actual context window (falling back to 32768 only if
+     * the model doesn't report one). Set this to override — e.g. if your local
+     * model serves a larger window than it advertises.
+     */
+    contextWindow?: number;
+  };
+  /**
+   * Sub-agent dispatcher settings.
+   *
+   * mode = 'off'       : `task` tool unavailable, no sub-agents ever spawn.
+   * mode = 'sequential' (default for local): sub-agents run one at a time, each with
+   *                      its own isolated context. Parent only sees the final summary.
+   *                      Same wall-clock cost as inline, but context stays clean.
+   * mode = 'parallel'  : sub-agents run concurrently. Only meaningful on cloud providers
+   *                      (Anthropic / OpenAI), since local single-GPU stacks serialise
+   *                      anyway. Falls back to sequential when the active provider is
+   *                      local (Ollama).
+   *
+   * maxConcurrent caps parallel mode. budgetPerSubagent limits how much each can spend
+   * before being killed (anti-runaway).
+   */
+  subagents?: {
+    mode: 'off' | 'sequential' | 'parallel';
+    maxConcurrent?: number;
+    budgetPerSubagent?: { maxTokens?: number; maxIterations?: number };
+    /**
+     * Concurrency policy. 'auto' is recommended: parallel only when sub-agents run on
+     * a different provider than the parent (e.g. parent local, sub-agent cloud). Two
+     * local models on a single GPU serialize anyway, so we fall back to sequential.
+     * 'force' lets the user override the check (useful for benchmarking).
+     */
+    concurrencyMode?: 'auto' | 'force';
+  };
+  /**
+   * Per-role model selection. Lets the user pick a different model for sub-agents than
+   * for the parent — the common patterns are:
+   *   - parent qwen2.5-coder:32b + sub-agent qwen2.5-coder:7b  (heavy reasoning, light workers)
+   *   - parent local + sub-agent cloud (orchestrate locally, delegate to Claude when needed)
+   *   - parent cloud + sub-agent local (Claude decides; workers run free)
+   *
+   * Sub-agents inherit parent model when this is undefined (current behaviour preserved).
+   * Per-call `task` invocations can ALSO override via the tool's `model` argument.
+   *
+   * As of v1.1.0, `roles` is an open Record — define any named role with its own
+   * provider+model. Built-in roles understood by QodeX:
+   *   - `subagent`   — dispatched by the `task` tool when no explicit role given
+   *   - `vision`     — used by `task` when caller passes `role: "vision"`; runs
+   *                    with a vision-tuned system prompt; expects a vision-capable model
+   *   - `summarization` — used by /compact (when implemented)
+   *   - `planning`   — used in plan mode (when implemented)
+   *
+   * Custom roles are also allowed — callers can pass any role name to `task` and
+   * if a config entry exists, that provider/model is used. Otherwise it falls back
+   * to `subagent` then to parent.
+   */
+  roles?: Record<string, RoleConfig | undefined>;
+  /**
+   * Context-assembly settings. The auto-retrieval pre-pass embeds the user's request and
+   * injects the most semantically-relevant files into the first turn — so the model
+   * starts pointed at the right code instead of grepping blind. Best-effort: a no-op when
+   * Ollama / an embedding index isn't available, never blocks startup.
+   */
+  context?: {
+    /** Enable the auto-retrieval pre-pass. Default true (silently skips when unavailable). */
+    autoRetrieve?: boolean;
+    /** How many files to surface. Default 6. */
+    retrieveTopFiles?: number;
+    /** Ollama embedding model. Default 'nomic-embed-text'. */
+    embeddingModel?: string;
+    /** Build the embedding index on the fly if none is cached. Default false (use the
+     *  index `semantic_search` / `/index` built; building inline adds first-run latency). */
+    buildIndexIfMissing?: boolean;
+    /** Stage-2 cross-encoder reranking of retrieval hits. Default false (opt-in;
+     *  needs a local reranker model served via Ollama /api/rerank or /v1/rerank). */
+    rerank?: boolean;
+    /** Reranker model name, e.g. 'bge-reranker-v2-m3'. */
+    rerankModel?: string;
+    /** Reranker base URL. Defaults to QODEX_RERANK_URL / OLLAMA_BASE_URL. */
+    rerankBaseUrl?: string;
+    /** Candidate pool size fed to the reranker before narrowing to retrieveTopFiles. Default 40. */
+    rerankCandidates?: number;
+    /** Inject upstream/downstream dependency meta-context for retrieved files
+     *  (symbol-graph daemon ripple-effect awareness). Default true. */
+    dependencyMap?: boolean;
+    /** Stale large tool results are stubbed after they age. Set false to disable. */
+    resultAging?: boolean;
+    /** Age tool results after this many assistant turns. Default 3 (2 when efficient). */
+    resultAgingMinTurns?: number;
+    /** Only age results larger than this many chars. Default 8000 (4000 when efficient). */
+    resultAgingMaxChars?: number;
+    /** Efficiency profile — opt-in aggressive token saving for long sessions on weak/
+     *  local models: ages results sooner (minTurns 2, maxChars 4000) and compacts
+     *  earlier (threshold 0.60). Default false. Explicit values above/in `compaction`
+     *  always override the profile. Trade-off: the model may occasionally re-read an
+     *  aged-out file. */
+    efficient?: boolean;
+  };
+  /**
+   * LLM Critic gate — semantic peer review after the mechanical verify gate. A
+   * Senior-QA prompt reviews the touched files for logic bugs and spec/convention
+   * mismatches a type-checker can't see; a blocking verdict sends the worker back
+   * to fix (test-time-compute backtracking). Opt-in — it costs an extra round-trip.
+   */
+  critic?: {
+    /** Enable the critic gate. Default false. */
+    enabled?: boolean;
+    /** Max critic→repair rounds per task. Default 1. */
+    maxRounds?: number;
+    /** Max files sent for review. Default 6. */
+    maxFiles?: number;
+  };
+  /**
+   * Git-backed sandbox — run complex tasks on a hidden `qodex/sandbox-<id>` branch,
+   * then squash-merge the result onto the user's branch only if it passes. Lets the
+   * agent experiment and hard-reset dead ends backstage. Opt-in; needs a git repo.
+   */
+  sandbox?: {
+    /** Enable git-backed isolation for normal-mode tasks. Default false. */
+    enabled?: boolean;
+  };
+  /**
+   * MCP SERVER mode — when QodeX runs as an MCP server (`qodex mcp serve`),
+   * exposing its tools to editors. Controls which tools are visible and how
+   * tool calls are authorized in this non-interactive context.
+   */
+  mcpServer?: {
+    /**
+     * Tool exposure scope. Which registry tools external clients can see/call.
+     *   - 'safe'      : read-only + the qodex_* specials (default — no host edits)
+     *   - 'all'       : every registered tool (full power; trust the client)
+     *   - string[]    : an explicit allowlist of tool names
+     * The qodex_* special tools are always exposed regardless.
+     */
+    expose?: 'safe' | 'all' | string[];
+    /**
+     * Rule-based auto-approval for the non-interactive server. Since a server
+     * can't prompt a human, a tool needing confirmation is declined by default.
+     * These rules grant automatic approval without a prompt:
+     */
+    autoApprove?: {
+      /** Glob-ish path prefixes under which file edits are auto-approved (e.g. ["src/", "test/"]). */
+      paths?: string[];
+      /** Tool names always auto-approved (e.g. ["read_file", "grep"]). */
+      tools?: string[];
+      /** If true, ALL tool calls are auto-approved. Dangerous — only on a fully trusted machine. */
+      all?: boolean;
+    };
+  };
+  /**
+   * Local data flywheel — record successful sandbox trajectories (prompt +
+   * reasoning + final code) to ~/.qodex/trajectories/<project>.jsonl for a later
+   * local QLoRA fine-tune. Strictly local, opt-in, only successful tasks.
+   */
+  flywheel?: {
+    /** Record successful trajectories. Default false. Requires sandbox.enabled. */
+    enabled?: boolean;
+  };
+  /**
+   * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has
+   * finished a coding task, QodeX type-checks the files it touched and, if they don't
+   * compile, feeds the errors back and forces a repair round. Whatever model is connected,
+   * it can't ship code that fails to type-check. Best-effort: no-ops when no checker is
+   * available for the project.
+   */
+  verify?: {
+    /** Enable the gate. Default true. */
+    auto?: boolean;
+    /** Consecutive auto-repair rounds before giving up and letting the model finish. Default 2. */
+    maxRepairAttempts?: number;
+    /** Per-run checker timeout (ms). Default 120000. */
+    timeoutMs?: number;
+  };
+  /** Safety net: auto-snapshot before potentially destructive shell commands. */
+  safety?: {
+    /** Whether to git-stash before destructive bash commands. Requires a git repo. */
+    autoSnapshot: boolean;
+    /** Auto-drop stashes older than this many turns (snapshots stay only this long). */
+    snapshotRetentionTurns?: number;
+  };
+  /**
+   * Detected hardware profile, cached in config so we don't redetect every startup.
+   * Re-run `qx setup` to refresh.
+   */
+  hardware?: {
+    tier: 'small' | 'medium' | 'large' | 'xl';
+    ramGb: number;
+    appleSilicon: boolean;
+    detectedAt: string;
+  };
+  /**
+   * Lifecycle hooks — shell commands triggered at PreToolUse / PostToolUse / SessionStart /
+   * SessionEnd / PreCompact. See src/hooks/types.ts for full semantics.
+   */
+  hooks?: {
+    PreToolUse?: Array<{
+      matcher?: string;
+      command: string;
+      timeout?: number;
+      cwd?: string;
+      blocking?: boolean;
+      name?: string;
+    }>;
+    PostToolUse?: Array<{
+      matcher?: string;
+      command: string;
+      timeout?: number;
+      cwd?: string;
+      name?: string;
+    }>;
+    SessionStart?: Array<{
+      command: string;
+      timeout?: number;
+      cwd?: string;
+      name?: string;
+    }>;
+    SessionEnd?: Array<{
+      command: string;
+      timeout?: number;
+      cwd?: string;
+      name?: string;
+    }>;
+    PreCompact?: Array<{
+      command: string;
+      timeout?: number;
+      cwd?: string;
+      name?: string;
+    }>;
+  };
+}
+
+export const DEFAULT_CONFIG: QodexConfig = {
+  defaults: {
+    provider: 'ollama',
+    model: 'qwen2.5-coder:32b',
+    preferLocal: true,
+    warmOnStart: true,
+    // Headroom for larger multi-file / creative tasks. Local models in particular
+    // spend iterations re-reading + self-correcting; 25 was too tight and tasks hit
+    // the cap mid-flight. The loop now also warns at ~80% before the hard stop.
+    // Set to 0 for NO iteration limit (token/cost/time budgets still apply). You can
+    // also lift it per-session at runtime with /unlimited or /iterations <n>.
+    maxIterations: 50,
+    web_search_backend: 'duckduckgo',
+  },
+  providers: {
+    ollama: { baseUrl: 'http://localhost:11434' },
+    anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' },
+    openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+    deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY', baseUrl: 'https://api.deepseek.com' },
+  },
+  routing: {
+    planning: 'qwen2.5-coder:7b',
+    toolDecision: 'qwen2.5-coder:7b',
+    codeGeneration: 'qwen2.5-coder:32b',
+    reflection: 'qwen2.5-coder:7b',
+  },
+  budget: {
+    dailyLimitUsd: 10.0,
+    perTaskLimitUsd: 1.0,
+    perTaskMaxTokens: 200_000,
+    perTaskMaxWallSeconds: 600,
+    toolTimeoutSeconds: 300,
+  },
+  security: {
+    autoApprove: [
+      '^ls( |$)',
+      '^pwd$',
+      '^echo ',
+      '^cat ',
+      '^head ',
+      '^tail ',
+      '^wc ',
+      '^which ',
+      '^node --version',
+      '^npm --version',
+      '^git (status|diff|log|show|branch)( |$)',
+      '^npm (test|run lint|run typecheck|run test|run build)',
+      '^npx tsc',
+      '^pytest',
+      '^cargo (check|test|build)',
+    ],
+    autoReject: [
+      'rm -rf /',
+      'rm -rf /\\*',
+      'mkfs',
+      'dd if=',
+      ':\\(\\)\\{',
+      'curl .* \\| (bash|sh)',
+      'wget .* \\| (bash|sh)',
+      '> /dev/sda',
+      'chmod -R 777 /',
+    ],
+    alwaysAsk: [
+      // macOS global preference / system settings mutation
+      '\\bdefaults\\s+(write|delete|rename)\\b',
+      '\\bpmset\\b',
+      '\\bscutil\\b',
+      '\\bnvram\\b',
+      '\\bsystemsetup\\b',
+      '\\bspctl\\b',
+      '\\bcsrutil\\b',
+      '\\blaunchctl\\s+(load|unload|enable|disable|bootstrap|bootout)\\b',
+      // Privilege escalation
+      '\\bsudo\\b',
+      '\\bsu\\b\\s',
+      // Ownership / permission changes (broad)
+      '\\bchown\\b',
+      '\\bchmod\\s+-R\\b',
+      // Package / global installs that mutate the machine
+      '\\bbrew\\s+(install|uninstall|reinstall|upgrade)\\b',
+      '\\bnpm\\s+(install|uninstall)\\s+-g\\b',
+      '\\bpip\\s+install\\b',
+      // Disk / partition / mount
+      '\\bdiskutil\\b',
+      '\\bmount\\b',
+      '\\bumount\\b',
+      // Firewall / network config
+      '\\bifconfig\\b',
+      '\\bnetworksetup\\b',
+      '\\bpfctl\\b',
+    ],
+    sandboxShell: false,
+  },
+  ui: {
+    theme: 'dark',
+    showThinking: true,
+    showTokenCount: true,
+    showCost: true,
+  },
+  mcp: {
+    servers: {},
+  },
+};

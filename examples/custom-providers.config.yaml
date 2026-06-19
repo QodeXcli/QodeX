@@ -1,0 +1,67 @@
+# ── Custom OpenAI-compatible providers ──────────────────────────────────────
+# Drop any of these blocks into ~/.qodex/config.yaml (under `providers:`) to make
+# QodeX talk to an external gateway. Each needs a unique `name`, an `apiKeyEnv`
+# (the env var that holds the key), and a `baseUrl`. `models` is OPTIONAL — omit
+# it and QodeX discovers the catalog from GET {baseUrl}/models at startup.
+#
+# Select a model afterwards with:  qodex --model <name-from-list>
+# See what's available with:        qodex --list-models
+#
+# NOTE: every provider here is a CLOUD service — your prompts AND the file
+# contents QodeX's tools read are sent to that company's servers. Fine for
+# experimental code; think twice for anything confidential.
+
+providers:
+  custom:
+    # Groq — extremely fast inference. Great for a snappy CLI.
+    - name: groq
+      apiKeyEnv: GROQ_API_KEY
+      baseUrl: https://api.groq.com/openai/v1
+      models:
+        - id: llama-3.3-70b-versatile
+          contextWindow: 131072
+          maxOutput: 32768
+      # A fast, smaller model does better with tighter instructions:
+      systemPromptAppend: >
+        Be terse and act fast. Make one focused edit at a time and verify it
+        before moving on. Do not over-explain.
+
+    # Google Gemini via its OpenAI-compatibility layer. 1M-token context.
+    - name: gemini
+      apiKeyEnv: GEMINI_API_KEY
+      baseUrl: https://generativelanguage.googleapis.com/v1beta/openai/
+      models:
+        - id: gemini-2.5-flash
+          contextWindow: 1048576
+          maxOutput: 65536
+      # Per-provider prompt steering (optional). Tunes BEHAVIOR, not intelligence.
+      # `systemPromptAppend` adds lines on top of the full QodeX prompt:
+      systemPromptAppend: >
+        You have a very large context window. Prefer reading entire files over
+        grepping fragments, and keep the whole relevant codebase in view before
+        editing. Favor thoroughness over brevity.
+
+    # GitHub Models — free with a GitHub PAT (models:read). Tight rate limits.
+    - name: github
+      apiKeyEnv: GITHUB_TOKEN
+      baseUrl: https://models.github.ai/inference
+      models:
+        - id: openai/gpt-4o
+          contextWindow: 128000
+          maxOutput: 16384
+
+    # Mistral.
+    - name: mistral
+      apiKeyEnv: MISTRAL_API_KEY
+      baseUrl: https://api.mistral.ai/v1
+      models:
+        - id: mistral-large-latest
+          contextWindow: 131072
+          maxOutput: 8192
+
+    # OpenRouter — one key, hundreds of models. Let QodeX discover the catalog
+    # by omitting `models` entirely:
+    - name: openrouter
+      apiKeyEnv: OPENROUTER_API_KEY
+      baseUrl: https://openrouter.ai/api/v1
+      # (no `models:` here → discovered from /models at startup)

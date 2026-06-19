@@ -1,0 +1,10 @@
+{
+  "id": "02-write-function",
+  "description": "Write a small CommonJS module that passes a runtime check.",
+  "prompt": "Create a JavaScript file named sum.js that exports a function sum(a, b) returning a + b. Use CommonJS: module.exports = { sum }.",
+  "check": {
+    "filesExist": ["sum.js"],
+    "command": { "command": "node -e \"const {sum}=require('./sum.js'); process.exit(sum(2,3)===5?0:1)\"", "expectExitZero": true }
+  },
+  "maxIterations": 12
+}

@@ -1,0 +1,16 @@
+{
+  "id": "03-fix-bug",
+  "description": "Fix a bug in existing code so a provided test passes.",
+  "prompt": "There is a bug in buggy.js — running `node test.js` fails. Find and fix the bug in buggy.js so that `node test.js` passes. Do not edit test.js.",
+  "setup": {
+    "files": {
+      "buggy.js": "function add(a, b) {\n  return a - b; // BUG: should add\n}\nmodule.exports = { add };\n",
+      "test.js": "const { add } = require('./buggy.js');\nif (add(2, 3) !== 5) {\n  console.error('FAIL: add(2,3) =', add(2, 3));\n  process.exit(1);\n}\nconsole.log('OK');\n"
+    }
+  },
+  "check": {
+    "command": { "command": "node test.js", "expectExitZero": true },
+    "fileChecks": [{ "path": "buggy.js", "matches": "a\\s*\\+\\s*b" }]
+  },
+  "maxIterations": 15
+}

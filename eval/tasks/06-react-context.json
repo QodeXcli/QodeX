@@ -1,0 +1,22 @@
+{
+  "id": "06-react-context",
+  "description": "Multi-file React typed context: provider + guarded hook whose types must line up with a shared interface across 3 files. Interlocking generics frequently trip a weak model → exercises the auto-verify gate.",
+  "prompt": "This is a strict-TypeScript React 18 project. Build a typed auth context across files in src/. (1) src/auth-types.ts already defines `User` and `AuthState` — read it, don't redefine. (2) Create src/AuthContext.tsx exporting: a context created with React.createContext<AuthState | null>(null); an `AuthProvider` component (props: { children: React.ReactNode }) that holds `user` state (User | null), exposes `login(user: User)` and `logout()`, and provides a fully-typed AuthState value; and a `useAuth(): AuthState` hook that reads the context and THROWS an Error if used outside the provider (so its return type is AuthState, never null). (3) Create src/Profile.tsx: a component that calls useAuth() and renders the user's name, or a 'Sign in' button that calls login with a sample user when there's no user. Everything must pass `npx tsc --noEmit` with zero errors.",
+  "setup": {
+    "files": {
+      "package.json": "{\n  \"name\": \"eval-react-ctx\",\n  \"private\": true,\n  \"version\": \"1.0.0\"\n}\n",
+      "tsconfig.json": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"target\": \"ES2020\",\n    \"lib\": [\"DOM\", \"DOM.Iterable\", \"ES2020\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"bundler\",\n    \"jsx\": \"react-jsx\",\n    \"esModuleInterop\": true,\n    \"noEmit\": true,\n    \"skipLibCheck\": true,\n    \"noUnusedLocals\": false\n  },\n  \"include\": [\"src\"]\n}\n",
+      "src/auth-types.ts": "export interface User {\n  id: string;\n  name: string;\n  email: string;\n}\n\nexport interface AuthState {\n  user: User | null;\n  login: (user: User) => void;\n  logout: () => void;\n}\n"
+    }
+  },
+  "check": {
+    "filesExist": ["src/AuthContext.tsx", "src/Profile.tsx"],
+    "command": { "command": "npx --no-install tsc --noEmit", "expectExitZero": true },
+    "fileChecks": [
+      { "path": "src/AuthContext.tsx", "matches": "createContext" },
+      { "path": "src/AuthContext.tsx", "matches": "useAuth" },
+      { "path": "src/Profile.tsx", "matches": "useAuth" }
+    ]
+  },
+  "maxIterations": 22
+}

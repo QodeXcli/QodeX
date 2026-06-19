@@ -1,0 +1,127 @@
+{
+  "name": "qodex-vscode",
+  "displayName": "QodeX",
+  "description": "Launch QodeX (local-first agentic coding CLI) from inside VS Code with editor context.",
+  "version": "0.2.2",
+  "publisher": "qodex",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "qodex.openInTerminal",
+        "title": "QodeX: Open in Terminal",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.askAboutSelection",
+        "title": "QodeX: Ask about current selection",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.editCurrentFile",
+        "title": "QodeX: Edit current file",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.runPlan",
+        "title": "QodeX: Plan a change",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.networkDiag",
+        "title": "QodeX: Network diagnostic",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.fixDiagnostics",
+        "title": "QodeX: Fix Problems in This File",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.explainDiagnostic",
+        "title": "QodeX: Explain Problem at Cursor",
+        "category": "QodeX"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "qodex.askAboutSelection",
+          "when": "editorHasSelection",
+          "group": "qodex@1"
+        },
+        {
+          "command": "qodex.fixDiagnostics",
+          "group": "qodex@1",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "qodex.explainDiagnostic",
+          "group": "qodex@2",
+          "when": "editorTextFocus"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "qodex.openInTerminal",
+          "group": "qodex@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "qodex.openInTerminal",
+        "key": "ctrl+alt+q",
+        "mac": "cmd+alt+q"
+      },
+      {
+        "command": "qodex.askAboutSelection",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "QodeX",
+      "properties": {
+        "qodex.executablePath": {
+          "type": "string",
+          "default": "qodex",
+          "description": "Path to the qodex binary. Use 'qodex' if it's on your PATH, or an absolute path otherwise."
+        },
+        "qodex.terminalName": {
+          "type": "string",
+          "default": "QodeX",
+          "description": "Name shown on the integrated terminal QodeX runs in."
+        },
+        "qodex.openHeadless": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use --headless flag when launching for selection / file commands (one-shot vs interactive)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx --yes @vscode/vsce package",
+    "reinstall": "npm run package && (code --uninstall-extension qodex.qodex-vscode || true) && code --install-extension \"$(ls -t *.vsix | head -1)\" --force"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.2"
+  }
+}

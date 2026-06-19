@@ -1,0 +1,18 @@
+{
+  "id": "05-typed-feature",
+  "description": "Add a typed function in a strict-TypeScript project — must type-check (exercises the auto-verify gate).",
+  "prompt": "This is a strict TypeScript project. In src/total.ts, export a function `cartTotal(items: CartItem[]): number` that returns the sum of each item's price times quantity. The CartItem type is already defined in src/types.ts — import it. It must pass `npx tsc --noEmit` with no errors.",
+  "setup": {
+    "files": {
+      "tsconfig.json": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"target\": \"ES2020\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"bundler\",\n    \"noEmit\": true,\n    \"skipLibCheck\": true\n  },\n  \"include\": [\"src\"]\n}\n",
+      "src/types.ts": "export interface CartItem {\n  id: string;\n  price: number;\n  quantity: number;\n}\n",
+      "package.json": "{\n  \"name\": \"eval-typed\",\n  \"private\": true,\n  \"version\": \"1.0.0\"\n}\n"
+    }
+  },
+  "check": {
+    "filesExist": ["src/total.ts"],
+    "command": { "command": "npx --no-install tsc --noEmit", "expectExitZero": true },
+    "fileChecks": [{ "path": "src/total.ts", "matches": "cartTotal" }]
+  },
+  "maxIterations": 18
+}

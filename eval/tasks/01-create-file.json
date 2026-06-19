@@ -1,0 +1,10 @@
+{
+  "id": "01-create-file",
+  "description": "Create a plain text file with exact contents.",
+  "prompt": "Create a file named hello.txt whose entire contents are exactly this line: Hello, QodeX!",
+  "check": {
+    "filesExist": ["hello.txt"],
+    "fileChecks": [{ "path": "hello.txt", "contains": "Hello, QodeX!" }]
+  },
+  "maxIterations": 8
+}
