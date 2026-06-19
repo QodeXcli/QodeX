@@ -36,7 +36,7 @@ import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import { BudgetTracker } from './budget.js';
-import { transformError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
+import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
@@ -1255,7 +1255,7 @@ export class AgentLoop {
 
       // Stream errored
       if (streamError) {
-        yield { type: 'error', data: { message: streamError } };
+        yield { type: 'error', data: { message: explainStreamError(streamError) } };
         return;
       }
 

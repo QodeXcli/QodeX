@@ -1,5 +1,56 @@
 import type { ToolCall } from '../session/store.js';
 
+/**
+ * Turn a raw provider/stream error string into a clear, actionable message for the USER
+ * (distinct from transformError, which formats errors for the MODEL mid-run). The common
+ * painful case is a 429 from a rate-limited endpoint — especially OpenRouter ":free" models,
+ * which share a heavily-contended pool — where the raw "429 Provider returned error" tells
+ * the user nothing about why or what to do. We keep the original text but prepend a plain
+ * explanation and a concrete next step.
+ */
+export function explainStreamError(raw: string): string {
+  const msg = String(raw ?? '').trim();
+  const is429 = /\b429\b|too many requests|rate.?limit/i.test(msg);
+  const is401 = /\b401\b|unauthorized|invalid api key|no api key/i.test(msg);
+  const is402 = /\b402\b|payment required|insufficient (credit|quota|balance)|quota/i.test(msg);
+  const is5xx = /\b50[0-9]\b|server error|bad gateway|service unavailable/i.test(msg);
+
+  if (is429) {
+    return (
+      `Rate limited (429): the model provider is refusing new requests right now.\n` +
+      `This is the provider throttling you, not a QodeX error. QodeX already retried with backoff.\n` +
+      `What to do:\n` +
+      `  • If you're on a free/shared model (e.g. an OpenRouter ":free" model or a free Gemini tier),\n` +
+      `    that pool is heavily contended — wait a bit, or switch to a paid model for reliable throughput.\n` +
+      `  • Try another model with --model (e.g. openai/gpt-4o-mini), or run a local model with no limits.\n` +
+      `  • If you have a Retry-After hint from the provider dashboard, wait that long.\n` +
+      `(raw: ${msg.slice(0, 160)})`
+    );
+  }
+  if (is401) {
+    return (
+      `Authentication failed (401): the provider rejected your API key.\n` +
+      `Check that the right env var is exported and matches the provider in your config.\n` +
+      `(raw: ${msg.slice(0, 160)})`
+    );
+  }
+  if (is402) {
+    return (
+      `Payment/quota issue (402): the provider says this key is out of credit or quota.\n` +
+      `Top up the account or switch to a free/local model with --model.\n` +
+      `(raw: ${msg.slice(0, 160)})`
+    );
+  }
+  if (is5xx) {
+    return (
+      `Provider server error: the model endpoint failed on its side (5xx). QodeX retried.\n` +
+      `Wait a moment and retry, or switch model with --model.\n` +
+      `(raw: ${msg.slice(0, 160)})`
+    );
+  }
+  return msg;
+}
+
 export function transformError(err: any, toolCall?: ToolCall): string {
   const code = err.code ?? '';
   const msg = err.message ?? String(err);

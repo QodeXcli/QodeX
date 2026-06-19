@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.3.4 — 2026-06-19
+
+**Clearer provider errors (esp. 429 rate limits).** When a model endpoint refused requests,
+QodeX surfaced the raw line (e.g. "429 Provider returned error") with no explanation, which
+read like a QodeX bug — it isn't. Stream errors now pass through `explainStreamError`, which
+recognizes 429 (rate limit), 401 (auth), 402 (quota/credit), and 5xx (provider server error)
+and prepends a plain explanation plus a concrete next step. The 429 message specifically calls
+out that free/shared pools (OpenRouter ":free", free Gemini tiers) are heavily contended and
+that switching to a paid or local model via --model gives reliable throughput. The retry layer
+already honored 429 + Retry-After; this just makes the final, user-facing message actionable.
+
+```
+src/agent/recovery.ts   (new explainStreamError)
+src/agent/loop.ts       (route stream errors through it)
+test/explain-stream-error.test.ts  (new — 12 assertions)
+```
+
 ## v2.3.3 — 2026-06-19
 
 **Layer 3 — the visual self-correction loop.** This is the part that makes QodeX artifacts
