@@ -56,7 +56,7 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 > Requires **Node 20+**. `dist/` is built locally (not committed) — the `npm run build` step is **required**.
 
 ```bash
-git clone https://github.com/batisexpress/QodeX.git qodex && cd qodex
+git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
 npm install
 npm run build
 npm link   # makes `qodex` and `qx` available on PATH
