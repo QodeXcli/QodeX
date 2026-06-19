@@ -83,7 +83,9 @@ export function stripModuleSyntax(src: string): string {
     // `export const/let/var/function/class` -> drop just the `export `
     .replace(/^\s*export\s+(?=(const|let|var|function|class|async)\b)/gm, '')
     // standalone named export / re-export statements: `export { A, B };` or `export { A } from '…';`
-    .replace(/^\s*export\s*\{[^}]*\}\s*(from\s*['"][^'"]+['"])?\s*;?\s*$/gm, '');
+    .replace(/^\s*export\s*\{[^}]*\}\s*(from\s*['"][^'"]+['"])?\s*;?\s*$/gm, '')
+    // CommonJS: `const X = require('…');` / `var X = require('…')` — drop the whole line
+    .replace(/^\s*(?:const|let|var)\s+[^;\n]*=\s*require\s*\([^)]*\)\s*;?\s*$/gm, '');
 }
 
 /** Best-effort: find the root React component name to mount (defaults to "App"). */
@@ -102,6 +104,24 @@ function reactHarness(src: string): string {
     `<script crossorigin src="${CDN.react}"></script>` +
     `<script crossorigin src="${CDN.reactDom}"></script>` +
     `<script src="${CDN.babel}"></script>`;
+
+  // We expose the common hooks as bare names (useState, …) for convenience. But if the model's
+  // OWN code already declares any of them — e.g. `const { useState } = React;` or a leftover
+  // `import { useState }` that became a declaration — injecting our destructure too causes
+  // "Identifier 'useState' has already been declared" and the whole render dies. So we only
+  // declare the hooks the model didn't already bring into scope itself.
+  const ALL_HOOKS = ['useState', 'useEffect', 'useRef', 'useMemo', 'useCallback', 'useReducer', 'useContext', 'useLayoutEffect'];
+  const declares = (name: string): boolean => {
+    // `const { … useState … } = React`  OR  `const useState = …`  OR `function useState`
+    const inDestructure = new RegExp(`(?:const|let|var)\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*=`).test(code);
+    const asBinding = new RegExp(`(?:const|let|var|function)\\s+${name}\\b`).test(code);
+    return inDestructure || asBinding;
+  };
+  const hooksToInject = ALL_HOOKS.filter(h => !declares(h));
+  const hookLine = hooksToInject.length
+    ? `const { ${hooksToInject.join(', ')} } = React;\n`
+    : '';
+
   // The component source + a bootstrap, both transpiled by Babel-in-the-browser.
   // Mount priority: an `export default` (captured as window.__art_default) wins, else the
   // detected named component, else a global named `App`. This covers named components,
@@ -109,7 +129,7 @@ function reactHarness(src: string): string {
   const body =
     `<div id="__art_root"></div>` +
     `<script type="text/babel" data-presets="react">\n` +
-    `const { useState, useEffect, useRef, useMemo, useCallback, useReducer } = React;\n` +
+    hookLine +
     `${code}\n` +
     `try {\n` +
     `  var __Art = (typeof window.__art_default !== 'undefined' && window.__art_default)\n` +

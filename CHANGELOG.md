@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.3.7 — 2026-06-19
+
+**Fix: React preview rendered blank when the model declared its own hooks.** Live testing a
+product-card artifact surfaced two harness bugs that produced a 4.6KB blank page (and sent the
+model into a fix-loop it couldn't win): (1) the harness ALWAYS injected
+`const { useState, … } = React;`, so when the model's own code also had `const { useState } = React`
+(or a leftover `import { useState }`), Babel threw "Identifier 'useState' has already been
+declared" and nothing rendered; (2) a CommonJS `const X = require('react')` line slipped past
+the module stripper.
+
+Now the harness only injects the hooks the model didn't already bind itself (scanning the
+source for `const { … } = React`, `const useState = …`, or `function useState`), and
+`stripModuleSyntax` also removes `require()` lines. Added 6 regression tests built from the
+exact failing component.
+
+```
+src/artifacts/preview.ts        (conditional hook injection + require stripping)
+test/artifact-preview.test.ts   (38 -> 44 assertions)
+```
+
+## v2.3.6 — 2026-06-19
+
+**Responsive welcome header.** The launch box used content-based width, so on a narrow
+terminal the rounded border shattered into wrapped, misaligned lines. It now reads the
+terminal width (via Ink's useStdout) and clamps the box to fit (min 34, capped at 100 cols),
+wraps the tagline + capability badges instead of overflowing the border, and drops to a
+compact tagline/badge set under 60 columns. A program can't resize the user's terminal — only
+the terminal app can — but it can lay itself out to fit whatever width it's given. The main
+REPL already tracked width + resize; this brings the header in line.
+
+```
+src/cli/prompts/welcome.tsx   (width-aware box + wrapping badges)
+```
+
 ## v2.3.5 — 2026-06-19
 
 **`qodex provider add` — add any OpenAI-compatible gateway in one command.** Adding a cloud

@@ -107,5 +107,35 @@ console.log('— stripModuleSyntax: real-world shapes —');
 }
 
 
+
+// ── regression: the "useState already declared" + require bugs (live SiliconFlow test) ──
+console.log('— harness: no double-declaration of hooks —');
+{
+  // model wrote its OWN React-hook destructure; harness must NOT inject a second one
+  const ownDestructure = `const { useState } = React;\nfunction Card(){ const [n,setN]=useState(0); return <button onClick={()=>setN(n+1)}>{n}</button>; }`;
+  const h1 = buildPreviewHtml('react', ownDestructure);
+  const useStateDecls = (h1.match(/const\s*\{[^}]*\buseState\b|const\s+useState\b/g) || []).length;
+  check('useState declared exactly once', useStateDecls === 1);
+  check('still injects the OTHER hooks', /useEffect/.test(h1));
+  check('component source preserved', h1.includes('function Card'));
+
+  // model wrote `const useState = React.useState` style single binding
+  const single = `const useState = React.useState;\nfunction App(){ const [n]=useState(0); return null; }`;
+  const h2 = buildPreviewHtml('react', single);
+  const c2 = (h2.match(/const\s+useState\b|const\s*\{[^}]*\buseState\b/g) || []).length;
+  check('single-binding useState not duplicated', c2 === 1);
+
+  // model brought NO hooks itself → harness injects the full set
+  const none = `function App(){ return null; }`;
+  const h3 = buildPreviewHtml('react', none);
+  check('injects hooks when model declared none', /const \{ useState, useEffect/.test(h3));
+}
+
+console.log('— harness: strips require —');
+{
+  const r = buildPreviewHtml('react', `const React = require('react');\nfunction App(){ return null; }`);
+  check('no leftover require() in harness', !/\brequire\s*\(/.test(r));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
