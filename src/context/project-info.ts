@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import { logger } from '../utils/logger.js';
 
 export interface ProjectInfo {
   framework?: string;
@@ -102,7 +103,14 @@ export async function detectProjectInfo(cwd: string): Promise<ProjectInfo> {
 
       // Type checker
       if ('typescript' in allDeps) info.typeChecker = 'tsc';
-    } catch {}
+    } catch (err: any) {
+      // ENOENT (package.json vanished between the exists-check and read) is
+      // benign — just skip deeper detection. A parse error means the file is
+      // present but malformed; log it so the degraded detection is traceable.
+      if (err?.code !== 'ENOENT') {
+        logger.debug(`Failed to parse ${pkgPath}: ${err?.message ?? err}`);
+      }
+    }
   }
 
   // Python-specific

@@ -3,6 +3,7 @@ import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import type { ToolContext } from '../base.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * Shared interactive edit-approval flow — the "surgical assistant" gate.
@@ -49,7 +50,10 @@ function editInEditor(content: string, originalPath: string): string | null {
     // stdio:'inherit' hands the TTY to the editor; on exit Ink repaints.
     execFileSync(editor, [tmp], { stdio: 'inherit' });
     return readFileSync(tmp, 'utf8');
-  } catch {
+  } catch (e: any) {
+    // Editor flow failed (mkdtemp/write/spawn/read). Log so it's traceable —
+    // otherwise this is indistinguishable from "no editor configured".
+    logger.warn('External editor flow failed; falling back', { editor, err: e?.message ?? String(e) });
     return null;
   }
 }

@@ -41,6 +41,15 @@ export interface SandboxState {
   checkpoints: string[]; // commit SHAs, oldest→newest
 }
 
+/**
+ * Result of finish(). Discriminated so the caller can tell apart a genuine
+ * "no committed changes to merge" (empty) from a real failure (the merge threw
+ * or conflicted) — the latter must NOT be reported to the user as benign.
+ */
+export type FinishResult =
+  | { merged: true }
+  | { merged: false; reason: 'empty' | 'conflict' | 'error'; error?: string };
+
 export class GitSandbox {
   private state: SandboxState | null = null;
   constructor(private cwd: string) {}
@@ -173,10 +182,15 @@ export class GitSandbox {
    *   ok=false → abandon the sandbox branch; restore the user's original state.
    * Either way we return to the origin branch and pop the WIP stash.
    */
-  async finish(ok: boolean, commitMessage: string, signal?: AbortSignal): Promise<{ merged: boolean }> {
-    if (!this.state?.active) return { merged: false };
+  async finish(ok: boolean, commitMessage: string, signal?: AbortSignal): Promise<FinishResult> {
+    if (!this.state?.active) return { merged: false, reason: 'empty' };
     const { branch, originBranch, baseCommit, stashed } = this.state;
+    // Distinguish a genuine "nothing to merge" (empty) from a real merge failure
+    // (conflict/error). Default to 'empty' for the !ok abandon path; the ok path
+    // overrides this when the squash actually fails.
     let merged = false;
+    let failReason: 'empty' | 'conflict' | 'error' = 'empty';
+    let failError: string | undefined;
     try {
       if (ok) {
         // Stage everything still uncommitted, then commit so squash captures it.
@@ -188,6 +202,19 @@ export class GitSandbox {
         if ((sq.exitCode === 0)) {
           const c = await git(['commit', '--no-verify', '-m', commitMessage], { cwd: this.cwd, signal });
           merged = (c.exitCode === 0);
+          if (!merged) {
+            // Squash staged nothing → empty commit refused. That's a genuine
+            // "no committed changes" case, not a failure.
+            const out = `${c.stdout ?? ''}\n${c.stderr ?? ''}`;
+            failReason = /nothing to commit|no changes added/i.test(out) ? 'empty' : 'error';
+            if (failReason === 'error') failError = (c.stderr || c.stdout || '').trim() || undefined;
+          }
+        } else {
+          // Merge itself failed (e.g. conflict) — surface it as a real failure.
+          merged = false;
+          const out = `${sq.stdout ?? ''}\n${sq.stderr ?? ''}`;
+          failReason = /conflict|CONFLICT/.test(out) ? 'conflict' : 'error';
+          failError = (sq.stderr || sq.stdout || '').trim() || undefined;
         }
         if (!merged) {
           // Squash had nothing or failed; ensure we at least left the branch.
@@ -205,9 +232,12 @@ export class GitSandbox {
     } catch (e: any) {
       logger.warn('GitSandbox.finish encountered an error; attempting to restore origin', { err: e?.message });
       await git(['checkout', '--force', originBranch], { cwd: this.cwd, signal }).catch(() => {});
+      merged = false;
+      failReason = /conflict/i.test(String(e?.message)) ? 'conflict' : 'error';
+      failError = e?.message ? String(e.message) : undefined;
     } finally {
       this.state = null;
     }
-    return { merged };
+    return merged ? { merged: true } : { merged: false, reason: failReason, error: failError };
   }
 }

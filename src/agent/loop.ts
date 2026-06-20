@@ -601,7 +601,12 @@ export class AgentLoop {
           if (diff.exitCode === 0) changedFiles = diff.stdout.split('\n').map(s => s.trim()).filter(Boolean);
         } catch { /* ignore */ }
       }
-      const { merged } = await sandbox.finish(reachedFinal, commitMsg, options.signal).catch(() => ({ merged: false }));
+      // Capture the branch name BEFORE finish() (it nulls internal state) so we
+      // can point the user at their work if the merge fails.
+      const sandboxBranch = sandbox.branch;
+      const finishResult = await sandbox.finish(reachedFinal, commitMsg, options.signal)
+        .catch((e: any) => ({ merged: false as const, reason: 'error' as const, error: e?.message ? String(e.message) : undefined }));
+      const merged = finishResult.merged;
       if (reachedFinal && merged) {
         yield { type: 'notice', data: { message: '🔒 Sandbox: changes squash-merged onto your branch ✓' } };
         // ── Data flywheel: record this successful trajectory (opt-in) ──
@@ -623,7 +628,17 @@ export class AgentLoop {
           }
         }
       } else if (reachedFinal && !merged) {
-        yield { type: 'notice', data: { message: '🔒 Sandbox: nothing to merge (no committed changes)' } };
+        if (!finishResult.merged && finishResult.reason === 'empty') {
+          yield { type: 'notice', data: { message: '🔒 Sandbox: nothing to merge (no committed changes)' } };
+        } else {
+          // Real merge failure (conflict/error): the work is NOT lost — it's still
+          // on the sandbox branch. Tell the user distinctly so they don't think
+          // their changes simply vanished.
+          const reason = !finishResult.merged ? finishResult.reason : 'error';
+          const errSuffix = (!finishResult.merged && finishResult.error) ? ` (${finishResult.error})` : '';
+          const branchSuffix = sandboxBranch ? ` Your work is preserved on branch '${sandboxBranch}'.` : ' Your work is preserved on the sandbox branch.';
+          yield { type: 'notice', data: { message: `🔒 Sandbox: FAILED to merge your changes onto your branch (${reason})${errSuffix}.${branchSuffix}` } };
+        }
       } else {
         yield { type: 'notice', data: { message: '🔒 Sandbox: task did not complete — your branch was left untouched' } };
       }
@@ -1452,7 +1467,10 @@ export class AgentLoop {
               verifyRepairAttempts = 0;
             }
           } catch (e: any) {
-            logger.debug('Auto-verify gate skipped (error)', { err: e?.message });
+            // The pre-finish safety gate was skipped — a possibly-broken task can
+            // now finish as "success". Make that visible, don't bury it in debug.
+            logger.warn('Auto-verify gate skipped (error)', { err: e?.message });
+            yield { type: 'notice', data: { message: `⚠ Auto-verify gate skipped due to an error (${e?.message ?? 'unknown'}) — changes were not type-checked` } };
           }
         }
 
@@ -1530,7 +1548,10 @@ export class AgentLoop {
               logger.debug('LLM critic passed', { warnings: verdict.findings.length });
             }
           } catch (e: any) {
-            logger.debug('LLM critic skipped (error)', { err: e?.message });
+            // The QA self-review gate was skipped — surface it so the task isn't
+            // silently allowed to finish unreviewed.
+            logger.warn('LLM critic skipped (error)', { err: e?.message });
+            yield { type: 'notice', data: { message: `⚠ QA review gate skipped due to an error (${e?.message ?? 'unknown'}) — changes were not peer-reviewed` } };
           }
         }
 
@@ -1792,6 +1813,16 @@ export class AgentLoop {
         }
       } catch (e: any) {
         logger.warn('Transaction commit failed', { err: e.message });
+        // Edits are already on disk but the journal/commit didn't finalize, so
+        // /undo and verify-baseline won't cover this turn. Surface it the same
+        // way we surface git-tracking issues above (don't let it pass silently).
+        yield {
+          type: 'tool_ui',
+          data: {
+            type: 'progress',
+            message: `journal: commit failed (${e.message}) — /undo may not cover this turn`,
+          },
+        };
       }
 
       // Add tool results to message history

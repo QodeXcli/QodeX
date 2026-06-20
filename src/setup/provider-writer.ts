@@ -32,7 +32,17 @@ export async function addProviderToConfig(
   let raw = '';
   try {
     raw = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8');
-  } catch {
+  } catch (e: any) {
+    // Only a missing file means "no config yet — start fresh". Any other read
+    // error (permission denied, IO failure) must NOT be swallowed: doing so
+    // would merge into an empty object and overwrite the file, dropping every
+    // previously-configured provider. Surface it before the merge-and-write.
+    if (e?.code !== 'ENOENT') {
+      throw new Error(
+        `Could not read ${QODEX_CONFIG_FILE} (${e?.message ?? e}). ` +
+        `Refusing to overwrite it to avoid dropping existing providers. Fix the file/permissions, then retry.`,
+      );
+    }
     raw = ''; // no config yet — start fresh
   }
 

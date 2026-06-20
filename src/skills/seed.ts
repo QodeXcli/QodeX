@@ -40,8 +40,14 @@ export async function seedBundledSkills(): Promise<void> {
       await fs.stat(dst);
       // Already present — don't touch.
       continue;
-    } catch {
-      // Not installed yet
+    } catch (e: any) {
+      if (e?.code !== 'ENOENT') {
+        // A non-ENOENT stat error (e.g. EACCES) does NOT mean "not installed".
+        // Treat the path as inaccessible and skip rather than seeding over it.
+        logger.warn('Skipping bundled skill seed; could not stat target', { name: ent.name, dst, err: e?.message });
+        continue;
+      }
+      // ENOENT — not installed yet, fall through and seed.
     }
     try {
       await fs.mkdir(dst, { recursive: true });

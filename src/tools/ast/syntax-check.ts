@@ -160,7 +160,10 @@ export async function checkSyntaxForWrite(
         tree = p.parser.parse(text);
         if (!tree?.rootNode) return null;
         return findIssuesInTree(tree.rootNode as TSNodeLike, text);
-      } catch {
+      } catch (e: any) {
+        // Fail-open (never block the write), but surface that the parser could
+        // not run so a silently-broken parser isn't mistaken for "clean file".
+        console.warn(`[syntax-check] parser could not run for ${absPath}; skipping syntax gate: ${e?.message ?? String(e)}`);
         return null;                        // parser hiccup → fail-open
       } finally {
         try { tree?.delete?.(); } catch { /* wasm cleanup best-effort */ }
@@ -173,7 +176,9 @@ export async function checkSyntaxForWrite(
     const beforeIssues = beforeContent === null ? null : parseIssues(beforeContent);
     const beforeHad = beforeIssues === null ? (beforeContent === null ? null : true) : beforeIssues.length > 0;
     return shouldReject(beforeHad, true) ? buildSyntaxRejectMessage(absPath, lang, after) : null;
-  } catch {
+  } catch (e: any) {
+    // Fail-open, but log so an unexpectedly-broken gate isn't read as "clean".
+    console.warn(`[syntax-check] gate could not run for ${absPath}; skipping syntax check: ${e?.message ?? String(e)}`);
     return null;                            // anything unexpected → fail-open
   }
 }

@@ -507,8 +507,36 @@ async function writeConfig(picks: {
   let existing: QodexConfig;
   try {
     existing = await loadConfig(process.cwd());
-  } catch {
-    existing = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      // No config yet — fresh start.
+      existing = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    } else {
+      // A real parse/IO error (corrupt YAML, permission denied, etc.). Do NOT
+      // silently reset over the user's config. Back the existing file up to a
+      // timestamped copy first, warn loudly, then continue from defaults so the
+      // original data is preserved on disk and recoverable.
+      const backup = `${QODEX_CONFIG_FILE}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      let backedUp = false;
+      try {
+        await fs.copyFile(QODEX_CONFIG_FILE, backup);
+        backedUp = true;
+      } catch {
+        // If even the backup fails, fall through to the abort below.
+      }
+      if (!backedUp) {
+        throw new Error(
+          `Could not read existing config at ${QODEX_CONFIG_FILE} (${err?.message ?? err}), ` +
+          `and could not back it up before overwriting. Aborting to avoid losing your settings. ` +
+          `Fix or move ${QODEX_CONFIG_FILE} aside, then re-run \`qx setup\`.`,
+        );
+      }
+      console.error(
+        `⚠ Could not read existing config at ${QODEX_CONFIG_FILE} (${err?.message ?? err}).\n` +
+        `  Your previous config was backed up to ${backup} before continuing from defaults.`,
+      );
+      existing = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    }
   }
 
   const updated: QodexConfig = {

@@ -11,6 +11,9 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   error: 3,
 };
 
+// One-time guard so a recurring rotation failure doesn't spam stderr.
+let warnedRotateFailed = false;
+
 class Logger {
   private logFile: string;
   private minLevel: LogLevel = 'info';
@@ -32,7 +35,16 @@ class Logger {
       if (stat.size > 10 * 1024 * 1024) {
         await fs.writeFile(this.logFile, '');
       }
-    } catch {}
+    } catch (err) {
+      // The logger can't reliably log about itself; warn once on stderr so an
+      // unbounded log file (rotation truncate failing) doesn't go unnoticed.
+      if (!warnedRotateFailed) {
+        warnedRotateFailed = true;
+        try {
+          process.stderr.write(`qodex: log rotation check failed for ${this.logFile}: ${(err as any)?.message ?? err}\n`);
+        } catch { /* intentional: logger must never throw */ }
+      }
+    }
 
     this.initialized = true;
     if (this.buffer.length > 0) {
@@ -53,7 +65,7 @@ class Logger {
     }
     try {
       await fs.appendFile(this.logFile, line + '\n');
-    } catch {}
+    } catch { /* intentional: logger must never throw */ }
   }
 
   debug(msg: string, meta?: Record<string, unknown>): void { void this.write('debug', msg, meta); }

@@ -35,6 +35,7 @@
 
 import type { Message } from '../session/store.js';
 import { countTokens, countTokensJson } from '../utils/tokenizer.js';
+import { logger } from '../utils/logger.js';
 
 export interface TurnBreakdown {
   turnNumber: number;
@@ -156,7 +157,11 @@ export function analyzeMessages(
                 e.reads += 1;
                 fileStats.set(p, e);
               }
-            } catch { /* ignore */ }
+            } catch (err) {
+              // Unparseable tool-call args mean this call's file/path attribution is
+              // skipped — log so the resulting undercount in diagnostics is traceable.
+              logger.debug('token-analyzer: failed to parse tool-call arguments', { tool: toolName, err });
+            }
           }
         }
       } else if (m.role === 'tool') {

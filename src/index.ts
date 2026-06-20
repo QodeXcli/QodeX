@@ -64,7 +64,7 @@ async function bootstrap(): Promise<{
 
   // Warm the real BPE tokenizer in the background (gpt-tokenizer, if installed).
   // Non-blocking: token counts use the calibrated heuristic until this resolves.
-  void import('./utils/tokenizer.js').then(t => t.warmTokenizer()).catch(() => {});
+  void import('./utils/tokenizer.js').then(t => t.warmTokenizer()).catch((err) => logger.debug('tokenizer warm-up failed', { err }));
 
   const config = await loadConfig(process.cwd());
   // Import Claude Code plugins/standalone assets: agents → dispatchable roles (for the
@@ -87,7 +87,7 @@ async function bootstrap(): Promise<{
 
   // Code graph — project-local SQLite
   const qodexProjectDir = path.join(process.cwd(), '.qodex');
-  try { fsSync.mkdirSync(qodexProjectDir, { recursive: true }); } catch {}
+  try { fsSync.mkdirSync(qodexProjectDir, { recursive: true }); } catch (err) { logger.warn('Failed to create project .qodex dir', { dir: qodexProjectDir, err }); }
   const codeGraph = new CodeGraphDB(path.join(qodexProjectDir, 'codegraph.db'));
   const indexer = new Indexer(codeGraph, process.cwd());
   setCodeGraphDB(codeGraph);
@@ -125,7 +125,7 @@ async function bootstrap(): Promise<{
       if (hooks.hasAny('SessionEnd')) {
         await hooks.dispatch('SessionEnd', { event: 'SessionEnd', sessionId: 'shutdown', cwd: process.cwd() });
       }
-    } catch {}
+    } catch (err) { logger.debug('SessionEnd hook failed', { err }); }
     try {
       const m = getMCPManager();
       if (m) await m.stopAll();

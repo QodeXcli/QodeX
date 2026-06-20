@@ -360,7 +360,15 @@ async function stampSource(skillFile: string, source: string): Promise<void> {
       const out = raw.replace(/^---\s*\n/, `---\nsource: ${source}\n`);
       await fs.writeFile(skillFile, out);
     }
-  } catch { /* non-fatal */ }
+  } catch (e: any) {
+    // Non-fatal: the skill is installed, but provenance stamping failed so it
+    // will be missing its `source:`. Surface it instead of hiding it silently.
+    logger.warn('Failed to stamp source provenance into skill', {
+      name: path.basename(path.dirname(skillFile)),
+      source,
+      err: e?.message ?? String(e),
+    });
+  }
 }
 
 /** Concatenate scannable skill text for the security scan (bulk path). */

@@ -46,7 +46,9 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
 
     // Auto-snapshot: if the wiring is present and this command pattern is destructive,
     // take a git stash first so /undo can roll back. Best-effort — never blocks on
-    // failure, just logs a warning.
+    // failure, but the failure IS surfaced in the result so the user knows /undo
+    // is unavailable for this command.
+    let snapshotWarning: string | null = null;
     if (ctx.snapshotService) {
       const snapshot = await import('../../safety/snapshot.js');
       const check = snapshot.isDestructiveBash(cmd);
@@ -57,13 +59,18 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
             ctx.currentTurn ?? 0,
           );
         } catch (e: any) {
-          // Snapshot failure is non-fatal — log and proceed.
+          // Snapshot failure is non-fatal — log, surface to the user, and proceed.
           logger.warn('Auto-snapshot before bash failed (continuing)', { err: e?.message });
+          snapshotWarning = '⚠ snapshot failed — /undo unavailable for this command';
         }
       }
     }
 
-    return await this.runCommand(cmd, ctx, timeoutMs);
+    const result = await this.runCommand(cmd, ctx, timeoutMs);
+    if (snapshotWarning) {
+      return { ...result, content: `${snapshotWarning}\n${result.content}` };
+    }
+    return result;
   }
 
   private runCommand(cmd: string, ctx: ToolContext, timeoutMs: number): Promise<ToolResult> {

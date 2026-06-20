@@ -193,6 +193,7 @@ export class SafeRenameTool extends Tool<z.infer<typeof SafeRenameArgs>> {
 
     // APPLY
     let writtenCount = 0;
+    let writeFailures = 0;
     for (const c of changes) {
       const abs = path.join(ctx.cwd, c.rel);
       let content: string;
@@ -219,11 +220,16 @@ export class SafeRenameTool extends Tool<z.infer<typeof SafeRenameArgs>> {
           await fs.writeFile(abs, newContent, 'utf-8');
           writtenCount++;
         } catch (e: any) {
+          writeFailures++;
           out.push(`  ⚠ Write failed for ${c.rel}: ${e?.message}`);
         }
       }
     }
     out.push('');
+    if (writeFailures > 0) {
+      out.push(`⚠ Partial failure — ${writtenCount} file(s) written, ${writeFailures} failed (see above). The rename is INCOMPLETE; review and re-run, or /restore to roll back.`);
+      return { content: out.join('\n'), isError: true, metadata: { filesChanged: writtenCount, writeFailures, occurrences: totalMatches } };
+    }
     out.push(`✅ Applied — ${writtenCount} file(s) written. Verify with grep/test/typecheck. /restore to roll back.`);
     return { content: out.join('\n'), metadata: { filesChanged: writtenCount, occurrences: totalMatches } };
   }

@@ -34,6 +34,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
+import { logger } from '../../utils/logger.js';
 
 const FindDeadCodeArgs = z.object({
   scope: z.enum(['files', 'exports', 'functions', 'all']).optional().describe('Which kind of dead code to look for. Default: all.'),
@@ -191,12 +192,27 @@ export class FindDeadCodeTool extends Tool<z.infer<typeof FindDeadCodeArgs>> {
 
     // package.json for entry-point hinting
     let pkg: any = null;
-    try { pkg = JSON.parse(await fs.readFile(path.join(ctx.cwd, 'package.json'), 'utf-8')); } catch { /* none */ }
+    let pkgUnparseable = false;
+    const pkgPath = path.join(ctx.cwd, 'package.json');
+    try {
+      pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'));
+    } catch (err: any) {
+      // A missing package.json is fine — just no entry-point hints. But a
+      // corrupt one means we proceed with NO deps/entry hints, which inflates
+      // false positives; warn so the user knows results may be unreliable.
+      if (err?.code !== 'ENOENT') {
+        pkgUnparseable = true;
+        logger.warn(`Failed to parse ${pkgPath}: ${err?.message ?? err}`);
+      }
+    }
 
     const lines: string[] = [];
     lines.push(`# Dead Code Report`);
     lines.push(`Scanned ${files.length} source file(s) in ${path.relative(ctx.cwd, root) || '.'}`);
     lines.push(`Scope: ${scope}${includeTests ? ' (incl. tests)' : ' (excl. tests)'}`);
+    if (pkgUnparseable) {
+      lines.push(`⚠ package.json exists but could not be parsed — entry-point detection is degraded, so results below may contain extra false positives.`);
+    }
     lines.push('');
 
     // ─── 1. Orphaned files ───
