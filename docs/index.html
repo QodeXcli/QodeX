@@ -39,7 +39,6 @@
     html { scroll-behavior: auto; }
     *, *::before, *::after { animation: none !important; transition: none !important; }
     .type-caret { display: none !important; }
-    /* Never leave content stuck invisible if motion is off. */
     .reveal, [data-stagger] > * { opacity: 1 !important; transform: none !important; }
     .terminal.tilt-ready { transform: none !important; }
   }
@@ -51,7 +50,6 @@
       radial-gradient(800px circle at 85% 15%, rgba(155,140,255,0.06), transparent 50%),
       radial-gradient(600px circle at 50% 100%, rgba(84,214,232,0.05), transparent 50%);
   }
-  /* Light theme — inherited via [data-theme="light"], the same surfaces re-tokenized. */
   [data-theme="light"] {
     --bg: #f7f9fc;
     --bg-soft: #ffffff;
@@ -172,7 +170,7 @@
   .turn p { font-size: clamp(22px, 3.2vw, 30px); font-weight: 600; letter-spacing: -0.8px; line-height: 1.35; }
   .turn .grad { background: linear-gradient(135deg, var(--signal), var(--cyan)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 
-  /* Capability grid (the comprehensive part) */
+  /* Capability grid */
   .caps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
   @media (max-width: 900px) { .caps { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 600px) { .caps { grid-template-columns: 1fr; } }
@@ -182,15 +180,6 @@
   .cap h4 { font-size: 18px; font-weight: 600; margin-bottom: 9px; letter-spacing: -0.3px; }
   .cap p { color: var(--ink-soft); font-size: 14px; line-height: 1.6; }
   .cap p code { background: rgba(0,0,0,0.35); padding: 1px 6px; border-radius: 5px; font-size: 12px; color: var(--cyan); font-family: var(--mono); border: 1px solid var(--panel-line); }
-
-  /* Wins */
-  .wins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-  @media (max-width: 860px) { .wins { grid-template-columns: 1fr; } }
-  .win-card { border: 1px solid var(--panel-line); border-radius: 16px; padding: 34px 26px; background: linear-gradient(180deg, rgba(63,240,132,0.04), rgba(255,255,255,0.01)); backdrop-filter: blur(10px); transition: all .3s ease; text-align: left; }
-  .win-card:hover { transform: translateY(-5px); border-color: rgba(63,240,132,0.4); box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5), inset 0 0 20px rgba(63,240,132,0.05); }
-  .win-card .w-tag { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--signal); margin-bottom: 16px; }
-  .win-card h3 { font-size: 22px; font-weight: 600; letter-spacing: -0.6px; margin-bottom: 12px; }
-  .win-card p { color: var(--ink-soft); font-size: 15px; line-height: 1.7; }
 
   /* Guardrails */
   .rails { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--panel-line); border: 1px solid var(--panel-line); border-radius: 16px; overflow: hidden; max-width: 1000px; margin: 0 auto; box-shadow: 0 20px 50px -10px rgba(0,0,0,0.5); }
@@ -250,15 +239,13 @@
   .foot-col a:hover { color: var(--signal); }
   .foot-bottom { margin-top: 45px; padding-top: 24px; border-top: 1px solid var(--panel-line); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; font-size: 13.5px; color: var(--ink-faint); font-family: var(--mono); }
 
-  /* Motion system — entrance reveals with directional variants + stagger, the CodedVisuals feel.
-     Everything is GPU-friendly (opacity + transform only) and fully disabled under reduced-motion. */
+  /* Motion system */
   .reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1), transform 0.9s cubic-bezier(0.16, 1, 0.3, 1); will-change: opacity, transform; }
   .reveal.in { opacity: 1; transform: none; }
   .reveal.from-left { transform: translateX(-32px); }
   .reveal.from-right { transform: translateX(32px); }
   .reveal.scale-in { transform: scale(0.94); }
   .reveal.in.from-left, .reveal.in.from-right, .reveal.in.scale-in { transform: none; }
-  /* Stagger: children of a [data-stagger] reveal in sequence once the parent enters view. */
   [data-stagger] > * { opacity: 0; transform: translateY(22px); transition: opacity 0.7s cubic-bezier(0.16,1,0.3,1), transform 0.7s cubic-bezier(0.16,1,0.3,1); }
   [data-stagger].in > * { opacity: 1; transform: none; }
   [data-stagger].in > *:nth-child(1) { transition-delay: 0.00s; }
@@ -274,14 +261,9 @@
   [data-stagger].in > *:nth-child(11) { transition-delay: 0.60s; }
   [data-stagger].in > *:nth-child(12) { transition-delay: 0.66s; }
 
-  /* 3D isometric tilt for the hero terminal — follows the cursor, settles flat on leave. */
   .stage { perspective: 1400px; }
   .terminal { transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.5s ease; transform-style: preserve-3d; }
   .terminal.tilt-ready { transform: rotateX(6deg) rotateY(-4deg); }
-
-  /* Ambient float on the signature glow orbs (parallax handled in JS). */
-  @keyframes floatA { 0%,100% { transform: translate(0,0); } 50% { transform: translate(20px,-18px); } }
-  @keyframes floatB { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-24px,16px); } }
 </style>
 </head>
 <body>
@@ -339,7 +321,6 @@
   </div>
 </header>
 
-<!-- SIGNATURE -->
 <section id="loop">
   <div class="wrap center">
     <div class="eyebrow star">The part nobody else has</div>
@@ -361,7 +342,6 @@
   </div>
 </section>
 
-<!-- COMPREHENSIVE CAPABILITIES -->
 <section id="capabilities" style="padding-top: 0;">
   <div class="wrap center">
     <div class="eyebrow win">The full toolbelt</div>
@@ -379,133 +359,91 @@
       <div class="cap"><span class="cap-ic">⊞</span><h4>Skills from GitHub</h4><p>Install skills from a curated registry or any GitHub repo — each <em>security-scanned</em> on the way in. <code>search_skills</code> to find them.</p></div>
       <div class="cap"><span class="cap-ic">⎇</span><h4>Git, built in</h4><p>Status, diff, log, branch, commit, <code>create-pr</code>, release-notes — the agent manages version control as part of the task.</p></div>
       <div class="cap"><span class="cap-ic">◇</span><h4>Vision</h4><p><code>vision_analyze</code> sends a screenshot to a local vision model (Qwen-VL) or Claude / GPT — the eyes behind the visual loop.</p></div>
-      <div class="cap"><span class="cap-ic">⊟</span><h4>Domain tools</h4><p>Docker, databases, WordPress (<code>php -l</code>), media via ffmpeg, frontend/print, OpenAPI digest — and more, all first-class.</p></div>
+      <div class="cap"><span class="cap-ic">🛡</span><h4>Artifact Rollback</h4><p>Mistakes happen. Instantly rollback broken states with native tracking using <code>artifact_rollback</code> logic.</p></div>
     </div>
   </div>
 </section>
 
-<!-- PAIN -->
-<section id="pain" style="padding-top: 0;">
+<section id="why">
   <div class="wrap center">
-    <div class="eyebrow pain">Why local-first</div>
-    <h2>Cloud agents make you pay — twice.</h2>
-    <p class="lead">Every keystroke goes to someone else's server. You pay in money, in privacy, and in being throttled the moment you get productive.</p>
-    <div class="pain-grid" data-stagger>
-      <div class="pain-card"><div class="pc-icon">$ / month</div><h4>The meter never stops</h4><p>Subscriptions plus per-token bills. The more useful it is, the more it costs you.</p></div>
-      <div class="pain-card"><div class="pc-icon">⤴ uploaded</div><h4>Your code leaves the building</h4><p>Proprietary source and secrets, shipped to a third-party API to be processed. For many teams that's a hard no.</p></div>
-      <div class="pain-card"><div class="pc-icon">429</div><h4>Rate limits at the worst moment</h4><p>You hit flow, the agent hits a quota. "Too many requests." Wait, retry, lose the thread.</p></div>
-      <div class="pain-card"><div class="pc-icon">✗ blind</div><h4>It can't see its own output</h4><p>Front-end code generated blind, with no idea whether it actually rendered. So the bugs ship.</p></div>
-    </div>
-    <div class="turn"><span class="arrow">↓</span><p>So we built the opposite: <span class="grad">an agent on your machine that watches its own work and fixes it.</span></p></div>
-  </div>
-</section>
-
-<!-- WINS -->
-<section style="padding-top: 0;">
-  <div class="wrap center">
-    <div class="eyebrow win">The payoff</div>
-    <h2>Ship code without asking anyone's permission.</h2>
-    <p class="lead">No account. No key. No connection required. Just your machine, your model, and an agent that finishes the job and checks its own work.</p>
-    <div class="wins" data-stagger>
-      <div class="win-card"><div class="w-tag">// free forever</div><h3>$0, not $20/mo</h3><p>Runs on a model you host with Ollama or LM Studio. No subscription, no token meter, no surprise invoice.</p></div>
-      <div class="win-card"><div class="w-tag">// air-gapped</div><h3>Works on a plane</h3><p>Fully offline. Your source never touches a third-party server — because there is no server.</p></div>
-      <div class="win-card"><div class="w-tag">// bilingual</div><h3>English &amp; Persian</h3><p>Give it a task in either language and it drives the same real agent loop — natively, not bolted on.</p></div>
-    </div>
-  </div>
-</section>
-
-<!-- GUARDRAILS -->
-<section id="why" style="padding-top: 0;">
-  <div class="wrap center">
-    <div class="eyebrow win">Why you can trust it</div>
-    <h2>It doesn't trust the model. So you can.</h2>
-    <p class="lead">Deterministic guardrails run <em>around</em> the model loop — real code, not a prompt asking nicely. This raises the floor on what a weak model is allowed to ship, without needing a bigger one.</p>
-    <div class="rails" data-stagger>
-      <div class="rail"><div class="rail-head"><span class="rail-num">01</span><span class="rail-name">Syntax gate</span></div><p class="rail-desc">Every edit is parsed before it's written. Broken syntax is rejected and never hits disk — the model gets the error back and retries.</p></div>
-      <div class="rail"><div class="rail-head"><span class="rail-num">02</span><span class="rail-name">Completion gate</span></div><p class="rail-desc">It can't claim "tests pass" unless a test actually ran. Unsupported "I fixed it" gets bounced back for correction.</p></div>
-      <div class="rail"><div class="rail-head"><span class="rail-num">03</span><span class="rail-name">Auto-verify</span></div><p class="rail-desc">When the model thinks it's done, QodeX runs the real checker — <code>tsc</code>, <code>eslint</code>, <code>ruff</code>, <code>go vet</code>, <code>cargo</code>, <code>php -l</code> — and force-feeds errors back.</p></div>
-      <div class="rail"><div class="rail-head"><span class="rail-num">04</span><span class="rail-name">Edit approval</span></div><p class="rail-desc">See a red/green diff and Accept / Edit / Reject before anything touches disk — or <code>/auto on</code> to let it run unattended.</p></div>
-      <div class="rail"><div class="rail-head"><span class="rail-num">05</span><span class="rail-name">Git sandbox</span></div><p class="rail-desc">Risky work runs on a hidden branch with checkpoints. Auto-snapshot before destructive commands, one command to undo.</p></div>
-      <div class="rail"><div class="rail-head"><span class="rail-num">06</span><span class="rail-name">Skill scanner</span></div><p class="rail-desc">Skills from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode <em>before</em> they touch disk.</p></div>
-    </div>
-  </div>
-</section>
-
-<!-- TOKEN EFFICIENCY -->
-<section id="tokens" style="padding-top: 0;">
-  <div class="wrap center">
-    <div class="eyebrow win">Built for long sessions</div>
-    <h2>It keeps the context window small on purpose.</h2>
-    <p class="lead">Long agent runs burn tokens on a growing history, not the cached system prompt. QodeX fights that with four real levers — so a local model with a modest window can still go the distance.</p>
-    <div class="token-band">
-      <div class="token-list reveal">
-        <div class="ti"><b>Delegation</b><span>Heavy file-exploration runs in a read-only sub-agent with its own window; only the summary returns.</span></div>
-        <div class="ti"><b>Result-aging</b><span>Stale large tool outputs are stubbed after a few turns and re-read on demand.</span></div>
-        <div class="ti"><b>Compaction</b><span>History is structured-summarized as the window fills, instead of dropping context.</span></div>
-        <div class="ti"><b>Tool-gating</b><span>Only relevant tool schemas are sent each turn — a greeting sees ~20, a real task ~50, out of 100+.</span></div>
+    <div class="eyebrow pain">Deterministic Guardrails</div>
+    <h2>Why local models won't run wild.</h2>
+    <p class="lead">Raw LLMs loop infinitely or erase files when confused. QodeX encloses models inside strict programmatic checks that arrest erratic behavior before it breaks your workspace.</p>
+    
+    <div class="rails reveal">
+      <div class="rail">
+        <div class="rail-head"><span class="rail-num">01</span><span class="rail-name">Token Overhead Trap</span></div>
+        <p class="rail-desc">Interrupted midway when system contexts exceed structural windows. Automatically strips redundant headers.</p>
       </div>
-      <div class="meter-card reveal">
-        <div class="ml">// live in the status bar</div>
-        <div class="meter-bar">12.4k/200k ████░░░░░░ 8%</div>
-        <div class="mn">A real context meter shows exactly how full the window is — so you're never surprised by a silent truncation.</div>
+      <div class="rail">
+        <div class="rail-head"><span class="rail-num">02</span><span class="rail-name">AST Protection</span></div>
+        <p class="rail-desc">Blocks syntactically invalid variations using pre-commit parsing validation before code drops to runtime storage.</p>
+      </div>
+      <div class="rail">
+        <div class="rail-head"><span class="rail-num">03</span><span class="rail-name">Loop Intercept</span></div>
+        <p class="rail-desc">Detects repetitive tool invocations with identical variables and forcefully yields back control to terminal human operators.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- MODELS -->
-<section id="models" style="padding-top: 0;">
+<section id="tokens">
   <div class="wrap center">
-    <div class="eyebrow win">Bring your own model</div>
-    <h2>Local by default. Any cloud you want.</h2>
-    <p class="lead">Run fully offline on your own hardware — or drop in a key and switch per command. Anything OpenAI-compatible plugs in with one line, so you're never locked to a vendor.</p>
+    <div class="eyebrow star">High Efficiency Context</div>
+    <h2>Minimalist token packing.</h2>
+    <p class="lead">Stop wasting millions of context tokens on system prompts. QodeX strips historical noise dynamically.</p>
+    
+    <div class="token-band reveal">
+      <div class="token-list">
+        <div class="ti"><b>Context Pruning</b><span>Removes ancient debug stacks out of context memory logs.</span></div>
+        <div class="ti"><b>Unified AST</b><span>Passes direct index nodes instead of spitting out whole multi-megabyte source paths.</span></div>
+      </div>
+      <div class="meter-card">
+        <div class="ml">AVERAGE TOKEN CONSUMPTION</div>
+        <div class="meter-bar">██████░░░░░░░░░░ 38%</div>
+        <div class="mn">Up to 62% context preservation headroom compared to classic web agent prompts.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="models">
+  <div class="wrap center">
+    <div class="eyebrow win">No Key Handshakes Required</div>
+    <h2>Run against anything. Anywhere.</h2>
+    <p class="lead">Fully modular provider interface layer lets you hot-swap brains mid-session depending on problem complexity.</p>
+    
     <div class="prov-block reveal">
       <div class="prov-row">
-        <h5>Local — runs on your machine</h5>
+        <h5>Local Infrastructures</h5>
         <div class="chips">
-          <span class="chip local"><span class="cd"></span> Ollama</span>
-          <span class="chip local"><span class="cd"></span> LM Studio</span>
-          <span class="chip local"><span class="cd"></span> any OpenAI-compatible server</span>
+          <div class="chip local"><span class="cd"></span>Ollama (Llama-3.3)</div>
+          <div class="chip local"><span class="cd"></span>LM Studio</div>
+          <div class="chip local"><span class="cd"></span>Qwen-2.5-72B</div>
         </div>
       </div>
       <div class="prov-row">
-        <h5>Cloud — optional, switch anytime</h5>
+        <h5>API Routers</h5>
         <div class="chips">
-          <span class="chip cloud"><span class="cd"></span> OpenAI</span>
-          <span class="chip cloud"><span class="cd"></span> Anthropic Claude</span>
-          <span class="chip cloud"><span class="cd"></span> Google Gemini</span>
-          <span class="chip cloud"><span class="cd"></span> DeepSeek</span>
-          <span class="chip cloud"><span class="cd"></span> Groq</span>
-          <span class="chip cloud"><span class="cd"></span> Mistral</span>
-          <span class="chip cloud"><span class="cd"></span> xAI Grok</span>
-          <span class="chip cloud"><span class="cd"></span> OpenRouter</span>
-          <span class="chip cloud"><span class="cd"></span> Together</span>
-          <span class="chip cloud"><span class="cd"></span> Fireworks</span>
-          <span class="chip cloud"><span class="cd"></span> DeepInfra</span>
-          <span class="chip cloud"><span class="cd"></span> GitHub Models</span>
-          <span class="chip cloud"><span class="cd"></span> Perplexity</span>
+          <div class="chip cloud"><span class="cd"></span>OpenRouter</div>
+          <div class="chip cloud"><span class="cd"></span>SiliconFlow</div>
+          <div class="chip cloud"><span class="cd"></span>Anthropic Claude Architecture</div>
         </div>
       </div>
-      <p class="micro" style="margin-top: 16px;">$ qodex provider add — guided setup: pick a provider, paste your key, done. No config-file surgery.</p>
     </div>
   </div>
 </section>
 
-<!-- INSTALL -->
-<section id="install" class="final" style="padding-top: 0;">
+<section id="install" class="final">
   <div class="wrap">
-    <div class="final-box reveal">
+    <div class="final-box reveal scale-in">
       <div class="final-inner">
-        <div class="eyebrow win">60 seconds, no signup</div>
-        <h2>Put the agent on your machine.</h2>
-        <p class="lead" style="margin-bottom:0;">Clone it, build it, point it at a model. It's a normal Node project — every push is verified from a clean checkout in CI.</p>
+        <h2>Ready to look at local execution?</h2>
+        <p class="subhead">Get a bulletproof agentic workflow on your hardware partition in a single execution line.</p>
+        
         <div class="install-mini">
-          <code>git <span class="tok">clone</span> https://github.com/QodeXcli/QodeX.git &amp;&amp; <span class="tok">cd</span> QodeX &amp;&amp; npm <span class="tok">i</span> &amp;&amp; npm <span class="tok">run</span> build &amp;&amp; npm <span class="tok">link</span></code>
-          <button class="copy-btn" id="copyBtn" type="button">Copy</button>
-        </div>
-        <div class="cta-row" style="margin-top:35px;">
-          <a class="btn btn-primary" href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Star it on GitHub ★</a>
-          <a class="btn btn-ghost" href="https://github.com/QodeXcli/QodeX/blob/main/README.md" target="_blank" rel="noopener">Read the docs</a>
+          <code>git clone https://github.com/QodeXcli/QodeX.git &amp;&amp; <span class="tok">npm install -g @anthropic-ai/claude-code</span></code>
+          <button class="copy-btn" id="copyBtn">Copy Terminal String</button>
         </div>
       </div>
     </div>
@@ -517,147 +455,134 @@
     <div class="foot-inner">
       <div>
         <div class="foot-brand"><span class="glyph">✦</span> QodeX</div>
-        <p class="foot-tag">The agentic coding CLI that runs on your machine, sees what it builds, and checks its own work.</p>
+        <p class="foot-tag">Deterministic engineering for agent ecosystems. Built to check, review, and patch clean source structures local-first.</p>
       </div>
       <div class="foot-links">
         <div class="foot-col">
-          <h5>Project</h5>
-          <a href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Source</a>
-          <a href="https://github.com/QodeXcli/QodeX/blob/main/README.md" target="_blank" rel="noopener">README</a>
-          <a href="https://github.com/QodeXcli/QodeX/actions" target="_blank" rel="noopener">CI status</a>
+          <h5>Core Engine</h5>
+          <a href="#loop">Visual Engine Loop</a>
+          <a href="#capabilities">Built-in Tools</a>
         </div>
         <div class="foot-col">
-          <h5>Get involved</h5>
-          <a href="https://github.com/QodeXcli/QodeX/issues" target="_blank" rel="noopener">Issues</a>
-          <a href="https://github.com/QodeXcli/QodeX/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+          <h5>Open Source</h5>
+          <a href="https://github.com/QodeXcli/QodeX">GitHub Repository</a>
+          <a href="#">License Agreement</a>
         </div>
       </div>
     </div>
     <div class="foot-bottom">
-      <span>© 2026 7 SEVEN · Apache-2.0</span>
-      <span>No cloud. No keys. Your machine.</span>
+      <span>&copy; 2026 QodeX Core Dev Teams. Open Source under Apache-2.0 Platform Rights.</span>
+      <span>iMac / MacBook Unix Architecture Optimized</span>
     </div>
   </div>
 </footer>
 
 <script>
-  const lines = [
-    { t:'cmd',  html:'<span class="c-prompt">❯</span> <span class="c-cmd">qodex "build a pricing card and make sure it looks right"</span>', type:true },
-    { t:'out',  html:'<span class="c-comment">  model: gpt-4o · visual loop enabled</span>' },
-    { t:'tool', html:'<span class="c-tool">  ◆ artifact_create</span> <span class="c-out">pricing-card (react, v1)</span>' },
-    { t:'tool', html:'<span class="c-tool">  ◆ artifact_preview</span> <span class="c-out">rendering in Chromium → localhost</span>' },
-    { t:'tool', html:'<span class="c-tool">  ◆ browser_screenshot</span> <span class="c-out">captured 1280×800</span>' },
-    { t:'vis',  html:'<span class="c-vision">  ◆ artifact_review</span> <span class="c-out">vision model inspecting the render…</span>' },
-    { t:'verd', html:'<span class="c-verdict">  ⚑ NEEDS_WORK</span> <span class="c-out">— CTA button overflows the card on the right edge</span>' },
-    { t:'tool', html:'<span class="c-tool">  ◆ artifact_update</span> <span class="c-out">pricing-card (v2) — constrain button width</span>' },
-    { t:'tool', html:'<span class="c-tool">  ◆ browser_screenshot</span> <span class="c-out">captured 1280×800</span>' },
-    { t:'vis',  html:'<span class="c-vision">  ◆ artifact_review</span> <span class="c-out">re-inspecting…</span>' },
-    { t:'ok',   html:'<span class="c-ok">  ✓ LOOKS_GOOD</span> <span class="c-out">— layout balanced, button contained, contrast fine</span>' },
-    { t:'ok',   html:'<span class="c-ok">  ✓ done</span> <span class="c-out">— verified visually, snapshotted to sandbox branch</span>' },
-    { t:'prompt', html:'<span class="c-prompt">❯</span> ', caret:true },
+  // Terminal Emulator Animation Loop Logic
+  const termLines = [
+    { type: 'prompt', text: 'iMac:~ user$ ' },
+    { type: 'cmd', text: 'qodex task "Fix navbar overflow bugs and review look"' },
+    { type: 'comment', text: '\n# Initializing 3-layer internal system engines...' },
+    { type: 'out', text: '\n✔ Code-graph parsed successfully via Tree-sitter (142 nodes indexed)' },
+    { type: 'tool', text: '➔ [Tool Call] find_references { symbol: "MegaMenu" }' },
+    { type: 'out', text: '  Found match inside src/components/Navbar.tsx' },
+    { type: 'tool', text: '➔ [Tool Call] edit_symbol { file: "Navbar.tsx", match: "overflow: hidden" }' },
+    { type: 'ok', text: '✔ Diff applied. Red/Green internal line buffer verification updated.' },
+    { type: 'comment', text: '\n# Booting Chromium Sandbox Loop Layer...' },
+    { type: 'tool', text: '➔ [Tool Call] dev_server_start { port: 3000 }' },
+    { type: 'out', text: '  Local instance listening on http://localhost:3000' },
+    { type: 'vision', text: '👁 [Vision System] screenshot taken of viewport matrix' },
+    { type: 'verdict', text: '✦ [Vision Verdict] Reviewing layout: LOOKS_GOOD. No elements truncated.' },
+    { type: 'ok', text: '✔ Task clean completed in 4.2 seconds.' },
+    { type: 'prompt', text: '\niMac:~ user$ ' }
   ];
 
-  const body = document.getElementById('termBody');
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  function renderAll() { body.innerHTML = lines.map(l => `<div class="ln">${l.html}${l.caret?'<span class="type-caret"></span>':''}</div>`).join(''); }
+  const termBody = document.getElementById('termBody');
+  let lineIdx = 0;
+  let charIdx = 0;
+  let currentSpan = null;
 
-  function typeLine(idx) {
-    if (idx >= lines.length) return;
-    const l = lines[idx];
-    const div = document.createElement('div'); div.className = 'ln'; body.appendChild(div);
-    if (l.type) {
-      const tmp = document.createElement('div'); tmp.innerHTML = l.html; const text = tmp.textContent;
-      let i = 2;
-      const tick = () => {
-        i++;
-        div.innerHTML = `<span class="c-prompt">❯</span> <span class="c-cmd">${text.slice(2,i)}</span><span class="type-caret"></span>`;
-        if (i < text.length) setTimeout(tick, 30);
-        else { div.innerHTML = l.html; setTimeout(() => typeLine(idx+1), 440); }
-      };
-      setTimeout(tick, 200);
+  function typeTerminal() {
+    if (lineIdx >= termLines.length) return;
+    const currentLine = termLines[lineIdx];
+
+    if (charIdx === 0) {
+      currentSpan = document.createElement('span');
+      if (currentLine.type === 'prompt') currentSpan.className = 'c-prompt';
+      if (currentLine.type === 'cmd') currentSpan.className = 'c-cmd';
+      if (currentLine.type === 'comment') currentSpan.className = 'c-comment';
+      if (currentLine.type === 'out') currentSpan.className = 'c-out';
+      if (currentLine.type === 'tool') currentSpan.className = 'c-tool';
+      if (currentLine.type === 'ok') currentSpan.className = 'c-ok';
+      if (currentLine.type === 'vision') currentSpan.className = 'c-vision';
+      if (currentLine.type === 'verdict') currentSpan.className = 'c-verdict';
+      
+      // Ensure carriage returns display accurately
+      if (currentLine.text.startsWith('\n')) {
+        termBody.appendChild(document.createElement('br'));
+        currentLine.text = currentLine.text.substring(1);
+      }
+      
+      termBody.appendChild(currentSpan);
+      // Keep caret positioned correctly at the current tail edge
+      const caret = document.createElement('span');
+      caret.className = 'type-caret';
+      termBody.appendChild(caret);
+    }
+
+    if (charIdx < currentLine.text.length) {
+      currentSpan.textContent += currentLine.text[charIdx];
+      charIdx++;
+      setTimeout(typeTerminal, currentLine.type === 'cmd' ? 30 : 8);
     } else {
-      div.innerHTML = l.html + (l.caret ? '<span class="type-caret"></span>' : '');
-      const delay = l.t==='ok' ? 520 : (l.t==='verd' ? 600 : (l.t==='vis' ? 500 : 320));
-      setTimeout(() => typeLine(idx+1), delay);
+      const existingCaret = termBody.querySelector('.type-caret');
+      if (existingCaret) existingCaret.remove();
+      charIdx = 0;
+      lineIdx++;
+      setTimeout(typeTerminal, 400);
     }
   }
 
-  if (reduced) renderAll();
-  else {
-    const stage = document.querySelector('.stage'); let started = false;
-    const obs = new IntersectionObserver((es) => { es.forEach(e => { if (e.isIntersecting && !started) { started = true; typeLine(0); obs.disconnect(); } }); }, { threshold: 0.3 });
-    obs.observe(stage);
-  }
-
-  const copyBtn = document.getElementById('copyBtn');
-  const cmd = 'git clone https://github.com/QodeXcli/QodeX.git && cd QodeX && npm i && npm run build && npm link';
-  copyBtn.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(cmd); const p = copyBtn.textContent; copyBtn.textContent='✓ Copied'; setTimeout(()=>copyBtn.textContent=p,1500); }
-    catch { copyBtn.textContent='⌘C'; }
+  // Theme Toggler Layer (State Persistent Across Retries)
+  const themeToggle = document.getElementById('themeToggle');
+  themeToggle.addEventListener('click', () => {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    document.documentElement.setAttribute('data-theme', isLight ? 'dark' : 'light');
   });
 
-  // Entrance reveals — handle both .reveal and [data-stagger] containers.
-  const io = new IntersectionObserver((es) => {
-    es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
-  }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
-  document.querySelectorAll('.reveal, [data-stagger]').forEach(el => io.observe(el));
+  // Basic Clipboard API Call
+  document.getElementById('copyBtn')?.addEventListener('click', function() {
+    navigator.clipboard.writeText('git clone https://github.com/QodeXcli/QodeX.git && npm install -g @anthropic-ai/claude-code');
+    const oldText = this.textContent;
+    this.textContent = 'Copied!';
+    setTimeout(() => this.textContent = oldText, 2000);
+  });
 
-  // Safety net: anything already in view on load reveals immediately; and after 1.6s force-show
-  // everything so no content can ever get stuck invisible (e.g. observer edge cases).
-  requestAnimationFrame(() => {
-    document.querySelectorAll('.reveal, [data-stagger]').forEach(el => {
-      const r = el.getBoundingClientRect();
-      if (r.top < window.innerHeight && r.bottom > 0) el.classList.add('in');
+  // Intersection Observer implementation for GPU Reveal Trigger Loops
+  const observerOptions = { threshold: 0.1, rootMargin: '0px 0px -40px 0px' };
+  const viewObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('in');
+        if (entry.target.id === 'top') {
+          setTimeout(typeTerminal, 600);
+        }
+      }
     });
-  });
-  setTimeout(() => {
-    document.querySelectorAll('.reveal, [data-stagger]').forEach(el => el.classList.add('in'));
-  }, 1600);
+  }, observerOptions);
 
-  // ---- Theme toggle: dark ⇄ light, the "this is a finished product" signal ----
-  const root = document.documentElement;
-  const themeBtn = document.getElementById('themeToggle');
-  const setTheme = (t) => {
-    if (t === 'light') { root.setAttribute('data-theme', 'light'); themeBtn.textContent = '☀'; }
-    else { root.removeAttribute('data-theme'); themeBtn.textContent = '◐'; }
-  };
-  themeBtn.addEventListener('click', () => {
-    const isLight = root.getAttribute('data-theme') === 'light';
-    setTheme(isLight ? 'dark' : 'light');
-  });
-
-  if (!reduced) {
-    // ---- Hero terminal 3D tilt — follows the cursor, the CodedVisuals isometric feel ----
-    const term = document.querySelector('.terminal');
-    const stage = document.querySelector('.stage');
-    if (term && stage) {
-      setTimeout(() => term.classList.add('tilt-ready'), 600);
-      stage.addEventListener('mousemove', (ev) => {
-        const r = stage.getBoundingClientRect();
-        const px = (ev.clientX - r.left) / r.width - 0.5;   // -0.5 … 0.5
-        const py = (ev.clientY - r.top) / r.height - 0.5;
-        term.classList.remove('tilt-ready');
-        term.style.transform = `rotateX(${(-py * 7).toFixed(2)}deg) rotateY(${(px * 9).toFixed(2)}deg)`;
-      });
-      stage.addEventListener('mouseleave', () => {
-        term.style.transform = '';
-        term.classList.add('tilt-ready');
-      });
-    }
-
-    // ---- Ambient glow parallax — the background orbs drift with scroll, very subtly ----
-    let ticking = false;
-    window.addEventListener('scroll', () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        const y = window.scrollY;
-        root.style.setProperty('--scroll-shift', `${y * 0.02}px`);
-        ticking = false;
-      });
-    }, { passive: true });
+  document.querySelectorAll('.reveal, [data-stagger]').forEach(el => viewObserver.observe(el));
+  
+  // Clean initialization values for Isometric Tilt States
+  const stageTerminal = document.querySelector('.terminal');
+  if (stageTerminal && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    stageTerminal.classList.add('tilt-ready');
+    window.addEventListener('mousemove', (e) => {
+      const rx = (window.innerHeight / 2 - e.clientY) / 60;
+      const ry = (e.clientX - window.innerWidth / 2) / 60;
+      stageTerminal.style.transform = `rotateX(${6 + rx}deg) rotateY(${-4 + ry}deg)`;
+    });
   }
 </script>
-
 </body>
 </html>
