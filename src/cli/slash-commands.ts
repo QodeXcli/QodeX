@@ -409,8 +409,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       };
     }
 
-    case 'normal':
-    case 'auto': {
+    case 'normal': {
+      // NOTE: do NOT alias 'auto' here — '/auto' is the session auto-approve
+      // command handled further down. Aliasing it to 'normal' shadowed that
+      // case (first match wins in the switch) and made /auto a no-op.
       return {
         handled: true,
         action: { type: 'set_mode', mode: 'normal' },
@@ -1101,18 +1103,6 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           sub === 'on'
             ? `⚠ Auto-approve ${status} for this session. All tool calls will run without prompting.\n  Hard-deny patterns still apply. Disable with /auto off.`
             : `Auto-approve ${status}. Permission prompts restored.`,
-      };
-    }
-
-    case 'compact': {
-      // /compact — summarise older history with the active model, preserving recent N turns.
-      // Until we wire the host action, surface a placeholder. This will be implemented as a
-      // host-level action in a follow-up release once the agent has a public "summarize" path.
-      return {
-        handled: true,
-        message:
-          '/compact is queued for v0.5.1. Use /clear (drops everything) or let auto-prune handle it for now.\n' +
-          'In v0.5.1 it will summarise the older half of history with the active model and replace it.',
       };
     }
 
