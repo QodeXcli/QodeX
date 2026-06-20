@@ -75,23 +75,59 @@ function chooseInteractive<T extends string>(
     let idx = initialIndex(options, defaultValue);
     const stdin = process.stdin;
     const stdout = process.stdout;
-    const block = options.length + 1; // option lines + one hint line
+
+    // Window the list so it never grows taller than the terminal. Without this, a list longer
+    // than the visible rows scrolls the top options off-screen, and the in-place redraw
+    // (\x1b[NA) can't reach those rows anymore — so only the bottom few stay visible and the
+    // highlight appears stuck. We show a sliding window of `pageSize` rows that follows the
+    // cursor, with ▲/▼ markers when there's more above/below.
+    const termRows = (stdout.rows && stdout.rows > 0) ? stdout.rows : 24;
+    // Reserve rows for: the question line already printed, the hint line, the optional
+    // more-above / more-below markers, and a little breathing room.
+    const pageSize = Math.max(3, Math.min(options.length, termRows - 5));
+    const windowed = options.length > pageSize;
+    let top = 0; // index of the first visible option
+    // The drawn block = (more-above marker?) + visible rows + (more-below marker?) + hint line.
+    let block = 0;
     let drawn = false;
 
     console.log(question);
 
+    const clampWindow = (): void => {
+      if (idx < top) top = idx;
+      else if (idx >= top + pageSize) top = idx - pageSize + 1;
+      if (top < 0) top = 0;
+      if (top > Math.max(0, options.length - pageSize)) top = Math.max(0, options.length - pageSize);
+    };
+
     const render = (): void => {
-      if (drawn) stdout.write(`\x1b[${block}A`); // jump back to the top of the block
-      stdout.write('\x1b[0J');                    // clear from cursor down
-      options.forEach((opt, i) => {
+      clampWindow();
+      if (drawn && block > 0) stdout.write(`\x1b[${block}A`); // jump back to the top of the block
+      stdout.write('\x1b[0J');                                // clear from cursor down
+
+      let lines = 0;
+      const end = Math.min(options.length, top + pageSize);
+
+      if (windowed && top > 0) { stdout.write(dim(`     ↑ ${top} more above`) + '\n'); lines++; }
+      for (let i = top; i < end; i++) {
+        const opt = options[i]!;
         const sel = i === idx;
         const marker = sel ? '▸' : ' ';
         const num = String(i + 1).padStart(2);
         const label = sel ? `\x1b[36m\x1b[1m${opt.label}\x1b[0m` : opt.label;
         const hint = opt.hint ? `  ${dim(opt.hint)}` : '';
         stdout.write(`  ${marker} ${num}. ${label}${hint}\n`);
-      });
-      stdout.write(dim('  ↑/↓ move · Enter select · 1-9 jump · Ctrl+C cancel') + '\n');
+        lines++;
+      }
+      if (windowed && end < options.length) { stdout.write(dim(`     ↓ ${options.length - end} more below`) + '\n'); lines++; }
+
+      const nav = windowed
+        ? '  ↑/↓ move · Enter select · type number+Enter · Ctrl+C cancel'
+        : '  ↑/↓ move · Enter select · 1-9 jump · Ctrl+C cancel';
+      stdout.write(dim(nav) + '\n');
+      lines++;
+
+      block = lines;
       drawn = true;
     };
 
@@ -102,21 +138,46 @@ function chooseInteractive<T extends string>(
       try { stdin.pause(); } catch { /* ignore */ }
     };
 
+    let numBuf = '';
+    let numTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const commitNumBuf = (): void => {
+      if (numBuf) {
+        const n = parseInt(numBuf, 10);
+        if (n >= 1 && n <= options.length) { idx = n - 1; render(); }
+        numBuf = '';
+      }
+    };
+
     const onKey = (_str: string, key: { name?: string; ctrl?: boolean } | undefined): void => {
       if (!key) return;
       if (key.ctrl && key.name === 'c') {
+        if (numTimer) clearTimeout(numTimer);
         cleanup();
         stdout.write('\n');
         process.exit(130); // SIGINT — user cancelled setup
       } else if (key.name === 'return' || key.name === 'enter') {
+        if (numTimer) clearTimeout(numTimer);
+        commitNumBuf();        // a pending number jump lands on that row first
         cleanup();
         resolve(options[idx]!.value);
       } else if (key.name === 'escape') {
+        if (numTimer) clearTimeout(numTimer);
         cleanup();
         resolve(defaultValue);
-      } else if (key.name && /^[1-9]$/.test(key.name)) {
-        const n = parseInt(key.name, 10);
-        if (n >= 1 && n <= options.length) { cleanup(); resolve(options[n - 1]!.value); }
+      } else if (key.name && /^[0-9]$/.test(key.name)) {
+        // Build up a (possibly multi-digit) number; move the cursor there. Enter confirms.
+        // A short idle delay auto-moves so single-digit jumps still feel instant.
+        numBuf += key.name;
+        if (numTimer) clearTimeout(numTimer);
+        const asNum = parseInt(numBuf, 10);
+        // If no longer number could extend this into a valid index, commit immediately.
+        const couldGrow = asNum * 10 <= options.length;
+        if (!couldGrow) { commitNumBuf(); }
+        else {
+          if (asNum >= 1 && asNum <= options.length) { idx = asNum - 1; render(); }
+          numTimer = setTimeout(() => { numBuf = ''; }, 600);
+        }
       } else {
         const next = moveSelection(idx, key.name, options.length);
         if (next !== idx) { idx = next; render(); }

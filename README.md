@@ -2,7 +2,7 @@
 
 > **Local-first agentic coding CLI.** Runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A local-first take on the agentic coding assistant — built so a model running on *your* machine can do real, multi-step engineering work, fully offline if you want.
 
-**Version 2.3.8** · 100+ built-in tools · English & Persian · Apache-2.0
+**Version 2.4.0** · 100+ built-in tools · English & Persian · Apache-2.0
 
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
 

@@ -51,6 +51,17 @@ async function bootstrap(): Promise<{
   await logger.init('info');
   logger.info('QodeX starting', { node: process.version, cwd: process.cwd() });
 
+  // Load any API keys stored in ~/.qodex/.env (written by `qodex provider add`) into the
+  // environment BEFORE the router reads them. An explicit `export` in the user's shell still
+  // wins, so this never overrides a key they set themselves.
+  try {
+    const { loadEnvFileIntoProcess } = await import('./setup/env-writer.js');
+    const n = await loadEnvFileIntoProcess();
+    if (n > 0) logger.info(`Loaded ${n} API key(s) from ~/.qodex/.env`);
+  } catch (e: any) {
+    logger.debug('No ~/.qodex/.env loaded', { err: e?.message });
+  }
+
   // Warm the real BPE tokenizer in the background (gpt-tokenizer, if installed).
   // Non-blocking: token counts use the calibrated heuristic until this resolves.
   void import('./utils/tokenizer.js').then(t => t.warmTokenizer()).catch(() => {});
@@ -530,17 +541,39 @@ providerCmd
   });
 
 providerCmd
-  .command('add <id>')
-  .description('Add a provider to ~/.qodex/config.yaml without overwriting your other providers')
+  .command('add [id]')
+  .description('Add a provider to ~/.qodex/config.yaml. Run with no id for a guided setup that asks for your key.')
   .option('--base-url <url>', 'OpenAI-compatible base URL (for a gateway not in the known list)')
   .option('--key-env <ENV_VAR>', 'Env var holding the API key (for an unlisted gateway)')
   .option('--model <id>', 'Pin a specific model id (otherwise the gateway default / auto-discovery is used)')
   .option('--context <n>', 'Context window for the pinned model', (v) => parseInt(v, 10))
   .option('--no-tools', 'Mark the pinned model as NOT supporting tool calls')
   .option('--default', 'Also set this provider+model as the default')
-  .action(async (id: string, opts: { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean }) => {
+  .action(async (id: string | undefined, opts: { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean }) => {
     const { findGateway, buildCustomEntry } = await import('./setup/gateways.js');
     const { addProviderToConfig } = await import('./setup/provider-writer.js');
+    const { isInteractiveTTY } = await import('./setup/prompt.js');
+
+    // Guided path: no id at all, OR a known gateway with no overriding flags, on a real TTY.
+    // This is the friendly "pick a provider → paste your key → done" flow.
+    const hasExplicitFlags = !!(opts.baseUrl || opts.keyEnv || opts.model || opts.context || opts.default);
+    const knownOrEmpty = !id || !!findGateway(id);
+    if (isInteractiveTTY() && knownOrEmpty && !hasExplicitFlags) {
+      const { interactiveAddProvider } = await import('./setup/provider-add-interactive.js');
+      try {
+        const r = await interactiveAddProvider(id);
+        process.exit(r ? 0 : 1);
+      } catch (e: any) {
+        console.error(`✗ ${e?.message ?? e}`);
+        process.exit(1);
+      }
+    }
+
+    if (!id) {
+      console.error('✗ Provide a provider id, or run `qodex provider add` in a terminal for guided setup.');
+      console.error('  Known gateways:  qodex provider list');
+      process.exit(1);
+    }
 
     const spec = findGateway(id);
     let entry;

@@ -1,5 +1,47 @@
 # Changelog
 
+## v2.4.0 — 2026-06-20
+
+**`provider add` confirms your pick before configuring — no more wrong-provider from a stray paste.**
+
+When you pick a provider from the interactive menu, QodeX now asks "Configure <provider>?" before
+writing anything. This catches the case where pasting several lines into the terminal at once
+sends a stray Enter that lands on the default row — previously that could silently configure the
+wrong provider (e.g. OpenRouter when you meant Groq). The direct form `qodex provider add groq`
+still skips straight to the key prompt with no extra confirmation.
+
+```
+src/setup/provider-add-interactive.ts  (confirm the menu pick before configuring)
+```
+
+## v2.3.9 — 2026-06-19
+
+**`qodex provider add` is now a guided, friendly flow — and long pick-lists scroll properly.**
+
+Adding a cloud provider used to mean hand-writing flags and then editing your shell rc to export
+the key. Now `qodex provider add` (no arguments) walks you through it: pick the provider, paste
+your key, done. The key is stored in `~/.qodex/.env` (chmod 600) and loaded automatically at
+startup — no `export` in `~/.zshrc`, no `cat > config.yaml` that wipes your other providers.
+
+1. **Guided `provider add`.** Run it with no id for an interactive picker (OpenRouter, Gemini,
+   Groq, Mistral, xAI, OpenRouter, Together, Fireworks, DeepInfra, GitHub Models, Perplexity, or
+   a custom endpoint). For a known gateway we already know the base URL, key env var, and a good
+   default model — you only paste the key. `provider add groq` jumps straight to the key prompt.
+
+2. **Keys persist to `~/.qodex/.env`.** Pasted keys are saved (0600) and auto-loaded at startup.
+   An explicit `export` in your shell still wins, so nothing you set yourself is overridden.
+
+3. **Scrollable selection lists.** The setup picker now windows long lists to the terminal
+   height with ↑/▼ "more above/below" markers, and supports multi-digit number jumps. Lists of
+   9+ providers are no longer cut off with an unreachable cursor.
+
+```
+src/setup/prompt.ts                    (windowed/scrolling select + multi-digit jump)
+src/setup/env-writer.ts                (NEW — persist keys to ~/.qodex/.env, chmod 600)
+src/setup/provider-add-interactive.ts  (NEW — guided pick→paste→wire flow)
+src/index.ts                           (route `provider add` to the guided flow; load .env at boot)
+```
+
 ## v2.3.8 — 2026-06-19
 
 **Two fixes so the artifact flow survives real model behavior.**

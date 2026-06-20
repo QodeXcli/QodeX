@@ -53,7 +53,7 @@ function logErr(msg: string, extra?: unknown): void {
 }
 
 const PROTOCOL_VERSION = '2024-11-05';
-const SERVER_INFO = { name: 'qodex', version: '2.3.8' };
+const SERVER_INFO = { name: 'qodex', version: '2.4.0' };
 
 export interface McpServerDeps {
   registry: ToolRegistry;

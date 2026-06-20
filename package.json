@@ -1,7 +1,7 @@
 {
   "name": "@qodex/cli",
-  "version": "2.3.8",
-  "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
+  "version": "2.4.0",
+  "description": "QodeX \u2014 Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
   "license": "Apache-2.0",
   "author": "7 SEVEN <REPLACE_WITH_YOUR_EMAIL>",
   "repository": {
@@ -46,11 +46,11 @@
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",
-    "diff": "^7.0.0",
+    "diff": "^8.0.3",
     "ink": "^5.0.1",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.1.1",
     "openai": "^4.73.0",
     "react": "^18.3.1",
     "simple-git": "^3.27.0",
@@ -63,13 +63,12 @@
     "mysql2": "^3.11.4",
     "pg": "^8.13.1",
     "playwright": "^1.49.0",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "gpt-tokenizer": "^2.5.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/cross-spawn": "^6.0.6",
-    "@types/diff": "^6.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.12",
