@@ -22,6 +22,8 @@ import { detectHardware, formatHardwareSummary, type HardwareProfile } from './h
 import { confirm, choose, section, paragraph, isInteractiveTTY, type PromptOptions } from './prompt.js';
 import { QODEX_CONFIG_FILE, QODEX_HOME, DEFAULT_CONFIG, type QodexConfig } from '../config/defaults.js';
 import { loadConfig } from '../config/loader.js';
+import { writeFileAtomic } from '../utils/atomic-write.js';
+import { withLock } from '../utils/file-lock.js';
 import {
   detectAllLocalModels,
   recommendPrimary,
@@ -503,6 +505,7 @@ async function writeConfig(picks: {
 }): Promise<void> {
   await fs.mkdir(QODEX_HOME, { recursive: true });
 
+  await withLock(QODEX_CONFIG_FILE + '.lock', async () => {
   // Try to load existing config and merge; if missing, start from DEFAULT_CONFIG.
   let existing: QodexConfig;
   try {
@@ -627,7 +630,8 @@ async function writeConfig(picks: {
     '# All keys are optional — sensible defaults are applied for anything missing.',
     '',
   ].join('\n');
-  await fs.writeFile(QODEX_CONFIG_FILE, banner + yamlOut, 'utf-8');
+  await writeFileAtomic(QODEX_CONFIG_FILE, banner + yamlOut);
+  });
 }
 
 /** Quick check: does ~/.qodex/config.yaml exist? Used to trigger first-run wizard. */

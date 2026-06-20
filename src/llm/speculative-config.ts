@@ -7,6 +7,7 @@
 import { promises as fs } from 'fs';
 import * as yaml from 'js-yaml';
 import { QODEX_CONFIG_FILE } from '../config/defaults.js';
+import { writeFileAtomic } from '../utils/atomic-write.js';
 
 export async function addDraftToConfig(providerName: string, draftModelId: string): Promise<void> {
   let cfg: any = {};
@@ -20,5 +21,5 @@ export async function addDraftToConfig(providerName: string, draftModelId: strin
   cfg.providers[providerName] = cfg.providers[providerName] ?? {};
   cfg.providers[providerName].draftModel = draftModelId;
   const text = yaml.dump(cfg, { indent: 2, lineWidth: 100 });
-  await fs.writeFile(QODEX_CONFIG_FILE, text, 'utf-8');
+  await writeFileAtomic(QODEX_CONFIG_FILE, text);
 }

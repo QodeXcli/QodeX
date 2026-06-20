@@ -12,3 +12,8 @@ coverage/
 .qodex/codegraph.db
 .qodex/codegraph.db-shm
 .qodex/codegraph.db-wal
+
+# Runtime artifacts: advisory locks + git-sandbox recovery record
+.qodex/sandbox.lock
+.qodex/sandbox-recovery.json
+**/.manifest.lock
