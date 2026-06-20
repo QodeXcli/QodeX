@@ -159,6 +159,23 @@ export interface CustomProviderEntry {
  * gateway). If a model id is given we pin it (with the spec's defaults); otherwise we omit
  * `models` so the provider auto-discovers from GET {baseUrl}/models.
  */
+/**
+ * Turn a user-supplied provider identifier into a valid provider NAME.
+ *
+ * A provider name must not contain spaces, "/", or ":" (the config loader rejects
+ * such names — `providers.custom[].name must not contain spaces or "/"`). Users
+ * commonly run `qodex provider add https://api.example.com/v1`, which would
+ * otherwise store the whole URL as the name and get silently dropped at load.
+ * We reduce a URL to its host and slugify: `https://api.203668.xyz/v1` → `api-203668-xyz`.
+ * A plain name like `myhost` passes through unchanged.
+ */
+export function slugifyProviderName(raw: string): string {
+  let s = (raw ?? '').trim().toLowerCase();
+  const url = s.match(/^[a-z][a-z0-9+.-]*:\/\/([^/]+)/); // scheme://host/... → host
+  if (url) s = url[1]!;
+  return s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 export function buildCustomEntry(opts: {
   spec?: GatewaySpec;
   name?: string;
@@ -168,10 +185,12 @@ export function buildCustomEntry(opts: {
   contextWindow?: number;
   toolCalls?: boolean;
 }): CustomProviderEntry {
-  const name = (opts.name ?? opts.spec?.name ?? '').trim();
+  // spec names are already valid; a user-supplied custom name may be a raw URL → slugify it.
+  const name = opts.spec ? (opts.spec.name ?? '').trim() : slugifyProviderName(opts.name ?? '');
   const baseUrl = (opts.baseUrl ?? opts.spec?.baseUrl ?? '').trim();
   const apiKeyEnv = (opts.apiKeyEnv ?? opts.spec?.apiKeyEnv ?? '').trim();
   if (!name) throw new Error('provider name is required');
+  if (/[\s/:]/.test(name)) throw new Error(`invalid provider name "${name}": must not contain spaces, "/", or ":"`);
   if (!baseUrl) throw new Error('baseUrl is required');
   if (!apiKeyEnv) throw new Error('apiKeyEnv is required');
 
