@@ -38,6 +38,8 @@
     "start": "node bin/qodex.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:scripts": "for f in test/artifact-preview test/artifact-review test/artifact-store test/completion-gate test/custom-config test/edit-approval test/efficiency-profile test/explain-stream-error test/gateways test/model-resolve test/prompt-tiering test/read-ledger test/security-scan test/syntax-check test/task-addenda test/tool-relevance test/viewport test/web-backends; do echo \"\\n# $f\"; tsx \"$f.test.ts\" || exit 1; done",
+    "test:all": "npm run test && npm run test:scripts",
     "eval": "npm run build && node eval/run.mjs"
   },
   "dependencies": {

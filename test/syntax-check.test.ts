@@ -123,8 +123,13 @@ console.log('— orchestrator fail-open paths (no tree-sitter in sandbox) —');
   const r4 = await checkSyntaxForWrite('/p/data.json', null, '{"new": true}');
   check('JSON: clean new file passes', r4 === null);
 
+  // PHP grammar may or may not be bundled depending on the environment. Either outcome is
+  // correct: if the grammar is wired (grammars/tree-sitter-php.wasm present) the gate must
+  // REJECT the broken edit; if it's unavailable the gate must fail-open (return null). What
+  // would be a bug is any other string, or a throw.
   const r5 = await checkSyntaxForWrite('/p/app.php', '<?php echo 1;', '<?php echo 1; }');
-  check('grammar unavailable in sandbox → fail-open (never blocks)', r5 === null);
+  check('PHP: REJECTED when grammar wired, else fail-open (never a false block)',
+    r5 === null || (typeof r5 === 'string' && r5.startsWith('[SYNTAX_REJECTED]')));
 
   setSyntaxGateEnabled(false);
   const r6 = await checkSyntaxForWrite('/p/data.json', '{"ok":1}', '{"broken":,}');

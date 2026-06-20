@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDuckDuckGoHtml, unwrapDdgRedirect } from '../src/tools/web/duckduckgo.js';
+import { parseDuckDuckGoHtml, unwrapDdgRedirect } from '../src/tools/web/parse.js';
 import { selectBackend, WebSearchTool } from '../src/tools/web/web-search.js';
 import type { WebSearchBackend } from '../src/tools/web/types.js';
 import { WebSearchError } from '../src/tools/web/types.js';
