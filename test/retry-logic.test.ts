@@ -106,4 +106,33 @@ describe('withRetry — control flow', () => {
       .rejects.toThrow(/abort/i);
     expect(calls).toBe(0);
   });
+
+  it('fails fast (no long sleep) when Retry-After exceeds the cap', async () => {
+    // A daily-quota 429 with a huge Retry-After must NOT hang the turn.
+    let calls = 0;
+    const start = Date.now();
+    await expect(withRetry(async () => {
+      calls++;
+      throw Object.assign(new Error('429 daily token limit'), {
+        status: 429,
+        headers: { get: (h: string) => (h === 'retry-after' ? '6710' : null) }, // ~112 min
+      });
+    }, { ...fast, maxAttempts: 4, maxRetryAfterMs: 60_000 })).rejects.toThrow('daily token limit');
+    expect(calls).toBe(1); // gave up immediately, did not retry
+    expect(Date.now() - start).toBeLessThan(1000); // did not sleep ~112 min
+  });
+
+  it('still honors a Retry-After within the cap', async () => {
+    let calls = 0;
+    const out = await withRetry(async () => {
+      calls++;
+      if (calls < 2) throw Object.assign(new Error('busy'), {
+        status: 429,
+        headers: { get: (h: string) => (h === 'retry-after' ? '0' : null) },
+      });
+      return 'ok';
+    }, { ...fast, maxRetryAfterMs: 60_000 });
+    expect(out).toBe('ok');
+    expect(calls).toBe(2);
+  });
 });
