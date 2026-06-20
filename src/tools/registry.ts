@@ -23,6 +23,7 @@ import { UseSkillTool } from './builtin/use-skill.js';
 import { SearchSkillsTool } from './builtin/search-skills.js';
 import { DataFlowTool } from './codegraph/data-flow-tool.js';
 import { OrchestrateTool } from './builtin/orchestrate.js';
+import { FanoutTool } from './builtin/fanout.js';
 import { InstallSkillTool } from './builtin/install-skill.js';
 import { InstallMcpTool } from './builtin/install-mcp.js';
 import {
@@ -206,6 +207,7 @@ export class ToolRegistry {
       new SearchSkillsTool(),
       new DataFlowTool(),
       new OrchestrateTool(),
+      new FanoutTool(),
       new InstallSkillTool(),
       new InstallMcpTool(),
       new CodeGraphFindSymbolTool(),
@@ -381,8 +383,9 @@ export class ToolRegistry {
       // Only read-only + plan-specific tools
       tools = tools.filter(t => t.isReadOnly || t.name === 'present_plan' || t.name === 'todo_write' || t.name === 'todo_read');
     } else if (mode.mode === 'subagent') {
-      // Exclude task spawning + gather (no recursion) and present_plan
-      tools = tools.filter(t => t.name !== 'task' && t.name !== 'gather' && t.name !== 'present_plan');
+      // Exclude every sub-agent-spawning tool (no recursion) + present_plan.
+      const noRecursion = new Set(['task', 'gather', 'orchestrate', 'fanout', 'present_plan']);
+      tools = tools.filter(t => !noRecursion.has(t.name));
     } else {
       // Normal mode: exclude present_plan (only used in plan mode)
       tools = tools.filter(t => t.name !== 'present_plan');

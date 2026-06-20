@@ -14,7 +14,10 @@ export function computeDiffStats(oldContent: string, newContent: string): DiffSt
   let additions = 0;
   let deletions = 0;
   for (const change of changes) {
-    const lineCount = (change.value.match(/\n/g) ?? []).length;
+    // Use the diff library's own line count. Counting '\n' characters
+    // under-counts a final line with no trailing newline (a new file or an
+    // append with no terminating newline), reporting 0 for a real change.
+    const lineCount = change.count ?? (change.value.match(/\n/g) ?? []).length;
     if (change.added) additions += lineCount;
     if (change.removed) deletions += lineCount;
   }

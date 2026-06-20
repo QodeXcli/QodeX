@@ -7,3 +7,8 @@ dist/
 .env.local
 test-output/
 coverage/
+
+# Local code-graph index (SQLite) — machine-local, never commit
+.qodex/codegraph.db
+.qodex/codegraph.db-shm
+.qodex/codegraph.db-wal

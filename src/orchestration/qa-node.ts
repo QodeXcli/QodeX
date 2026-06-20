@@ -81,6 +81,7 @@ export class QaNode {
         for (const err of errs) blockers.push(err);
       } catch (e: any) {
         logger.debug('Typecheck hook threw (non-fatal)', { err: e?.message });
+        warnings.push(`Typecheck could not run: ${e?.message ?? String(e)}`);
       }
     }
 
@@ -94,6 +95,7 @@ export class QaNode {
         }
       } catch (e: any) {
         logger.debug('Design audit hook threw (non-fatal)', { err: e?.message });
+        warnings.push(`Design audit could not run: ${e?.message ?? String(e)}`);
       }
     }
 

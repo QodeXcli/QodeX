@@ -40,8 +40,11 @@ export async function runHook(hook: HookConfig, ctx: HookContext): Promise<HookR
           ? redactObject(parsed)
           : parsed,
       );
-    } catch {
-      env.QODEX_TOOL_ARGS_JSON = ctx.toolArgsJson;
+    } catch (e: any) {
+      // Redaction failed — NEVER fall back to the raw args (would leak secrets
+      // into the hook subprocess env). Use a safe placeholder instead.
+      logger.warn('Tool arg redaction failed; passing placeholder to hook', { hookName, err: e?.message });
+      env.QODEX_TOOL_ARGS_JSON = '[redaction failed]';
     }
   }
   if (ctx.toolResult !== undefined) {

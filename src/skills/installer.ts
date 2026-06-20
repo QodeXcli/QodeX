@@ -118,21 +118,28 @@ async function installFromNpm(spec: string, originalSource: string, opts: { forc
 
 /** Walk a freshly extracted source looking for a SKILL.md root. */
 async function findSkillRoot(src: string): Promise<string> {
+  // Track the last non-ENOENT stat failure so a real IO error (e.g. EACCES on a
+  // candidate path) isn't masked behind a generic "couldn't find SKILL.md".
+  let lastStatErr: any;
+  const tryStat = async (p: string): Promise<boolean> => {
+    try {
+      await fs.stat(p);
+      return true;
+    } catch (e: any) {
+      if (e?.code !== 'ENOENT') lastStatErr = e;
+      return false;
+    }
+  };
+
   // Direct hit: src/SKILL.md
-  try {
-    await fs.stat(path.join(src, 'SKILL.md'));
-    return src;
-  } catch {}
+  if (await tryStat(path.join(src, 'SKILL.md'))) return src;
 
   // Single child wrapper (common with tar extracts and git clones)
   const entries = await fs.readdir(src, { withFileTypes: true });
   const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.'));
   if (dirs.length === 1) {
     const inner = path.join(src, dirs[0]!.name);
-    try {
-      await fs.stat(path.join(inner, 'SKILL.md'));
-      return inner;
-    } catch {}
+    if (await tryStat(path.join(inner, 'SKILL.md'))) return inner;
   }
 
   // skills/<name>/SKILL.md layout (multi-skill repos pick the first)
@@ -142,14 +149,12 @@ async function findSkillRoot(src: string): Promise<string> {
     for (const ent of sub) {
       if (!ent.isDirectory()) continue;
       const cand = path.join(skillsParent, ent.name);
-      try {
-        await fs.stat(path.join(cand, 'SKILL.md'));
-        return cand;
-      } catch {}
+      if (await tryStat(path.join(cand, 'SKILL.md'))) return cand;
     }
   } catch {}
 
-  throw new Error(`Couldn't find a SKILL.md in ${src}. Skills must ship a top-level SKILL.md or skills/<name>/SKILL.md.`);
+  const ioNote = lastStatErr ? ` (note: a filesystem error occurred while looking: ${lastStatErr?.message ?? lastStatErr})` : '';
+  throw new Error(`Couldn't find a SKILL.md in ${src}. Skills must ship a top-level SKILL.md or skills/<name>/SKILL.md.${ioNote}`);
 }
 
 async function copyInto(srcRoot: string, originalSource: string, opts: { force?: boolean }): Promise<InstallResult> {
@@ -197,11 +202,13 @@ async function copyInto(srcRoot: string, originalSource: string, opts: { force?:
     }
     await fs.rm(target, { recursive: true, force: true });
   } catch (e: any) {
-    // Not-installed is the happy path
-    if (e?.code !== 'ENOENT' && !String(e?.message ?? '').includes('already installed')) {
-      // re-throw if it's the "already installed" error so the caller sees it
-      if (String(e?.message ?? '').startsWith('Skill "')) throw e;
-    }
+    // The ONLY case we swallow is a genuine "not installed yet": fs.stat threw
+    // ENOENT because the target dir doesn't exist. Everything else must
+    // propagate — the already-installed sentinel (so the caller sees it), and
+    // any real IO error including a failed fs.rm during --force overwrite.
+    // Swallowing an rm failure here would let us copy over a half-removed dir
+    // and produce a corrupt skill.
+    if (e?.code !== 'ENOENT') throw e;
   }
   await fs.mkdir(target, { recursive: true });
   await copyDir(srcRoot, target);

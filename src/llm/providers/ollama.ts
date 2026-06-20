@@ -298,7 +298,7 @@ export class OllamaProvider extends Provider {
       if (e.name === 'AbortError') {
         yield { type: 'error', error: 'Cancelled by user' };
       } else {
-        yield { type: 'error', error: e.message };
+        yield { type: 'error', error: `Ollama stream failed at ${this.baseUrl} (model=${req.model ?? '?'}): ${e?.message ?? String(e)}` };
       }
       return;
     }

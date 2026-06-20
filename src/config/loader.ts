@@ -64,6 +64,18 @@ export async function ensureQodexHome(): Promise<void> {
   }
 }
 
+/**
+ * A config file must parse to a plain object to be mergeable. A YAML file that
+ * is syntactically valid but collapses to a scalar (`42`, `just a string`) or a
+ * top-level array (`- a\n- b`) would otherwise be handed to deepMerge, whose
+ * "type mismatch → override wins" rule replaces the ENTIRE config object with
+ * that scalar/array — silently corrupting config for every downstream reader.
+ * We reject those here instead of clobbering.
+ */
+function isMergeableConfig(parsed: unknown): parsed is Partial<QodexConfig> {
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+}
+
 export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConfig> {
   await ensureQodexHome();
 
@@ -72,8 +84,11 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConf
   // User-level config
   try {
     const userYaml = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8');
-    const userCfg = yaml.load(userYaml) as Partial<QodexConfig>;
-    if (userCfg) config = deepMerge(config, userCfg);
+    const userCfg = yaml.load(userYaml);
+    if (isMergeableConfig(userCfg)) config = deepMerge(config, userCfg);
+    else if (userCfg != null) {
+      logger.warn('Ignoring user config: top-level value is not a mapping', { file: QODEX_CONFIG_FILE, got: Array.isArray(userCfg) ? 'array' : typeof userCfg });
+    }
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
       logger.warn('Failed to load user config', { err: err.message });
@@ -84,8 +99,11 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConf
   const projectConfig = path.join(cwd, '.qodex', 'config.yaml');
   try {
     const projectYaml = await fs.readFile(projectConfig, 'utf-8');
-    const projCfg = yaml.load(projectYaml) as Partial<QodexConfig>;
-    if (projCfg) config = deepMerge(config, projCfg);
+    const projCfg = yaml.load(projectYaml);
+    if (isMergeableConfig(projCfg)) config = deepMerge(config, projCfg);
+    else if (projCfg != null) {
+      logger.warn('Ignoring project config: top-level value is not a mapping', { file: projectConfig, got: Array.isArray(projCfg) ? 'array' : typeof projCfg });
+    }
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
       logger.warn('Failed to load project config', { err: err.message });

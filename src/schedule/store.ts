@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_SESSION_DB } from '../config/defaults.js';
 import { parseCron, nextAfter } from './cron.js';
+import { logger } from '../utils/logger.js';
 
 export interface ScheduleEntry {
   id: string;
@@ -182,8 +183,16 @@ export class ScheduleStore {
     try {
       const parsed = parseCron(e.cron);
       next = nextAfter(parsed, new Date());
-    } catch {
-      // Invalid cron — leave next_run_at null so the tick loop ignores it.
+    } catch (err: any) {
+      // Invalid cron — leave next_run_at null so the tick loop ignores it, but
+      // warn so the user can learn why this schedule never fires instead of it
+      // being silently disabled.
+      logger.warn('Schedule has an invalid cron expression; it will never run until fixed', {
+        id: e.id,
+        name: e.name,
+        cron: e.cron,
+        err: err?.message ?? String(err),
+      });
     }
     this.db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ?`).run(next?.toISOString() ?? null, scheduleId);
   }

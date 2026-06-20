@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { findMcpSpec, listMcpSpecs } from '../../mcp/registry.js';
 import { addServerToConfig, listConfiguredServers } from '../../mcp/config-writer.js';
+import { logger } from '../../utils/logger.js';
 
 const Args = z.object({
   source: z.string().describe(
@@ -42,8 +43,19 @@ export class InstallMcpTool extends Tool<z.infer<typeof Args>> {
 
     if (q.toLowerCase() === 'list' || q === '') {
       const specs = listMcpSpecs();
-      const installed = new Set(await listConfiguredServers().catch((): string[] => []));
+      let configReadFailed = false;
+      const installed = new Set(
+        await listConfiguredServers().catch((e: any): string[] => {
+          // A genuine read/parse failure is NOT the same as "no servers installed".
+          logger.warn('Could not read existing MCP config for list', { err: e?.message });
+          configReadFailed = true;
+          return [];
+        }),
+      );
       const lines = ['Available MCP servers (install_mcp source="<id>"):', ''];
+      if (configReadFailed) {
+        lines.push('⚠ Could not read your existing MCP config — the ✓ marks below may be inaccurate.', '');
+      }
       for (const s of specs) {
         const mark = installed.has(s.id) ? '✓' : '○';
         lines.push(`  ${mark} ${s.id} — ${s.description}`);
@@ -62,7 +74,19 @@ export class InstallMcpTool extends Tool<z.infer<typeof Args>> {
       };
     }
 
-    const already = await listConfiguredServers().catch((): string[] => []);
+    let already: string[];
+    try {
+      already = await listConfiguredServers();
+    } catch (e: any) {
+      // Don't silently treat a read/parse failure as "nothing installed" — that
+      // could clobber or duplicate the user's existing config. Surface it.
+      logger.warn('Could not read existing MCP config before install', { err: e?.message });
+      return {
+        content: `[ERROR] Couldn't read your existing MCP config (${e?.message ?? String(e)}). ` +
+          `Aborting to avoid clobbering or duplicating an existing entry — fix the config file and retry.`,
+        isError: true,
+      };
+    }
     if (already.includes(spec.id)) {
       return { content: `MCP server "${spec.id}" is already in your config. It's active on next launch.` };
     }

@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
+import { logger } from '../../utils/logger.js';
 
 const ProjectOverviewArgs = z.object({
   path: z.string().optional().describe('Directory to scan (absolute, or relative to the working dir). Defaults to the current working directory. Use this to overview a DIFFERENT local folder (e.g. an uploaded project) instead of the one QodeX was started in.'),
@@ -132,8 +133,22 @@ const LANG_BY_EXT: Record<string, string> = {
   xml: 'XML', proto: 'Proto', graphql: 'GraphQL', gql: 'GraphQL',
 };
 
-async function readJsonOrNull(filePath: string): Promise<any> {
-  try { return JSON.parse(await fs.readFile(filePath, 'utf-8')); } catch { return null; }
+/**
+ * Reads + parses a JSON config. Returns null when the file is simply absent
+ * (ENOENT), but on a real parse failure logs a warning and records the path in
+ * `unparseable` so the caller can surface the corruption instead of silently
+ * misreporting the tech stack as "config absent".
+ */
+async function readJsonOrNull(filePath: string, unparseable?: string[]): Promise<any> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf-8'));
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      logger.warn(`Failed to parse ${filePath}: ${err?.message ?? err}`);
+      unparseable?.push(filePath);
+    }
+    return null;
+  }
 }
 
 export class ProjectOverviewTool extends Tool<z.infer<typeof ProjectOverviewArgs>> {
@@ -166,7 +181,14 @@ export class ProjectOverviewTool extends Tool<z.infer<typeof ProjectOverviewArgs
     lines.push('');
 
     // package.json info
-    const pkg = await readJsonOrNull(path.join(root, 'package.json'));
+    const unparseable: string[] = [];
+    const pkg = await readJsonOrNull(path.join(root, 'package.json'), unparseable);
+    if (unparseable.length > 0) {
+      lines.push('## ⚠ Unparseable config files');
+      lines.push('  The following config files exist but could not be parsed; tech-stack detection below may be incomplete:');
+      for (const f of unparseable) lines.push(`  - ${path.relative(root, f) || path.basename(f)}`);
+      lines.push('');
+    }
     if (pkg) {
       lines.push('## Node.js Project (package.json)');
       lines.push(`  Name:     ${pkg.name ?? '(unnamed)'}`);

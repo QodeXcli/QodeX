@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import { logger } from '../utils/logger.js';
 
 const PROJECT_RULE_FILES = ['QODEX.md', 'CLAUDE.md', 'AGENTS.md', '.cursorrules', '.windsurfrules', 'AI.md'];
 
@@ -14,7 +15,14 @@ export async function loadProjectRules(cwd: string): Promise<{ content: string; 
       try {
         const content = await fs.readFile(filePath, 'utf-8');
         return { content: content.trim(), sourcePath: filePath };
-      } catch {}
+      } catch (err: any) {
+        // ENOENT just means this rule file isn't present here — keep walking.
+        // Any other error (e.g. EACCES) means an EXISTING rule file failed to
+        // read; surface it so the user's project rules aren't silently dropped.
+        if (err?.code !== 'ENOENT') {
+          logger.warn(`Failed to read project rule file ${filePath}: ${err?.message ?? err}`);
+        }
+      }
     }
     const parent = path.dirname(dir);
     if (parent === dir) break;

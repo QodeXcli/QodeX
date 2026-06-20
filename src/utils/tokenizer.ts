@@ -26,9 +26,14 @@
  * import-failure cost on every call).
  */
 
+import { logger } from './logger.js';
+
 let encoder: ((text: string) => number[]) | null = null;
 let triedLoad = false;
 let loadingPromise: Promise<void> | null = null;
+// One-time guard: log the first encoder runtime failure so a silent degrade to
+// the heuristic (which can under/over-count and risk context overflows) is traceable.
+let warnedEncoderFailed = false;
 
 /**
  * Calibrated fallback. Plain prose averages ~4 chars/token; source code is
@@ -87,7 +92,15 @@ async function ensureEncoder(): Promise<void> {
 export function countTokens(text: string | null | undefined): number {
   if (!text) return 0;
   if (encoder) {
-    try { return encoder(text).length; } catch { /* fall through */ }
+    try {
+      return encoder(text).length;
+    } catch (err) {
+      if (!warnedEncoderFailed) {
+        warnedEncoderFailed = true;
+        logger.debug('tokenizer encoder failed; falling back to heuristic', { err });
+      }
+      /* fall through */
+    }
   }
   return heuristicTokens(text);
 }

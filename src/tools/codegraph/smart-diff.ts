@@ -36,8 +36,8 @@ function runGit(cwd: string, args: string[]): { exitCode: number; stdout: string
   try {
     const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf-8', timeout: 15_000, maxBuffer: 50 * 1024 * 1024 });
     return { exitCode: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-  } catch {
-    return { exitCode: 127, stdout: '', stderr: 'git failed' };
+  } catch (e: any) {
+    return { exitCode: 127, stdout: '', stderr: `git failed: ${e?.message ?? e}` };
   }
 }
 

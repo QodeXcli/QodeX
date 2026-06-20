@@ -273,7 +273,10 @@ export class AnthropicProvider extends Provider {
       yield { type: 'usage', usage: { input: inputTokens, output: outputTokens } };
       yield { type: 'done' };
     } catch (e: any) {
-      yield { type: 'error', error: e.message ?? String(e) };
+      yield {
+        type: 'error',
+        error: `[${this.name}] stream failed (model=${req.model ?? '?'}): ${e?.message ?? String(e)}`,
+      };
     }
   }
 }
