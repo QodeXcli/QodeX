@@ -80,6 +80,10 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   { members: ['network_check', 'network_optimize'], keywords: ['network', 'latency', 'dns', 'proxy', 'ping'] },
   { members: ['ci_status'], keywords: [' ci ', 'pipeline', 'github actions', 'workflow run'] },
   { members: ['code_run'], keywords: ['run code', 'eval', 'repl', 'snippet'] },
+  // Standalone UI/visual artifacts (html/react/svg/markdown) with versioned manifests.
+  // Without this the artifact_* tools matched no tier and were silently never shipped,
+  // so the agent never knew it could make an artifact even when asked outright.
+  { members: ['artifact_'], keywords: ['artifact', 'artefact', 'آرتیفکت', 'آرتفکت'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {
