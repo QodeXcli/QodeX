@@ -155,8 +155,24 @@ export class ScheduleStore {
     return Number(r.lastInsertRowid);
   }
 
-  recordRunFinish(runId: number, scheduleId: string, status: 'success' | 'error' | 'skipped', exitCode: number, message: string, durationMs: number): void {
+  /**
+   * Record the result of a run and atomically advance next_run_at.
+   *
+   * Returns true if this caller won the claim, false if a concurrent tick had
+   * already advanced next_run_at. The whole thing is one transaction: we
+   * advance next_run_at FIRST (the atomic claim), and only if we win do we
+   * commit the run/bookkeeping rows. A loser's writes are rolled back so it
+   * leaves no trace and does not double-count — callers must treat false as
+   * "this run did not happen / do not fire".
+   */
+  recordRunFinish(runId: number, scheduleId: string, status: 'success' | 'error' | 'skipped', exitCode: number, message: string, durationMs: number): boolean {
+    const CLAIM_LOST = Symbol('claim-lost');
     const tx = this.db.transaction(() => {
+      // Atomic claim first: if we lose the race, abort the transaction so none
+      // of the bookkeeping below is committed.
+      if (!this.recomputeNext(scheduleId)) {
+        throw CLAIM_LOST;
+      }
       this.db.prepare(`
         UPDATE schedule_runs SET finished_at = CURRENT_TIMESTAMP, status = ?, exit_code = ?, message = ?, duration_ms = ?
         WHERE id = ?
@@ -170,15 +186,28 @@ export class ScheduleStore {
           run_count = run_count + 1
         WHERE id = ?
       `).run(status, message, durationMs, scheduleId);
-      this.recomputeNext(scheduleId);
     });
-    tx();
+    try {
+      tx();
+      return true;
+    } catch (err) {
+      if (err === CLAIM_LOST) return false;
+      throw err;
+    }
   }
 
-  /** Recompute next_run_at from now. Called after every run and on enable. */
-  recomputeNext(scheduleId: string): void {
+  /**
+   * Recompute next_run_at from now. Called after every run and on enable.
+   *
+   * Returns true if this caller successfully advanced next_run_at, false if it
+   * lost a race (another process/tick already advanced the same row). The
+   * advance is atomic: the UPDATE is conditional on the previously-read
+   * next_run_at, so only the first of two concurrent ticks sees changes === 1.
+   * Callers on the run path MUST treat a false result as "do not fire".
+   */
+  recomputeNext(scheduleId: string): boolean {
     const e = this.get(scheduleId);
-    if (!e) return;
+    if (!e) return false;
     let next: Date | null = null;
     try {
       const parsed = parseCron(e.cron);
@@ -194,7 +223,15 @@ export class ScheduleStore {
         err: err?.message ?? String(err),
       });
     }
-    this.db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ?`).run(next?.toISOString() ?? null, scheduleId);
+    // Atomic claim: only advance if next_run_at still holds the value we read.
+    // A losing concurrent tick sees changes === 0 and must not fire.
+    const prev = e.next_run_at ?? null;
+    const res = prev === null
+      ? this.db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ? AND next_run_at IS NULL`)
+          .run(next?.toISOString() ?? null, scheduleId)
+      : this.db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ? AND next_run_at = ?`)
+          .run(next?.toISOString() ?? null, scheduleId, prev);
+    return res.changes === 1;
   }
 
   recentRuns(scheduleId: string, limit = 10): ScheduleRun[] {
