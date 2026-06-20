@@ -20,6 +20,8 @@
  */
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import { writeFileAtomic } from '../utils/atomic-write.js';
+import { withLock } from '../utils/file-lock.js';
 
 export type ArtifactType = 'html' | 'react' | 'svg' | 'markdown' | 'vue' | 'text';
 
@@ -127,15 +129,29 @@ function artifactDir(cwd: string, id: string): string {
 function manifestPath(cwd: string, id: string): string {
   return path.join(artifactDir(cwd, id), 'manifest.json');
 }
+/** Per-artifact lock guarding the manifest read-modify-write. */
+function manifestLockPath(cwd: string, id: string): string {
+  return path.join(artifactDir(cwd, id), '.manifest.lock');
+}
 
 // ── I/O operations (writes go through WriteFn) ────────────────────────────────
 
 async function readManifest(cwd: string, id: string): Promise<ArtifactManifest | null> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(manifestPath(cwd, id), 'utf-8');
+    raw = await fs.readFile(manifestPath(cwd, id), 'utf-8');
+  } catch (err: any) {
+    // Truly absent → quietly null. Any other read error (permissions, etc.) is
+    // NOT "deleted" — surface it rather than masking it.
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
     return JSON.parse(raw) as ArtifactManifest;
-  } catch {
-    return null;
+  } catch (err: any) {
+    // The manifest exists but is corrupt (e.g. a truncated write). Do NOT report
+    // the artifact as absent — that would make it look deleted. Surface it.
+    throw new Error(`Artifact "${id}" has a corrupt manifest.json: ${err?.message ?? err}`);
   }
 }
 
@@ -158,7 +174,9 @@ export async function createArtifact(cwd: string, input: CreateInput, write: Wri
   const absFile = path.join(artifactDir(cwd, id), rel);
   await write(absFile, input.content);
   const manifest = buildManifest(id, input.title, input.type, rel, now, input.note);
-  await write(manifestPath(cwd, id), JSON.stringify(manifest, null, 2));
+  // Manifest corruption is the catastrophic case (a truncated manifest makes the
+  // whole artifact look deleted), so write it atomically regardless of WriteFn.
+  await writeFileAtomic(manifestPath(cwd, id), JSON.stringify(manifest, null, 2));
   return { manifest, absFile };
 }
 
@@ -166,15 +184,19 @@ export interface UpdateInput { id: string; content: string; note?: string; }
 
 /** Update an artifact: writes a NEW version file + updated manifest. */
 export async function updateArtifact(cwd: string, input: UpdateInput, write: WriteFn, now = new Date().toISOString()): Promise<{ manifest: ArtifactManifest; absFile: string; version: number }> {
-  const existing = await readManifest(cwd, input.id);
-  if (!existing) throw new Error(`Artifact "${input.id}" not found.`);
-  const v = nextVersionNumber(existing);
-  const rel = path.join(`v${v}`, entryFileName(existing.type));
-  const absFile = path.join(artifactDir(cwd, input.id), rel);
-  await write(absFile, input.content);
-  const manifest = addVersion(existing, rel, now, input.note);
-  await write(manifestPath(cwd, input.id), JSON.stringify(manifest, null, 2));
-  return { manifest, absFile, version: v };
+  // Serialize the read-modify-write so concurrent updates to the SAME artifact
+  // don't both compute the same next version number and lose one.
+  return withLock(manifestLockPath(cwd, input.id), async () => {
+    const existing = await readManifest(cwd, input.id);
+    if (!existing) throw new Error(`Artifact "${input.id}" not found.`);
+    const v = nextVersionNumber(existing);
+    const rel = path.join(`v${v}`, entryFileName(existing.type));
+    const absFile = path.join(artifactDir(cwd, input.id), rel);
+    await write(absFile, input.content);
+    const manifest = addVersion(existing, rel, now, input.note);
+    await writeFileAtomic(manifestPath(cwd, input.id), JSON.stringify(manifest, null, 2));
+    return { manifest, absFile, version: v };
+  });
 }
 
 /** List all artifacts (newest-updated first). */
@@ -189,7 +211,15 @@ export async function listArtifacts(cwd: string): Promise<ArtifactSummary[]> {
   }
   const out: ArtifactSummary[] = [];
   for (const id of ids) {
-    const m = await readManifest(cwd, id);
+    let m: ArtifactManifest | null;
+    try {
+      m = await readManifest(cwd, id);
+    } catch (err) {
+      // A corrupt manifest must not silently disappear nor abort the whole list:
+      // skip this one but make the corruption visible.
+      console.error(`[artifacts] skipping "${id}": ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
     if (m) out.push({ id: m.id, title: m.title, type: m.type, current: m.current, versionCount: m.versions.length, updatedAt: m.updatedAt });
   }
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -209,10 +239,14 @@ export async function getArtifact(cwd: string, id: string, version?: number): Pr
 
 /** Roll the "current" pointer back to an earlier (existing) version — no new file. */
 export async function rollbackArtifact(cwd: string, id: string, toVersion: number, write: WriteFn, now = new Date().toISOString()): Promise<ArtifactManifest> {
-  const manifest = await readManifest(cwd, id);
-  if (!manifest) throw new Error(`Artifact "${id}" not found.`);
-  if (!manifest.versions.some(v => v.v === toVersion)) throw new Error(`Artifact "${id}" has no version ${toVersion}.`);
-  const updated: ArtifactManifest = { ...manifest, current: toVersion, updatedAt: now };
-  await write(manifestPath(cwd, id), JSON.stringify(updated, null, 2));
-  return updated;
+  // Lock so a concurrent updateArtifact can't slip a new version in between our
+  // read and write (which would drop that version when we save the manifest).
+  return withLock(manifestLockPath(cwd, id), async () => {
+    const manifest = await readManifest(cwd, id);
+    if (!manifest) throw new Error(`Artifact "${id}" not found.`);
+    if (!manifest.versions.some(v => v.v === toVersion)) throw new Error(`Artifact "${id}" has no version ${toVersion}.`);
+    const updated: ArtifactManifest = { ...manifest, current: toVersion, updatedAt: now };
+    await writeFileAtomic(manifestPath(cwd, id), JSON.stringify(updated, null, 2));
+    return updated;
+  });
 }
