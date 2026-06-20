@@ -3,6 +3,14 @@ import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } fr
 import type { Message } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 
+// The `openai` SDK defaults its User-Agent to `OpenAI/JS <ver>`. Some custom
+// OpenAI-compatible relays sit behind a WAF (e.g. Cloudflare) that BLOCKS that
+// exact User-Agent with a 403 "Your request was blocked" — which silently
+// breaks every request to such a gateway (exactly the endpoints `provider add
+// <url>` exists for). We override it with our own UA so requests aren't blocked
+// for impersonating the OpenAI SDK. A caller-supplied User-Agent still wins.
+const QODEX_USER_AGENT = 'qodex-cli';
+
 // OpenAI's own models. The DeepSeek models live separately so they're served ONLY
 // by the dedicated DeepSeekProvider — otherwise they'd also surface under the
 // `openai` provider (which shares this base list) and show up twice in --list-models.
@@ -82,7 +90,7 @@ export class OpenAIProvider extends Provider {
       this.client = new OpenAI({
         apiKey: this.apiKey,
         baseURL: opts.baseURL,
-        defaultHeaders: opts.defaultHeaders,
+        defaultHeaders: { 'User-Agent': QODEX_USER_AGENT, ...opts.defaultHeaders },
       });
       // Flag custom baseURL so users are reminded their traffic is routing through a non-Anthropic/OpenAI host
       if (opts.baseURL && !opts.baseURL.includes('openai.com') && !opts.baseURL.includes('deepseek.com')) {
@@ -276,7 +284,7 @@ export class DeepSeekProvider extends OpenAIProvider {
       providerName: 'deepseek',
       models: DEEPSEEK_MODELS,
       extraModels: opts.extraModels,
-      defaultHeaders: opts.defaultHeaders,
+      defaultHeaders: { 'User-Agent': QODEX_USER_AGENT, ...opts.defaultHeaders },
     });
   }
 }
