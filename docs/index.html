@@ -39,6 +39,9 @@
     html { scroll-behavior: auto; }
     *, *::before, *::after { animation: none !important; transition: none !important; }
     .type-caret { display: none !important; }
+    /* Never leave content stuck invisible if motion is off. */
+    .reveal, [data-stagger] > * { opacity: 1 !important; transform: none !important; }
+    .terminal.tilt-ready { transform: none !important; }
   }
   body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.7; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
   body::before {
@@ -48,6 +51,30 @@
       radial-gradient(800px circle at 85% 15%, rgba(155,140,255,0.06), transparent 50%),
       radial-gradient(600px circle at 50% 100%, rgba(84,214,232,0.05), transparent 50%);
   }
+  /* Light theme — inherited via [data-theme="light"], the same surfaces re-tokenized. */
+  [data-theme="light"] {
+    --bg: #f7f9fc;
+    --bg-soft: #ffffff;
+    --panel: rgba(255, 255, 255, 0.8);
+    --panel-line: rgba(10, 20, 35, 0.10);
+    --ink: #0a1320;
+    --ink-soft: #41526a;
+    --ink-faint: #8493a6;
+    --signal-dim: #0e9f54;
+  }
+  [data-theme="light"] body::before {
+    background:
+      radial-gradient(800px circle at 15% -5%, rgba(33,180,95,0.10), transparent 50%),
+      radial-gradient(800px circle at 85% 15%, rgba(124,108,255,0.08), transparent 50%),
+      radial-gradient(600px circle at 50% 100%, rgba(40,160,200,0.06), transparent 50%);
+  }
+  [data-theme="light"] .terminal,
+  [data-theme="light"] .rail { background: rgba(255,255,255,0.9); }
+  [data-theme="light"] .term-bar { background: rgba(240,244,250,0.8); }
+  [data-theme="light"] h1 .grad { text-shadow: none; }
+  html { transition: none; }
+  body, .terminal, .rail, .pain-card, .cap, .win-card, nav { transition: background 0.4s ease, border-color 0.4s ease, color 0.4s ease; }
+
   a { color: inherit; text-decoration: none; }
   .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
   em { font-style: normal; color: var(--signal); }
@@ -61,6 +88,8 @@
   .nav-links a:hover { color: var(--ink); transition: color 0.2s; }
   .nav-cta { font-family: var(--mono); font-size: 13px; font-weight: 600; background: linear-gradient(135deg, rgba(63,240,132,0.1), rgba(63,240,132,0.05)); border: 1px solid var(--signal-dim); color: var(--signal); padding: 8px 18px; border-radius: 8px; transition: all .2s; }
   .nav-cta:hover { transform: translateY(-1px); background: var(--signal); color: #022210; box-shadow: 0 4px 15px rgba(63,240,132,0.25); }
+  .theme-toggle { font-size: 17px; line-height: 1; background: rgba(255,255,255,0.03); border: 1px solid var(--panel-line); color: var(--ink-soft); width: 38px; height: 38px; border-radius: 9px; cursor: pointer; transition: all .25s; display: inline-flex; align-items: center; justify-content: center; }
+  .theme-toggle:hover { color: var(--signal); border-color: var(--signal-dim); transform: rotate(180deg); }
   @media (max-width: 880px) { .nav-links a:not(.nav-cta) { display: none; } }
 
   /* Hero */
@@ -221,8 +250,38 @@
   .foot-col a:hover { color: var(--signal); }
   .foot-bottom { margin-top: 45px; padding-top: 24px; border-top: 1px solid var(--panel-line); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; font-size: 13.5px; color: var(--ink-faint); font-family: var(--mono); }
 
-  .reveal { opacity: 0; transform: translateY(25px); transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
+  /* Motion system — entrance reveals with directional variants + stagger, the CodedVisuals feel.
+     Everything is GPU-friendly (opacity + transform only) and fully disabled under reduced-motion. */
+  .reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1), transform 0.9s cubic-bezier(0.16, 1, 0.3, 1); will-change: opacity, transform; }
   .reveal.in { opacity: 1; transform: none; }
+  .reveal.from-left { transform: translateX(-32px); }
+  .reveal.from-right { transform: translateX(32px); }
+  .reveal.scale-in { transform: scale(0.94); }
+  .reveal.in.from-left, .reveal.in.from-right, .reveal.in.scale-in { transform: none; }
+  /* Stagger: children of a [data-stagger] reveal in sequence once the parent enters view. */
+  [data-stagger] > * { opacity: 0; transform: translateY(22px); transition: opacity 0.7s cubic-bezier(0.16,1,0.3,1), transform 0.7s cubic-bezier(0.16,1,0.3,1); }
+  [data-stagger].in > * { opacity: 1; transform: none; }
+  [data-stagger].in > *:nth-child(1) { transition-delay: 0.00s; }
+  [data-stagger].in > *:nth-child(2) { transition-delay: 0.06s; }
+  [data-stagger].in > *:nth-child(3) { transition-delay: 0.12s; }
+  [data-stagger].in > *:nth-child(4) { transition-delay: 0.18s; }
+  [data-stagger].in > *:nth-child(5) { transition-delay: 0.24s; }
+  [data-stagger].in > *:nth-child(6) { transition-delay: 0.30s; }
+  [data-stagger].in > *:nth-child(7) { transition-delay: 0.36s; }
+  [data-stagger].in > *:nth-child(8) { transition-delay: 0.42s; }
+  [data-stagger].in > *:nth-child(9) { transition-delay: 0.48s; }
+  [data-stagger].in > *:nth-child(10) { transition-delay: 0.54s; }
+  [data-stagger].in > *:nth-child(11) { transition-delay: 0.60s; }
+  [data-stagger].in > *:nth-child(12) { transition-delay: 0.66s; }
+
+  /* 3D isometric tilt for the hero terminal — follows the cursor, settles flat on leave. */
+  .stage { perspective: 1400px; }
+  .terminal { transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.5s ease; transform-style: preserve-3d; }
+  .terminal.tilt-ready { transform: rotateX(6deg) rotateY(-4deg); }
+
+  /* Ambient float on the signature glow orbs (parallax handled in JS). */
+  @keyframes floatA { 0%,100% { transform: translate(0,0); } 50% { transform: translate(20px,-18px); } }
+  @keyframes floatB { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-24px,16px); } }
 </style>
 </head>
 <body>
@@ -236,6 +295,7 @@
       <a href="#why">Guardrails</a>
       <a href="#tokens">Efficiency</a>
       <a href="#models">Models</a>
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
       <a class="nav-cta" href="https://github.com/QodeXcli/QodeX" target="_blank" rel="noopener">Star on GitHub ★</a>
     </div>
   </div>
@@ -243,7 +303,7 @@
 
 <header class="hero" id="top">
   <div class="wrap">
-    <div class="badge-row">
+    <div class="badge-row" data-stagger>
       <span class="badge"><span class="bd"></span> 100% LOCAL-FIRST</span>
       <span class="badge"><span class="bd"></span> 100+ BUILT-IN TOOLS</span>
       <span class="badge"><span class="bd"></span> OPEN SOURCE · APACHE-2.0</span>
@@ -259,7 +319,7 @@
     </div>
     <p class="micro">git clone · npm install · done. Nothing to sign up for.</p>
 
-    <div class="stats">
+    <div class="stats" data-stagger>
       <div class="stat"><div class="sv">100+</div><div class="sl">built-in tools</div></div>
       <div class="stat"><div class="sv alt">6</div><div class="sl">safety guardrails</div></div>
       <div class="stat"><div class="sv alt2">14+</div><div class="sl">model providers</div></div>
@@ -288,7 +348,7 @@
     <div class="loop-wrap reveal">
       <div class="loop-inner">
         <span class="loop-tag">◆ Living Artifact · 3-layer engine</span>
-        <div class="loop-steps">
+        <div class="loop-steps" data-stagger>
           <div class="loop-step"><div class="ls-n">01</div><div class="ls-t">create</div><div class="ls-d">Versioned artifact store — every revision kept, rollback anytime.</div></div>
           <div class="loop-step"><div class="ls-n">02</div><div class="ls-t">preview</div><div class="ls-d">Renders React / Vue / HTML in real Chromium. No build step.</div></div>
           <div class="loop-step"><div class="ls-n">03</div><div class="ls-t">screenshot</div><div class="ls-d">Captures exactly what a user would see, pixels and all.</div></div>
@@ -307,19 +367,19 @@
     <div class="eyebrow win">The full toolbelt</div>
     <h2>Everything an agent needs to ship real code.</h2>
     <p class="lead">Not a chat box with a couple of tools bolted on. QodeX drives a real agent loop with 100+ tools across reading, editing, understanding, running, browsing, and verifying — all in one session.</p>
-    <div class="caps">
-      <div class="cap reveal"><span class="cap-ic">✎</span><h4>Read &amp; edit code</h4><p>AST-aware edits with <code>edit_symbol</code>, atomic <code>multi_file_edit</code> across up to 50 files, and a red/green diff you approve before anything hits disk.</p></div>
-      <div class="cap reveal"><span class="cap-ic">◎</span><h4>Understand a codebase</h4><p>A Tree-sitter code-graph powers <code>analyze_impact</code>, <code>find_callers</code>, <code>find_references</code>, <code>find_dead_code</code>, and <code>safe_rename</code>.</p></div>
-      <div class="cap reveal"><span class="cap-ic">▶</span><h4>Run anything</h4><p><code>bash</code> plus sandboxed <code>code_run</code> for Python, Node, TS, PHP &amp; Ruby — with macOS <code>sandbox-exec</code> isolation where available.</p></div>
-      <div class="cap reveal"><span class="cap-ic">◐</span><h4>Drive a real browser</h4><p>Playwright-backed Chromium: navigate, click, fill, screenshot, run JS, read console &amp; page errors — to verify your own UI changes.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⧉</span><h4>Dev servers &amp; jobs</h4><p>Start <code>dev_server_start</code>, hit <code>localhost</code>, kick off <code>background_job_start</code> for async work — all tracked in one session.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⌖</span><h4>Search the web</h4><p>DuckDuckGo by default, or Tavily / Brave / Firecrawl when you add a key — with an auto-fallback chain across whatever keys are present.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⚇</span><h4>Sub-agents &amp; orchestration</h4><p><code>task</code> delegates to a separate model/window; <code>orchestrate</code> runs a DAG of sub-agents; <code>gather</code> fans out reads in parallel.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⬡</span><h4>MCP, fully native</h4><p>Connect any MCP-compatible server and its tools join the same registry as the built-ins — no glue code, no wrappers.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⊞</span><h4>Skills from GitHub</h4><p>Install skills from a curated registry or any GitHub repo — each <em>security-scanned</em> on the way in. <code>search_skills</code> to find them.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⎇</span><h4>Git, built in</h4><p>Status, diff, log, branch, commit, <code>create-pr</code>, release-notes — the agent manages version control as part of the task.</p></div>
-      <div class="cap reveal"><span class="cap-ic">◇</span><h4>Vision</h4><p><code>vision_analyze</code> sends a screenshot to a local vision model (Qwen-VL) or Claude / GPT — the eyes behind the visual loop.</p></div>
-      <div class="cap reveal"><span class="cap-ic">⊟</span><h4>Domain tools</h4><p>Docker, databases, WordPress (<code>php -l</code>), media via ffmpeg, frontend/print, OpenAPI digest — and more, all first-class.</p></div>
+    <div class="caps" data-stagger>
+      <div class="cap"><span class="cap-ic">✎</span><h4>Read &amp; edit code</h4><p>AST-aware edits with <code>edit_symbol</code>, atomic <code>multi_file_edit</code> across up to 50 files, and a red/green diff you approve before anything hits disk.</p></div>
+      <div class="cap"><span class="cap-ic">◎</span><h4>Understand a codebase</h4><p>A Tree-sitter code-graph powers <code>analyze_impact</code>, <code>find_callers</code>, <code>find_references</code>, <code>find_dead_code</code>, and <code>safe_rename</code>.</p></div>
+      <div class="cap"><span class="cap-ic">▶</span><h4>Run anything</h4><p><code>bash</code> plus sandboxed <code>code_run</code> for Python, Node, TS, PHP &amp; Ruby — with macOS <code>sandbox-exec</code> isolation where available.</p></div>
+      <div class="cap"><span class="cap-ic">◐</span><h4>Drive a real browser</h4><p>Playwright-backed Chromium: navigate, click, fill, screenshot, run JS, read console &amp; page errors — to verify your own UI changes.</p></div>
+      <div class="cap"><span class="cap-ic">⧉</span><h4>Dev servers &amp; jobs</h4><p>Start <code>dev_server_start</code>, hit <code>localhost</code>, kick off <code>background_job_start</code> for async work — all tracked in one session.</p></div>
+      <div class="cap"><span class="cap-ic">⌖</span><h4>Search the web</h4><p>DuckDuckGo by default, or Tavily / Brave / Firecrawl when you add a key — with an auto-fallback chain across whatever keys are present.</p></div>
+      <div class="cap"><span class="cap-ic">⚇</span><h4>Sub-agents &amp; orchestration</h4><p><code>task</code> delegates to a separate model/window; <code>orchestrate</code> runs a DAG of sub-agents; <code>gather</code> fans out reads in parallel.</p></div>
+      <div class="cap"><span class="cap-ic">⬡</span><h4>MCP, fully native</h4><p>Connect any MCP-compatible server and its tools join the same registry as the built-ins — no glue code, no wrappers.</p></div>
+      <div class="cap"><span class="cap-ic">⊞</span><h4>Skills from GitHub</h4><p>Install skills from a curated registry or any GitHub repo — each <em>security-scanned</em> on the way in. <code>search_skills</code> to find them.</p></div>
+      <div class="cap"><span class="cap-ic">⎇</span><h4>Git, built in</h4><p>Status, diff, log, branch, commit, <code>create-pr</code>, release-notes — the agent manages version control as part of the task.</p></div>
+      <div class="cap"><span class="cap-ic">◇</span><h4>Vision</h4><p><code>vision_analyze</code> sends a screenshot to a local vision model (Qwen-VL) or Claude / GPT — the eyes behind the visual loop.</p></div>
+      <div class="cap"><span class="cap-ic">⊟</span><h4>Domain tools</h4><p>Docker, databases, WordPress (<code>php -l</code>), media via ffmpeg, frontend/print, OpenAPI digest — and more, all first-class.</p></div>
     </div>
   </div>
 </section>
@@ -330,11 +390,11 @@
     <div class="eyebrow pain">Why local-first</div>
     <h2>Cloud agents make you pay — twice.</h2>
     <p class="lead">Every keystroke goes to someone else's server. You pay in money, in privacy, and in being throttled the moment you get productive.</p>
-    <div class="pain-grid">
-      <div class="pain-card reveal"><div class="pc-icon">$ / month</div><h4>The meter never stops</h4><p>Subscriptions plus per-token bills. The more useful it is, the more it costs you.</p></div>
-      <div class="pain-card reveal"><div class="pc-icon">⤴ uploaded</div><h4>Your code leaves the building</h4><p>Proprietary source and secrets, shipped to a third-party API to be processed. For many teams that's a hard no.</p></div>
-      <div class="pain-card reveal"><div class="pc-icon">429</div><h4>Rate limits at the worst moment</h4><p>You hit flow, the agent hits a quota. "Too many requests." Wait, retry, lose the thread.</p></div>
-      <div class="pain-card reveal"><div class="pc-icon">✗ blind</div><h4>It can't see its own output</h4><p>Front-end code generated blind, with no idea whether it actually rendered. So the bugs ship.</p></div>
+    <div class="pain-grid" data-stagger>
+      <div class="pain-card"><div class="pc-icon">$ / month</div><h4>The meter never stops</h4><p>Subscriptions plus per-token bills. The more useful it is, the more it costs you.</p></div>
+      <div class="pain-card"><div class="pc-icon">⤴ uploaded</div><h4>Your code leaves the building</h4><p>Proprietary source and secrets, shipped to a third-party API to be processed. For many teams that's a hard no.</p></div>
+      <div class="pain-card"><div class="pc-icon">429</div><h4>Rate limits at the worst moment</h4><p>You hit flow, the agent hits a quota. "Too many requests." Wait, retry, lose the thread.</p></div>
+      <div class="pain-card"><div class="pc-icon">✗ blind</div><h4>It can't see its own output</h4><p>Front-end code generated blind, with no idea whether it actually rendered. So the bugs ship.</p></div>
     </div>
     <div class="turn"><span class="arrow">↓</span><p>So we built the opposite: <span class="grad">an agent on your machine that watches its own work and fixes it.</span></p></div>
   </div>
@@ -346,10 +406,10 @@
     <div class="eyebrow win">The payoff</div>
     <h2>Ship code without asking anyone's permission.</h2>
     <p class="lead">No account. No key. No connection required. Just your machine, your model, and an agent that finishes the job and checks its own work.</p>
-    <div class="wins">
-      <div class="win-card reveal"><div class="w-tag">// free forever</div><h3>$0, not $20/mo</h3><p>Runs on a model you host with Ollama or LM Studio. No subscription, no token meter, no surprise invoice.</p></div>
-      <div class="win-card reveal"><div class="w-tag">// air-gapped</div><h3>Works on a plane</h3><p>Fully offline. Your source never touches a third-party server — because there is no server.</p></div>
-      <div class="win-card reveal"><div class="w-tag">// bilingual</div><h3>English &amp; Persian</h3><p>Give it a task in either language and it drives the same real agent loop — natively, not bolted on.</p></div>
+    <div class="wins" data-stagger>
+      <div class="win-card"><div class="w-tag">// free forever</div><h3>$0, not $20/mo</h3><p>Runs on a model you host with Ollama or LM Studio. No subscription, no token meter, no surprise invoice.</p></div>
+      <div class="win-card"><div class="w-tag">// air-gapped</div><h3>Works on a plane</h3><p>Fully offline. Your source never touches a third-party server — because there is no server.</p></div>
+      <div class="win-card"><div class="w-tag">// bilingual</div><h3>English &amp; Persian</h3><p>Give it a task in either language and it drives the same real agent loop — natively, not bolted on.</p></div>
     </div>
   </div>
 </section>
@@ -360,13 +420,13 @@
     <div class="eyebrow win">Why you can trust it</div>
     <h2>It doesn't trust the model. So you can.</h2>
     <p class="lead">Deterministic guardrails run <em>around</em> the model loop — real code, not a prompt asking nicely. This raises the floor on what a weak model is allowed to ship, without needing a bigger one.</p>
-    <div class="rails">
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">01</span><span class="rail-name">Syntax gate</span></div><p class="rail-desc">Every edit is parsed before it's written. Broken syntax is rejected and never hits disk — the model gets the error back and retries.</p></div>
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">02</span><span class="rail-name">Completion gate</span></div><p class="rail-desc">It can't claim "tests pass" unless a test actually ran. Unsupported "I fixed it" gets bounced back for correction.</p></div>
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">03</span><span class="rail-name">Auto-verify</span></div><p class="rail-desc">When the model thinks it's done, QodeX runs the real checker — <code>tsc</code>, <code>eslint</code>, <code>ruff</code>, <code>go vet</code>, <code>cargo</code>, <code>php -l</code> — and force-feeds errors back.</p></div>
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">04</span><span class="rail-name">Edit approval</span></div><p class="rail-desc">See a red/green diff and Accept / Edit / Reject before anything touches disk — or <code>/auto on</code> to let it run unattended.</p></div>
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">05</span><span class="rail-name">Git sandbox</span></div><p class="rail-desc">Risky work runs on a hidden branch with checkpoints. Auto-snapshot before destructive commands, one command to undo.</p></div>
-      <div class="rail reveal"><div class="rail-head"><span class="rail-num">06</span><span class="rail-name">Skill scanner</span></div><p class="rail-desc">Skills from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode <em>before</em> they touch disk.</p></div>
+    <div class="rails" data-stagger>
+      <div class="rail"><div class="rail-head"><span class="rail-num">01</span><span class="rail-name">Syntax gate</span></div><p class="rail-desc">Every edit is parsed before it's written. Broken syntax is rejected and never hits disk — the model gets the error back and retries.</p></div>
+      <div class="rail"><div class="rail-head"><span class="rail-num">02</span><span class="rail-name">Completion gate</span></div><p class="rail-desc">It can't claim "tests pass" unless a test actually ran. Unsupported "I fixed it" gets bounced back for correction.</p></div>
+      <div class="rail"><div class="rail-head"><span class="rail-num">03</span><span class="rail-name">Auto-verify</span></div><p class="rail-desc">When the model thinks it's done, QodeX runs the real checker — <code>tsc</code>, <code>eslint</code>, <code>ruff</code>, <code>go vet</code>, <code>cargo</code>, <code>php -l</code> — and force-feeds errors back.</p></div>
+      <div class="rail"><div class="rail-head"><span class="rail-num">04</span><span class="rail-name">Edit approval</span></div><p class="rail-desc">See a red/green diff and Accept / Edit / Reject before anything touches disk — or <code>/auto on</code> to let it run unattended.</p></div>
+      <div class="rail"><div class="rail-head"><span class="rail-num">05</span><span class="rail-name">Git sandbox</span></div><p class="rail-desc">Risky work runs on a hidden branch with checkpoints. Auto-snapshot before destructive commands, one command to undo.</p></div>
+      <div class="rail"><div class="rail-head"><span class="rail-num">06</span><span class="rail-name">Skill scanner</span></div><p class="rail-desc">Skills from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode <em>before</em> they touch disk.</p></div>
     </div>
   </div>
 </section>
@@ -536,8 +596,67 @@
     catch { copyBtn.textContent='⌘C'; }
   });
 
-  const io = new IntersectionObserver((es) => { es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }); }, { threshold: 0.1 });
-  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+  // Entrance reveals — handle both .reveal and [data-stagger] containers.
+  const io = new IntersectionObserver((es) => {
+    es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('.reveal, [data-stagger]').forEach(el => io.observe(el));
+
+  // Safety net: anything already in view on load reveals immediately; and after 1.6s force-show
+  // everything so no content can ever get stuck invisible (e.g. observer edge cases).
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.reveal, [data-stagger]').forEach(el => {
+      const r = el.getBoundingClientRect();
+      if (r.top < window.innerHeight && r.bottom > 0) el.classList.add('in');
+    });
+  });
+  setTimeout(() => {
+    document.querySelectorAll('.reveal, [data-stagger]').forEach(el => el.classList.add('in'));
+  }, 1600);
+
+  // ---- Theme toggle: dark ⇄ light, the "this is a finished product" signal ----
+  const root = document.documentElement;
+  const themeBtn = document.getElementById('themeToggle');
+  const setTheme = (t) => {
+    if (t === 'light') { root.setAttribute('data-theme', 'light'); themeBtn.textContent = '☀'; }
+    else { root.removeAttribute('data-theme'); themeBtn.textContent = '◐'; }
+  };
+  themeBtn.addEventListener('click', () => {
+    const isLight = root.getAttribute('data-theme') === 'light';
+    setTheme(isLight ? 'dark' : 'light');
+  });
+
+  if (!reduced) {
+    // ---- Hero terminal 3D tilt — follows the cursor, the CodedVisuals isometric feel ----
+    const term = document.querySelector('.terminal');
+    const stage = document.querySelector('.stage');
+    if (term && stage) {
+      setTimeout(() => term.classList.add('tilt-ready'), 600);
+      stage.addEventListener('mousemove', (ev) => {
+        const r = stage.getBoundingClientRect();
+        const px = (ev.clientX - r.left) / r.width - 0.5;   // -0.5 … 0.5
+        const py = (ev.clientY - r.top) / r.height - 0.5;
+        term.classList.remove('tilt-ready');
+        term.style.transform = `rotateX(${(-py * 7).toFixed(2)}deg) rotateY(${(px * 9).toFixed(2)}deg)`;
+      });
+      stage.addEventListener('mouseleave', () => {
+        term.style.transform = '';
+        term.classList.add('tilt-ready');
+      });
+    }
+
+    // ---- Ambient glow parallax — the background orbs drift with scroll, very subtly ----
+    let ticking = false;
+    window.addEventListener('scroll', () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        const y = window.scrollY;
+        root.style.setProperty('--scroll-shift', `${y * 0.02}px`);
+        ticking = false;
+      });
+    }, { passive: true });
+  }
 </script>
 
 </body>
