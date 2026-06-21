@@ -396,6 +396,18 @@ tools actually returned — not background education and not a pitch.
     sections.push(ctx.skillsBlock.trim());
   }
 
+  // Skill-provisioning policy — applies whether or not any skills are installed
+  // (the list above may be empty). The decision to pull a repo stays with the user.
+  if (ctx.mode !== 'subagent') {
+    sections.push(`## Skills — provisioning policy
+A "skill" is an installable playbook (any installed ones are listed under "Available Skills" above — that list may be empty).
+- If a clearly-matching skill is ALREADY installed, just load it with use_skill — no need to ask.
+- If the task would clearly benefit from a skill you DON'T have installed: do not silently install one, and do not silently guess. First ASK the user which they prefer:
+  (a) you proceed with your own built-in knowledge, or
+  (b) you find & install a relevant skill — search installed (search_skills) → known registry → GitHub search — then load it.
+- Only call install_skill AFTER the user chooses (b). It resolves a bare name (registry, then GitHub search), confirms a SKILL.md, runs a security scan, and installs into ~/.qodex/skills; then load it with use_skill. Never install from an unverified source without naming what you picked.`);
+  }
+
   // Strict mode appendix — only in normal/non-subagent modes (sub-agents already
   // have a focused brief from their role prompt). Adds extra-careful instructions
   // when the user has enabled /strict for production work.
