@@ -399,6 +399,14 @@ export interface ApiCatalogModel { provider: string; id: string; contextWindow?:
  * with no key, no network, or no /models support simply contributes nothing.
  */
 export async function detectConfiguredApiModels(timeoutMs = 6000): Promise<ApiCatalogModel[]> {
+  // The `setup` command runs the wizard WITHOUT the main bootstrap, so ~/.qodex/.env
+  // hasn't been loaded into process.env yet — without this, every configured provider
+  // looks key-less and we'd discover nothing. Existing env values still win (no clobber).
+  try {
+    const { loadEnvFileIntoProcess } = await import('./env-writer.js');
+    await loadEnvFileIntoProcess();
+  } catch { /* best-effort */ }
+
   let cfg: any;
   try { cfg = await loadConfig(process.cwd()); } catch { return []; }
   const customRaw = (cfg?.providers as any)?.custom;
