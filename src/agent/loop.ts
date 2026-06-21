@@ -120,6 +120,10 @@ export class AgentLoop {
   private readLedger = new ReadLedger();
   /** Skills already auto-injected this session — never inject the same one twice. */
   private autoInjectedSkills = new Set<string>();
+  /** Monotonic union of tool names shipped this session. The relevance gate only ever
+   *  ADDS to this — never drops — so the tools block stays a byte-stable cache prefix
+   *  across turns (a sliding per-turn set would flip and invalidate the prompt cache). */
+  private sessionToolNames = new Set<string>();
   /** Auto tool profile: null = not yet derived this session; then a ratcheting list. */
   private autoDisabledTools: string[] | null = null;
   /** Live context windows read from LM Studio's native API, fetched once per session. */
@@ -760,6 +764,10 @@ export class AgentLoop {
     // When set, the next dispatch sends NO tools, forcing the model to answer in plain text
     // (used to break a stuck read loop by making it summarize what it already found).
     let forceTextOnly = false;
+    // When set, the next dispatch forces a tool call (toolChoice:'required') — used after a
+    // refusal where a tool-capable model talked instead of acting. Strongest "lead" for weak
+    // models: the server must emit a tool call, not prose. One-shot; reset after each dispatch.
+    let forceToolChoice = false;
     // Scope guard: did the user ask for run/install/test? If not, a one-time advisory fires the
     // first time the model wanders into starting a dev server or installing packages on its own.
     // Derive the latest user message from `messages` (no `userPrompt` param in this method's scope).
@@ -1073,10 +1081,14 @@ export class AgentLoop {
           .map(m => (typeof m.content === 'string' ? m.content : ''))
           .join('\n');
         const gated = filterSchemasByRelevance(schemasForModeAll, signal);
-        schemasForMode = gated.schemas;
-        if (!gated.includedAll) {
+        // Accumulate into a session-monotonic union so the tools block only ever GROWS.
+        // A per-turn set would drop families as the signal window slides, flipping the
+        // tool block and invalidating the (cloud) prompt cache / (local) KV-cache prefix.
+        for (const s of gated.schemas) this.sessionToolNames.add(s.function.name);
+        schemasForMode = schemasForModeAll.filter(s => this.sessionToolNames.has(s.function.name));
+        if (schemasForMode.length < schemasForModeAll.length) {
           logger.info('Tool gating active', {
-            before: gated.before, after: gated.after, matchedFamilies: gated.matchedFamilies,
+            before: schemasForModeAll.length, after: schemasForMode.length, matchedFamilies: gated.matchedFamilies,
           });
         }
       }
@@ -1202,11 +1214,16 @@ export class AgentLoop {
         }
       }
 
+      // Force a tool call only when recovering from a refusal AND native tools are in play
+      // (text-tool mode carries no `tools`, so 'required' would be meaningless there).
+      const forceCall = forceToolChoice && tools.length > 0;
+      forceToolChoice = false;
       const stream = route.provider.complete({
         model: route.model,
         messages: outboundMessages,
         tools,
         signal: options.signal,
+        ...(forceCall ? { toolChoice: 'required' as const } : {}),
         ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
       });
 
@@ -1417,6 +1434,7 @@ export class AgentLoop {
               'Do not apologize, do not narrate this correction — just call the tool now. ' +
               'After it runs, summarize what you created in 1-2 sentences.',
           });
+          forceToolChoice = true; // next attempt: make the server emit a tool call, not more prose
           continue; // loop back and try again with the corrective message
         }
 
