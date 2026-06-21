@@ -65,6 +65,13 @@ export async function runHook(hook: HookConfig, ctx: HookContext): Promise<HookR
         cwd: hook.cwd ?? ctx.cwd,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // Run in its OWN process group so a timeout can kill the whole tree, not
+        // just the shell. With `shell: true` the command runs as `sh -c "<cmd>"`;
+        // SIGTERM to the shell alone can orphan its children (e.g. `sleep`), which
+        // keep the stdout pipe open so `close` never fires until they exit on their
+        // own — the hook timeout then never takes effect. Killing the group fixes it.
+        // (Windows has no POSIX process groups; cross-spawn handles kill there.)
+        detached: process.platform !== 'win32',
       });
     } catch (e: any) {
       logger.warn(`Hook spawn failed`, { hookName, err: e.message });
@@ -94,12 +101,23 @@ export async function runHook(hook: HookConfig, ctx: HookContext): Promise<HookR
     proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
 
+    // Kill the whole process GROUP (negative pid) on POSIX so the shell's children
+    // die too; fall back to a plain proc.kill if the group signal can't be sent
+    // (already dead, or Windows where there's no group).
+    const killTree = (signal: NodeJS.Signals): void => {
+      const pid = proc.pid;
+      if (pid != null && process.platform !== 'win32') {
+        try { process.kill(-pid, signal); return; } catch { /* fall through */ }
+      }
+      try { proc.kill(signal); } catch { /* already gone */ }
+    };
+
     const termTimer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill('SIGTERM'); } catch {}
+      killTree('SIGTERM');
     }, timeoutMs);
     const killTimer = setTimeout(() => {
-      try { proc.kill('SIGKILL'); } catch {}
+      killTree('SIGKILL');
     }, timeoutMs + 2000);
 
     proc.on('close', (code, signal) => {
