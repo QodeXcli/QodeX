@@ -3,12 +3,37 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>QodeX — the local-first agentic coding CLI that checks its own work</title>
-<meta name="description" content="A local-first agentic coding CLI with 100+ tools: a real browser, an AST code-graph, sub-agent orchestration, MCP, and deterministic guardrails that make even a small local model trustworthy. Runs on your machine. No API keys required." />
+<title>QodeX — Local-First LLM Agent &amp; AI Coding CLI Agent</title>
+<meta name="description" content="QodeX is an open-source LLM agent and CLI coding agent for your terminal. Runs local models with deterministic guardrails, 100+ tools, a real browser, smart vision, shareable live artifacts, and trade-off analysis. The local-first, privacy-first AI agent — no API keys required." />
+<meta name="keywords" content="LLM agent, CLI agent, AI coding agent, terminal agent, agentic CLI, local LLM agent, autonomous coding agent, AI agent CLI, coding assistant, open source AI agent, Ollama agent, LM Studio agent, Qwen coder agent" />
+<meta name="author" content="QodeX" />
+<link rel="canonical" href="https://qodexcli.github.io/QodeX/" />
 
-<meta property="og:title" content="QodeX — the local-first agentic coding CLI that checks its own work" />
-<meta property="og:description" content="100+ tools, deterministic guardrails, a visual self-correction loop, and full local-first privacy. Open source, Apache-2.0." />
+<meta property="og:title" content="QodeX — Local-First LLM Agent &amp; AI Coding CLI Agent" />
+<meta property="og:description" content="An open-source LLM agent / CLI coding agent that runs local models with deterministic guardrails, 100+ tools, smart vision, and shareable live artifacts. Local-first, privacy-first. Apache-2.0." />
 <meta property="og:type" content="website" />
+<meta property="og:url" content="https://qodexcli.github.io/QodeX/" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="QodeX — Local-First LLM Agent &amp; AI Coding CLI Agent" />
+<meta name="twitter:description" content="The local-first LLM agent for your terminal: 100+ tools, deterministic guardrails, smart vision, shareable live artifacts. Open source, Apache-2.0." />
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "QodeX",
+  "alternateName": ["QodeX LLM Agent", "QodeX CLI Agent", "QodeX AI Coding Agent"],
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux, Windows",
+  "description": "QodeX is an open-source, local-first LLM agent and CLI coding agent for the terminal. It runs local models (Qwen3-Coder via Ollama / LM Studio) with deterministic guardrails, 100+ built-in tools, a real browser, smart vision, shareable live artifacts, and trade-off analysis.",
+  "url": "https://qodexcli.github.io/QodeX/",
+  "downloadUrl": "https://github.com/QodeXcli/QodeX",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "softwareVersion": "2.4.0",
+  "keywords": "LLM agent, CLI agent, AI coding agent, agentic CLI, local-first AI agent, terminal coding agent",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -308,9 +333,9 @@
       <span class="badge"><span class="bd"></span> 100+ BUILT-IN TOOLS</span>
       <span class="badge"><span class="bd"></span> OPEN SOURCE · APACHE-2.0</span>
     </div>
-    <h1>The coding agent that <span class="grad">checks its own work.</span></h1>
+    <h1>The local-first <span class="grad">LLM agent</span> that checks its own work.</h1>
     <p class="subhead">
-      QodeX is a local-first agentic CLI with <strong>100+ tools</strong> — a real browser, an AST code-graph, sub-agent orchestration, MCP — wrapped in <strong>deterministic guardrails</strong> that make even a small model running on your own machine produce output you can trust. No API keys required.
+      QodeX is an open-source <strong>LLM agent</strong> and <strong>CLI coding agent</strong> for your terminal — <strong>100+ tools</strong> (a real browser, an AST code-graph, smart vision, sub-agent orchestration, MCP) wrapped in <strong>deterministic guardrails</strong> that make even a small model on your own machine produce output you can trust. No API keys required.
     </p>
     <p class="kicker">$ read · edit · run · browse · verify — all on your machine</p>
     <div class="cta-row">
@@ -378,7 +403,10 @@
       <div class="cap"><span class="cap-ic">⬡</span><h4>MCP, fully native</h4><p>Connect any MCP-compatible server and its tools join the same registry as the built-ins — no glue code, no wrappers.</p></div>
       <div class="cap"><span class="cap-ic">⊞</span><h4>Skills from GitHub</h4><p>Install skills from a curated registry or any GitHub repo — each <em>security-scanned</em> on the way in. <code>search_skills</code> to find them.</p></div>
       <div class="cap"><span class="cap-ic">⎇</span><h4>Git, built in</h4><p>Status, diff, log, branch, commit, <code>create-pr</code>, release-notes — the agent manages version control as part of the task.</p></div>
-      <div class="cap"><span class="cap-ic">◇</span><h4>Vision</h4><p><code>vision_analyze</code> sends a screenshot to a local vision model (Qwen-VL) or Claude / GPT — the eyes behind the visual loop.</p></div>
+      <div class="cap"><span class="cap-ic">◇</span><h4>Smart vision</h4><p><strong>Uses your own vision-capable model</strong> (Gemini, GPT-4o, Claude, or a local Qwen-VL) when your primary or sub-agent can already see — only spins up a separate vision model when neither can.</p></div>
+      <div class="cap"><span class="cap-ic">⊕</span><h4>Shareable live artifacts</h4><p>Build a page / React app / dashboard and serve it with <code>artifact_live</code> that <strong>hot-reloads on every edit</strong> — <code>share="tunnel"</code> gives a <strong>private link your team opens</strong> (LAN or https, token-protected). A live PR walkthrough.</p></div>
+      <div class="cap"><span class="cap-ic">⊜</span><h4>Trade-off &amp; business analysis</h4><p>Not always coding. Ask it to analyze or plan and it gives <strong>decision-grade output</strong>: options × weighted criteria → a scored comparison and one clear recommendation — no invented numbers.</p></div>
+      <div class="cap"><span class="cap-ic">⌘</span><h4>English &amp; Persian</h4><p><strong>Persian-first</strong>: skill auto-loading and tool selection understand Persian prompts (تحلیل، دیتابیس، آرتیفکت…), not just English keywords.</p></div>
       <div class="cap"><span class="cap-ic">⊟</span><h4>Domain tools</h4><p>Docker, databases, WordPress (<code>php -l</code>), media via ffmpeg, frontend/print, OpenAPI digest — and more, all first-class.</p></div>
     </div>
   </div>
