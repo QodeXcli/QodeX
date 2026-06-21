@@ -16,6 +16,15 @@ describe('resolveKnownSkill', () => {
   it('returns undefined for an unknown name', () => {
     expect(resolveKnownSkill('totally-made-up-skill-xyz')).toBeUndefined();
   });
+
+  it('maps "tailwind" to a VALID anthropics/skills monorepo subpath (regression)', () => {
+    // The old entry pointed at gh:anthropics/skills#tailwind, a path that does not
+    // exist in the repo, so the install silently fell back to "empty catalog".
+    const r = resolveKnownSkill('tailwind');
+    expect(r).toBeDefined();
+    expect(r!.source).toBe('gh:anthropics/skills#skills/frontend-design');
+    expect(r!.source).toContain('#skills/'); // a real subpath, not a bare (missing) one
+  });
 });
 
 describe('searchGitHubForSkill', () => {

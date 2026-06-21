@@ -44,9 +44,18 @@ export const KNOWN_SKILLS: KnownSkill[] = [
     description: 'shadcn/ui component patterns and composition',
   },
   {
-    names: ['tailwind', 'tailwindcss'],
-    source: 'gh:anthropics/skills#tailwind',
-    description: 'Tailwind CSS utility and design-token guidance',
+    // Anthropic's skills repo is a MONOREPO (skills/<name>/SKILL.md). The old
+    // `#tailwind` subpath never existed there; the frontend-design skill is the
+    // real home for Tailwind + design-token guidance. The installer scopes to the
+    // `#skills/frontend-design` subpath and installs just that one.
+    names: ['frontend-design', 'tailwind', 'tailwindcss', 'frontend-ui'],
+    source: 'gh:anthropics/skills#skills/frontend-design',
+    description: 'Anthropic frontend-design skill — modern UI, Tailwind & design-token guidance',
+  },
+  {
+    names: ['algorithmic-art', 'generative-art'],
+    source: 'gh:anthropics/skills#skills/algorithmic-art',
+    description: 'Anthropic algorithmic-art skill — generative/p5.js visual art',
   },
 ];
 
