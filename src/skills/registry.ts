@@ -136,9 +136,60 @@ export function buildSkillsSystemBlock(): string {
 }
 
 /** Lightweight keyword/substring search over installed skills (for the search_skills tool). */
+/**
+ * Persian → English synonym layer. Installed skills carry ENGLISH names/descriptions/
+ * triggers, so a Persian-only prompt substring-matches nothing and auto-inject never
+ * fires — for the very audience QodeX targets. We map common Persian task words (and
+ * transliterated names) to the English terms the skills actually contain, then score
+ * against those too. Curated short terms (seo/ui/ux/api) bypass the min-length filter.
+ */
+const FA_EN_SYNONYMS: Record<string, string[]> = {
+  // marketing / copy
+  'تبلیغ': ['marketing', 'advertising', 'copy'], 'تبلیغاتی': ['marketing', 'advertising', 'copy'],
+  'کپی': ['copy', 'copywriting'], 'کپیرایت': ['copywriting', 'copy'], 'برند': ['brand', 'marketing'],
+  'فروش': ['sales', 'marketing'], 'بازاریابی': ['marketing'],
+  // animation / emil kowalski
+  'انیمیشن': ['animation', 'motion'], 'متحرک': ['animation', 'motion'], 'اسپرینگ': ['spring', 'animation'],
+  'امیل': ['emil'], 'کوالسکی': ['kowalski'],
+  // refactor / ghost
+  'ریفکتور': ['refactor'], 'بازنویسی': ['refactor'], 'نامرئی': ['invisible', 'ghost'],
+  // backend / frontend / api
+  'بکاند': ['backend', 'api', 'server'], 'بکند': ['backend', 'api'], 'سرور': ['server', 'backend'],
+  'فرانتاند': ['frontend'], 'فرانت': ['frontend'],
+  // seo / geo
+  'سئو': ['seo'], 'جئو': ['geo'],
+  // design / ui / ux / taste
+  'دیزاین': ['design', 'visual'], 'طراحی': ['design', 'visual'], 'ظاهر': ['visual', 'design'],
+  'سلیقه': ['taste', 'design'], 'بصری': ['visual', 'design'], 'رابط': ['interface'],
+  'تجربهکاربری': ['ux'], 'دسترسپذیری': ['accessibility'],
+  // data / generative
+  'داده': ['data'], 'دیتا': ['data'], 'اسکرپ': ['scrape', 'scraping'], 'جمعآوری': ['collect', 'scraping'],
+  'مولد': ['generative'],
+};
+
+/** Normalize a Persian token so map keys match real prose: drop ZWNJ + the Ezafe/diacritic
+ *  marks (kasra ِ, fatha, …) that get appended to words, and unify Arabic ي/ك → Persian ی/ک. */
+export function normalizeFaToken(s: string): string {
+  return s
+    .replace(/[‌ـ]/g, '')        // ZWNJ + tatweel
+    .replace(/[ً-ْ]/g, '')       // harakat/diacritics (kasra, fatha, damma, sukun…)
+    .replace(/ي/g, 'ی').replace(/ك/g, 'ک'); // Arabic → Persian letter forms
+}
+
 export function searchInstalledSkills(query: string, limit = 8): Array<{ name: string; description: string; score: number; strong: number }> {
   const q = query.toLowerCase();
-  const qTerms = q.split(/\s+/).filter(Boolean);
+  // Build effective match terms: organic words (≥3 chars) + curated Persian→English synonyms.
+  const terms = new Set<string>();
+  for (const raw of q.split(/\s+/).filter(Boolean)) {
+    const t = normalizeFaToken(raw);
+    if (t.length >= 3) terms.add(t);
+    // Substring match against synonym keys handles Persian morphology — Ezafe, prefixes,
+    // and compounds (e.g. "خوش‌سلیقه" contains "سلیقه", "طراحیِ" → "طراحی").
+    for (const [key, vals] of Object.entries(FA_EN_SYNONYMS)) {
+      if (t === key || t.includes(key)) for (const e of vals) terms.add(e);
+    }
+  }
+  const qTerms = [...terms];
   const scored = listSkills().map(s => {
     const haystack = `${s.name} ${s.description} ${(s.triggers ?? []).join(' ')}`.toLowerCase();
     let score = 0;
@@ -149,7 +200,7 @@ export function searchInstalledSkills(query: string, limit = 8): Array<{ name: s
     // only racked up incidental description-word overlaps.
     let strong = 0;
     for (const term of qTerms) {
-      if (term.length < 3) continue; // ignore "a", "to", "of" … as match terms
+      // terms are pre-filtered (organic ≥3 chars + curated synonyms), so score each directly.
       if (s.name.toLowerCase().includes(term)) { score += 5; strong += 5; }   // name match is strongest
       if ((s.triggers ?? []).some(t => t.toLowerCase().includes(term))) { score += 3; strong += 3; }
       if (haystack.includes(term)) score += 1;

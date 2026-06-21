@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { pickDominantSkill } from '../src/skills/registry.js';
+import { pickDominantSkill, normalizeFaToken } from '../src/skills/registry.js';
+
+describe('normalizeFaToken (Persian skill-match normalization)', () => {
+  it('strips the Ezafe kasra so a word matches its dictionary form', () => {
+    expect(normalizeFaToken('کپیِ')).toBe('کپی');       // U+0650 kasra removed
+    expect(normalizeFaToken('طراحیِ')).toBe('طراحی');
+  });
+  it('drops the ZWNJ joiner used in compounds', () => {
+    expect(normalizeFaToken('خوش‌سلیقه')).toBe('خوشسلیقه'); // contains "سلیقه" as a substring
+    expect(normalizeFaToken('خوش‌سلیقه').includes('سلیقه')).toBe(true);
+  });
+  it('unifies Arabic letter forms to Persian', () => {
+    expect(normalizeFaToken('كپي')).toBe('کپی'); // ك→ک, ي→ی
+  });
+  it('leaves plain English tokens untouched', () => {
+    expect(normalizeFaToken('marketing')).toBe('marketing');
+  });
+});
 
 describe('pickDominantSkill', () => {
   it('picks a confident, dominant top match', () => {
