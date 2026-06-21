@@ -26,7 +26,8 @@ const ALL = [
   'design_audit','detect_frontend_stack','find_ui_components','vision_analyze',
   'csv_read','xlsx_read','pdf_read','wp_find_hook','wp_list_hooks',
   'explain_codebase','find_dead_code','semantic_search','auto_fix',
-  'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback',
+  'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback','artifact_live','artifact_live_stop',
+  'install_skill','install_mcp','mcp_scaffold',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -91,6 +92,36 @@ console.log('— artifact family gates on the artifact signal (regression) —')
   const fa = names('یه آرتیفکت ری‌اکت بساز');
   check('persian artifact task surfaces artifact_create', fa.has('artifact_create'));
   check('non-artifact task EXCLUDES artifact tools', !names('fix the type error in math.ts').has('artifact_create'));
+  // live-artifacts: a "live"/"hot-reload" request must surface the live tools.
+  const live = names('start a live preview of the artifact with hot-reload');
+  check('live request surfaces artifact_live', live.has('artifact_live'));
+  check('live request surfaces artifact_live_stop', live.has('artifact_live_stop'));
+}
+
+console.log('— install_skill surfaces whenever skills are discussed (regression) —');
+{
+  // Without this the model never sees install_skill and wrongly says "I can't install".
+  check('en: "find any skill and install it" surfaces install_skill',
+    names('can you find any skill and install it?').has('install_skill'));
+  check('en: "install the shadcn skill" surfaces install_skill',
+    names('install the shadcn skill').has('install_skill'));
+  check('fa: "یه اسکیل پیدا کن و نصب کن" surfaces install_skill',
+    names('یه اسکیل پیدا کن و نصب کن').has('install_skill'));
+  check('non-skill task EXCLUDES install_skill',
+    !names('fix the type error in math.ts').has('install_skill'));
+  check('mcp keyword still pulls install_mcp', names('add the linear mcp connector').has('install_mcp'));
+}
+
+console.log('— specialist families gate on PERSIAN signals too (regression) —');
+{
+  // QodeX's audience writes in Persian; without Persian keywords these heavy tools
+  // were invisible unless the user happened to type the English term.
+  check('persian "داکرایز/کانتینر" pulls docker', names('این پروژه رو داکرایز کن و کانتینر بساز').has('docker_build'));
+  check('persian "دیتابیس/کوئری" pulls db', names('یه کوئریِ دیتابیس بنویس').has('db_query'));
+  check('persian "مرورگر/اسکرین‌شات" pulls browser', names('یه اسکرین‌شات از سایت با مرورگر بگیر').has('browser_screenshot'));
+  check('persian "اکسل" pulls data family', names('این فایلِ اکسل رو تحلیل کن').has('csv_read'));
+  check('persian "ووکامرس/وردپرس" pulls wp', names('یه قلابِ ووکامرس در وردپرس پیدا کن').has('wp_find_hook'));
+  check('persian greeting still pulls no specialist', !names('سلام خوبی').has('docker_build'));
 }
 
 console.log('— specialist composes with common —');

@@ -78,13 +78,55 @@ export function resolveLocalVisionModel(): string | undefined {
   return undefined;
 }
 
+/**
+ * Resolve a vision model served by ANY configured OpenAI-compatible provider — the
+ * "the user set up an API; if their model can see, just use it" path. When the primary
+ * (or sub-agent) model is vision-capable and its provider is a custom gateway (Gemini's
+ * OpenAI endpoint, OpenRouter, …) or a custom-baseURL openai, return its endpoint so the
+ * vision tool calls THAT model instead of demanding a separate ANTHROPIC/OPENAI key.
+ * Returns undefined when no configured provider serves a vision-capable model.
+ */
+export function resolveConfiguredVisionModel(): { model: string; baseUrl: string; apiKey: string } | undefined {
+  const cfg = getActiveConfig() as any;
+  if (!cfg) return undefined;
+  const candidates: Array<{ provider?: string; model?: string }> = [
+    { provider: cfg.defaults?.provider, model: cfg.defaults?.model },        // primary first
+    { provider: cfg.roles?.subagent?.provider, model: cfg.roles?.subagent?.model }, // then sub-agent
+  ];
+  for (const { provider, model } of candidates) {
+    if (!model || typeof model !== 'string' || !looksVisionCapable(model)) continue;
+    const ep = resolveProviderEndpoint(cfg, provider);
+    if (ep) return { model, baseUrl: ep.baseUrl, apiKey: ep.apiKey };
+  }
+  return undefined;
+}
+
+/** Map a provider NAME to its OpenAI-compatible {baseUrl, apiKey}, or undefined if it
+ *  isn't an OpenAI-compatible HTTP provider with a key set. (anthropic/ollama/lm-studio
+ *  are intentionally excluded — they're handled by their own dedicated backends.) */
+function resolveProviderEndpoint(cfg: any, providerName?: string): { baseUrl: string; apiKey: string } | undefined {
+  if (!providerName) return undefined;
+  const norm = (u: string) => u.replace(/\/+$/, '');
+  const custom = (cfg.providers?.custom ?? []).find((c: any) => c?.name === providerName);
+  if (custom?.baseUrl && custom?.apiKeyEnv && /^https?:\/\//.test(custom.baseUrl)) {
+    const key = process.env[custom.apiKeyEnv];
+    if (key) return { baseUrl: norm(custom.baseUrl), apiKey: key };
+  }
+  if (providerName === 'openai') {
+    const key = process.env[cfg.providers?.openai?.apiKeyEnv ?? 'OPENAI_API_KEY'];
+    const baseUrl = cfg.providers?.openai?.baseUrl ?? 'https://api.openai.com/v1';
+    if (key && /^https?:\/\//.test(baseUrl)) return { baseUrl: norm(baseUrl), apiKey: key };
+  }
+  return undefined;
+}
+
 const VisionAnalyzeArgs = z.object({
   image_path: z.string().min(1).describe('Path to a PNG/JPEG/WebP file on disk. Often the result of browser_screenshot.'),
   prompt: z.string().min(1).describe(
     'What you want to know about the image. Examples: "describe this UI", "is the submit button visible", "transcribe the error message", "what colors are used".'
   ),
   detail: z.enum(['low', 'auto', 'high']).optional().describe('OpenAI-style detail level. Default "auto".'),
-  backend: z.enum(['anthropic', 'openai', 'ollama', 'local', 'auto']).optional().describe('Which backend to use. Default "auto" picks the best available.'),
+  backend: z.enum(['configured', 'anthropic', 'openai', 'ollama', 'local', 'auto']).optional().describe('Which backend to use. Default "auto" picks the best available — preferring your own vision-capable model (primary/sub-agent) if configured.'),
 });
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -294,6 +336,36 @@ async function callLocal(base64: string, mime: string, prompt: string): Promise<
  * can't process. We're deliberately strict — only flag clear refusals, not
  * legitimate analyses that happen to mention these words.
  */
+/** Send an OpenAI-compatible vision request to the user's configured provider (Gemini's
+ *  OpenAI endpoint, OpenRouter, a custom-baseURL openai, …) whose primary/sub-agent model
+ *  can see. This is the "you already configured a vision-capable model — use it" backend. */
+async function callConfigured(base64: string, mime: string, prompt: string): Promise<string> {
+  const v = resolveConfiguredVisionModel();
+  if (!v) throw new Error('No configured vision-capable model (primary/sub-agent is text-only or its provider has no key).');
+  const res = await fetch(`${v.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${v.apiKey}`, 'User-Agent': 'qodex-cli' },
+    body: JSON.stringify({
+      model: v.model,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
+      ] }],
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`Configured vision backend HTTP ${res.status}: ${t.slice(0, 300)}`);
+  }
+  const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const content = body.choices?.[0]?.message?.content ?? '';
+  if (looksLikeTextOnlyRefusal(content)) {
+    throw new Error(`Configured model '${v.model}' responded as if it can't see images — its weights may be text-only despite the id.`);
+  }
+  return content;
+}
+
 function looksLikeTextOnlyRefusal(text: string): boolean {
   const lower = text.toLowerCase();
   const refusalPatterns = [
@@ -334,19 +406,22 @@ export class VisionAnalyzeTool extends Tool<z.infer<typeof VisionAnalyzeArgs>> {
       // Build the candidate chain. In 'auto' mode we ONLY include backends with
       // visible credentials/config — never silently fall through to a text-only
       // local model.
-      let order: Array<'anthropic' | 'openai' | 'ollama' | 'local'>;
-      if (requested === 'anthropic') order = ['anthropic'];
+      let order: Array<'configured' | 'anthropic' | 'openai' | 'ollama' | 'local'>;
+      if (requested === 'configured') order = ['configured'];
+      else if (requested === 'anthropic') order = ['anthropic'];
       else if (requested === 'openai') order = ['openai'];
       else if (requested === 'ollama') order = ['ollama'];
       else if (requested === 'local') order = ['local'];
       else {
         // auto: chain everything that's actually configured.
-        // Priority: if the PRIMARY model can already see (e.g. Gemma 4), use it
-        // directly via LM Studio FIRST — no separate vision sub-agent needed. Then
-        // fall back to a dedicated Ollama vision model (qwen2.5vl), then cloud.
+        // Priority: if the user's OWN model (primary or sub-agent) can already see —
+        // including a configured API like Gemini/OpenRouter — use it FIRST; no separate
+        // vision model needed. Then LM Studio/Ollama vision, then dedicated cloud keys.
         order = [];
+        const configuredVision = resolveConfiguredVisionModel();
         const localVision = resolveLocalVisionModel();
         const ollamaVision = resolveOllamaVisionModel();
+        if (configuredVision) order.push('configured');
         // Only lead with `local` when it's the vision-capable PRIMARY (or an explicit
         // LM Studio vision model) — not when local would just hit a loaded text model.
         if (localVision) order.push('local');
@@ -379,7 +454,8 @@ export class VisionAnalyzeTool extends Tool<z.infer<typeof VisionAnalyzeArgs>> {
       for (const backend of order) {
         try {
           let result: string;
-          if (backend === 'anthropic') result = await callAnthropic(base64, mime, args.prompt);
+          if (backend === 'configured') result = await callConfigured(base64, mime, args.prompt);
+          else if (backend === 'anthropic') result = await callAnthropic(base64, mime, args.prompt);
           else if (backend === 'openai') result = await callOpenAI(base64, mime, args.prompt, detail);
           else if (backend === 'ollama') result = await callOllama(base64, mime, args.prompt);
           else result = await callLocal(base64, mime, args.prompt);

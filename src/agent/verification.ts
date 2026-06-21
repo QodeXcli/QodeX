@@ -16,7 +16,7 @@
 
 import * as path from 'path';
 import {
-  CHECKERS, runChecker, checkerText, pickChecker, detectProjectFiles,
+  CHECKERS, runChecker, checkerText, pickCheckers, detectProjectFiles,
   type CheckerSpec,
 } from '../tools/diagnostics/checkers.js';
 import type { Diagnostic } from '../tools/diagnostics/parsers.js';
@@ -149,55 +149,72 @@ export async function verifyTouchedFiles(opts: {
   if (touched.length === 0) return { ran: false, diagnostics: [], errorCount: 0 };
 
   const rootFiles = await detectProjectFiles(cwd);
-  const spec = pickChecker(rootFiles);
-  if (!spec) return { ran: false, diagnostics: [], errorCount: 0 };
+  // One checker per language present in the project. Each runs ONLY if the model
+  // touched a file in a language it owns, so a Python edit in a TS+Py repo is checked
+  // by ruff, not silently skipped because tsc happened to be first.
+  const specs = pickCheckers(rootFiles);
+  if (specs.length === 0) return { ran: false, diagnostics: [], errorCount: 0 };
+  const timeoutMs = opts.timeoutMs ?? 120_000;
 
-  const relevant = relevantTouchedFiles(touched, spec);
-  if (relevant.length === 0) return { ran: false, diagnostics: [], errorCount: 0 };
+  let anyRan = false;
+  let anyUnavailable = false;
+  const ids: string[] = [];
+  const allRelevant: string[] = [];
+  const collected: Diagnostic[] = [];
 
-  let diags: Diagnostic[];
-  if (spec.perFile) {
-    // Per-file checker (e.g. `php -l`): run once per relevant touched file, append
-    // the path to argv each time, merge diagnostics. A missing binary on the FIRST
-    // file marks the whole checker unavailable (don't claim a clean pass it can't give).
-    diags = [];
-    let anyRan = false;
-    for (const file of relevant) {
-      const r = await runChecker([...spec.argv, file], cwd, opts.timeoutMs ?? 120_000, opts.signal);
-      if (r.spawnError || r.code === 127) {
-        if (!anyRan) return { ran: false, diagnostics: [], errorCount: 0, unavailable: true };
-        continue;
-      }
-      anyRan = true;
-      try { diags.push(...spec.parse(checkerText(spec, r))); } catch { /* skip this file */ }
-    }
-    if (!anyRan) return { ran: false, diagnostics: [], errorCount: 0, unavailable: true };
-  } else {
-    const run = await runChecker(spec.argv, cwd, opts.timeoutMs ?? 120_000, opts.signal);
-    if (run.spawnError || run.code === 127) {
-      return { ran: false, diagnostics: [], errorCount: 0, unavailable: true };
-    }
-    try {
-      diags = spec.parse(checkerText(spec, run));
-    } catch {
-      // Couldn't parse (the checker itself errored in an unexpected way) — don't block.
-      return { ran: false, diagnostics: [], errorCount: 0 };
-    }
+  for (const spec of specs) {
+    const relevant = relevantTouchedFiles(touched, spec);
+    if (relevant.length === 0) continue; // model didn't touch this language
+    const { diags, unavailable } = await runCheckerCollect(spec, cwd, relevant, timeoutMs, opts.signal);
+    if (unavailable) { anyUnavailable = true; continue; } // tool missing for this language — skip, don't block
+    anyRan = true;
+    ids.push(spec.id);
+    allRelevant.push(...relevant);
+    collected.push(...filterToTouched(diags, relevant, cwd));
   }
 
-  let scoped = filterToTouched(diags, relevant, cwd);
+  if (!anyRan) {
+    // No language's checker produced a result: either nothing touched is in a covered
+    // language, or the only relevant checkers' binaries were missing.
+    return { ran: false, diagnostics: [], errorCount: 0, ...(anyUnavailable ? { unavailable: true } : {}) };
+  }
+
+  let scoped = collected;
   // Baseline subtraction: if we captured the pre-edit state, only hold the model
   // accountable for errors it actually introduced — not the project's prior debt.
+  // Signatures are checker-specific, so a flat union baseline subtracts correctly per language.
   if (opts.baseline) {
-    const baseScoped = filterToTouched(opts.baseline, relevant, cwd);
+    const baseScoped = filterToTouched(opts.baseline, allRelevant, cwd);
     scoped = diffDiagnostics(baseScoped, scoped);
   }
   return {
     ran: true,
-    checker: spec.id,
+    checker: ids.join('+'),
     diagnostics: scoped,
     errorCount: scoped.filter(d => d.severity === 'error').length,
   };
+}
+
+/** Run ONE checker over its relevant touched files — whole-project, or once per file for
+ *  per-file linters (php -l). Returns raw diagnostics and whether the binary was missing. */
+async function runCheckerCollect(
+  spec: CheckerSpec, cwd: string, relevant: string[], timeoutMs: number, signal?: AbortSignal,
+): Promise<{ diags: Diagnostic[]; unavailable: boolean }> {
+  if (spec.perFile) {
+    const diags: Diagnostic[] = [];
+    let anyRan = false;
+    for (const file of relevant) {
+      const r = await runChecker([...spec.argv, file], cwd, timeoutMs, signal);
+      if (r.spawnError || r.code === 127) { if (!anyRan) return { diags: [], unavailable: true }; continue; }
+      anyRan = true;
+      try { diags.push(...spec.parse(checkerText(spec, r))); } catch { /* skip this file */ }
+    }
+    return { diags, unavailable: !anyRan };
+  }
+  const run = await runChecker(spec.argv, cwd, timeoutMs, signal);
+  if (run.spawnError || run.code === 127) return { diags: [], unavailable: true };
+  try { return { diags: spec.parse(checkerText(spec, run)), unavailable: false }; }
+  catch { return { diags: [], unavailable: false }; } // parse failure → no diags, but the tool DID run
 }
 
 /**
@@ -213,16 +230,24 @@ export async function captureBaseline(opts: {
 }): Promise<Diagnostic[]> {
   try {
     const rootFiles = await detectProjectFiles(opts.cwd);
-    const spec = pickChecker(rootFiles);
-    if (!spec) return [];
-    // Per-file checkers (php -l) would have to lint the ENTIRE project to baseline,
-    // which is costly and near-useless (a working project has no syntax errors at
-    // baseline; any the agent introduces are by definition new). Skip — every
-    // syntax error found post-edit is correctly treated as new.
-    if (spec.perFile) return [];
-    const run = await runChecker(spec.argv, opts.cwd, opts.timeoutMs ?? 120_000, opts.signal);
-    if (run.spawnError || run.code === 127) return [];
-    return spec.parse(checkerText(spec, run));
+    // Baseline EVERY language's checker (one per language), in parallel, so the post-edit
+    // verify can subtract pre-existing debt for whichever language(s) the model touches.
+    // Per-file checkers (php -l) are skipped: linting the whole project to baseline is
+    // costly and near-useless — a working project has no syntax errors, so any the agent
+    // introduces are by definition new.
+    const specs = pickCheckers(rootFiles).filter(s => !s.perFile);
+    if (specs.length === 0) return [];
+    const timeoutMs = opts.timeoutMs ?? 120_000;
+    const perChecker = await Promise.all(specs.map(async spec => {
+      try {
+        const run = await runChecker(spec.argv, opts.cwd, timeoutMs, opts.signal);
+        if (run.spawnError || run.code === 127) return [] as Diagnostic[];
+        return spec.parse(checkerText(spec, run));
+      } catch {
+        return [] as Diagnostic[];
+      }
+    }));
+    return perChecker.flat();
   } catch {
     return [];
   }

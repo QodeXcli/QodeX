@@ -35,6 +35,22 @@ export function initialIndex<T extends string>(
   return i >= 0 ? i : 0;
 }
 
+/** Visible width of a string: length with ANSI SGR (colour/dim) escapes removed. Pure → testable. */
+export function displayWidth(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, '').length;
+}
+
+/** How many PHYSICAL terminal rows a logical line occupies once the terminal wraps
+ *  it at `cols`. A line wider than the terminal wraps to ⌈width/cols⌉ rows; empty
+ *  lines still take one. Pure → testable. This is what makes the in-place redraw
+ *  move the cursor up by the right amount — counting logical lines undercounts when
+ *  long options (e.g. long base URLs) wrap, leaving stale rows that pile up. */
+export function physicalRows(s: string, cols: number): number {
+  if (cols <= 0) return 1;
+  return Math.max(1, Math.ceil(displayWidth(s) / cols));
+}
+
 /** Compute the next highlighted index for a keypress. Returns the same index for no-op keys. Pure → testable. */
 export function moveSelection(current: number, keyName: string | undefined, len: number): number {
   if (len <= 0) return 0;
@@ -105,10 +121,16 @@ function chooseInteractive<T extends string>(
       if (drawn && block > 0) stdout.write(`\x1b[${block}A`); // jump back to the top of the block
       stdout.write('\x1b[0J');                                // clear from cursor down
 
-      let lines = 0;
+      // Count PHYSICAL rows (accounting for terminal wrap), not logical lines — a long
+      // option that wraps occupies >1 row, and if we undercount the cursor-up leaves the
+      // top rows behind and every keypress piles up another stale copy.
+      const cols = (stdout.columns && stdout.columns > 0) ? stdout.columns : 80;
+      let physical = 0;
+      const emit = (s: string): void => { stdout.write(s + '\n'); physical += physicalRows(s, cols); };
+
       const end = Math.min(options.length, top + pageSize);
 
-      if (windowed && top > 0) { stdout.write(dim(`     ↑ ${top} more above`) + '\n'); lines++; }
+      if (windowed && top > 0) emit(dim(`     ↑ ${top} more above`));
       for (let i = top; i < end; i++) {
         const opt = options[i]!;
         const sel = i === idx;
@@ -116,18 +138,16 @@ function chooseInteractive<T extends string>(
         const num = String(i + 1).padStart(2);
         const label = sel ? `\x1b[36m\x1b[1m${opt.label}\x1b[0m` : opt.label;
         const hint = opt.hint ? `  ${dim(opt.hint)}` : '';
-        stdout.write(`  ${marker} ${num}. ${label}${hint}\n`);
-        lines++;
+        emit(`  ${marker} ${num}. ${label}${hint}`);
       }
-      if (windowed && end < options.length) { stdout.write(dim(`     ↓ ${options.length - end} more below`) + '\n'); lines++; }
+      if (windowed && end < options.length) emit(dim(`     ↓ ${options.length - end} more below`));
 
       const nav = windowed
         ? '  ↑/↓ move · Enter select · type number+Enter · Ctrl+C cancel'
         : '  ↑/↓ move · Enter select · 1-9 jump · Ctrl+C cancel';
-      stdout.write(dim(nav) + '\n');
-      lines++;
+      emit(dim(nav));
 
-      block = lines;
+      block = physical;
       drawn = true;
     };
 

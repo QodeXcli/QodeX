@@ -66,4 +66,15 @@ describe('buildCriticRepairMessage', () => {
     expect(msg).not.toMatch(/naming/);
     expect(msg).toMatch(/QA REVIEW/);
   });
+
+  it('falls back to warnings when pass:false but no blocker is marked (no empty list)', () => {
+    const msg = buildCriticRepairMessage({
+      pass: false,
+      findings: [
+        { severity: 'warning', location: 'b.ts:4', issue: 'unhandled promise rejection' },
+      ],
+    });
+    expect(msg).toMatch(/unhandled promise rejection/); // the worker gets something actionable
+    expect(msg).toMatch(/b\.ts:4/);
+  });
 });

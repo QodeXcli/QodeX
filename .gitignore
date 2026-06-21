@@ -17,3 +17,6 @@ coverage/
 .qodex/sandbox.lock
 .qodex/sandbox-recovery.json
 **/.manifest.lock
+
+# QodeX runtime artifacts created when running qodex inside this repo
+.qodex/artifacts/

@@ -212,3 +212,16 @@ export function previewPort(id: string): number {
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return 4500 + (h % 500);
 }
+
+/** A stable process/registry name for an artifact's LIVE server. */
+export function liveServerName(id: string): string {
+  return `artifact-live:${id}`;
+}
+
+/** Deterministic-ish port in the 5000–5499 range — DISJOINT from previewPort's 4500–4999
+ *  so a live server and a static preview for the same id don't collide. */
+export function livePort(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return 5000 + (h % 500);
+}

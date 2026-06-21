@@ -24,7 +24,8 @@ import type { QodexConfig } from '../config/defaults.js';
 export type RoleName = 'subagent' | 'vision' | 'summarization' | 'planning' | string;
 
 export interface ResolvedRole {
-  provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+  // Built-in provider OR a custom gateway name (providers.custom[].name).
+  provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | (string & {});
   model: string;
   /** How we arrived at this choice — useful in logs and `/roles` output. */
   source: 'explicit' | 'session-override' | 'config-role' | 'parent-default';

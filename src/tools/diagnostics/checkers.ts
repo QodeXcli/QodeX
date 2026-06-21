@@ -165,3 +165,24 @@ export async function detectProjectFiles(root: string): Promise<Set<string>> {
 export function pickChecker(files: Set<string>): CheckerSpec | undefined {
   return CHECKERS.find(c => c.detect(files));
 }
+
+/**
+ * Every checker that applies to this project, deduplicated to ONE per language. The
+ * highest-priority detected checker (CHECKERS array order) "owns" each extension, so a
+ * TS+Python repo runs tsc AND ruff — but a TS repo that also has an eslint config still
+ * runs only tsc for .ts/.tsx (eslint is added solely for the .js/.jsx/.mjs/.cjs it
+ * uniquely owns). A monolingual project returns exactly one checker, so the verify gate
+ * behaves identically to before; only genuinely polyglot repos get the extra coverage.
+ */
+export function pickCheckers(files: Set<string>): CheckerSpec[] {
+  const chosen: CheckerSpec[] = [];
+  const owned = new Set<string>();
+  for (const c of CHECKERS) {
+    if (!c.detect(files)) continue;
+    if (c.exts.some(e => !owned.has(e))) {
+      chosen.push(c);
+      for (const e of c.exts) owned.add(e);
+    }
+  }
+  return chosen;
+}

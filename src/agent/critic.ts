@@ -117,10 +117,13 @@ export function parseCriticVerdict(text: string): CriticVerdict {
 
 /** Build the corrective message sent back to the worker when the critic blocks. */
 export function buildCriticRepairMessage(verdict: CriticVerdict): string {
+  // Prefer blockers, but if the critic set pass:false while marking only warnings, fall
+  // back to ALL findings — otherwise the worker gets an empty list and no idea what to fix.
   const blockers = verdict.findings.filter(f => f.severity === 'blocker');
-  const lines = blockers.map(f => `  - ${f.location ? `[${f.location}] ` : ''}${f.issue}`);
+  const shown = blockers.length > 0 ? blockers : verdict.findings;
+  const lines = shown.map(f => `  - ${f.location ? `[${f.location}] ` : ''}${f.issue}`);
   return (
-    '[QA REVIEW] A senior-QA review of your change found blocking defect(s):\n' +
+    '[QA REVIEW] A senior-QA review of your change found defect(s) to fix:\n' +
     lines.join('\n') +
     '\n\nFix these specific issues by editing the files (use your edit tools). ' +
     'Do not apologize or explain — just make the corrections, then continue.'

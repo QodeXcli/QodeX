@@ -136,18 +136,76 @@ export function buildSkillsSystemBlock(): string {
 }
 
 /** Lightweight keyword/substring search over installed skills (for the search_skills tool). */
-export function searchInstalledSkills(query: string, limit = 8): Array<{ name: string; description: string; score: number }> {
+/**
+ * Persian → English synonym layer. Installed skills carry ENGLISH names/descriptions/
+ * triggers, so a Persian-only prompt substring-matches nothing and auto-inject never
+ * fires — for the very audience QodeX targets. We map common Persian task words (and
+ * transliterated names) to the English terms the skills actually contain, then score
+ * against those too. Curated short terms (seo/ui/ux/api) bypass the min-length filter.
+ */
+const FA_EN_SYNONYMS: Record<string, string[]> = {
+  // marketing / copy
+  'تبلیغ': ['marketing', 'advertising', 'copy'], 'تبلیغاتی': ['marketing', 'advertising', 'copy'],
+  'کپی': ['copy', 'copywriting'], 'کپیرایت': ['copywriting', 'copy'], 'برند': ['brand', 'marketing'],
+  'فروش': ['sales', 'marketing'], 'بازاریابی': ['marketing'],
+  // animation / emil kowalski
+  'انیمیشن': ['animation', 'motion'], 'متحرک': ['animation', 'motion'], 'اسپرینگ': ['spring', 'animation'],
+  'امیل': ['emil'], 'کوالسکی': ['kowalski'],
+  // refactor / ghost
+  'ریفکتور': ['refactor'], 'بازنویسی': ['refactor'], 'نامرئی': ['invisible', 'ghost'],
+  // backend / frontend / api
+  'بکاند': ['backend', 'api', 'server'], 'بکند': ['backend', 'api'], 'سرور': ['server', 'backend'],
+  'فرانتاند': ['frontend'], 'فرانت': ['frontend'],
+  // seo / geo
+  'سئو': ['seo'], 'جئو': ['geo'],
+  // design / ui / ux / taste
+  'دیزاین': ['design', 'visual'], 'طراحی': ['design', 'visual'], 'ظاهر': ['visual', 'design'],
+  'سلیقه': ['taste', 'design'], 'بصری': ['visual', 'design'], 'رابط': ['interface'],
+  'تجربهکاربری': ['ux'], 'دسترسپذیری': ['accessibility'],
+  // data / generative
+  'داده': ['data'], 'دیتا': ['data'], 'اسکرپ': ['scrape', 'scraping'], 'جمعآوری': ['collect', 'scraping'],
+  'مولد': ['generative'],
+};
+
+/** Normalize a Persian token so map keys match real prose: drop ZWNJ + the Ezafe/diacritic
+ *  marks (kasra ِ, fatha, …) that get appended to words, and unify Arabic ي/ك → Persian ی/ک. */
+export function normalizeFaToken(s: string): string {
+  return s
+    .replace(/[‌ـ]/g, '')        // ZWNJ + tatweel
+    .replace(/[ً-ْ]/g, '')       // harakat/diacritics (kasra, fatha, damma, sukun…)
+    .replace(/ي/g, 'ی').replace(/ك/g, 'ک'); // Arabic → Persian letter forms
+}
+
+export function searchInstalledSkills(query: string, limit = 8): Array<{ name: string; description: string; score: number; strong: number }> {
   const q = query.toLowerCase();
-  const qTerms = q.split(/\s+/).filter(Boolean);
+  // Build effective match terms: organic words (≥3 chars) + curated Persian→English synonyms.
+  const terms = new Set<string>();
+  for (const raw of q.split(/\s+/).filter(Boolean)) {
+    const t = normalizeFaToken(raw);
+    if (t.length >= 3) terms.add(t);
+    // Substring match against synonym keys handles Persian morphology — Ezafe, prefixes,
+    // and compounds (e.g. "خوش‌سلیقه" contains "سلیقه", "طراحیِ" → "طراحی").
+    for (const [key, vals] of Object.entries(FA_EN_SYNONYMS)) {
+      if (t === key || t.includes(key)) for (const e of vals) terms.add(e);
+    }
+  }
+  const qTerms = [...terms];
   const scored = listSkills().map(s => {
     const haystack = `${s.name} ${s.description} ${(s.triggers ?? []).join(' ')}`.toLowerCase();
     let score = 0;
+    // `strong` tracks ONLY the high-signal matches (skill NAME + distinctive TRIGGERS),
+    // separate from the +1 generic-word (haystack) hits that any verbose description
+    // accumulates. The dominance gate uses `strong` so an obvious name/trigger match
+    // (e.g. "Emil Kowalski" → emilkowalski) isn't blocked by a noisy runner-up that
+    // only racked up incidental description-word overlaps.
+    let strong = 0;
     for (const term of qTerms) {
-      if (s.name.toLowerCase().includes(term)) score += 5;      // name match is strongest
-      if ((s.triggers ?? []).some(t => t.toLowerCase().includes(term))) score += 3;
+      // terms are pre-filtered (organic ≥3 chars + curated synonyms), so score each directly.
+      if (s.name.toLowerCase().includes(term)) { score += 5; strong += 5; }   // name match is strongest
+      if ((s.triggers ?? []).some(t => t.toLowerCase().includes(term))) { score += 3; strong += 3; }
       if (haystack.includes(term)) score += 1;
     }
-    return { name: s.name, description: s.description, score };
+    return { name: s.name, description: s.description, score, strong };
   });
   return scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }
@@ -179,7 +237,7 @@ export function suggestSkillForPrompt(
  * touching the registry's module state.
  */
 export function pickDominantSkill(
-  results: Array<{ name: string; score: number }>,
+  results: Array<{ name: string; score: number; strong?: number }>,
   opts: { minScore?: number; dominance?: number } = {},
 ): string | null {
   const minScore = opts.minScore ?? 6;
@@ -188,7 +246,19 @@ export function pickDominantSkill(
   const top = results[0];
   if (top.score < minScore) return null;
   const second = results[1];
-  if (second && top.score < second.score * dominance) return null; // ambiguous → defer to model
+  if (!second) return top.name;
+
+  // High-signal win: the top skill matched on its NAME or a distinctive TRIGGER more
+  // than the runner-up did. This rescues obvious picks (e.g. "Emil Kowalski" →
+  // emilkowalski:strong=10) that the blunt total-score ratio would otherwise reject
+  // because a verbose runner-up (e.g. data-collector) piled up incidental word hits.
+  const topStrong = top.strong ?? 0;
+  const secondStrong = second.strong ?? 0;
+  if (topStrong >= 5 && topStrong > secondStrong) return top.name;
+
+  // Otherwise require clear TOTAL dominance, so genuinely ambiguous prose (no decisive
+  // name/trigger signal) injects nothing and defers to the model's own use_skill.
+  if (top.score < second.score * dominance) return null;
   return top.name;
 }
 

@@ -18,10 +18,11 @@ import {
   createArtifact, updateArtifact, listArtifacts, getArtifact, rollbackArtifact,
   isArtifactType, type ArtifactType,
 } from '../../artifacts/store.js';
-import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort } from '../../artifacts/preview.js';
+import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort, livePort, liveServerName } from '../../artifacts/preview.js';
 import { buildReviewPrompt, buildReviewReport, formatReviewReport } from '../../artifacts/review.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import * as processRegistry from '../browser/process-registry.js';
+import { startLive, stopLive, stopAllLive, listLive } from '../../artifacts/live-registry.js';
 
 const TYPE_VALUES = ['html', 'react', 'svg', 'markdown', 'vue', 'text'] as const;
 
@@ -292,7 +293,107 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
   }
 }
 
+const LiveArgs = z.object({
+  id: z.string().optional().describe('The artifact id to serve live.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
+  share: z.enum(['local', 'network', 'tunnel']).optional().describe(
+    'Reach: "local" (default, localhost only) · "network" (same WiFi/LAN — teammates open ' +
+    'http://<your-ip>:port) · "tunnel" (a public https link via cloudflared/ngrok, plus LAN). ' +
+    'network/tunnel links carry a private access token, so only someone with the full URL gets in.'),
+  // No `version`: live mode ALWAYS tracks the current version (incl. rollbacks).
+});
+
+export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
+  name = 'artifact_live';
+  description =
+    'Serve an artifact in a real browser with LIVE hot-reload: a persistent server that always ' +
+    'renders the artifact’s CURRENT version (React/Vue via an in-browser harness, no build step) ' +
+    'and auto-refreshes the instant you artifact_update or artifact_rollback it. Returns a URL — ' +
+    'open it once; it stays in sync as you iterate. Set share="network" to share over your LAN, or ' +
+    'share="tunnel" for a public private link (PR walkthrough / living dashboard for your team). ' +
+    'Stop it with artifact_live_stop. Use artifact_preview for a one-shot snapshot to screenshot.';
+  argsSchema = LiveArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof LiveArgs>, ctx: ToolContext): Promise<ToolResult> {
+    let id: string;
+    let manifest;
+    try {
+      id = resolveArtifactId(args);
+      // Validate the artifact exists up-front so the model gets a clean error, not a 500 page.
+      ({ manifest } = await getArtifact(ctx.cwd, id));
+    } catch (e: any) {
+      return { content: e?.message ?? String(e), isError: true };
+    }
+
+    const share = args.share ?? 'local';
+    const shared = share !== 'local';
+    const { makeAccessToken } = await import('../../artifacts/live-share.js');
+
+    let info;
+    try {
+      info = await startLive({
+        cwd: ctx.cwd,
+        id,
+        port: livePort(id),
+        host: shared ? '0.0.0.0' : '127.0.0.1',           // expose on the network when sharing
+        token: shared ? makeAccessToken() : undefined,    // private-link token for shared modes
+        lan: shared,
+        tunnel: share === 'tunnel',
+      });
+    } catch (e: any) {
+      return { content: `Could not start live server for "${id}": ${e?.message ?? e}`, isError: true };
+    }
+
+    ctx.emit({ type: 'progress', message: `Live artifact "${id}" (${manifest.type}) at ${info.url}` });
+
+    const lines = [`Live preview of "${id}" (${manifest.type}) — hot-reloads on every artifact_update / artifact_rollback.`];
+    lines.push(`  You (this machine):  ${info.url}`);
+    if (shared) {
+      const lan = info.urls.filter(u => u !== info.url && u !== info.tunnelUrl);
+      for (const u of lan) lines.push(`  Same network (LAN):  ${u}`);
+      if (info.tunnelUrl) lines.push(`  Public link:         ${info.tunnelUrl}`);
+      else if (info.tunnelError) lines.push(`  Public link:         (unavailable — ${info.tunnelError})`);
+      lines.push(`  🔒 These links include a private access token — share the FULL url.`);
+    }
+    lines.push(`Stop with artifact_live_stop id="${id}".`);
+
+    return {
+      content: lines.join('\n'),
+      metadata: {
+        artifactId: id, type: manifest.type, url: info.url, urls: info.urls,
+        tunnelUrl: info.tunnelUrl, port: info.port, share, server: liveServerName(id), live: true,
+      },
+    };
+  }
+}
+
+const LiveStopArgs = z.object({
+  id: z.string().optional().describe('The artifact id whose live server to stop. Omit to stop ALL live artifact servers.'),
+  name: z.string().optional().describe('Alias for id.'),
+});
+
+export class ArtifactLiveStopTool extends Tool<z.infer<typeof LiveStopArgs>> {
+  name = 'artifact_live_stop';
+  description = 'Stop a live artifact server started with artifact_live (or all of them if no id is given).';
+  argsSchema = LiveStopArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof LiveStopArgs>, _ctx: ToolContext): Promise<ToolResult> {
+    const id = (args.id ?? args.name ?? '').trim();
+    if (!id) {
+      const running = listLive().length;
+      await stopAllLive();
+      return { content: running ? `Stopped ${running} live artifact server(s).` : 'No live artifact servers were running.' };
+    }
+    const stopped = await stopLive(id);
+    return { content: stopped ? `Stopped live server for "${id}".` : `No live server was running for "${id}".` };
+  }
+}
+
 export const ARTIFACT_TOOLS = [
   ArtifactCreateTool, ArtifactUpdateTool, ArtifactListTool, ArtifactGetTool, ArtifactRollbackTool, ArtifactPreviewTool,
-  ArtifactReviewTool,
+  ArtifactReviewTool, ArtifactLiveTool, ArtifactLiveStopTool,
 ];

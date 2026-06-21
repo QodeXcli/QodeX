@@ -34,5 +34,19 @@ console.log('— nudge content is precise (avoids over-delegation) —');
 console.log('— general returns empty (unchanged behavior) —');
 check('general is empty', systemAddendumFor('general') === '');
 
+console.log('— analysis profile equips the model for trade-off / business tasks —');
+{
+  const a = systemAddendumFor('analysis');
+  check('analysis has a substantial profile', a.length > 500);
+  check('marks it as NOT a coding task', a.includes('NOT a coding task'));
+  check('prescribes options', /OPTIONS/.test(a));
+  check('prescribes weighted criteria', /CRITERIA/.test(a) && /[Ww]eight/.test(a));
+  check('demands a single recommendation', /Recommend ONE|Recommend\b/.test(a));
+  check('covers trade-offs explicitly', /trade-?off/i.test(a));
+  check('covers business plans', /business plan/i.test(a));
+  check('forbids inventing numbers/citations', /NEVER invent/.test(a));
+  check('gets no delegation nudge (not read-heavy)', !a.includes('SEPARATE context window'));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

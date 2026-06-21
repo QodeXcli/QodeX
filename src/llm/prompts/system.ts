@@ -27,7 +27,7 @@ export interface SystemPromptContext {
   availableToolNames: string[];
   /** Detected task class (refactor/debug/feature/review/explain/frontend/general).
    *  Used to inject focused task-shaped reasoning hints into the system prompt. */
-  taskClass?: 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'general';
+  taskClass?: 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general';
   /** Deep stack-specialist expertise (Django/WordPress/Next/Vite/three.js/Node).
    *  Pre-built by the caller via stack-profiles.buildStackAddendum(). Orthogonal to
    *  taskClass — injected right after the task-class addendum. */
@@ -372,7 +372,12 @@ tools actually returned — not background education and not a pitch.
 - Concise. The user is in a terminal — skip pleasantries.
 - Show your plan in 1-3 lines before doing heavy work.
 - Between tool calls, narrate progress briefly (1 sentence).
-- When done, summarize what changed in 1-3 lines and any follow-up the user should do.
+- When done, summarize what changed in 1-3 lines.
+- **End a substantive task with a brief next-step suggestion.** After the summary, add one short
+  line (prefixed \`Next:\`) proposing the most relevant follow-up for THIS task — e.g. "Next: want me
+  to run the tests?", "Next: I can fix the meta description and add the hreflang tags", "Next: deploy
+  this, or review the diff?". Offer 1-3 concrete, task-specific options the user can say yes to — not
+  generic filler. Skip it only for trivial turns (a greeting, a one-word answer, a pure lookup).
 - For code blocks in your final message, use fenced blocks with language tags.
 - **CRITICAL: Output your final response exactly ONCE.** Do not repeat, restate, or
   duplicate your answer, report, or any of its sections. Once you have written your
@@ -394,6 +399,18 @@ tools actually returned — not background education and not a pitch.
   // other way around. Sub-agents skip this: their role brief is already focused.
   if (ctx.mode !== 'subagent' && ctx.skillsBlock && ctx.skillsBlock.trim()) {
     sections.push(ctx.skillsBlock.trim());
+  }
+
+  // Skill-provisioning policy — applies whether or not any skills are installed
+  // (the list above may be empty). The decision to pull a repo stays with the user.
+  if (ctx.mode !== 'subagent') {
+    sections.push(`## Skills — provisioning policy
+A "skill" is an installable playbook (any installed ones are listed under "Available Skills" above — that list may be empty).
+- If a clearly-matching skill is ALREADY installed, just load it with use_skill — no need to ask.
+- If the task would clearly benefit from a skill you DON'T have installed: do not silently install one, and do not silently guess. First ASK the user which they prefer:
+  (a) you proceed with your own built-in knowledge, or
+  (b) you find & install a relevant skill — search installed (search_skills) → known registry → GitHub search — then load it.
+- Only call install_skill AFTER the user chooses (b). It resolves a bare name (registry, then GitHub search), confirms a SKILL.md, runs a security scan, and installs into ~/.qodex/skills; then load it with use_skill. Never install from an unverified source without naming what you picked.`);
   }
 
   // Strict mode appendix — only in normal/non-subagent modes (sub-agents already

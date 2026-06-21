@@ -1,6 +1,8 @@
-# QodeX
+# QodeX — the local-first LLM agent & coding CLI agent
 
-> **Local-first agentic coding CLI.** Runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A local-first take on the agentic coding assistant — built so a model running on *your* machine can do real, multi-step engineering work, fully offline if you want.
+> **QodeX is an open-source LLM agent for your terminal — a local-first, agentic coding CLI.** It runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A privacy-first AI coding agent built so a model on *your* machine does real, multi-step engineering work — fully offline if you want.
+
+> If you're looking for an **LLM agent**, a **CLI agent**, an **AI coding agent**, or an **autonomous terminal agent** that doesn't ship your code to someone else's cloud — that's QodeX.
 
 **Version 2.4.0** · 100+ built-in tools · English & Persian · Apache-2.0
 
@@ -45,8 +47,11 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes.
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
-- **Vision** — `vision_analyze` sends a screenshot to a local vision model (Qwen-VL) or Claude / GPT.
-- **Verify its own work** — `auto_fix` runs your test command in a fix→test loop with an iteration cap and same-failure-twice detection.
+- **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.
+- **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit**; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
+- **Trade‑off & business analysis** — ask it to analyze or plan (not code) and it produces **decision‑grade output**: options × weighted criteria → a scored comparison and one clear recommendation, business‑plan structure, no invented numbers.
+- **Persian‑first** — skill auto‑loading and tool selection understand Persian prompts (تحلیل، دیتابیس، آرتیفکت…), not just English keywords.
+- **Verify its own work** — `auto_fix` runs your test command in a fix→test loop with an iteration cap and same-failure-twice detection; the auto‑verify gate runs the right checker **per language** in a polyglot repo (TS *and* Python both get checked).
 - **Git** — status, diff, log, branch, commit, create-pr, release-notes.
 - **Skills** — install from a curated registry or any GitHub repo (single / multi / catalog), security-scanned on the way in; `search_skills` to find them.
 - **Sub-agents & orchestration** — `task` delegates to a separate model/window; `orchestrate` runs a DAG of sub-agents; `gather` fans out reads in parallel.

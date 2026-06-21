@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://qodexcli.github.io/QodeX/sitemap.xml

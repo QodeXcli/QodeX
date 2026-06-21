@@ -1,5 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { initialIndex, moveSelection, choose } from '../src/setup/prompt.js';
+import { initialIndex, moveSelection, choose, displayWidth, physicalRows } from '../src/setup/prompt.js';
+
+describe('setup selector — wrap-aware redraw math (regression for piled-up menu)', () => {
+  it('displayWidth ignores ANSI colour/dim escapes', () => {
+    expect(displayWidth('hello')).toBe(5);
+    expect(displayWidth('\x1b[36m\x1b[1mOpenRouter\x1b[0m')).toBe(10);
+    expect(displayWidth('\x1b[2mdim\x1b[0m')).toBe(3);
+  });
+  it('physicalRows counts terminal wrapping, not logical lines', () => {
+    expect(physicalRows('short', 80)).toBe(1);
+    expect(physicalRows('', 80)).toBe(1);
+    // a 100-char visible line wraps to 2 rows at 80 cols (the bug: it was counted as 1)
+    expect(physicalRows('x'.repeat(100), 80)).toBe(2);
+    expect(physicalRows('x'.repeat(161), 80)).toBe(3);
+  });
+  it('physicalRows uses VISIBLE width — colour codes do not inflate the row count', () => {
+    const styled = '\x1b[36m\x1b[1m' + 'x'.repeat(40) + '\x1b[0m'; // 40 visible chars
+    expect(physicalRows(styled, 80)).toBe(1);
+  });
+});
 
 describe('setup selector — initialIndex', () => {
   const opts = [{ value: 'a' }, { value: 'b' }, { value: 'c' }];

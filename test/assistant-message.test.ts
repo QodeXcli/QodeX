@@ -1,5 +1,30 @@
 import { describe, it, expect } from 'vitest';
-import { parseSegments } from '../src/cli/render/assistant-message.js';
+import { parseSegments, normalizeProse } from '../src/cli/render/assistant-message.js';
+
+describe('normalizeProse (collapse blank-line padding)', () => {
+  it('collapses runs of 3+ newlines down to a single blank line', () => {
+    expect(normalizeProse('a\n\n\n\n\n\nb')).toBe('a\n\nb');
+  });
+  it('keeps a single paragraph break and adjacent lines intact', () => {
+    expect(normalizeProse('a\n\nb')).toBe('a\n\nb');
+    expect(normalizeProse('a\nb')).toBe('a\nb');
+  });
+  it('trims leading/trailing blank lines and trailing whitespace', () => {
+    expect(normalizeProse('\n\n  a\n\n\n')).toBe('  a');
+    expect(normalizeProse('a   \n\n\nb')).toBe('a\n\nb');
+  });
+});
+
+describe('parseSegments collapses blank-line padding in prose only', () => {
+  it('collapses huge gaps in prose but preserves blank lines inside code', () => {
+    const msg = 'Intro\n\n\n\n\n\nstill intro\n\n```js\nlet a = 1;\n\n\n\nlet b = 2;\n```';
+    const segs = parseSegments(msg);
+    const text = segs.find(s => s.kind === 'text') as any;
+    const code = segs.find(s => s.kind === 'code') as any;
+    expect(text.body).toBe('Intro\n\nstill intro');           // gap collapsed
+    expect(code.body).toBe('let a = 1;\n\n\n\nlet b = 2;');    // code untouched
+  });
+});
 
 describe('parseSegments (assistant message code/prose split)', () => {
   it('splits prose and fenced code into ordered segments', () => {
