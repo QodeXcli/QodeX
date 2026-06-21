@@ -2237,7 +2237,7 @@ export class AgentLoop {
    * picks ONE of refactor/debug/feature/review/explain/general based on the
    * user's verbs and structure.
    */
-  private classifyForPrompt(initial: Message[]): 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'general' {
+  private classifyForPrompt(initial: Message[]): 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general' {
     const userMsg = initial.find(m => m.role === 'user')?.content ?? '';
     const text = String(userMsg).toLowerCase();
     // Backend / Django signals — checked FIRST so "design the Django models" classifies as backend, not frontend.
@@ -2256,6 +2256,12 @@ export class AgentLoop {
     if (/\b(debug|fix|error|exception|crash|broken|bug|broke|stuck|hang|throwing|undefined|null|fail|regression|نمی‌?کار|نمیکار|خراب|باگ|اشکال|درست(?: نمی| نمی))\b/.test(text)) return 'debug';
     if (/\b(review|critique|audit|inspect|code ?review|smell|improve|quality|بررسی)\b/.test(text)) return 'review';
     if (/\b(explain|describe|what does|how does|walk through|understand|چطور|چگونه|توضیح)\b/.test(text)) return 'explain';
+    // Analytical / decision / business tasks — NOT coding. Checked before `feature` so
+    // "build a business plan" / "develop a strategy" classify as analysis, not a build task.
+    if (/\b(trade-?offs?|business ?plan|pros and cons|cost[- ]benefit|swot|feasibility|go-to-market|value proposition|market analysis|competitive analysis|monetiz|decision matrix|which (?:option |one )?(?:is )?better|compare\b[\s\S]*\b(?:vs|versus)\b|evaluate (?:the )?options|weigh (?:the )?(?:options|pros)|should (?:i|we) (?:use|choose|pick|go with)|strategy|analy[sz]e|analysis)\b/.test(text)
+      || /(تحلیل|بیزینس ?پلن|طرح ?کسب|کسب ?و ?کار|استراتژی|مقایسه|مزایا و معایب|سود و زیان|گزینه|ارزیابی|امکان ?سنجی|تصمیم|بازار)/.test(text)) {
+      return 'analysis';
+    }
     if (/\b(add|build|implement|create|new feature|develop|integrate|بساز|اضافه|پیاده ?سازی|ایجاد)\b/.test(text)) return 'feature';
     return 'general';
   }

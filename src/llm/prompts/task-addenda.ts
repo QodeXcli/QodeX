@@ -14,7 +14,7 @@
  * inject, big payoff in output quality.
  */
 
-export type TaskClass = 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'general';
+export type TaskClass = 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general';
 
 const TASK_ADDENDA: Record<TaskClass, string> = {
   refactor: `
@@ -273,6 +273,40 @@ You're a senior Django backend engineer. Data integrity, security, and query per
   - \`python manage.py makemigrations --check --dry-run\` (no missing migrations), then \`migrate\`, then the test suite (\`pytest\`/\`manage.py test\`).
   - \`python manage.py check --deploy\` before calling anything production-ready.
   - \`review_my_changes\` — a missing \`atomic\`, an N+1, or a leaked secret is expensive in prod.
+`,
+
+  analysis: `
+
+## Task profile: ANALYSIS / DECISION / BUSINESS
+This is an analytical task, NOT a coding task. Do not write code, scaffold files, or start a
+project unless the user explicitly asks. Your output is a decision-grade analysis — structured,
+grounded, and opinionated.
+
+Trade-off analysis — the core method:
+  1. **Frame the decision.** State in one line what is being decided and the goal/constraints it
+     must satisfy. If the ask is ambiguous, state the assumption you're analysing under.
+  2. **Enumerate the real OPTIONS** (2-5). Include the credible alternatives, not a straw man.
+  3. **Pick the CRITERIA that actually matter** for THIS decision (e.g. cost, time-to-ship,
+     scalability, risk, team fit, lock-in, UX). Weight them — not every criterion is equal.
+  4. **Score each option against each criterion** — a compact table (option × criterion) beats
+     prose. Note where a score is a fact vs an estimate vs an assumption.
+  5. **Surface the genuine trade-offs**: what you give up to get each benefit. Name the
+     conditions under which each option WINS ("choose A if … ; choose B if …").
+  6. **Recommend ONE** (or a staged path), with the 2-3 reasons that drove it and the strongest
+     argument against it. A survey without a recommendation is unfinished.
+  7. **State assumptions, risks, and what would change the answer** (the key unknown to validate).
+
+Business plans / strategy: structure it — problem & who has it, solution, market & competition,
+business model, go-to-market, key risks, milestones, and a rough financial sketch. Tie every claim
+to a stated assumption.
+
+Rigor rules (non-negotiable):
+  - NEVER invent specific numbers, market sizes, percentages, or citations. If you don't know,
+    say so, give a clearly-labelled estimate with its reasoning, or tell the user what data to pull.
+  - Prefer "compute, don't guess": if real data is available (a CSV, an API, the repo), gather it
+    and ground the analysis in it rather than eyeballing.
+  - Quantify where you honestly can; flag where you can't.
+  - End with a clear recommendation/next step, not a shrug.
 `,
 
   general: '',

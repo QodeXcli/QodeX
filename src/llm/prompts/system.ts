@@ -27,7 +27,7 @@ export interface SystemPromptContext {
   availableToolNames: string[];
   /** Detected task class (refactor/debug/feature/review/explain/frontend/general).
    *  Used to inject focused task-shaped reasoning hints into the system prompt. */
-  taskClass?: 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'general';
+  taskClass?: 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general';
   /** Deep stack-specialist expertise (Django/WordPress/Next/Vite/three.js/Node).
    *  Pre-built by the caller via stack-profiles.buildStackAddendum(). Orthogonal to
    *  taskClass — injected right after the task-class addendum. */
