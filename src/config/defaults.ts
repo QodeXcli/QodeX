@@ -51,7 +51,9 @@ export const QODEX_BLOBS_DIR = path.join(QODEX_HOME, 'blobs');
 export interface RoleConfig {
   /** Provider + model. Optional: when omitted (e.g. an imported Claude Code agent that
    *  inherits), the role inherits roles.subagent → parent default. */
-  provider?: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+  // A built-in provider, OR a custom gateway name from providers.custom[].name.
+  // `(string & {})` keeps editor autocomplete for the built-ins while allowing any name.
+  provider?: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | (string & {});
   model?: string;
   /** Per-sub-agent iteration cap. Defaults to subagents.budgetPerSubagent.maxIterations. */
   maxIterations?: number;
@@ -67,7 +69,8 @@ export interface RoleConfig {
 
 export interface QodexConfig {
   defaults: {
-    provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+    // A built-in provider, OR a custom gateway name from providers.custom[].name.
+    provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | (string & {});
     model: string;
     preferLocal: boolean;
     /** Preload the local default model at startup so the first prompt isn't a cold load.

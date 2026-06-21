@@ -24,6 +24,9 @@ import { QODEX_CONFIG_FILE, QODEX_HOME, DEFAULT_CONFIG, type QodexConfig } from 
 import { loadConfig } from '../config/loader.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { withLock } from '../utils/file-lock.js';
+import { validateCustomProviders } from '../llm/providers/custom-config.js';
+import { CustomOpenAIProvider } from '../llm/providers/custom.js';
+import type { ModelInfo } from '../llm/types.js';
 import {
   detectAllLocalModels,
   recommendPrimary,
@@ -106,11 +109,25 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     console.log('');
   }
 
-  const modelChoices = buildModelChoices(hw, detected);
-  // Default: the detector's top recommendation (if any), else hardware-tier suggestion.
+  // Models from any configured custom API (provider add) whose key is set — fetched
+  // live from its /models endpoint so the wizard can offer them for primary/sub-agent.
+  const apiModels = await detectConfiguredApiModels();
+  if (apiModels.length > 0) {
+    const byProvider = new Map<string, number>();
+    for (const m of apiModels) byProvider.set(m.provider, (byProvider.get(m.provider) ?? 0) + 1);
+    console.log(`  From your configured API${byProvider.size === 1 ? '' : 's'}: ${
+      [...byProvider].map(([p, n]) => `${p} (${n} model${n === 1 ? '' : 's'})`).join(', ')}`);
+    console.log('');
+  }
+
+  const modelChoices = buildModelChoices(hw, detected, apiModels);
+  // Default: a configured-API model first (the user just set it up), else the detector's
+  // top local recommendation, else the first choice.
   const recommended = recommendPrimary(detected);
-  const defaultPick = recommended?.id ?? modelChoices[0]!.value;
-  const primaryModel = await choose<string>(
+  const defaultPick = apiModels[0]
+    ? `${apiModels[0].provider}/${apiModels[0].id}`
+    : (recommended?.id ?? modelChoices[0]!.value);
+  let primaryModel = await choose<string>(
     'Pick the model QodeX should use by default:',
     modelChoices,
     defaultPick,
@@ -118,12 +135,15 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   );
 
   // Derive provider from the chosen model id.
-  // If the user picked something we detected, trust its source attribution
-  // (an LM Studio model goes through the openai provider with custom baseUrl).
-  // Otherwise fall back to id-pattern heuristics.
+  // A configured-API pick arrives as "<provider>/<id>" — split it so defaults.provider
+  // points at that gateway and defaults.model is the bare id. Otherwise: trust a detected
+  // model's source attribution, else fall back to id-pattern heuristics.
+  const apiPick = apiModels.find(m => `${m.provider}/${m.id}` === primaryModel);
+  if (apiPick) primaryModel = apiPick.id;
   const detectedPick = detected.find(m => m.id === primaryModel);
-  const provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' =
-    detectedPick ? detectedPick.provider
+  const provider: string =
+    apiPick ? apiPick.provider
+    : detectedPick ? detectedPick.provider
     : primaryModel.startsWith('claude-') ? 'anthropic'
     : primaryModel.startsWith('gpt-') || primaryModel.startsWith('o') ? 'openai'
     : primaryModel.startsWith('deepseek-') ? 'deepseek'
@@ -160,7 +180,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   //                     role=<cloud>/<picked>
   // - 'off'           : mode=off
   let subagentMode: 'off' | 'sequential' | 'parallel' = 'sequential';
-  let subagentRole: { provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek'; model: string } | undefined;
+  let subagentRole: { provider: string; model: string } | undefined;
 
   if (subagentChoice === 'off') {
     subagentMode = 'off';
@@ -213,6 +233,8 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
       'If your parent is local, this enables real parallel execution (auto policy).',
     );
     const cloudChoices: Array<{ value: string; label: string; hint?: string }> = [
+      // Your configured-API models first (you just set them up), then the built-in cloud options.
+      ...apiModels.map(m => ({ value: `${m.provider}/${m.id}`, label: `${m.provider}/${m.id}`, hint: `API · ${m.provider}` })),
       { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5', hint: 'cheap, fast — good for batch sub-tasks' },
       { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', hint: 'premium quality, higher cost' },
       { value: 'gpt-4o-mini', label: 'gpt-4o-mini', hint: 'cheap OpenAI option' },
@@ -222,14 +244,16 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     const cloudModel = await choose<string>(
       'Sub-agent model:',
       cloudChoices,
-      'claude-haiku-4-5',
+      cloudChoices[0]!.value,
       promptOpts,
     );
-    const cloudProvider: 'anthropic' | 'openai' | 'deepseek' =
-      cloudModel.startsWith('claude-') ? 'anthropic'
+    const apiSub = apiModels.find(m => `${m.provider}/${m.id}` === cloudModel);
+    const cloudProvider: string =
+      apiSub ? apiSub.provider
+      : cloudModel.startsWith('claude-') ? 'anthropic'
       : cloudModel.startsWith('gpt-') ? 'openai'
       : 'deepseek';
-    subagentRole = { provider: cloudProvider, model: cloudModel };
+    subagentRole = { provider: cloudProvider, model: apiSub ? apiSub.id : cloudModel };
   }
 
   // ── 3c. Optional dedicated vision sub-agent ─────────────────────────────────
@@ -237,7 +261,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   // mockup analysis here, on a vision-capable model, independent of the general
   // sub-agent above. We suggest any detected vision model (id markers: vl/vision/
   // llava/moondream/minicpm-v/bakllava); the user can also pick a cloud one.
-  let visionRole: { provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek'; model: string } | undefined;
+  let visionRole: { provider: string; model: string } | undefined;
   if (subagentChoice !== 'off') {
     const visionModels = detected.filter(m =>
       /(?:vl\b|vl[:_-]|vision|llava|moondream|minicpm-v|bakllava)/i.test(m.id));
@@ -364,9 +388,41 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
  *      require a `ollama pull` first.
  *   3. Cloud options.
  */
-function buildModelChoices(
+/** A model offered by a CONFIGURED custom API provider (providers.custom[] with its key set). */
+export interface ApiCatalogModel { provider: string; id: string; contextWindow?: number }
+
+/**
+ * Fetch the model catalog of every configured custom provider whose API key is set,
+ * by reusing the SAME `GET {baseUrl}/models` discovery the runtime uses. This is what
+ * lets the wizard offer "the models of the API you set up" for primary / sub-agent —
+ * previously it only saw locally-detected models. Best-effort and bounded: a provider
+ * with no key, no network, or no /models support simply contributes nothing.
+ */
+export async function detectConfiguredApiModels(timeoutMs = 6000): Promise<ApiCatalogModel[]> {
+  let cfg: any;
+  try { cfg = await loadConfig(process.cwd()); } catch { return []; }
+  const customRaw = (cfg?.providers as any)?.custom;
+  if (!Array.isArray(customRaw) || customRaw.length === 0) return [];
+  const { providers: defs } = validateCustomProviders(customRaw);
+  const active = defs.filter(d => !!process.env[d.apiKeyEnv]);
+  if (active.length === 0) return [];
+
+  const out: ApiCatalogModel[] = [];
+  await Promise.allSettled(active.map(async def => {
+    const provider = new CustomOpenAIProvider(def, process.env[def.apiKeyEnv]);
+    const models = await Promise.race<ModelInfo[]>([
+      provider.listModels(),
+      new Promise<ModelInfo[]>(resolve => setTimeout(() => resolve([]), timeoutMs)),
+    ]);
+    for (const m of models) out.push({ provider: def.name, id: m.id, contextWindow: m.contextWindow });
+  }));
+  return out;
+}
+
+export function buildModelChoices(
   hw: HardwareProfile,
   detected: DetectedModel[],
+  apiModels: ApiCatalogModel[] = [],
 ): Array<{ value: string; label: string; hint?: string }> {
   const choices: Array<{ value: string; label: string; hint?: string }> = [];
   const seen = new Set<string>();
@@ -377,6 +433,15 @@ function buildModelChoices(
     seen.add(m.id);
     const f = formatModel(m);
     choices.push({ value: m.id, label: f.label, hint: `installed · ${f.hint}` });
+  }
+
+  // 1b. Models from configured custom APIs (provider/id form so routing is unambiguous).
+  for (const m of apiModels) {
+    const value = `${m.provider}/${m.id}`;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const ctx = m.contextWindow ? ` · ${Math.round(m.contextWindow / 1000)}k ctx` : '';
+    choices.push({ value, label: value, hint: `API · ${m.provider}${ctx}` });
   }
 
   // 2. Hardware-tier recommendations — not yet installed, will need a pull
@@ -492,12 +557,12 @@ function approxModelSizeB(modelId: string): number {
 /** Write the assembled config to disk, merging with existing values. */
 async function writeConfig(picks: {
   primaryModel: string;
-  provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek';
+  provider: string;
   primaryDetected?: DetectedModel;
   subagentMode: 'off' | 'sequential' | 'parallel';
-  subagentRole?: { provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek'; model: string };
+  subagentRole?: { provider: string; model: string };
   subagentDetected?: DetectedModel;
-  visionRole?: { provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek'; model: string };
+  visionRole?: { provider: string; model: string };
   visionDetected?: DetectedModel;
   anthropicCaching: boolean;
   autoSnapshot: boolean;
@@ -591,7 +656,7 @@ async function writeConfig(picks: {
       concurrencyMode: (existing as any).subagents?.concurrencyMode ?? 'auto',
     },
     roles: (() => {
-      type Role = { provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek'; model: string };
+      type Role = { provider: string; model: string };
       const r: Record<string, Role> = { ...((existing as any).roles ?? {}) };
       // General sub-agent role: set when chosen, else clear (inherit parent next run).
       if (picks.subagentRole) {
