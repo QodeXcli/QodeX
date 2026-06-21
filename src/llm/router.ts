@@ -222,6 +222,23 @@ export class ModelRouter {
   }
 
   /**
+   * Resolve a model id, breaking provider ties in favor of `defaults.provider`.
+   *
+   * A bare model id (e.g. `glm-5.2`) is ambiguous when two providers serve it — the
+   * model index's bare key holds whichever was registered last, so routing could pick
+   * the wrong provider (and its possibly-invalid key → 401). When the id is bare and
+   * the configured default provider actually serves it, resolve the qualified
+   * `${defaults.provider}/${id}` first; otherwise fall back to the plain resolution.
+   */
+  private resolvePreferringDefaultProvider(modelId: string): ReturnType<typeof this.resolveModel> {
+    if (!modelId.includes('/')) {
+      const qualified = this.resolveModel(`${this.config.defaults.provider}/${modelId}`);
+      if (qualified) return qualified;
+    }
+    return this.resolveModel(modelId);
+  }
+
+  /**
    * Distinct models whose id (or `provider/id`) matches `query` case-insensitively.
    * Prefix matches win: if any id starts with the query, only those are returned;
    * otherwise substring matches are returned. Used by resolveModel (unique case)
@@ -291,11 +308,11 @@ export class ModelRouter {
         candidateId = this.config.defaults.model;
     }
 
-    let resolved = this.resolveModel(candidateId);
+    let resolved = this.resolvePreferringDefaultProvider(candidateId);
 
     // Fall back to default if class-specific isn't available
     if (!resolved) {
-      resolved = this.resolveModel(this.config.defaults.model);
+      resolved = this.resolvePreferringDefaultProvider(this.config.defaults.model);
     }
 
     // Last resort: any model that fits context

@@ -86,5 +86,49 @@ console.log('— prefix beats substring —');
     m.length === 1 && m[0]!.info.id === 'coder-special:7b');
 }
 
+console.log('— defaults.provider breaks ties for a bare model id (regression) —');
+{
+  // Faithful replication of RouterCore.resolveModel (exact path) + the new
+  // resolvePreferringDefaultProvider tie-break.
+  const resolveExact = (index: Map<string, Val>, modelId: string, providers: Set<string>) => {
+    const direct = index.get(modelId);
+    if (!direct) return null;
+    let resolvedId = modelId;
+    if (modelId.includes('/')) {
+      const [first, ...rest] = modelId.split('/');
+      if (first && providers.has(first)) resolvedId = rest.join('/');
+    }
+    return { provider: direct.provider, resolvedId };
+  };
+  const resolvePreferringDefault = (index: Map<string, Val>, modelId: string, defProvider: string, providers: Set<string>) => {
+    if (!modelId.includes('/')) {
+      const q = resolveExact(index, `${defProvider}/${modelId}`, providers);
+      if (q) return q;
+    }
+    return resolveExact(index, modelId, providers);
+  };
+
+  // Two providers serve glm-5.2; api-203668-xyz registers LAST so it owns the bare key.
+  const idx = buildIndex([
+    { provider: 'glm', id: 'glm-5.2' },
+    { provider: 'api-203668-xyz', id: 'glm-5.2' },
+  ]);
+  const providers = new Set(['glm', 'api-203668-xyz']);
+
+  check('the bug: bare "glm-5.2" resolves to the LAST-registered provider',
+    resolveExact(idx, 'glm-5.2', providers)!.provider.name === 'api-203668-xyz');
+
+  const r = resolvePreferringDefault(idx, 'glm-5.2', 'glm', providers)!;
+  check('defaults.provider=glm wins the tie', r.provider.name === 'glm' && r.resolvedId === 'glm-5.2');
+
+  const r2 = resolvePreferringDefault(idx, 'glm-5.2', 'ollama', providers)!;
+  check('falls back to plain resolution when default provider lacks the model',
+    r2.provider.name === 'api-203668-xyz');
+
+  const r3 = resolvePreferringDefault(idx, 'glm/glm-5.2', 'api-203668-xyz', providers)!;
+  check('an explicit provider/model is never overridden by the default',
+    r3.provider.name === 'glm');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
