@@ -75,7 +75,10 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   { members: ['csv_read', 'csv_write', 'xlsx_read', 'pdf_read', 'media_probe', 'media_transform'],
     keywords: ['csv', 'excel', 'xlsx', 'spreadsheet', 'pdf', 'video', 'audio', 'ffmpeg', '.csv', '.pdf', '.xlsx', '.mp4', '.png', '.jpg'] },
   { members: ['wp_find_hook', 'wp_list_hooks'], keywords: ['wordpress', 'woocommerce', 'wp_', 'wp-', 'shortcode', 'gutenberg'] },
-  { members: ['install_mcp', 'install_skill', 'mcp_scaffold'], keywords: ['mcp', 'scaffold', 'connector', 'install skill'] },
+  // install_skill must surface whenever skills are discussed — otherwise the model can't
+  // self-provision a skill it lacks (it never sees the tool) and wrongly says "I can't install".
+  { members: ['install_skill'], keywords: ['skill', 'skills', 'اسکیل', 'مهارت', 'plugin'] },
+  { members: ['install_mcp', 'mcp_scaffold'], keywords: ['mcp', 'scaffold', 'connector', 'install skill'] },
   { members: ['forget', 'project_log', 'project_recall'], keywords: ['forget', 'project log', 'remember that', 'note that'] },
   { members: ['network_check', 'network_optimize'], keywords: ['network', 'latency', 'dns', 'proxy', 'ping'] },
   { members: ['ci_status'], keywords: [' ci ', 'pipeline', 'github actions', 'workflow run'] },

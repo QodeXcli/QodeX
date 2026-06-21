@@ -27,6 +27,7 @@ const ALL = [
   'csv_read','xlsx_read','pdf_read','wp_find_hook','wp_list_hooks',
   'explain_codebase','find_dead_code','semantic_search','auto_fix',
   'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback','artifact_live','artifact_live_stop',
+  'install_skill','install_mcp','mcp_scaffold',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -95,6 +96,20 @@ console.log('— artifact family gates on the artifact signal (regression) —')
   const live = names('start a live preview of the artifact with hot-reload');
   check('live request surfaces artifact_live', live.has('artifact_live'));
   check('live request surfaces artifact_live_stop', live.has('artifact_live_stop'));
+}
+
+console.log('— install_skill surfaces whenever skills are discussed (regression) —');
+{
+  // Without this the model never sees install_skill and wrongly says "I can't install".
+  check('en: "find any skill and install it" surfaces install_skill',
+    names('can you find any skill and install it?').has('install_skill'));
+  check('en: "install the shadcn skill" surfaces install_skill',
+    names('install the shadcn skill').has('install_skill'));
+  check('fa: "یه اسکیل پیدا کن و نصب کن" surfaces install_skill',
+    names('یه اسکیل پیدا کن و نصب کن').has('install_skill'));
+  check('non-skill task EXCLUDES install_skill',
+    !names('fix the type error in math.ts').has('install_skill'));
+  check('mcp keyword still pulls install_mcp', names('add the linear mcp connector').has('install_mcp'));
 }
 
 console.log('— specialist composes with common —');
