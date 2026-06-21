@@ -296,19 +296,22 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
 const LiveArgs = z.object({
   id: z.string().optional().describe('The artifact id to serve live.'),
   name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
+  share: z.enum(['local', 'network', 'tunnel']).optional().describe(
+    'Reach: "local" (default, localhost only) · "network" (same WiFi/LAN — teammates open ' +
+    'http://<your-ip>:port) · "tunnel" (a public https link via cloudflared/ngrok, plus LAN). ' +
+    'network/tunnel links carry a private access token, so only someone with the full URL gets in.'),
   // No `version`: live mode ALWAYS tracks the current version (incl. rollbacks).
 });
 
 export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
   name = 'artifact_live';
   description =
-    'Serve an artifact in a real browser with LIVE hot-reload: starts a persistent local ' +
-    'server that always renders the artifact’s CURRENT version (React/Vue via an in-browser ' +
-    'harness, no build step) and auto-refreshes the browser the instant you change it with ' +
-    'artifact_update or artifact_rollback. Returns a URL — open it once with browser_navigate; ' +
-    'it stays in sync as you iterate. No python required. Stop it with artifact_live_stop. ' +
-    'Use this for interactive iteration; use artifact_preview for a one-shot snapshot to ' +
-    'screenshot + review. (React/Vue rendering needs in-browser CDN access.)';
+    'Serve an artifact in a real browser with LIVE hot-reload: a persistent server that always ' +
+    'renders the artifact’s CURRENT version (React/Vue via an in-browser harness, no build step) ' +
+    'and auto-refreshes the instant you artifact_update or artifact_rollback it. Returns a URL — ' +
+    'open it once; it stays in sync as you iterate. Set share="network" to share over your LAN, or ' +
+    'share="tunnel" for a public private link (PR walkthrough / living dashboard for your team). ' +
+    'Stop it with artifact_live_stop. Use artifact_preview for a one-shot snapshot to screenshot.';
   argsSchema = LiveArgs;
   isReadOnly = false;
   isDestructive = false;
@@ -324,21 +327,44 @@ export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
       return { content: e?.message ?? String(e), isError: true };
     }
 
+    const share = args.share ?? 'local';
+    const shared = share !== 'local';
+    const { makeAccessToken } = await import('../../artifacts/live-share.js');
+
     let info;
     try {
-      info = await startLive({ cwd: ctx.cwd, id, port: livePort(id) });
+      info = await startLive({
+        cwd: ctx.cwd,
+        id,
+        port: livePort(id),
+        host: shared ? '0.0.0.0' : '127.0.0.1',           // expose on the network when sharing
+        token: shared ? makeAccessToken() : undefined,    // private-link token for shared modes
+        lan: shared,
+        tunnel: share === 'tunnel',
+      });
     } catch (e: any) {
       return { content: `Could not start live server for "${id}": ${e?.message ?? e}`, isError: true };
     }
 
     ctx.emit({ type: 'progress', message: `Live artifact "${id}" (${manifest.type}) at ${info.url}` });
+
+    const lines = [`Live preview of "${id}" (${manifest.type}) — hot-reloads on every artifact_update / artifact_rollback.`];
+    lines.push(`  You (this machine):  ${info.url}`);
+    if (shared) {
+      const lan = info.urls.filter(u => u !== info.url && u !== info.tunnelUrl);
+      for (const u of lan) lines.push(`  Same network (LAN):  ${u}`);
+      if (info.tunnelUrl) lines.push(`  Public link:         ${info.tunnelUrl}`);
+      else if (info.tunnelError) lines.push(`  Public link:         (unavailable — ${info.tunnelError})`);
+      lines.push(`  🔒 These links include a private access token — share the FULL url.`);
+    }
+    lines.push(`Stop with artifact_live_stop id="${id}".`);
+
     return {
-      content:
-        `Live preview of "${id}" (${manifest.type}) is running at ${info.url}\n` +
-        `Open it with browser_navigate ${info.url} — the page hot-reloads automatically every ` +
-        `time you artifact_update or artifact_rollback "${id}". ` +
-        `Stop it with artifact_live_stop id="${id}".`,
-      metadata: { artifactId: id, type: manifest.type, url: info.url, port: info.port, server: liveServerName(id), live: true },
+      content: lines.join('\n'),
+      metadata: {
+        artifactId: id, type: manifest.type, url: info.url, urls: info.urls,
+        tunnelUrl: info.tunnelUrl, port: info.port, share, server: liveServerName(id), live: true,
+      },
     };
   }
 }

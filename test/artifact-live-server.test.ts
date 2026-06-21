@@ -127,6 +127,28 @@ describe('live registry', () => {
     expect(await stopLive(id)).toBe(false); // idempotent
   });
 
+  it('token-gates a shared server: 403 without the token, 200 with ?k= (+ LAN urls)', async () => {
+    const cwd = await tmpDir();
+    const { manifest } = await createArtifact(cwd, { title: 'Shared', type: 'html', content: '<html><body><h1>SHARED</h1></body></html>' }, write);
+    const id = manifest.id;
+    const info = await startLive({ cwd, id, port: 0, host: '0.0.0.0', token: 'secret123', lan: true });
+
+    expect(info.token).toBe('secret123');
+    expect(info.urls.every(u => u.includes('?k=secret123'))).toBe(true);   // every shareable url carries the token
+    expect(info.urls.length).toBeGreaterThanOrEqual(1);                    // owner (+ LAN if any iface)
+
+    const base = `http://127.0.0.1:${info.port}/`;
+    expect((await fetch(base)).status).toBe(403);                          // no token → blocked
+    const wrong = await fetch(`${base}?k=nope`);
+    expect(wrong.status).toBe(403);                                       // wrong token → blocked
+    const ok = await fetch(`${base}?k=secret123`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('set-cookie')).toMatch(/qx_live=secret123/);   // issues the follow-up cookie
+    expect(await ok.text()).toContain('SHARED');
+
+    expect(await stopLive(id)).toBe(true);
+  });
+
   it('stopAllLive tears everything down', async () => {
     const cwd = await tmpDir();
     const a = await createArtifact(cwd, { title: 'One', type: 'html', content: '<html><body>1</body></html>' }, write);

@@ -34,15 +34,33 @@ export interface CreateLiveServerOptions {
   channelPath?: string;
   debounceMs?: number;
   host?: string;
+  /** When set, EVERY request must carry this token (via `?k=<token>` or the cookie it
+   *  sets). Makes a network-/tunnel-exposed artifact a genuine PRIVATE link — only
+   *  someone with the full URL can open it. Omitted for loopback-only ('local') mode. */
+  token?: string;
 }
 
 export interface LiveServerHandle {
   id: string;
   url: string;
   port: number;
+  token?: string;
   startedAt: number;
   clientCount: () => number;
   close: () => Promise<void>;
+}
+
+/** Decide whether a request is authorized for a token-gated live server, and whether to
+ *  set the access cookie. Pure → unit-testable. A `?k=<token>` match authorizes AND issues
+ *  a cookie so the follow-up SSE / reload requests (which carry no query) stay authorized. */
+export function checkLiveAuth(token: string | undefined, url: string, cookieHeader: string | undefined):
+  { ok: boolean; setCookie: boolean } {
+  if (!token) return { ok: true, setCookie: false };
+  const q = url.match(/[?&]k=([^&]+)/);
+  if (q && decodeURIComponent(q[1]!) === token) return { ok: true, setCookie: true };
+  const c = (cookieHeader ?? '').match(/(?:^|;\s*)qx_live=([^;]+)/);
+  if (c && decodeURIComponent(c[1]!) === token) return { ok: true, setCookie: false };
+  return { ok: false, setCookie: false };
 }
 
 /** sha1 of the served HTML — the single comparison that correctly dedupes updates,
@@ -108,14 +126,26 @@ export async function createLiveServer(opts: CreateLiveServerOptions): Promise<L
   const debouncedFlush = makeDebouncer(flush, debounceMs);
 
   // ── HTTP server ──────────────────────────────────────────────────────────
+  const token = opts.token;
   const server: Server = createServer((req, res) => {
     const url = req.url ?? '/';
+    // Token gate: a network-/tunnel-exposed server rejects anyone without the link's token.
+    const auth = checkLiveAuth(token, url, req.headers.cookie);
+    if (!auth.ok) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('403 — invalid or missing access token. Open the full private link (it ends with ?k=…).');
+      return;
+    }
+    const cookieHeader: Record<string, string> = auth.setCookie
+      ? { 'Set-Cookie': `qx_live=${token}; Path=/; SameSite=Lax; HttpOnly; Max-Age=86400` }
+      : {};
     if (url === channelPath || url.startsWith(channelPath + '?')) {
       // SSE channel: keep open, push reload events.
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
+        ...cookieHeader,
       });
       res.flushHeaders?.();
       res.write('retry: 1000\n\n');
@@ -131,7 +161,7 @@ export async function createLiveServer(opts: CreateLiveServerOptions): Promise<L
     }
     // Everything else → the current page.
     void renderCurrent(cwd, id, channelPath).then(html => {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...cookieHeader });
       res.end(html);
     }).catch(err => {
       res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -161,7 +191,9 @@ export async function createLiveServer(opts: CreateLiveServerOptions): Promise<L
   }
   const addr = server.address();
   const actualPort = addr && typeof addr === 'object' ? addr.port : opts.port;
-  const url = `http://${host}:${actualPort}/`;
+  // Owner URL: 0.0.0.0 isn't openable, so report loopback; append the token when gated.
+  const ownerHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
+  const url = `http://${ownerHost}:${actualPort}/${token ? `?k=${token}` : ''}`;
 
   // ── File watch on the artifact dir ───────────────────────────────────────
   // Watch the DIR (atomic rename swaps manifest.json's inode). Qualify events to the
@@ -195,6 +227,7 @@ export async function createLiveServer(opts: CreateLiveServerOptions): Promise<L
     id,
     url,
     port: actualPort,
+    token,
     startedAt: Date.now(),
     clientCount: () => clients.size,
     close,
