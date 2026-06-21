@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_TXN_DB, QODEX_BLOBS_DIR } from '../config/defaults.js';
 import { logger } from '../utils/logger.js';
+import { writeFileAtomic } from '../utils/atomic-write.js';
 
 export type FileOperation = 'write' | 'delete' | 'create' | 'rename';
 
@@ -112,7 +113,7 @@ export class Transaction {
     await this.journal.storeBlob(afterHash, content);
 
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, content, 'utf-8');
+    await writeFileAtomic(abs, content, { encoding: 'utf-8' });
 
     this.ops.push({
       operation: isCreate ? 'create' : 'write',
@@ -237,13 +238,13 @@ export class Transaction {
       try {
         if (op.operation === 'write' || op.operation === 'create') {
           if (op.beforeContent !== undefined) {
-            await fs.writeFile(op.path, op.beforeContent, 'utf-8');
+            await writeFileAtomic(op.path, op.beforeContent, { encoding: 'utf-8' });
           } else {
             await fs.unlink(op.path).catch(() => {});
           }
         } else if (op.operation === 'delete' && op.beforeContent !== undefined) {
           await fs.mkdir(path.dirname(op.path), { recursive: true });
-          await fs.writeFile(op.path, op.beforeContent, 'utf-8');
+          await writeFileAtomic(op.path, op.beforeContent, { encoding: 'utf-8' });
         }
       } catch (e: any) {
         logger.warn('Rollback step failed', { path: op.path, err: e.message });
@@ -349,7 +350,7 @@ export class TransactionJournal {
       await fs.access(blobPath);
       return;
     } catch {}
-    await fs.writeFile(blobPath, content, 'utf-8');
+    await writeFileAtomic(blobPath, content, { encoding: 'utf-8' });
   }
 
   async loadBlob(hash: string): Promise<string> {
@@ -372,7 +373,7 @@ export class TransactionJournal {
         if (row.before_hash) {
           const content = await this.loadBlob(row.before_hash);
           await fs.mkdir(path.dirname(row.path), { recursive: true });
-          await fs.writeFile(row.path, content, 'utf-8');
+          await writeFileAtomic(row.path, content, { encoding: 'utf-8' });
           filesRestored++;
         } else if (row.operation === 'write' || row.operation === 'create') {
           await fs.unlink(row.path).catch(() => {});
@@ -414,7 +415,7 @@ export class TransactionJournal {
         if (row.before_hash) {
           const content = await this.loadBlob(row.before_hash);
           await fs.mkdir(path.dirname(row.path), { recursive: true });
-          await fs.writeFile(row.path, content, 'utf-8');
+          await writeFileAtomic(row.path, content, { encoding: 'utf-8' });
           filesRestored++;
         } else if (row.operation === 'write' || row.operation === 'create') {
           await fs.unlink(row.path).catch(() => {});

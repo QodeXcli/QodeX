@@ -15,6 +15,7 @@ export function openDatabase(filePath: string): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('synchronous = NORMAL');
+  db.pragma('busy_timeout = 5000');
   connections.set(filePath, db);
   return db;
 }

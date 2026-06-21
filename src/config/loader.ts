@@ -3,6 +3,8 @@ import * as path from 'path';
 import yaml from 'js-yaml';
 import { DEFAULT_CONFIG, QODEX_CONFIG_FILE, QODEX_HOME, type QodexConfig } from './defaults.js';
 import { logger } from '../utils/logger.js';
+import { writeFileAtomic } from '../utils/atomic-write.js';
+import { withLock } from '../utils/file-lock.js';
 
 /**
  * Deep merge two configuration objects.
@@ -115,8 +117,10 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConf
 
 export async function saveUserConfig(config: Partial<QodexConfig>): Promise<void> {
   await ensureQodexHome();
-  const yamlText = yaml.dump(config, { indent: 2, lineWidth: 100 });
-  await fs.writeFile(QODEX_CONFIG_FILE, yamlText, 'utf-8');
+  await withLock(QODEX_CONFIG_FILE + '.lock', async () => {
+    const yamlText = yaml.dump(config, { indent: 2, lineWidth: 100 });
+    await writeFileAtomic(QODEX_CONFIG_FILE, yamlText);
+  });
 }
 
 export async function configExists(): Promise<boolean> {

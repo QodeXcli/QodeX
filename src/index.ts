@@ -645,7 +645,8 @@ providerCmd
       console.log(`(no custom provider "${name}" in config)`); process.exit(0);
     }
     cfg.providers.custom = custom.filter((c: any) => c?.name !== name);
-    await fs.writeFile(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }), 'utf-8');
+    const { writeFileAtomic } = await import('./utils/atomic-write.js');
+    await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
     console.log(`✓ Removed custom provider "${name}".`);
     process.exit(0);
   });

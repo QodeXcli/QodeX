@@ -11,12 +11,12 @@ jobs:
     name: Build & typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       # npm install (not `npm ci`) so a slightly out-of-sync package-lock.json
@@ -33,15 +33,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-  # NOTE: a `test` job is intentionally omitted for now. The suite currently mixes
-  # 99 vitest-style files with 14 standalone (process.exit) files, so `vitest run`
-  # would report false failures. Once the suite is unified, add:
-  #
-  #   test:
-  #     runs-on: ubuntu-latest
-  #     steps:
-  #       - uses: actions/checkout@v4
-  #       - uses: actions/setup-node@v4
-  #         with: { node-version: '20', cache: 'npm' }
-  #       - run: npm install
-  #       - run: npm test
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      # `npm test` is `vitest run`. The standalone (process.exit) suites are
+      # excluded via STANDALONE_SCRIPTS in vitest.config.ts, so this is clean.
+      - name: Test
+        run: npm test

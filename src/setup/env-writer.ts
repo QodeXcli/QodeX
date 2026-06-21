@@ -16,6 +16,8 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { QODEX_HOME } from '../config/defaults.js';
+import { writeFileAtomic } from '../utils/atomic-write.js';
+import { withLock } from '../utils/file-lock.js';
 
 export const QODEX_ENV_FILE = path.join(QODEX_HOME, '.env');
 
@@ -67,12 +69,15 @@ export async function readEnvFile(): Promise<Record<string, string>> {
 export async function setEnvKey(key: string, value: string): Promise<string> {
   const trimmedKey = key.trim();
   if (!trimmedKey) throw new Error('env key name is required');
-  const vars = await readEnvFile();
-  vars[trimmedKey] = value;
   await fs.mkdir(QODEX_HOME, { recursive: true });
-  await fs.writeFile(QODEX_ENV_FILE, serializeEnvFile(vars), { encoding: 'utf-8', mode: 0o600 });
-  try { await fs.chmod(QODEX_ENV_FILE, 0o600); } catch { /* best-effort on platforms without chmod */ }
-  return QODEX_ENV_FILE;
+  // Lock the whole read→merge→write so concurrent `provider add` runs can't clobber each other's key.
+  return withLock(QODEX_ENV_FILE + '.lock', async () => {
+    const vars = await readEnvFile();
+    vars[trimmedKey] = value;
+    // Atomic temp+fsync+rename; mode 0o600 is applied at create, so no separate chmod is needed.
+    await writeFileAtomic(QODEX_ENV_FILE, serializeEnvFile(vars), { mode: 0o600, encoding: 'utf-8' });
+    return QODEX_ENV_FILE;
+  });
 }
 
 /**

@@ -40,6 +40,9 @@ const STANDALONE_SCRIPTS = [
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    // Isolate git-spawning tests from the developer's personal ~/.gitconfig
+    // (e.g. SSH commit signing). See test/setup-git-env.ts.
+    setupFiles: ['./test/setup-git-env.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

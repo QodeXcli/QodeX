@@ -15,7 +15,7 @@
  *
  * Everything here is additive: the non-interactive `provider add <id> --flags` path is unchanged.
  */
-import { KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, type GatewaySpec } from './gateways.js';
+import { KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, slugifyProviderName, type GatewaySpec } from './gateways.js';
 import { addProviderToConfig } from './provider-writer.js';
 import { setEnvKey } from './env-writer.js';
 import { choose, text, confirm, isInteractiveTTY, type PromptOptions } from './prompt.js';
@@ -48,8 +48,13 @@ export async function interactiveAddProvider(preselectId?: string): Promise<Inte
   if (preselectId && findGateway(preselectId)) {
     spec = findGateway(preselectId);
   } else if (preselectId) {
-    // A name we don't know — treat it as a custom provider with that name.
-    customName = preselectId.trim().toLowerCase();
+    // A name we don't know — treat it as a custom provider. If the user passed a
+    // URL (`provider add https://api.x.com/v1`), use it as the base URL and derive
+    // a valid slug name from its host; otherwise slugify the given name.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(preselectId.trim())) {
+      customBaseUrl = preselectId.trim();
+    }
+    customName = slugifyProviderName(preselectId);
   } else {
     const ids = listGatewayIds();
     const choices = [
@@ -61,7 +66,7 @@ export async function interactiveAddProvider(preselectId?: string): Promise<Inte
     ];
     const picked = await choose('\nWhich provider do you want to add?', choices, ids[0]!, opts);
     if (picked === CUSTOM_SENTINEL) {
-      customName = (await text('  Provider name (one word, e.g. "myhost")', '', opts)).trim().toLowerCase();
+      customName = slugifyProviderName(await text('  Provider name (one word, e.g. "myhost")', '', opts));
       if (!customName) { console.log('  ✗ Cancelled — no name given.'); return null; }
     } else {
       spec = findGateway(picked);

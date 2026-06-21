@@ -105,9 +105,27 @@ export class SnapshotService {
 
     this.snapshotCounter += 1;
     const message = `qodex-auto/${this.sessionId.slice(0, 8)}/${this.snapshotCounter} — ${reason}`;
+
+    // Capture a snapshot (including untracked files) as a restore point WITHOUT
+    // leaving the working tree reverted.
+    //
+    // `git stash push --include-untracked` records everything we want, but it
+    // REVERTS the working tree to HEAD (the changes move into the stash and
+    // leave the tree). The original code never re-applied it — so every snapshot
+    // wiped the user's in-progress edits AND swept unrelated untracked files off
+    // disk until /undo. We immediately `stash apply` to put the working tree
+    // (and untracked files) back, while keeping the stash entry as the restore
+    // point. If the re-apply fails, we pop it back so the user is never left
+    // with a silently reverted tree, and report the snapshot as failed.
     const stash = this.runGit(['stash', 'push', '--include-untracked', '-m', message]);
     if (stash.exitCode !== 0) {
       logger.warn('Auto-snapshot failed', { error: stash.stderr.trim(), reason });
+      return null;
+    }
+    const reapply = this.runGit(['stash', 'apply', 'stash@{0}']);
+    if (reapply.exitCode !== 0) {
+      this.runGit(['stash', 'pop', 'stash@{0}']); // restore tree, drop the broken snapshot
+      logger.warn('Auto-snapshot rolled back (could not re-apply working tree)', { error: reapply.stderr.trim(), reason });
       return null;
     }
 

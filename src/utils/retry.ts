@@ -38,6 +38,14 @@ export interface RetryOptions {
   label?: string;
   /** Override transient classification (return true → retryable). */
   isRetryable?: (err: unknown) => boolean;
+  /**
+   * Cap on how long we'll honor a server Retry-After before giving up. A 429
+   * from a DAILY token/quota limit can return Retry-After of many minutes
+   * (e.g. Groq TPD → ~112 min); blocking the whole turn that long is useless
+   * in an interactive CLI. If Retry-After exceeds this, fail fast so the caller
+   * can switch model/provider. Default 60000 (60s).
+   */
+  maxRetryAfterMs?: number;
 }
 
 /** Sleep that rejects promptly if the signal aborts. */
@@ -116,6 +124,7 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, opts: Re
   const baseMs = opts.baseMs ?? 400;
   const capMs = opts.capMs ?? 8000;
   const retryable = opts.isRetryable ?? isTransientError;
+  const maxRetryAfterMs = opts.maxRetryAfterMs ?? 60_000;
   const label = opts.label ?? 'op';
 
   let lastErr: unknown;
@@ -130,6 +139,14 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, opts: Re
 
       // Compute wait: prefer server's Retry-After, else full-jitter backoff.
       const server = retryAfterMs(err);
+      // A Retry-After longer than we're willing to block (e.g. a daily quota
+      // 429 asking for many minutes) → fail fast instead of hanging the turn.
+      if (server !== undefined && server > maxRetryAfterMs) {
+        logger.warn(`Retry ${label}: server Retry-After ${Math.round(server / 1000)}s exceeds cap ${Math.round(maxRetryAfterMs / 1000)}s — giving up (switch model/provider)`, {
+          status: statusOf(err),
+        });
+        throw err;
+      }
       const expo = Math.min(capMs, baseMs * 2 ** attempt);
       const wait = server ?? Math.floor(Math.random() * expo);
       logger.warn(`Retry ${label}`, {

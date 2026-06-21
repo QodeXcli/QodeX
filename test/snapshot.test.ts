@@ -104,32 +104,38 @@ describe('SnapshotService — using a real temp git repo', () => {
     expect(r).not.toBeNull();
     expect(r!.message).toContain('qodex-auto/abcdef01/');
     expect(r!.message).toContain('test stash');
-    // After stash, working tree should be reverted
+    // A snapshot is a non-destructive restore POINT: the working tree must be
+    // LEFT AS-IS (the old code reverted it to HEAD — a data-loss bug).
     const content = await fs.readFile(path.join(repo, 'README.md'), 'utf-8');
-    expect(content).toBe('# initial\n');
+    expect(content).toBe('# modified\n');
     // List shows the record
     expect(svc.list()).toHaveLength(1);
   });
 
-  it('captures untracked files as part of the snapshot', async () => {
+  it('captures untracked files in the snapshot WITHOUT removing them from disk', async () => {
     await fs.writeFile(path.join(repo, 'untracked.txt'), 'will be stashed');
     const svc = new SnapshotService(repo, 'test-session');
     const r = svc.takeSnapshot('include untracked', 1);
     expect(r).not.toBeNull();
-    // Untracked file should be gone from working tree (stashed away)
-    await expect(fs.access(path.join(repo, 'untracked.txt'))).rejects.toThrow();
+    // The untracked file stays on disk (the old code swept it off disk into the
+    // stash until /undo — a data-loss bug) AND is captured in the restore point.
+    expect(await fs.readFile(path.join(repo, 'untracked.txt'), 'utf-8')).toBe('will be stashed');
+    const show = spawnSync('git', ['stash', 'show', '--include-untracked', 'stash@{0}'], { cwd: repo, encoding: 'utf-8' });
+    expect(show.stdout).toContain('untracked.txt');
   });
 
-  it('restoreLatest pops the stash back', async () => {
+  it('restoreLatest re-applies the snapshot after the tree is damaged', async () => {
     await fs.writeFile(path.join(repo, 'README.md'), '# changed\n');
     const svc = new SnapshotService(repo, 'test-session');
     svc.takeSnapshot('change', 1);
-    // After snapshot, README reverted
+    // Snapshot is non-destructive: the change is still here.
+    expect(await fs.readFile(path.join(repo, 'README.md'), 'utf-8')).toBe('# changed\n');
+    // Simulate a destructive op wiping the change back to HEAD.
+    gitSetup(repo, ['checkout', '--', 'README.md']);
     expect(await fs.readFile(path.join(repo, 'README.md'), 'utf-8')).toBe('# initial\n');
-    // Restore
+    // Restore brings the snapshotted change back.
     const r = svc.restoreLatest();
     expect(r.restored).toBe(true);
-    // README should now have the change back
     expect(await fs.readFile(path.join(repo, 'README.md'), 'utf-8')).toBe('# changed\n');
     expect(svc.list()).toHaveLength(0);
   });
