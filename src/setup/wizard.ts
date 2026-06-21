@@ -32,6 +32,7 @@ import {
   recommendPrimary,
   recommendSubagent,
   formatModel,
+  looksVisionCapable,
   type DetectedModel,
 } from './model-detector.js';
 
@@ -262,7 +263,19 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   // sub-agent above. We suggest any detected vision model (id markers: vl/vision/
   // llava/moondream/minicpm-v/bakllava); the user can also pick a cloud one.
   let visionRole: { provider: string; model: string } | undefined;
-  if (subagentChoice !== 'off') {
+  // If the primary OR the sub-agent model can already see images, a dedicated vision
+  // model is redundant — don't ask. The vision tool uses that model directly at runtime.
+  const parentSees = looksVisionCapable(primaryModel) || (subagentRole ? looksVisionCapable(subagentRole.model) : false);
+  if (parentSees) {
+    section('[3c/7] Vision');
+    const who = looksVisionCapable(primaryModel)
+      ? `Primary model (${primaryModel})`
+      : `Sub-agent model (${subagentRole!.model})`;
+    paragraph(
+      `${who} already supports images — no separate vision model needed.\n` +
+      'QodeX will route screenshot / UI / mockup analysis to it automatically.',
+    );
+  } else if (subagentChoice !== 'off') {
     const visionModels = detected.filter(m =>
       /(?:vl\b|vl[:_-]|vision|llava|moondream|minicpm-v|bakllava)/i.test(m.id));
     section('[3c/7] Vision sub-agent (optional)');

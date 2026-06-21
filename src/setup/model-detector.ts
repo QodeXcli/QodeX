@@ -217,7 +217,10 @@ export function looksVisionCapable(id: string): boolean {
   if (/(^|[^a-z])vl([^a-z]|$)/.test(lower)) return true;
   if (/vision/.test(lower)) return true;              // llama3.2-vision, etc.
   if (/llava|minicpm-?v|pixtral|moondream|internvl|cogvlm/.test(lower)) return true;
-  if (/gpt-?4o|claude-3|gemini/.test(lower)) return true; // cloud multimodal
+  // Cloud multimodal: GPT-4o family, Gemini, and every modern Claude (3.x AND 4.x —
+  // sonnet/opus/haiku are all image-capable; the old `claude-3`-only test missed claude-4).
+  if (/gpt-?4o|gemini/.test(lower)) return true;
+  if (/claude-(3|4|5|sonnet|opus|haiku)/.test(lower)) return true;
   return false;
 }
 
