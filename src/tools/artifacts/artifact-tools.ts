@@ -18,10 +18,11 @@ import {
   createArtifact, updateArtifact, listArtifacts, getArtifact, rollbackArtifact,
   isArtifactType, type ArtifactType,
 } from '../../artifacts/store.js';
-import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort } from '../../artifacts/preview.js';
+import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort, livePort, liveServerName } from '../../artifacts/preview.js';
 import { buildReviewPrompt, buildReviewReport, formatReviewReport } from '../../artifacts/review.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import * as processRegistry from '../browser/process-registry.js';
+import { startLive, stopLive, stopAllLive, listLive } from '../../artifacts/live-registry.js';
 
 const TYPE_VALUES = ['html', 'react', 'svg', 'markdown', 'vue', 'text'] as const;
 
@@ -292,7 +293,81 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
   }
 }
 
+const LiveArgs = z.object({
+  id: z.string().optional().describe('The artifact id to serve live.'),
+  name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
+  // No `version`: live mode ALWAYS tracks the current version (incl. rollbacks).
+});
+
+export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
+  name = 'artifact_live';
+  description =
+    'Serve an artifact in a real browser with LIVE hot-reload: starts a persistent local ' +
+    'server that always renders the artifact’s CURRENT version (React/Vue via an in-browser ' +
+    'harness, no build step) and auto-refreshes the browser the instant you change it with ' +
+    'artifact_update or artifact_rollback. Returns a URL — open it once with browser_navigate; ' +
+    'it stays in sync as you iterate. No python required. Stop it with artifact_live_stop. ' +
+    'Use this for interactive iteration; use artifact_preview for a one-shot snapshot to ' +
+    'screenshot + review. (React/Vue rendering needs in-browser CDN access.)';
+  argsSchema = LiveArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof LiveArgs>, ctx: ToolContext): Promise<ToolResult> {
+    let id: string;
+    let manifest;
+    try {
+      id = resolveArtifactId(args);
+      // Validate the artifact exists up-front so the model gets a clean error, not a 500 page.
+      ({ manifest } = await getArtifact(ctx.cwd, id));
+    } catch (e: any) {
+      return { content: e?.message ?? String(e), isError: true };
+    }
+
+    let info;
+    try {
+      info = await startLive({ cwd: ctx.cwd, id, port: livePort(id) });
+    } catch (e: any) {
+      return { content: `Could not start live server for "${id}": ${e?.message ?? e}`, isError: true };
+    }
+
+    ctx.emit({ type: 'progress', message: `Live artifact "${id}" (${manifest.type}) at ${info.url}` });
+    return {
+      content:
+        `Live preview of "${id}" (${manifest.type}) is running at ${info.url}\n` +
+        `Open it with browser_navigate ${info.url} — the page hot-reloads automatically every ` +
+        `time you artifact_update or artifact_rollback "${id}". ` +
+        `Stop it with artifact_live_stop id="${id}".`,
+      metadata: { artifactId: id, type: manifest.type, url: info.url, port: info.port, server: liveServerName(id), live: true },
+    };
+  }
+}
+
+const LiveStopArgs = z.object({
+  id: z.string().optional().describe('The artifact id whose live server to stop. Omit to stop ALL live artifact servers.'),
+  name: z.string().optional().describe('Alias for id.'),
+});
+
+export class ArtifactLiveStopTool extends Tool<z.infer<typeof LiveStopArgs>> {
+  name = 'artifact_live_stop';
+  description = 'Stop a live artifact server started with artifact_live (or all of them if no id is given).';
+  argsSchema = LiveStopArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: z.infer<typeof LiveStopArgs>, _ctx: ToolContext): Promise<ToolResult> {
+    const id = (args.id ?? args.name ?? '').trim();
+    if (!id) {
+      const running = listLive().length;
+      await stopAllLive();
+      return { content: running ? `Stopped ${running} live artifact server(s).` : 'No live artifact servers were running.' };
+    }
+    const stopped = await stopLive(id);
+    return { content: stopped ? `Stopped live server for "${id}".` : `No live server was running for "${id}".` };
+  }
+}
+
 export const ARTIFACT_TOOLS = [
   ArtifactCreateTool, ArtifactUpdateTool, ArtifactListTool, ArtifactGetTool, ArtifactRollbackTool, ArtifactPreviewTool,
-  ArtifactReviewTool,
+  ArtifactReviewTool, ArtifactLiveTool, ArtifactLiveStopTool,
 ];

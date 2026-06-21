@@ -83,7 +83,7 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   // Standalone UI/visual artifacts (html/react/svg/markdown) with versioned manifests.
   // Without this the artifact_* tools matched no tier and were silently never shipped,
   // so the agent never knew it could make an artifact even when asked outright.
-  { members: ['artifact_'], keywords: ['artifact', 'artefact', 'آرتیفکت', 'آرتفکت'] },
+  { members: ['artifact_'], keywords: ['artifact', 'artefact', 'آرتیفکت', 'آرتفکت', 'live', 'hot reload', 'hot-reload', 'reload'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {

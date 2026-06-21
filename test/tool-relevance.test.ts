@@ -26,7 +26,7 @@ const ALL = [
   'design_audit','detect_frontend_stack','find_ui_components','vision_analyze',
   'csv_read','xlsx_read','pdf_read','wp_find_hook','wp_list_hooks',
   'explain_codebase','find_dead_code','semantic_search','auto_fix',
-  'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback',
+  'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback','artifact_live','artifact_live_stop',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -91,6 +91,10 @@ console.log('— artifact family gates on the artifact signal (regression) —')
   const fa = names('یه آرتیفکت ری‌اکت بساز');
   check('persian artifact task surfaces artifact_create', fa.has('artifact_create'));
   check('non-artifact task EXCLUDES artifact tools', !names('fix the type error in math.ts').has('artifact_create'));
+  // live-artifacts: a "live"/"hot-reload" request must surface the live tools.
+  const live = names('start a live preview of the artifact with hot-reload');
+  check('live request surfaces artifact_live', live.has('artifact_live'));
+  check('live request surfaces artifact_live_stop', live.has('artifact_live_stop'));
 }
 
 console.log('— specialist composes with common —');
