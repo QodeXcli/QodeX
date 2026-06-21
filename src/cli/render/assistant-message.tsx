@@ -26,6 +26,18 @@ type Segment =
   | { kind: 'code'; lang: string; body: string; incomplete?: boolean }
   | { kind: 'text'; body: string };
 
+/**
+ * Collapse runs of blank lines in PROSE so the transcript doesn't show big
+ * vertical gaps. Some models pad output with many consecutive newlines; rendered
+ * verbatim each one is an empty terminal row. We keep at most a single blank line
+ * (one paragraph break) and trim leading/trailing blanks. Only applied to prose —
+ * blank lines INSIDE fenced code are preserved (code segments never pass through
+ * here).
+ */
+export function normalizeProse(s: string): string {
+  return s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
+}
+
 /** Split a message into alternating prose and fenced-code segments. */
 export function parseSegments(text: string): Segment[] {
   const segments: Segment[] = [];
@@ -35,7 +47,7 @@ export function parseSegments(text: string): Segment[] {
   while ((m = fence.exec(text)) !== null) {
     if (m.index > last) {
       const prose = text.slice(last, m.index);
-      if (prose.trim()) segments.push({ kind: 'text', body: prose.replace(/\n+$/, '') });
+      if (prose.trim()) segments.push({ kind: 'text', body: normalizeProse(prose) });
     }
     segments.push({ kind: 'code', lang: (m[1] ?? '').trim(), body: (m[2] ?? '').replace(/\n$/, '') });
     last = fence.lastIndex;
@@ -48,14 +60,14 @@ export function parseSegments(text: string): Segment[] {
     const open = tail.match(/```([^\n`]*)\n?/);
     if (open && open.index !== undefined) {
       const before = tail.slice(0, open.index);
-      if (before.trim()) segments.push({ kind: 'text', body: before.replace(/\n+$/, '') });
+      if (before.trim()) segments.push({ kind: 'text', body: normalizeProse(before) });
       const codeBody = tail.slice(open.index + open[0].length);
       segments.push({ kind: 'code', lang: (open[1] ?? '').trim(), body: codeBody.replace(/\n$/, ''), incomplete: true });
     } else if (tail.trim()) {
-      segments.push({ kind: 'text', body: tail.replace(/^\n+/, '') });
+      segments.push({ kind: 'text', body: normalizeProse(tail) });
     }
   }
-  return segments.length ? segments : [{ kind: 'text', body: text }];
+  return segments.length ? segments : [{ kind: 'text', body: normalizeProse(text) }];
 }
 
 // ---------------------------------------------------------------------------
