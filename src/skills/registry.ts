@@ -136,18 +136,25 @@ export function buildSkillsSystemBlock(): string {
 }
 
 /** Lightweight keyword/substring search over installed skills (for the search_skills tool). */
-export function searchInstalledSkills(query: string, limit = 8): Array<{ name: string; description: string; score: number }> {
+export function searchInstalledSkills(query: string, limit = 8): Array<{ name: string; description: string; score: number; strong: number }> {
   const q = query.toLowerCase();
   const qTerms = q.split(/\s+/).filter(Boolean);
   const scored = listSkills().map(s => {
     const haystack = `${s.name} ${s.description} ${(s.triggers ?? []).join(' ')}`.toLowerCase();
     let score = 0;
+    // `strong` tracks ONLY the high-signal matches (skill NAME + distinctive TRIGGERS),
+    // separate from the +1 generic-word (haystack) hits that any verbose description
+    // accumulates. The dominance gate uses `strong` so an obvious name/trigger match
+    // (e.g. "Emil Kowalski" → emilkowalski) isn't blocked by a noisy runner-up that
+    // only racked up incidental description-word overlaps.
+    let strong = 0;
     for (const term of qTerms) {
-      if (s.name.toLowerCase().includes(term)) score += 5;      // name match is strongest
-      if ((s.triggers ?? []).some(t => t.toLowerCase().includes(term))) score += 3;
+      if (term.length < 3) continue; // ignore "a", "to", "of" … as match terms
+      if (s.name.toLowerCase().includes(term)) { score += 5; strong += 5; }   // name match is strongest
+      if ((s.triggers ?? []).some(t => t.toLowerCase().includes(term))) { score += 3; strong += 3; }
       if (haystack.includes(term)) score += 1;
     }
-    return { name: s.name, description: s.description, score };
+    return { name: s.name, description: s.description, score, strong };
   });
   return scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }
@@ -179,7 +186,7 @@ export function suggestSkillForPrompt(
  * touching the registry's module state.
  */
 export function pickDominantSkill(
-  results: Array<{ name: string; score: number }>,
+  results: Array<{ name: string; score: number; strong?: number }>,
   opts: { minScore?: number; dominance?: number } = {},
 ): string | null {
   const minScore = opts.minScore ?? 6;
@@ -188,7 +195,19 @@ export function pickDominantSkill(
   const top = results[0];
   if (top.score < minScore) return null;
   const second = results[1];
-  if (second && top.score < second.score * dominance) return null; // ambiguous → defer to model
+  if (!second) return top.name;
+
+  // High-signal win: the top skill matched on its NAME or a distinctive TRIGGER more
+  // than the runner-up did. This rescues obvious picks (e.g. "Emil Kowalski" →
+  // emilkowalski:strong=10) that the blunt total-score ratio would otherwise reject
+  // because a verbose runner-up (e.g. data-collector) piled up incidental word hits.
+  const topStrong = top.strong ?? 0;
+  const secondStrong = second.strong ?? 0;
+  if (topStrong >= 5 && topStrong > secondStrong) return top.name;
+
+  // Otherwise require clear TOTAL dominance, so genuinely ambiguous prose (no decisive
+  // name/trigger signal) injects nothing and defers to the model's own use_skill.
+  if (top.score < second.score * dominance) return null;
   return top.name;
 }
 
