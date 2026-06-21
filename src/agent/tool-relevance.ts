@@ -66,15 +66,17 @@ interface SpecialistFamily {
  *  against the signal; many are English loanwords Hamed writes in Latin script even
  *  in Persian sentences (docker, sql, react, wordpress, …), plus file extensions. */
 const SPECIALIST_FAMILIES: SpecialistFamily[] = [
-  { members: ['docker_'], keywords: ['docker', 'container', 'compose', 'dockerfile'] },
-  { members: ['db_query', 'db_schema'], keywords: ['database', 'sql', 'postgres', 'mysql', 'sqlite', 'mongo', ' db ', '.sql', 'query'] },
-  { members: ['browser_'], keywords: ['browser', 'screenshot', 'headless', 'puppeteer', 'playwright', 'scrape', 'navigate', 'selector'] },
-  { members: ['computer_use_'], keywords: ['desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard'] },
-  { members: ['dev_server_'], keywords: ['dev server', 'npm run', 'serve', 'localhost', 'vite', 'next dev', 'hot reload', 'hmr'] },
+  // Persian keywords are added alongside the English ones (substring match) so a
+  // Persian-only request still surfaces the specialist tools for QodeX's target audience.
+  { members: ['docker_'], keywords: ['docker', 'container', 'compose', 'dockerfile', 'داکر', 'کانتینر', 'کامپوز'] },
+  { members: ['db_query', 'db_schema'], keywords: ['database', 'sql', 'postgres', 'mysql', 'sqlite', 'mongo', ' db ', '.sql', 'query', 'دیتابیس', 'پایگاه داده', 'پایگاه‌داده', 'کوئری', 'دادگان'] },
+  { members: ['browser_'], keywords: ['browser', 'screenshot', 'headless', 'puppeteer', 'playwright', 'scrape', 'navigate', 'selector', 'مرورگر', 'اسکرین', 'اسکرپ', 'کراول'] },
+  { members: ['computer_use_'], keywords: ['desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard', 'دسکتاپ', 'ماوس', 'کیبورد', 'صفحه‌نمایش'] },
+  { members: ['dev_server_'], keywords: ['dev server', 'npm run', 'serve', 'localhost', 'vite', 'next dev', 'hot reload', 'hmr', 'سرور توسعه', 'لوکال‌هاست'] },
   { members: ['background_job_'], keywords: ['background job', 'long-running', 'long running', 'async job', 'queue', 'worker'] },
   { members: ['csv_read', 'csv_write', 'xlsx_read', 'pdf_read', 'media_probe', 'media_transform'],
-    keywords: ['csv', 'excel', 'xlsx', 'spreadsheet', 'pdf', 'video', 'audio', 'ffmpeg', '.csv', '.pdf', '.xlsx', '.mp4', '.png', '.jpg'] },
-  { members: ['wp_find_hook', 'wp_list_hooks'], keywords: ['wordpress', 'woocommerce', 'wp_', 'wp-', 'shortcode', 'gutenberg'] },
+    keywords: ['csv', 'excel', 'xlsx', 'spreadsheet', 'pdf', 'video', 'audio', 'ffmpeg', '.csv', '.pdf', '.xlsx', '.mp4', '.png', '.jpg', 'اکسل', 'صفحه‌گسترده', 'ویدیو', 'ویدئو', 'صدا', 'تصویر'] },
+  { members: ['wp_find_hook', 'wp_list_hooks'], keywords: ['wordpress', 'woocommerce', 'wp_', 'wp-', 'shortcode', 'gutenberg', 'وردپرس', 'ووکامرس', 'افزونه', 'قلاب'] },
   // install_skill must surface whenever skills are discussed — otherwise the model can't
   // self-provision a skill it lacks (it never sees the tool) and wrongly says "I can't install".
   { members: ['install_skill'], keywords: ['skill', 'skills', 'اسکیل', 'مهارت', 'plugin'] },

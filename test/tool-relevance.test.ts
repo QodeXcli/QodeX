@@ -112,6 +112,18 @@ console.log('— install_skill surfaces whenever skills are discussed (regressio
   check('mcp keyword still pulls install_mcp', names('add the linear mcp connector').has('install_mcp'));
 }
 
+console.log('— specialist families gate on PERSIAN signals too (regression) —');
+{
+  // QodeX's audience writes in Persian; without Persian keywords these heavy tools
+  // were invisible unless the user happened to type the English term.
+  check('persian "داکرایز/کانتینر" pulls docker', names('این پروژه رو داکرایز کن و کانتینر بساز').has('docker_build'));
+  check('persian "دیتابیس/کوئری" pulls db', names('یه کوئریِ دیتابیس بنویس').has('db_query'));
+  check('persian "مرورگر/اسکرین‌شات" pulls browser', names('یه اسکرین‌شات از سایت با مرورگر بگیر').has('browser_screenshot'));
+  check('persian "اکسل" pulls data family', names('این فایلِ اکسل رو تحلیل کن').has('csv_read'));
+  check('persian "ووکامرس/وردپرس" pulls wp', names('یه قلابِ ووکامرس در وردپرس پیدا کن').has('wp_find_hook'));
+  check('persian greeting still pulls no specialist', !names('سلام خوبی').has('docker_build'));
+}
+
 console.log('— specialist composes with common —');
 {
   const t = names('refactor the db layer and write a new sql query');
