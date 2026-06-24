@@ -10,6 +10,14 @@ export interface OllamaOptions {
   options?: Record<string, number>;
   /** Draft model for speculative decoding, passed through if the server supports it. */
   draftModel?: string;
+  /**
+   * Upper bound for the per-request `num_ctx`, derived from the host's hardware tier.
+   * Ollama allocates a KV cache sized to `num_ctx` regardless of the actual prompt
+   * length, so defaulting it to a model's full 32k/128k window on a small/8GB box
+   * causes heavy memory pressure and swapping — every turn crawls, even warm. We cap
+   * the DEFAULT to something the box can hold; an explicit `options.num_ctx` still wins.
+   */
+  numCtxCeiling?: number;
 }
 
 interface OllamaModel {
@@ -77,6 +85,17 @@ export class OllamaProvider extends Provider {
     if (lower.includes('gemma2')) return 8192;
     if (lower.includes('deepseek')) return 16384;
     return 8192;
+  }
+
+  /**
+   * The `num_ctx` to REQUEST for a model: its real context window, capped by the
+   * hardware-derived ceiling. This is distinct from {@link guessContextWindow},
+   * which advertises the model's true capability to the router — we only shrink the
+   * runtime KV allocation, not the model's stated window.
+   */
+  private numCtxFor(model: string): number {
+    const full = this.guessContextWindow(model);
+    return this.opts.numCtxCeiling ? Math.min(full, this.opts.numCtxCeiling) : full;
   }
 
   private supportsTools(model: string): boolean {
@@ -156,7 +175,7 @@ export class OllamaProvider extends Provider {
         // model's real context window stops Ollama from silently clamping long
         // sessions to its 2k/4k server default (a classic "it forgot everything"
         // cause) — and keeping it stable across turns preserves the KV cache.
-        num_ctx: this.guessContextWindow(req.model),
+        num_ctx: this.numCtxFor(req.model),
         temperature: req.temperature ?? 0.3,
         ...(req.maxTokens ? { num_predict: req.maxTokens } : {}),
         ...(this.opts.options ?? {}),
