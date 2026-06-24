@@ -176,6 +176,21 @@ export function slugifyProviderName(raw: string): string {
   return s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Normalize an OpenAI-compatible base URL so the SDK can append `/chat/completions`.
+ *
+ * The base URL must be the root (e.g. `https://integrate.api.nvidia.com/v1`). Users very
+ * commonly paste a deeper path instead — the model-list URL (`…/v1/models`) or the full
+ * chat URL (`…/v1/chat/completions`) — and then EVERY request hits `…/v1/models/chat/completions`
+ * (a 404) or `…/v1/chat/completions/chat/completions`. We defensively strip those trailing
+ * segments and any trailing slash so the common copy-paste mistake just works.
+ */
+export function normalizeBaseUrl(raw: string): string {
+  let u = (raw ?? '').trim().replace(/\/+$/, '');           // drop trailing slash(es)
+  u = u.replace(/\/(?:chat\/completions|completions|models)$/i, ''); // strip a pasted endpoint path
+  return u;
+}
+
 export function buildCustomEntry(opts: {
   spec?: GatewaySpec;
   name?: string;
@@ -187,7 +202,7 @@ export function buildCustomEntry(opts: {
 }): CustomProviderEntry {
   // spec names are already valid; a user-supplied custom name may be a raw URL → slugify it.
   const name = opts.spec ? (opts.spec.name ?? '').trim() : slugifyProviderName(opts.name ?? '');
-  const baseUrl = (opts.baseUrl ?? opts.spec?.baseUrl ?? '').trim();
+  const baseUrl = normalizeBaseUrl(opts.baseUrl ?? opts.spec?.baseUrl ?? '');
   const apiKeyEnv = (opts.apiKeyEnv ?? opts.spec?.apiKeyEnv ?? '').trim();
   if (!name) throw new Error('provider name is required');
   if (/[\s/:]/.test(name)) throw new Error(`invalid provider name "${name}": must not contain spaces, "/", or ":"`);

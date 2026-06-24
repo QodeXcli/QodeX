@@ -3,13 +3,26 @@
  * Run: node --experimental-strip-types test/gateways.test.ts
  */
 import {
-  KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, mergeCustomProvider,
+  KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, mergeCustomProvider, normalizeBaseUrl,
 } from '../src/setup/gateways.ts';
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
   if (cond) { passed++; console.log(`  ✓ ${name}`); }
   else { failed++; console.log(`  ✗ ${name}`); }
+}
+
+console.log('— normalizeBaseUrl (strip pasted endpoint paths) —');
+{
+  // The exact bug a user hit: pasting the NVIDIA /models URL → 404 on every request.
+  check('strips a trailing /models', normalizeBaseUrl('https://integrate.api.nvidia.com/v1/models') === 'https://integrate.api.nvidia.com/v1');
+  check('strips a trailing /chat/completions', normalizeBaseUrl('https://x.com/v1/chat/completions') === 'https://x.com/v1');
+  check('strips a trailing /completions', normalizeBaseUrl('https://x.com/v1/completions') === 'https://x.com/v1');
+  check('drops a trailing slash', normalizeBaseUrl('https://x.com/v1/') === 'https://x.com/v1');
+  check('leaves a clean /v1 untouched', normalizeBaseUrl('https://x.com/v1') === 'https://x.com/v1');
+  check('buildCustomEntry normalizes the stored baseUrl', buildCustomEntry({
+    name: 'nvidia', baseUrl: 'https://integrate.api.nvidia.com/v1/models', apiKeyEnv: 'NVIDIA_API_KEY', modelId: 'nvidia/nemotron-3-ultra-550b-a55b',
+  }).baseUrl === 'https://integrate.api.nvidia.com/v1');
 }
 
 console.log('— registry —');
