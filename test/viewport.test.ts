@@ -36,6 +36,33 @@ console.log('— tailForViewport still bounds output —');
   check('counts wrapped rows for long unbroken lines', tailForViewport(wide + '\n' + wide, 12, 80).length > 0);
 }
 
+console.log('— streaming-region height invariant (no overflow → no scroll/jitter) —');
+{
+  // StreamingView renders the tail with ZERO chrome: exactly one element per logical
+  // line, each occupying ceil(len/width) wrapped rows — the SAME measure tailForViewport
+  // sums against the budget. So the real rendered height must never exceed the budget,
+  // even for code-heavy text (the boxed AssistantMessage would have, which caused the
+  // oscillation + non-stop scroll bug). We replicate StreamingView's height here.
+  const physicalRows = (text: string, width: number) =>
+    text.split('\n').reduce((n, ln) => n + Math.max(1, Math.ceil(ln.length / Math.max(20, width))), 0);
+
+  const cases = [
+    Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n'),                 // long prose
+    'Here is the fix:\n\n```ts\n' + Array.from({ length: 80 }, (_, i) => `  const v${i} = compute(${i});`).join('\n') + '\n```\n', // big code block
+    'x'.repeat(2000) + '\n' + 'y'.repeat(2000),                                     // unbroken wrapped lines
+    '```js\n' + 'a'.repeat(500) + '\n```\nmore prose here',                         // wrapped code + prose
+  ];
+  for (const [rows, cols] of [[24, 80], [40, 120], [12, 60], [50, 200]] as Array<[number, number]>) {
+    const budget = Math.max(6, rows - 10);
+    let ok = true;
+    for (const text of cases) {
+      const tail = tailForViewport(text, rows, cols);
+      if (physicalRows(tail, cols) > budget) ok = false;
+    }
+    check(`rendered tail height ≤ budget at ${rows}x${cols}`, ok);
+  }
+}
+
 console.log('— formatContextMeter —');
 {
   check('unknown window → empty', formatContextMeter(1000, 0) === '');
