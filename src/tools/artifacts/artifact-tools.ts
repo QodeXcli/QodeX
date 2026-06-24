@@ -300,6 +300,9 @@ const LiveArgs = z.object({
     'Reach: "local" (default, localhost only) · "network" (same WiFi/LAN — teammates open ' +
     'http://<your-ip>:port) · "tunnel" (a public https link via cloudflared/ngrok, plus LAN). ' +
     'network/tunnel links carry a private access token, so only someone with the full URL gets in.'),
+  open: z.boolean().optional().describe(
+    'Auto-open the live page in the user’s default browser so they WATCH it hot-reload as you ' +
+    'iterate (default true). Set false for headless/automated runs. Always best-effort — never fails the tool.'),
   // No `version`: live mode ALWAYS tracks the current version (incl. rollbacks).
 });
 
@@ -308,8 +311,9 @@ export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
   description =
     'Serve an artifact in a real browser with LIVE hot-reload: a persistent server that always ' +
     'renders the artifact’s CURRENT version (React/Vue via an in-browser harness, no build step) ' +
-    'and auto-refreshes the instant you artifact_update or artifact_rollback it. Returns a URL — ' +
-    'open it once; it stays in sync as you iterate. Set share="network" to share over your LAN, or ' +
+    'and auto-refreshes the instant you artifact_update or artifact_rollback it. It AUTO-OPENS the ' +
+    'page in the user’s browser so they watch your changes land in real time (pass open=false to skip). ' +
+    'Set share="network" to share over your LAN, or ' +
     'share="tunnel" for a public private link (PR walkthrough / living dashboard for your team). ' +
     'Stop it with artifact_live_stop. Use artifact_preview for a one-shot snapshot to screenshot.';
   argsSchema = LiveArgs;
@@ -348,8 +352,18 @@ export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
 
     ctx.emit({ type: 'progress', message: `Live artifact "${id}" (${manifest.type}) at ${info.url}` });
 
+    // Pop the page open on the user's machine so they actually SEE the artifact and
+    // watch it hot-reload as the model iterates — the live URL on its own usually
+    // goes unclicked. Best-effort: skipped on headless/CI, never fails the tool.
+    let opened = false;
+    if (args.open !== false) {
+      const { openUrl } = await import('../../artifacts/open-browser.js');
+      opened = await openUrl(info.url);
+      if (opened) ctx.emit({ type: 'progress', message: `Opened ${info.url} in your browser — watch it update live.` });
+    }
+
     const lines = [`Live preview of "${id}" (${manifest.type}) — hot-reloads on every artifact_update / artifact_rollback.`];
-    lines.push(`  You (this machine):  ${info.url}`);
+    lines.push(`  You (this machine):  ${info.url}${opened ? '  (opened in your browser)' : ''}`);
     if (shared) {
       const lan = info.urls.filter(u => u !== info.url && u !== info.tunnelUrl);
       for (const u of lan) lines.push(`  Same network (LAN):  ${u}`);
@@ -363,7 +377,7 @@ export class ArtifactLiveTool extends Tool<z.infer<typeof LiveArgs>> {
       content: lines.join('\n'),
       metadata: {
         artifactId: id, type: manifest.type, url: info.url, urls: info.urls,
-        tunnelUrl: info.tunnelUrl, port: info.port, share, server: liveServerName(id), live: true,
+        tunnelUrl: info.tunnelUrl, port: info.port, share, server: liveServerName(id), live: true, opened,
       },
     };
   }
