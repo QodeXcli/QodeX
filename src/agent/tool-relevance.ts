@@ -89,12 +89,22 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   // Without this the artifact_* tools matched no tier and were silently never shipped,
   // so the agent never knew it could make an artifact even when asked outright.
   { members: ['artifact_'], keywords: ['artifact', 'artefact', 'آرتیفکت', 'آرتفکت', 'live', 'hot reload', 'hot-reload', 'reload'] },
+  // Design platforms via MCP (Figma / Canva). Tool names are `mcp:figma:*` / `mcp:canva:*`
+  // (the `:` prefix is treated like `_` by expand()). No-op unless the user has actually
+  // added the figma/canva MCP server — then a design/website-design ask surfaces them.
+  { members: ['mcp:figma:', 'mcp:canva:'], keywords: [
+    'figma', 'canva', 'design', 'website design', 'web design', 'landing page', 'mockup',
+    'prototype', 'wireframe', 'ui design', 'design system', 'brand template',
+    'طراحی', 'فیگما', 'کانوا', 'کانواس', 'دیزاین', 'ماکاپ', 'وب‌سایت', 'وبسایت',
+    'طراحی سایت', 'طراحی وب', 'رابط کاربری', 'لندینگ', 'صفحه فرود'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {
   const out = new Set<string>();
   for (const m of members) {
-    if (m.endsWith('_')) { for (const n of allNames) if (n.startsWith(m)) out.add(n); }
+    // Trailing `_` (built-in families like docker_) or `:` (MCP names like mcp:figma:)
+    // mark a prefix pattern; otherwise it's an exact tool name.
+    if (m.endsWith('_') || m.endsWith(':')) { for (const n of allNames) if (n.startsWith(m)) out.add(n); }
     else if (allNames.includes(m)) out.add(m);
   }
   return out;
