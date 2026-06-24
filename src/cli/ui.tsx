@@ -31,7 +31,7 @@ import { stripThinkingForDisplay, stripLeakedToolTags } from '../llm/thinking.js
 import { isRedundantAssistantText, dedupeSelfRepeatedText } from './modes/final-dedupe.js';
 import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
-import { AssistantMessage } from './render/assistant-message.js';
+import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
 import { summarizeToolResult } from './render/tool-summary.js';
 import { handleSlashCommand } from './slash-commands.js';
@@ -185,6 +185,35 @@ export function App(props: AppProps): React.ReactElement {
   const nextId = useCallback(() => {
     idCounterRef.current++;
     return String(idCounterRef.current);
+  }, []);
+
+  // Throttle the live streaming region: setting state on every text_delta (one per
+  // token) repaints the multi-line region dozens of times a second, which the user
+  // sees as flicker/jitter. We coalesce bursts into at most one repaint per ~50ms.
+  // The trailing pending text is intentionally discarded on clear — the FINAL text
+  // commits to <Static> separately, so nothing is lost.
+  const streamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamPendingRef = useRef<string | null>(null);
+  const flushStreaming = useCallback(() => {
+    streamTimerRef.current = null;
+    if (streamPendingRef.current !== null) {
+      setStreamingText(streamPendingRef.current);
+      streamPendingRef.current = null;
+    }
+  }, []);
+  const pushStreaming = useCallback((text: string) => {
+    streamPendingRef.current = text;
+    if (streamTimerRef.current === null) {
+      streamTimerRef.current = setTimeout(flushStreaming, 50);
+    }
+  }, [flushStreaming]);
+  const clearStreaming = useCallback(() => {
+    if (streamTimerRef.current !== null) {
+      clearTimeout(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+    streamPendingRef.current = null;
+    setStreamingText('');
   }, []);
 
   // Initialize agent
@@ -358,7 +387,7 @@ export function App(props: AppProps): React.ReactElement {
 
     setHistory(h => [...h, { type: 'user', text: opts?.displayAs ?? prompt, id: nextId() }]);
     setBusy(true);
-    setStreamingText('');
+    clearStreaming();
     setActiveTools([]);
 
     const ac = new AbortController();
@@ -419,7 +448,7 @@ export function App(props: AppProps): React.ReactElement {
             // calls (JSON-shaped, <function=…>, or <tool_call>) or <thinking> blocks.
             // Strip all of them from the accumulated text each frame (stateless — the UI
             // re-renders the whole string).
-            setStreamingText(stripLeakedToolTags(stripThinkingForDisplay(stripLeakedToolJson(accumulated))));
+            pushStreaming(stripLeakedToolTags(stripThinkingForDisplay(stripLeakedToolJson(accumulated))));
             break;
           case 'thinking_done':
             // Clear the live streaming region BEFORE committing the message to the
@@ -431,7 +460,7 @@ export function App(props: AppProps): React.ReactElement {
             // then a cut-off restart). The message data is never duplicated — only
             // the terminal paint — which is why the text-level dedupe helpers can't
             // catch it. Emptying the live region first removes the offending frame.
-            setStreamingText('');
+            clearStreaming();
             if (accumulated.trim()) {
               // Same filter when committing to history display, then collapse any
               // self-repeat (model emitting its whole answer twice in one block).
@@ -519,11 +548,11 @@ export function App(props: AppProps): React.ReactElement {
       const loaded = getSessionStore().loadSession(sessionId);
       if (loaded) setMessages(loaded.messages);
       setBusy(false);
-      setStreamingText('');
+      clearStreaming();
       setActiveTools([]);
       abortRef.current = null;
     }
-  }, [sessionId, mode, explicitModel, messages, props.cwd, props.config, exit, nextId, askUser]);
+  }, [sessionId, mode, explicitModel, messages, props.cwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
 
   const handleSubmit = useCallback((value: string) => {
     const v = value.trim();
@@ -617,7 +646,7 @@ export function App(props: AppProps): React.ReactElement {
       </Static>
 
       {streamingText && (
-        <AssistantMessage text={tailForViewport(streamingText, rows, cols)} />
+        <StreamingView text={tailForViewport(streamingText, rows, cols)} />
       )}
 
       {activeTools.map(t => (
