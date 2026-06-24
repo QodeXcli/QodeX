@@ -184,18 +184,15 @@ export class ModelRouter {
     // Try exact match first
     const direct = this.modelIndex.get(modelId);
     if (direct) {
-      // The map stores entries under both `${providerName}/${modelId}` AND `${modelId}`.
-      // We only want to strip the prefix if it's actually a QodeX provider name
-      // (ollama, openai, anthropic, deepseek) — NOT a HuggingFace-style publisher
-      // prefix like `qwen/qwen3-coder-next` that LM Studio uses.
-      let resolvedId = modelId;
-      if (modelId.includes('/')) {
-        const [first, ...rest] = modelId.split('/');
-        if (first && this.providers.has(first)) {
-          resolvedId = rest.join('/');
-        }
-      }
-      return { provider: direct.provider, modelInfo: direct.info, resolvedId };
+      // The matched model's OWN id is exactly what the provider expects on the wire.
+      // Using it (instead of stripping a leading "provider/") is correct in every case:
+      //   - `openai/gpt-4o`        → info.id `gpt-4o`                       (provider prefix dropped)
+      //   - `qwen/qwen3-coder-next`→ info.id `qwen/qwen3-coder-next`        (HF publisher kept)
+      //   - `nvidia/nemotron-3-super-120b-a12b` on a provider NAMED nvidia → info.id kept VERBATIM.
+      // The old "strip if first segment is a provider name" heuristic broke that last case: a
+      // custom provider named `nvidia` made it strip the model's `nvidia/` VENDOR prefix, so the
+      // gateway got `nemotron-3-...` and 404'd. info.id never has that collision.
+      return { provider: direct.provider, modelInfo: direct.info, resolvedId: direct.info.id };
     }
     // Try fuzzy match — only for QodeX-provider prefixes, same rule as above.
     for (const [key, val] of this.modelIndex) {
