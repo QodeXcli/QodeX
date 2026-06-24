@@ -28,6 +28,8 @@ const ALL = [
   'explain_codebase','find_dead_code','semantic_search','auto_fix',
   'artifact_create','artifact_update','artifact_list','artifact_get','artifact_rollback','artifact_live','artifact_live_stop',
   'install_skill','install_mcp','mcp_scaffold',
+  // MCP design servers (only present when the user added figma/canva) — names use `:`.
+  'mcp:figma:get_code','mcp:figma:get_file','mcp:canva:create_design','mcp:canva:export_design',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -96,6 +98,20 @@ console.log('— artifact family gates on the artifact signal (regression) —')
   const live = names('start a live preview of the artifact with hot-reload');
   check('live request surfaces artifact_live', live.has('artifact_live'));
   check('live request surfaces artifact_live_stop', live.has('artifact_live_stop'));
+}
+
+console.log('— design MCP tools (figma/canva) gate on design signal, EN + FA —');
+{
+  // The `mcp:figma:` / `mcp:canva:` prefix must expand like an `_` family.
+  check('en "design a landing page in figma" surfaces figma tools',
+    names('design a landing page in figma').has('mcp:figma:get_code'));
+  check('en "canva" surfaces canva tools', names('make a poster in canva').has('mcp:canva:create_design'));
+  check('fa "طراحی سایت با فیگما" surfaces figma tools',
+    names('این صفحه رو با فیگما طراحی کن').has('mcp:figma:get_file'));
+  check('fa "کانوا" surfaces canva tools', names('یه پوستر توی کانوا بساز').has('mcp:canva:export_design'));
+  check('fa "طراحی وب‌سایت" surfaces figma tools', names('طراحی وب‌سایت برای فروشگاه').has('mcp:figma:get_code'));
+  check('unrelated task EXCLUDES design MCP tools', !names('fix the type error in math.ts').has('mcp:figma:get_code'));
+  check('plain backend task EXCLUDES canva', !names('write a sql migration').has('mcp:canva:create_design'));
 }
 
 console.log('— install_skill surfaces whenever skills are discussed (regression) —');

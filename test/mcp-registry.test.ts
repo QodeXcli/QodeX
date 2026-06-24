@@ -17,6 +17,38 @@ describe('MCP registry', () => {
     expect(findMcpSpec('nonexistent')).toBeUndefined();
   });
 
+  it('offers all three Figma access methods', () => {
+    const ids = listMcpSpecs().map(s => s.id);
+    for (const id of ['figma', 'figma-devmode', 'figma-remote']) expect(ids).toContain(id);
+    // token, no-auth-local, oauth-remote respectively
+    expect(findMcpSpec('figma')!.auth).toBe('token');
+    const dev = findMcpSpec('figma-devmode')!;
+    expect(dev.transport).toBe('remote');
+    expect(dev.auth).toBe('none');
+    expect(dev.url).toBe('http://127.0.0.1:3845/mcp'); // local desktop, uses the logged-in session
+    expect(dev.streamable).toBe(true);
+    const remote = findMcpSpec('figma-remote')!;
+    expect(remote.auth).toBe('oauth');
+    expect((remote.args ?? []).join(' ')).toContain('mcp-remote https://mcp.figma.com/mcp');
+    // Dev Mode builds a local streamable-HTTP entry with no headers (uses the desktop session).
+    const devEntry = buildServerEntry(dev);
+    expect(devEntry.url).toBe('http://127.0.0.1:3845/mcp');
+    expect(devEntry.streamable).toBe(true);
+    expect(devEntry.headers).toBeUndefined();
+  });
+
+  it('Canva is an OAuth login server via the mcp-remote bridge', () => {
+    const spec = findMcpSpec('canva')!;
+    expect(spec.transport).toBe('stdio');
+    expect(spec.auth).toBe('oauth');
+    expect(spec.credentials).toEqual([]); // OAuth → no token on disk
+    const entry = buildServerEntry(spec);
+    const argsJoined = (entry.args ?? []).join(' ');
+    expect(argsJoined).toContain('mcp-remote');
+    expect(argsJoined).toContain('https://mcp.canva.com/mcp');
+    expect(entry.destructive).toBe(true); // can create/edit/export designs
+  });
+
   it('tavily uses the mcp-remote stdio bridge with the key in the URL via env ref', () => {
     const spec = findMcpSpec('tavily')!;
     expect(spec.transport).toBe('stdio');
