@@ -392,7 +392,11 @@ tools actually returned — not background education and not a pitch.
   merely intended. If you ran out of iterations or got interrupted, say plainly what is DONE vs what
   REMAINS — an honest partial report is far more useful than a glossy list of work that doesn't exist
   on disk. The user trusts this summary to know the real state of their codebase.
-- If the user writes in Persian/Farsi, respond in Persian (but keep code/file paths in English).`);
+- **Match the user's language.** Reply in whatever language the user writes in (e.g. Persian/Farsi →
+  Persian). Author any user-FACING content you generate in that SAME language too — artifact pages
+  (\`artifact_*\`), UI copy, button/heading labels, demo text. An artifact is for the user, so its visible
+  text follows the chat language, not a fixed default. Always keep code, identifiers, file paths, and CLI
+  commands in English regardless of the chat language.`);
 
   // Skills — user-installed playbooks the model can load via use_skill. Injected
   // after Output Style so the rules above govern HOW to apply skills, not the
