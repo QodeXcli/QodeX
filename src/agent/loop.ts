@@ -1235,10 +1235,20 @@ export class AgentLoop {
       let lastUsage = { input: 0, output: 0 };
       let streamError: string | null = null;
 
+      // Turn timing. TTFT (time-to-first-token) is what the user FEELS as "how long
+      // before it answers" — on a local backend it's dominated by prompt prefill, so
+      // pairing it with the prompt-token estimate tells prefill-bound apart from a
+      // slow link or a huge generation. Logged once per turn at info level.
+      const dispatchStart = Date.now();
+      let firstTokenAt = 0;
+
       for await (const event of stream) {
         if (options.signal?.aborted) {
           streamError = 'Cancelled by user';
           break;
+        }
+        if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta')) {
+          firstTokenAt = Date.now();
         }
 
         switch (event.type) {
@@ -1284,6 +1294,29 @@ export class AgentLoop {
       }
 
       yield { type: 'thinking_done' };
+
+      // Per-turn latency telemetry. ttftMs is the user-perceived "time to answer";
+      // on local backends compare it to promptTokensEst to see prefill throughput
+      // (tokens / ttft). prefillTokPerSec near the model's known prompt-eval rate ⇒
+      // prefill-bound (reduce prompt / raise LM Studio n_batch + flash attention);
+      // far below ⇒ a cold load or cache miss instead.
+      {
+        const ttftMs = firstTokenAt ? firstTokenAt - dispatchStart : 0;
+        const totalMs = Date.now() - dispatchStart;
+        logger.info('LLM turn timing', {
+          model: route.model,
+          provider: route.provider.name,
+          local: route.provider.isLocal,
+          promptTokensEst: estTokens,
+          outputTokens: lastUsage.output || undefined,
+          ttftMs,
+          totalMs,
+          prefillTokPerSec: ttftMs > 0 ? Math.round(estTokens / (ttftMs / 1000)) : undefined,
+          genTokPerSec: lastUsage.output && firstTokenAt && Date.now() > firstTokenAt
+            ? Math.round(lastUsage.output / ((Date.now() - firstTokenAt) / 1000))
+            : undefined,
+        });
+      }
 
       // Stream errored
       if (streamError) {
