@@ -10,6 +10,19 @@
 
 ---
 
+## Highlights
+
+- **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
+- **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model can't ship broken or unverified code.
+- **Self-learning skills (safe by design)** — QodeX captures the winning approach from an *objectively-successful* task as a quarantined skill; only an **independent judge model** can promote it, and it **never overwrites a human-written skill**.
+- **Live, shareable artifacts** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel.
+- **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
+- **100+ built-in tools** — Tree-sitter code-graph, real Playwright browser automation, dev-servers, web search, vision, Docker / DB / WordPress, and any MCP server.
+- **Persian-first** — prompts, skill matching, *and* generated artifact copy follow your chat language, not a fixed default.
+- **Token-efficient** — sub-agent delegation, result-aging, compaction, and tool-gating keep the working context small on long sessions.
+
+---
+
 ## What makes it different
 
 Most agentic CLIs *delegate to the model* — they hand the model tools and trust it to use them well. That works with a frontier model and falls apart with a weaker local one (loops, half-finished edits, "done" when nothing was tested).
@@ -48,7 +61,9 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
 - **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.
-- **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit**; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
+- **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit and auto‑opens in your browser** so you watch it change live; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
+- **Design integrations (Figma + Canva)** — `qodex mcp add figma` (3 ways: your logged‑in desktop Dev Mode, a personal token, or hosted OAuth) and `qodex mcp add canva` (OAuth login) let the model turn a Figma frame into code or build a Canva design — driven from the terminal over MCP.
+- **Self‑learning skills** — after a task that *objectively* succeeded (verified + honest, ≥ a few tool calls), QodeX can capture the winning approach as a **candidate** skill in quarantine. An **independent judge model** (a *different* model from the one that did the work) reviews it before it’s promoted, and a human‑authored skill is **never** overwritten. Drive it with `qodex skill candidates | curate | promote`. Off by default (`learning.enabled`).
 - **Trade‑off & business analysis** — ask it to analyze or plan (not code) and it produces **decision‑grade output**: options × weighted criteria → a scored comparison and one clear recommendation, business‑plan structure, no invented numbers.
 - **Persian‑first** — skill auto‑loading and tool selection understand Persian prompts (تحلیل، دیتابیس، آرتیفکت…), not just English keywords.
 - **Verify its own work** — `auto_fix` runs your test command in a fix→test loop with an iteration cap and same-failure-twice detection; the auto‑verify gate runs the right checker **per language** in a polyglot repo (TS *and* Python both get checked).
@@ -60,21 +75,59 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 
 ## Install
 
-> Requires **Node 20+**. `dist/` is built locally (not committed) — the `npm run build` step is **required**.
+**Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.
+
+### macOS
 
 ```bash
+# Node + Git via Homebrew (or use nvm). Check: node -v  →  v20+  
+brew install node git
+
 git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
 npm install
 npm run build
-npm link   # makes `qodex` and `qx` available on PATH
+npm link            # puts `qodex` and `qx` on your PATH
 ```
 
-Optional but recommended (browser automation, ~200 MB one-time):
+### Linux
+
+```bash
+# Debian/Ubuntu — get Node 20+ from NodeSource if your distro ships an older one
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs git
+# (Fedora: sudo dnf install nodejs git    ·    Arch: sudo pacman -S nodejs npm git)
+
+git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
+npm install
+npm run build
+sudo npm link       # or plain `npm link` if your npm prefix is user-writable
+```
+
+### Windows
+
+Open **PowerShell** and install Node + Git (via [winget](https://learn.microsoft.com/windows/package-manager/), or the installers from [nodejs.org](https://nodejs.org) / [git-scm.com](https://git-scm.com)):
+
+```powershell
+winget install OpenJS.NodeJS.LTS Git.Git
+# reopen PowerShell so PATH refreshes, then:
+git clone https://github.com/QodeXcli/QodeX.git qodex; cd qodex
+npm install
+npm run build
+npm link            # `qodex` and `qx` on PATH
+```
+
+> **Windows tip:** if the native `better-sqlite3` module fails to compile, install the C/C++ build tools (`npm install --global windows-build-tools`, run PowerShell as Administrator) — or use **WSL2** and follow the **Linux** steps above (recommended for the smoothest experience).
+
+### Optional — browser automation (all platforms)
+
+Playwright-backed Chromium for the `browser_*` tools (~200 MB, one-time):
 
 ```bash
 npm install playwright
 npx playwright install chromium
 ```
+
+> Then run `qodex setup` to detect your local models and write `~/.qodex/config.yaml`.
 
 ## Quick start
 
