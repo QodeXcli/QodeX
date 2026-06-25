@@ -297,6 +297,10 @@ export interface QodexConfig {
    * Ollama / an embedding index isn't available, never blocks startup.
    */
   context?: {
+    /** Auto-infer the project's code style (indentation, quotes, semicolons, naming) from
+     *  its source + .editorconfig and inject it so generated code matches — no explicit
+     *  `remember` needed. Deterministic, computed once per session. Default true. */
+    styleProfile?: boolean;
     /** Enable the auto-retrieval pre-pass. Default true (silently skips when unavailable). */
     autoRetrieve?: boolean;
     /** How many files to surface. Default 6. */

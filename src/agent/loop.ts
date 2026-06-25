@@ -126,6 +126,7 @@ export class AgentLoop {
   private sessionToolNames = new Set<string>();
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
   private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
+  private styleBlock: string | null = null; // inferred code-style block, computed once per session
 
   /** Record a tool failure to episodic memory (best-effort, opt-in). Only fires when
    *  failure-driven learning is enabled; the pattern miner later decides what's worth
@@ -546,6 +547,22 @@ export class AgentLoop {
         } catch (e: any) {
           logger.debug('Auto-retrieval pre-pass failed (ignored)', { err: e?.message });
         }
+      }
+    }
+
+    // ── User-preference modeling: match the project's code style automatically ──
+    // Inferred once per session (deterministic, cached), injected so generated code blends
+    // in without the user having to `remember` their conventions. Off via context.styleProfile:false.
+    if ((this.config as any).context?.styleProfile !== false && mode !== 'plan') {
+      try {
+        if (this.styleBlock === null) {
+          const { scanProjectStyle, buildStyleBlock } = await import('../context/style-profile.js');
+          this.styleBlock = buildStyleBlock(await scanProjectStyle(this.cwd));
+        }
+        if (this.styleBlock) sysPrompt += `\n\n${this.styleBlock}`;
+      } catch (e: any) {
+        logger.debug('Style-profile injection skipped', { err: e?.message });
+        this.styleBlock = ''; // don't retry every turn on failure
       }
     }
 
