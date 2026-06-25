@@ -463,7 +463,7 @@ export class AgentLoop {
         availableToolNames: effectiveTools,
         taskClass,
         stackAddendum,
-        skillsBlock: buildSkillsSystemBlock(),
+        skillsBlock: buildSkillsSystemBlock({ prompt: userPrompt }),
       });
     }
 
@@ -630,6 +630,17 @@ export class AgentLoop {
             });
           } catch (e: any) {
             logger.debug('Flywheel record skipped', { err: e?.message });
+          }
+          // ── Zero-cost distillation: export the FULL conversation as ShareGPT JSONL ──
+          // Same objective-success gate; uses the complete message history (not the
+          // truncated summary) so the dataset is training-ready. Strictly local, opt-in.
+          if ((this.config as any).flywheel?.datasetExport) {
+            try {
+              const { appendShareGptRecord } = await import('./dataset-export.js');
+              await appendShareGptRecord(this.cwd, messages);
+            } catch (e: any) {
+              logger.debug('Dataset export skipped', { err: e?.message });
+            }
           }
         }
         // ── Skill-learning: capture a CANDIDATE skill (opt-in, quarantined) ──

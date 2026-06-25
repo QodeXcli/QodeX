@@ -390,6 +390,10 @@ export interface QodexConfig {
   flywheel?: {
     /** Record successful trajectories. Default false. Requires sandbox.enabled. */
     enabled?: boolean;
+    /** Also export each successful task as a ShareGPT JSONL record to
+     *  ~/.qodex/dataset/<project>.jsonl — a ready-to-use corpus for a future
+     *  zero-cost local fine-tune. Default false. Strictly local. */
+    datasetExport?: boolean;
   };
   /**
    * Skill-learning loop — capture reusable methodology from OBJECTIVELY-successful tasks
