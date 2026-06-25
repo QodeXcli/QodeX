@@ -707,6 +707,30 @@ export class AgentLoop {
               await writeCandidate(candidate);
               await recordLearningEvent({ event: 'capture', name: candidate.name, confidence });
               yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+
+              // Auto-Evaluation (opt-in): immediately replay the captured skill in a clean
+              // worktree and record whether it produces verified code. Costs a model call +
+              // worktree, so it's behind learning.autoEval. Best-effort — the task already
+              // succeeded; an eval failure here never affects it.
+              if (learningCfg.autoEval) {
+                try {
+                  const { evalSkillMd } = await import('../skills/learning/eval.js');
+                  const { formatEvalSection, upsertEvalSection, skillContentHash } = await import('../skills/learning/eval-record.js');
+                  const { candidatesDir } = await import('../skills/learning/candidate-store.js');
+                  const { result } = await evalSkillMd(this.cwd, candidate.skillMd, { noCache: true });
+                  if (result) {
+                    const fsmod = await import('fs');
+                    const pathmod = await import('path');
+                    const file = pathmod.join(candidatesDir(), candidate.name, 'SKILL.md');
+                    const updated = upsertEvalSection(candidate.skillMd, formatEvalSection(result, skillContentHash(candidate.skillMd)));
+                    await fsmod.promises.writeFile(file, updated, 'utf-8');
+                    await recordLearningEvent({ event: 'eval', name: candidate.name, evalStatus: result.status });
+                    yield { type: 'notice', data: { message: `🧪 Auto-eval of "${candidate.name}": ${result.status}.` } };
+                  }
+                } catch (e: any) {
+                  logger.debug('Auto-eval after capture skipped', { err: e?.message });
+                }
+              }
             } else {
               logger.debug('Skill capture skipped', { reason: elig.reason });
             }
