@@ -48,6 +48,19 @@ export function detectModelFamily(modelId: string): SystemPromptContext['modelFa
   return 'other';
 }
 
+/**
+ * Is this a HIGH-CAPACITY model by parameter count (≥ ~70B)? A frontier-class local model
+ * (e.g. qwen3-235b, llama-3.1-405b) follows terse guidance as reliably as a cloud model, so
+ * it should get the COMPRESSED prompt — the verbose, example-laden version just inflates
+ * prefill (and TTFT) for no quality gain. We read the largest `<n>b` param marker in the id;
+ * MoE active-param markers (a22b) are ignored because the total is what signals capability.
+ * Small local models (≤ ~32B) stay on the full guidance they depend on.
+ */
+export function isHighCapacityModel(modelId: string): boolean {
+  const nums = [...(modelId.toLowerCase().matchAll(/(?:^|[^a-z\d])(\d{2,4})\s*b(?![a-z])/g))].map(m => parseInt(m[1]!, 10));
+  return nums.length > 0 && Math.max(...nums) >= 70;
+}
+
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
   const sections: string[] = [];
   const isQwen = ctx.modelFamily === 'qwen' || ctx.modelFamily === 'deepseek';
@@ -55,8 +68,10 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   // compressed prompt — real token savings on turn-1 prefill and cloud input billing.
   // Weak/local families (qwen/deepseek/other) keep the FULL, example-laden guidance
   // they depend on. This is cache-safe: the model doesn't change mid-session, so the
-  // chosen prompt is a stable prefix.
-  const capable = ctx.modelFamily === 'claude' || ctx.modelFamily === 'gpt' || ctx.modelFamily === 'gemini';
+  // chosen prompt is a stable prefix. A high-capacity LOCAL model (big qwen/llama) also
+  // counts as capable — the verbose prompt only inflated its prefill/TTFT for no gain.
+  const capable = ctx.modelFamily === 'claude' || ctx.modelFamily === 'gpt' || ctx.modelFamily === 'gemini'
+    || isHighCapacityModel(ctx.modelId ?? '');
 
   const runtimeModelLine = ctx.modelId
     ? `\n\nThe LLM currently routing this request is **${ctx.modelId}**${ctx.providerName ? ` (served via ${ctx.providerName})` : ''}. If — and only if — the user explicitly asks which underlying model/LLM powers you, you may state this exact model name. Do NOT guess, and do NOT name any other model (you are not "qwen2.5-coder" or any hardcoded default — report the real model name given here). Never identify AS the model; your identity is QodeX.`
