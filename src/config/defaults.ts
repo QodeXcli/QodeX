@@ -383,6 +383,17 @@ export interface QodexConfig {
     };
   };
   /**
+   * Browser tooling. By default the `browser_*` tools launch a fresh headless Chromium.
+   * Set `cdpUrl` to ATTACH to an already-running browser over the Chrome DevTools Protocol
+   * instead — drive your OWN logged-in Chrome / Brave / Arc / Edge (started with
+   * `--remote-debugging-port=9222`), or any Chromium-based browser, with your real cookies
+   * and sessions. The `QODEX_BROWSER_CDP_URL` env var overrides this.
+   */
+  browser?: {
+    /** CDP/DevTools endpoint to attach to, e.g. "http://127.0.0.1:9222". */
+    cdpUrl?: string;
+  };
+  /**
    * Local data flywheel — record successful sandbox trajectories (prompt +
    * reasoning + final code) to ~/.qodex/trajectories/<project>.jsonl for a later
    * local QLoRA fine-tune. Strictly local, opt-in, only successful tasks.
