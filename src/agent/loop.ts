@@ -125,6 +125,26 @@ export class AgentLoop {
    *  across turns (a sliding per-turn set would flip and invalidate the prompt cache). */
   private sessionToolNames = new Set<string>();
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
+  private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
+
+  /** Record a tool failure to episodic memory (best-effort, opt-in). Only fires when
+   *  failure-driven learning is enabled; the pattern miner later decides what's worth
+   *  learning. Fire-and-forget — never blocks or throws into the loop. */
+  private recordToolFailure(tool: string, content: string): void {
+    if (!(this.config as any).learning?.failureLessons?.enabled) return;
+    if (!this.currentTaskKey) return;
+    void (async () => {
+      try {
+        const { recordFailure, normalizeFailureSignature } = await import('../skills/learning/failures.js');
+        await recordFailure({
+          task: this.currentTaskKey,
+          tool,
+          signature: normalizeFailureSignature(tool, content),
+          sample: (content || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        });
+      } catch { /* best-effort */ }
+    })();
+  }
   /** Auto tool profile: null = not yet derived this session; then a ratcheting list. */
   private autoDisabledTools: string[] | null = null;
   /** Live context windows read from LM Studio's native API, fetched once per session. */
@@ -526,6 +546,25 @@ export class AgentLoop {
         } catch (e: any) {
           logger.debug('Auto-retrieval pre-pass failed (ignored)', { err: e?.message });
         }
+      }
+    }
+
+    // ── Failure-driven learning: inject cautions mined from RECURRING past failures ──
+    // Deterministic, bounded, opt-in. Also stamp this run's task key so failures we
+    // record below are attributable to a distinct task (the repetition gate counts tasks).
+    const flCfg = (this.config as any).learning?.failureLessons;
+    if (flCfg?.enabled) {
+      try {
+        const { loadLessonsBlock, taskKey } = await import('../skills/learning/failures.js');
+        this.currentTaskKey = taskKey(String(userPrompt));
+        const block = await loadLessonsBlock({
+          minOccurrences: flCfg.minOccurrences ?? 3,
+          minDistinctTasks: flCfg.minDistinctTasks ?? 2,
+          topK: flCfg.maxInjected ?? 5,
+        });
+        if (block) { sysPrompt += `\n\n${block}`; logger.info('Learned cautions injected'); }
+      } catch (e: any) {
+        logger.debug('Failure-lessons injection skipped', { err: e?.message });
       }
     }
 
@@ -1818,6 +1857,7 @@ export class AgentLoop {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           noteResult(tc.function.name, r);
           // Emit any UI events captured during execution
           for (const ev of r.uiEvents) {
@@ -1847,6 +1887,7 @@ export class AgentLoop {
           const tc = batch[0]!;
           const r = await this.executeToolCall(tc, txn, sessionId, options);
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           noteResult(tc.function.name, r);
           for (const ev of r.uiEvents) {
             yield { type: 'tool_ui', data: ev };
@@ -1867,6 +1908,7 @@ export class AgentLoop {
             const tc = batch[i]!;
             const r = results[i]!;
             yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          if (r.isError) this.recordToolFailure(tc.function.name, r.content);
             noteResult(tc.function.name, r);
             for (const ev of r.uiEvents) yield { type: 'tool_ui', data: ev };
             toolMessages.push({
