@@ -416,6 +416,10 @@ export interface QodexConfig {
   learning?: {
     /** Capture candidate skills after eligible tasks. Default false. */
     enabled?: boolean;
+    /** Auto-run `skill eval` immediately after a capture (replay in a clean worktree +
+     *  objective verify, recorded into the candidate). Costs a model call + worktree per
+     *  capture, so it's opt-in. Default false; otherwise run `qodex skill eval` on demand. */
+    autoEval?: boolean;
     /** Minimum tool calls for a task to be capture-worthy. Default 5. */
     minToolCalls?: number;
     /** Require objective verification to have passed before capturing. Default true.

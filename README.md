@@ -82,6 +82,8 @@ QodeX can **learn reusable playbooks from your successful tasks** — without th
 1. **Capture** — when a task finishes in the git sandbox and *objectively* succeeds (it compiled / type-checked, the completion-claim gate passed, and it took at least a few tool calls and changed a file), QodeX distills the winning approach into a `SKILL.md` and assigns it a **confidence score (0–100)** from those objective signals.
 2. **Quarantine** — the new skill is written to `~/.qodex/skills-candidates/` (a dir QodeX never auto-loads), stamped `provenance: machine`, `status: candidate`. It can't affect the model until promoted.
 3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
+4. **Auto-evaluation** — `qodex skill eval <name>` (or `learning.autoEval` to run it right after capture) **replays the skill's original task in a throwaway git worktree** and runs the **real** verifier (`tsc`/`ruff`/…) on the code it produces, recording **pass / fail / inconclusive** into the skill. It tests whether the skill actually *works*, not just whether a judge likes it. Content-hash cached.
+5. **Learning from failures** — with `learning.failureLessons.enabled`, QodeX records tool failures and, once a mistake **recurs across tasks**, injects a deterministic "learned caution" into the prompt (e.g. *"verify a symbol exists before `edit_symbol`"*) so it stops repeating it. One-offs never teach; see `qodex skill lessons`.
 
 ```yaml
 # ~/.qodex/config.yaml — opt in
@@ -90,14 +92,19 @@ learning:
   minToolCalls: 5                   # how substantial a task must be to capture
   judgeModel: llama-3.3-70b-versatile   # the INDEPENDENT judge (must differ from defaults.model)
   autoPromoteMinConfidence: 50      # hold lower-confidence captures for human review
+  autoEval: false                   # run `skill eval` automatically after each capture
+  failureLessons:
+    enabled: true                   # learn from RECURRING tool failures
 ```
 
 ```bash
 qodex skill candidates          # list quarantined captures (with confidence)
 qodex skill curate              # independent judge merges + promotes the good ones
+qodex skill eval <name>         # replay the skill in a clean worktree + real verify → pass/fail
 qodex skill promote <name>      # promote one yourself (you are the independent reviewer)
 qodex skill reject <name>       # discard a candidate
 qodex skill stats               # learning metrics: captured / promoted / merged, promotion rate, avg confidence
+qodex skill lessons             # cautions learned from your recurring failures
 qodex skill snapshots           # rollback points;  qodex skill restore <archive>  to roll back
 ```
 
