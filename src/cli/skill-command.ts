@@ -121,10 +121,35 @@ export function buildSkillCommand(): Command {
       }
       console.log(`${cands.length} candidate(s) awaiting review:\n`);
       for (const c of cands) {
-        console.log(`  ◇ ${c.name}${c.capturedAt ? `  (captured ${c.capturedAt})` : ''}`);
+        const conf = typeof c.confidence === 'number' ? `  [confidence ${c.confidence}/100]` : '';
+        console.log(`  ◇ ${c.name}${conf}${c.capturedAt ? `  (captured ${c.capturedAt})` : ''}`);
         console.log(`      ${c.description}`);
       }
       console.log('\nPromote:  qodex skill promote <name>   ·   Reject:  qodex skill reject <name>   ·   Auto-judge:  qodex skill curate');
+    });
+
+  cmd
+    .command('learning-stats')
+    .description('Show learning-loop metrics: captured / promoted / rejected / merged, promotion rate, avg confidence')
+    .action(async () => {
+      const { readLearningEvents, aggregateStats } = await import('../skills/learning/ledger.js');
+      const { listCandidates } = await import('../skills/learning/candidate-store.js');
+      const events = await readLearningEvents();
+      const pending = (await listCandidates()).length;
+      const s = aggregateStats(events, pending);
+      console.log('Skill-learning metrics');
+      console.log('──────────────────────');
+      console.log(`  Captured:        ${s.captured}`);
+      console.log(`  Promoted:        ${s.promoted}`);
+      console.log(`  Rejected:        ${s.rejected}`);
+      console.log(`  Merged:          ${s.merged}`);
+      console.log(`  Promotion rate:  ${(s.promotionRate * 100).toFixed(0)}%  (of judged candidates)`);
+      console.log(`  Avg confidence:  ${s.avgConfidence === null ? '—' : `${s.avgConfidence}/100`}`);
+      console.log(`  Pending review:  ${s.pendingCandidates}`);
+      if (s.lastEventAt) console.log(`  Last activity:   ${s.lastEventAt}`);
+      if (s.captured + s.promoted + s.rejected + s.merged === 0) {
+        console.log('\nNo activity yet. Enable with learning.enabled in ~/.qodex/config.yaml.');
+      }
     });
 
   cmd

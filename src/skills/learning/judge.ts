@@ -14,14 +14,20 @@ import type { JudgeVerdict } from './types.js';
 export function buildJudgePrompt(candidateMd: string, existingSkillNames: string[] = []): { system: string; user: string } {
   const system =
     'You are an independent reviewer deciding whether to ADD a machine-captured "skill" ' +
-    '(a reusable playbook) to a shared library. Your default is to REJECT. Approve ONLY if ' +
-    'the skill is genuinely reusable across future tasks, correct, specific enough to be ' +
-    'useful, and NOT redundant with an existing skill. Reject if it is: a one-off with no ' +
-    'reuse value, vague/generic, likely wrong, or duplicates something already present. ' +
-    'You did NOT write this; have no loyalty to it.\n\n' +
+    '(a reusable playbook) to a shared library. Your default is to REJECT. You did NOT write ' +
+    'this; have no loyalty to it.\n\n' +
+    'RUBRIC — approve (pass:true) ONLY if ALL hold:\n' +
+    '  1. Reusable: applies to a CLASS of future tasks, not one specific file/function.\n' +
+    '  2. Correct: the described approach is sound and won\'t mislead.\n' +
+    '  3. Specific: concrete enough to actually guide work (not "write good code").\n' +
+    '  4. Non-redundant: not a duplicate of a skill already in the library (listed below).\n' +
+    'Reject if ANY fails.\n\n' +
+    'EXAMPLES:\n' +
+    '  GOOD → {"pass": true, "reasons": ["reusable across any Prisma model", "concrete migration + rollback steps"]}\n' +
+    '  BAD  → {"pass": false, "reasons": ["one-off: hardcodes src/foo.ts, not generalizable"]}\n' +
+    '  BAD  → {"pass": false, "reasons": ["vague: just says \'refactor carefully\' with no procedure"]}\n\n' +
     'Respond with STRICT JSON only, no prose:\n' +
-    '{"pass": boolean, "reasons": ["..."]}\n' +
-    'Give concrete reasons either way.';
+    '{"pass": boolean, "reasons": ["..."]}';
 
   const existing = existingSkillNames.length
     ? `\n\n## Skills already in the library (reject if this duplicates one)\n${existingSkillNames.map(n => `- ${n}`).join('\n')}`

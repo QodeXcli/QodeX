@@ -25,6 +25,7 @@ export interface CandidateInfo {
   description: string;
   dir: string;
   capturedAt?: string;
+  confidence?: number;
 }
 
 /** Write (or replace) a candidate. Candidates are always machine-owned, so replacing a
@@ -53,7 +54,8 @@ export async function listCandidates(): Promise<CandidateInfo[]> {
       const raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
       const desc = raw.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? '';
       const at = raw.match(/^captured-at:\s*(.+)$/m)?.[1]?.trim();
-      out.push({ name: ent.name, description: desc, dir, capturedAt: at });
+      const conf = raw.match(/^confidence:\s*(\d+)/m)?.[1];
+      out.push({ name: ent.name, description: desc, dir, capturedAt: at, confidence: conf ? Number(conf) : undefined });
     } catch { /* skip unreadable */ }
   }
   return out;
