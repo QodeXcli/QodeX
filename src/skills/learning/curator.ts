@@ -19,11 +19,28 @@ import { ModelRouter } from '../../llm/router.js';
 import { logger } from '../../utils/logger.js';
 import { loadSkillByName } from '../loader.js';
 import { listCandidates, readCandidate, promoteCandidate, writeCandidate, archiveCandidate } from './candidate-store.js';
-import { buildJudgePrompt, parseJudgeVerdict, buildMergePrompt, parseMergeResult } from './judge.js';
+import { buildMergePrompt, parseMergeResult } from './judge.js';
+import {
+  buildRubricPrompt, parseRubricScores, shouldEscalate, rubricToVerdict,
+  alignmentDrift, buildCalibrationBlock, type DriftRecord, type RubricScores,
+} from './judge-cascade.js';
 import { decidePromotion } from './promotion.js';
 import { snapshotSkills } from './snapshot.js';
 import { findSimilarPairs, skillSimilarityText } from './similarity.js';
 import { recordLearningEvent } from './ledger.js';
+import { promises as fsp } from 'fs';
+import * as os from 'os';
+import * as nodePath from 'path';
+
+const driftPath = () => nodePath.join(os.homedir(), '.qodex', 'judge-drift.jsonl');
+async function readDrift(): Promise<DriftRecord[]> {
+  try { return (await fsp.readFile(driftPath(), 'utf-8')).split('\n').filter(Boolean).map(l => JSON.parse(l) as DriftRecord); }
+  catch { return []; }
+}
+async function appendDrift(r: DriftRecord): Promise<void> {
+  try { await fsp.mkdir(nodePath.dirname(driftPath()), { recursive: true }); await fsp.appendFile(driftPath(), JSON.stringify(r) + '\n', 'utf-8'); }
+  catch { /* best-effort */ }
+}
 
 export interface CurateResult {
   snapshot: string | null;
@@ -122,6 +139,24 @@ export async function curateCandidates(
   // Re-list after the merge pass so promotion sees the collapsed set.
   const liveCandidates = (await listCandidates()).filter(c => !mergedAway.has(c.name));
   const existingNames = liveCandidates.map(c => c.name);
+
+  // ── Escalating cascade setup ── Tier 1 is judgeRoute (the light/local judge). Tier 2 is an
+  // optional heavy model (learning.judgeModelTier2) we escalate to only when Tier 1 is unsure.
+  const tier2Model = String((config as any).learning?.judgeModelTier2 ?? '').trim();
+  let tier2Route: ReturnType<typeof router.route> | null = null;
+  if (tier2Model && tier2Model !== authorModel && tier2Model !== judgeRoute.model) {
+    try { tier2Route = router.route('reflection', 2000, { explicitModel: tier2Model }); } catch { tier2Route = null; }
+  }
+  // Calibration: if Tier 1 has been drifting from Tier 2, feed it the worst past corrections.
+  const driftRecords = await readDrift();
+  const calibration = buildCalibrationBlock(driftRecords, 3);
+
+  const scoreWith = async (route: NonNullable<typeof tier2Route>, md: string, calib: string): Promise<RubricScores | null> => {
+    const { system, user } = buildRubricPrompt(md, calib);
+    const text = await drainText(route.provider.complete({ model: route.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0 } as any));
+    return parseRubricScores(text);
+  };
+
   for (const c of liveCandidates) {
     const md = await readCandidate(c.name);
     if (!md) { result.skipped.push({ name: c.name, reason: 'unreadable' }); continue; }
@@ -132,16 +167,25 @@ export async function curateCandidates(
       continue;
     }
 
-    log(`Judging "${c.name}" with ${judgeRoute.model} …`);
+    // ── Escalating cascade: Tier 1 (light) scores; escalate to Tier 2 (heavy) only when unsure ──
     let verdict;
     try {
-      const { system, user } = buildJudgePrompt(md, existingNames.filter(n => n !== c.name));
-      const text = await drainText(judgeRoute.provider.complete({
-        model: judgeRoute.model,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-        temperature: 0,
-      } as any));
-      verdict = parseJudgeVerdict(text, judgeRoute.model);
+      log(`Judging "${c.name}" with ${judgeRoute.model} (Tier 1) …`);
+      const t1 = await scoreWith(judgeRoute, md, calibration);
+      let finalScores = t1, finalModel = judgeRoute.model, reasons: string[] = [];
+      // Escalate when Tier 1 couldn't score (null) or is in the grey/confused zone, and a Tier 2 exists.
+      if (tier2Route && (!t1 || shouldEscalate(t1))) {
+        log(`  ↑ escalating "${c.name}" to ${tier2Route.model} (Tier 2)${t1 ? ` — avg/variance unclear` : ' — Tier 1 unparseable'} …`);
+        const t2 = await scoreWith(tier2Route, md, '');
+        if (t2) {
+          finalScores = t2; finalModel = tier2Route.model; reasons = [t2.justification].filter(Boolean);
+          if (t1) await appendDrift({ ts: new Date().toISOString(), tier1: t1, tier2: t2, drift: alignmentDrift(t1, t2) });
+        }
+      } else if (t1) {
+        reasons = [t1.justification].filter(Boolean);
+      }
+      if (!finalScores) { result.skipped.push({ name: c.name, reason: 'judge produced no parseable scores (Tier 1 + Tier 2)' }); continue; }
+      verdict = { pass: rubricToVerdict(finalScores), judgeModel: finalModel, reasons };
     } catch (e: any) {
       result.skipped.push({ name: c.name, reason: `judge call failed: ${e?.message}` });
       continue;
