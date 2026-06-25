@@ -442,6 +442,18 @@ export interface QodexConfig {
      *  within this window. Default 24. */
     evalCacheTtlHours?: number;
     /**
+     * Episodic memory — record a lean episode after each successful task and, at the start
+     * of a new one, inject the most SIMILAR past episode(s) so the agent reuses its own
+     * proven approach. Smart retrieval (top-K above a threshold), concise injection.
+     */
+    episodicMemory?: {
+      enabled?: boolean;
+      /** How many past episodes to inject. Default 2. */
+      topK?: number;
+      /** Min lexical similarity (0–1) to inject — below this, nothing. Default 0.18. */
+      minSimilarity?: number;
+    };
+    /**
      * Failure-driven learning — record tool failures and, once a pattern RECURS across
      * tasks, inject a deterministic "learned caution" into the system prompt so the agent
      * stops repeating it. Off by default. See src/skills/learning/failures.ts.
