@@ -85,6 +85,9 @@ QodeX can **learn reusable playbooks from your successful tasks** — without th
 3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
 4. **Auto-evaluation** — `qodex skill eval <name>` (or `learning.autoEval` to run it right after capture) **replays the skill's original task in a throwaway git worktree** and runs the **real** verifier (`tsc`/`ruff`/…) on the code it produces, recording **pass / fail / inconclusive** into the skill. It tests whether the skill actually *works*, not just whether a judge likes it. Content-hash cached.
 5. **Learning from failures** — with `learning.failureLessons.enabled`, QodeX records tool failures and, once a mistake **recurs across tasks**, injects a deterministic "learned caution" into the prompt (e.g. *"verify a symbol exists before `edit_symbol`"*) so it stops repeating it. One-offs never teach; see `qodex skill lessons`.
+6. **Episodic memory** — with `learning.episodicMemory.enabled`, QodeX records a lean episode after each successful task and, at the start of a new one, recalls the **most similar past task on this project** and injects a one-line reminder of what worked — so it reuses its own approach instead of rediscovering it. Smart retrieval: only the top match above a similarity threshold (an unrelated task recalls nothing).
+
+QodeX also **auto-matches your code style** (indentation, quotes, semicolons, naming — inferred from the project + `.editorconfig`) so generated code blends in without you having to spell it out. Off via `context.styleProfile: false`.
 
 ```yaml
 # ~/.qodex/config.yaml — opt in
@@ -96,6 +99,25 @@ learning:
   autoEval: false                   # run `skill eval` automatically after each capture
   failureLessons:
     enabled: true                   # learn from RECURRING tool failures
+  episodicMemory:
+    enabled: true                   # recall the most similar past task and reuse what worked
+```
+
+**A worked example.** With `learning.enabled` + an independent `judgeModel`, a typical loop:
+
+```text
+> add cursor pagination to the /orders endpoint        # you give a task
+… QodeX edits, type-checks, tests, and the sandbox merges (objective success) …
+🎓 Captured candidate skill "add-cursor-pagination" (confidence 82/100)
+🧪 Auto-eval of "add-cursor-pagination": pass            # (if learning.autoEval)
+
+$ qodex skill candidates        # review the quarantined capture
+$ qodex skill curate            # an INDEPENDENT judge promotes/merges the good ones
+$ qodex skill stats             # captured 3 · promoted 2 · promotion rate 67%
+
+# next week, a similar task:
+> add pagination to the /users endpoint
+# → QodeX recalls the past episode + loads the promoted skill automatically.
 ```
 
 ```bash

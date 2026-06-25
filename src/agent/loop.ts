@@ -566,6 +566,23 @@ export class AgentLoop {
       }
     }
 
+    // ── Episodic memory: recall the most SIMILAR past task on this project ──
+    // Smart retrieval (top-K above a similarity threshold), concise injection. An unrelated
+    // task injects nothing. Opt-in via learning.episodicMemory.enabled.
+    const emCfg = (this.config as any).learning?.episodicMemory;
+    if (emCfg?.enabled && mode !== 'plan') {
+      try {
+        const { loadEpisodeBlock } = await import('../context/episodic-memory.js');
+        const block = await loadEpisodeBlock(this.cwd, String(userPrompt), {
+          topK: emCfg.topK ?? 2,
+          minScore: emCfg.minSimilarity ?? 0.18,
+        });
+        if (block) { sysPrompt += `\n\n${block}`; logger.info('Episodic memory injected'); }
+      } catch (e: any) {
+        logger.debug('Episodic recall skipped', { err: e?.message });
+      }
+    }
+
     // ── Failure-driven learning: inject cautions mined from RECURRING past failures ──
     // Deterministic, bounded, opt-in. Also stamp this run's task key so failures we
     // record below are attributable to a distinct task (the repetition gate counts tasks).
@@ -696,6 +713,20 @@ export class AgentLoop {
               await appendShareGptRecord(this.cwd, messages);
             } catch (e: any) {
               logger.debug('Dataset export skipped', { err: e?.message });
+            }
+          }
+          // ── Episodic memory: record a lean "how I solved this" episode for later recall ──
+          if ((this.config as any).learning?.episodicMemory?.enabled) {
+            try {
+              const { recordEpisode } = await import('../context/episodic-memory.js');
+              await recordEpisode(this.cwd, {
+                prompt: String(firstUserMsg),
+                summary: finalContent.slice(0, 300),
+                filesChanged: changedFiles,
+                toolsUsed: [...this.sessionToolNames],
+              });
+            } catch (e: any) {
+              logger.debug('Episode record skipped', { err: e?.message });
             }
           }
         }
