@@ -130,6 +130,7 @@ export function buildSkillCommand(): Command {
 
   cmd
     .command('learning-stats')
+    .alias('stats')
     .description('Show learning-loop metrics: captured / promoted / rejected / merged, promotion rate, avg confidence')
     .action(async () => {
       const { readLearningEvents, aggregateStats } = await import('../skills/learning/ledger.js');
@@ -150,6 +151,43 @@ export function buildSkillCommand(): Command {
       if (s.captured + s.promoted + s.rejected + s.merged === 0) {
         console.log('\nNo activity yet. Enable with learning.enabled in ~/.qodex/config.yaml.');
       }
+    });
+
+  cmd
+    .command('eval <name>')
+    .description('Replay a skill\'s original task in a clean git worktree and check the produced code against the real verifier (writes the result into the skill)')
+    .option('--no-cache', 'Re-evaluate even if the skill is unchanged and was evaluated recently')
+    .action(async (name: string, opts: { cache?: boolean }) => {
+      const { readCandidate, candidatesDir } = await import('../skills/learning/candidate-store.js');
+      const { loadSkillByName } = await import('../skills/loader.js');
+      const { evalSkillMd } = await import('../skills/learning/eval.js');
+      const { formatEvalSection, upsertEvalSection, skillContentHash } = await import('../skills/learning/eval-record.js');
+      const { recordLearningEvent } = await import('../skills/learning/ledger.js');
+      const { loadConfig } = await import('../config/loader.js');
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+
+      // Find the skill: a candidate first, else an active one.
+      let md = await readCandidate(name);
+      let filePath: string | null = md ? path.join(candidatesDir(), name, 'SKILL.md') : null;
+      if (!md) {
+        const active = await loadSkillByName(name, process.cwd());
+        if (active) { md = await fs.readFile(path.join(active.dir, 'SKILL.md'), 'utf-8'); filePath = path.join(active.dir, 'SKILL.md'); }
+      }
+      if (!md || !filePath) { console.error(`✗ no candidate or active skill named "${name}"`); process.exit(1); }
+
+      const config = await loadConfig(process.cwd());
+      const ttlMs = Number((config as any).learning?.evalCacheTtlHours ?? 24) * 3600_000;
+      const { result, skipped, reason } = await evalSkillMd(process.cwd(), md, { noCache: opts.cache === false, cacheTtlMs: ttlMs, onProgress: m => console.log(`  ${m}`) });
+      if (skipped) { console.log(`↷ Skipped: ${reason}. Use --no-cache to force.`); return; }
+      if (!result) { console.error('✗ eval produced no result'); process.exit(1); }
+
+      const section = formatEvalSection(result, skillContentHash(md));
+      await fs.writeFile(filePath, upsertEvalSection(md, section), 'utf-8');
+      await recordLearningEvent({ event: 'eval', name, evalStatus: result.status, judge: result.model });
+      const icon = result.status === 'pass' ? '✓' : result.status === 'fail' ? '✗' : result.status === 'inconclusive' ? '◌' : '⚠';
+      console.log(`\n${icon} ${name}: ${result.status}${result.note ? ` — ${result.note}` : ''}`);
+      console.log(`  recorded in ${filePath}`);
     });
 
   cmd

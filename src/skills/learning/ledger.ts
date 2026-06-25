@@ -10,7 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { logger } from '../../utils/logger.js';
 
-export type LearningEventKind = 'capture' | 'promote' | 'reject' | 'merge';
+export type LearningEventKind = 'capture' | 'promote' | 'reject' | 'merge' | 'eval';
 
 export interface LearningEvent {
   ts: string;
@@ -22,6 +22,8 @@ export interface LearningEvent {
   judge?: string;
   /** For merge: the names that were collapsed. */
   from?: string[];
+  /** For eval: the replay outcome (pass/fail/inconclusive/error). */
+  evalStatus?: string;
 }
 
 export function ledgerPath(): string {

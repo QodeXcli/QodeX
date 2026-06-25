@@ -73,6 +73,36 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **MCP** — connect any MCP-compatible server; its tools join the same registry as built-ins.
 - **Domain tools** — Docker, databases, WordPress (`php -l` linting), media (ffmpeg), frontend/print, OpenAPI digest, and more.
 
+## Self-learning skills
+
+QodeX can **learn reusable playbooks from your successful tasks** — without the usual failure mode of an agent rubber-stamping its own work and overwriting your hand-tuned skills. The whole loop is **off by default** and gated on *objective* signals, not the model's self-grade.
+
+**How it works:**
+
+1. **Capture** — when a task finishes in the git sandbox and *objectively* succeeds (it compiled / type-checked, the completion-claim gate passed, and it took at least a few tool calls and changed a file), QodeX distills the winning approach into a `SKILL.md` and assigns it a **confidence score (0–100)** from those objective signals.
+2. **Quarantine** — the new skill is written to `~/.qodex/skills-candidates/` (a dir QodeX never auto-loads), stamped `provenance: machine`, `status: candidate`. It can't affect the model until promoted.
+3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
+
+```yaml
+# ~/.qodex/config.yaml — opt in
+learning:
+  enabled: true                     # capture candidates after successful tasks
+  minToolCalls: 5                   # how substantial a task must be to capture
+  judgeModel: llama-3.3-70b-versatile   # the INDEPENDENT judge (must differ from defaults.model)
+  autoPromoteMinConfidence: 50      # hold lower-confidence captures for human review
+```
+
+```bash
+qodex skill candidates          # list quarantined captures (with confidence)
+qodex skill curate              # independent judge merges + promotes the good ones
+qodex skill promote <name>      # promote one yourself (you are the independent reviewer)
+qodex skill reject <name>       # discard a candidate
+qodex skill stats               # learning metrics: captured / promoted / merged, promotion rate, avg confidence
+qodex skill snapshots           # rollback points;  qodex skill restore <archive>  to roll back
+```
+
+> Every successful task can also be exported as a **ShareGPT JSONL** corpus (`flywheel.datasetExport: true` → `~/.qodex/dataset/`) — a ready-to-use dataset for a future zero-cost local fine-tune. Strictly local; nothing is uploaded.
+
 ## Install
 
 **Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.

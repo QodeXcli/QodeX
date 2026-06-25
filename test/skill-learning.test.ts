@@ -49,6 +49,11 @@ describe('captureEligible — OBJECTIVE gate, never a self-grade', () => {
   it('rejects trivial tasks (below minToolCalls)', () => {
     expect(captureEligible({ ...ok, toolCalls: 2 }).eligible).toBe(false);
   });
+  it('rejects tasks that changed no files (edge case — nothing to encode)', () => {
+    const r = captureEligible({ ...ok, filesChanged: [] });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no files/);
+  });
   it('rejects tasks that did NOT objectively verify', () => {
     expect(captureEligible({ ...ok, verifyClean: false }).eligible).toBe(false);
     expect(captureEligible({ ...ok, completionHonest: false }).eligible).toBe(false);
