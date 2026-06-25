@@ -147,7 +147,9 @@ export function buildSkillCommand(): Command {
       console.log(`  Avg confidence:  ${s.avgConfidence === null ? '—' : `${s.avgConfidence}/100`}`);
       console.log(`  Pending review:  ${s.pendingCandidates}`);
       if (s.lastEventAt) console.log(`  Last activity:   ${s.lastEventAt}`);
-      if (s.captured === 0) console.log('\nNo activity yet. Enable with learning.enabled in ~/.qodex/config.yaml.');
+      if (s.captured + s.promoted + s.rejected + s.merged === 0) {
+        console.log('\nNo activity yet. Enable with learning.enabled in ~/.qodex/config.yaml.');
+      }
     });
 
   cmd
