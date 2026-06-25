@@ -191,6 +191,27 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('versions <name>')
+    .description('Show a skill\'s version history, champion/challenger, and per-version stats (UCB1 A/B)')
+    .action(async (name: string) => {
+      const { loadSkillByName } = await import('../skills/loader.js');
+      const { readManifest } = await import('../skills/learning/versioned-store.js');
+      const { routeSkillVersion } = await import('../skills/learning/skill-versioning.js');
+      const spec = await loadSkillByName(name, process.cwd());
+      if (!spec) { console.error(`✗ no skill named "${name}"`); process.exit(1); }
+      const m = await readManifest(spec.dir);
+      if (!m) { console.log(`"${name}" is a single-version (legacy) skill — no version history yet.`); return; }
+      const routed = routeSkillVersion(m);
+      console.log(`Skill "${m.skillId}"  ·  strategy: ${m.routingStrategy}  ·  routed this turn → ${routed}\n`);
+      for (const v of Object.values(m.versions).sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }))) {
+        const tag = v.version === m.activeVersion ? '★ champion' : v.version === m.challengerVersion ? '⚡ challenger' : v.retired ? '✗ retired' : '';
+        const rate = v.stats.executions ? `${Math.round((v.stats.successes / v.stats.executions) * 100)}% over ${v.stats.executions}` : 'untested';
+        console.log(`  ${v.version}  [${v.author}]  ${tag}`);
+        console.log(`      success: ${rate}  ·  tokens: ${v.stats.totalTokensUsed}  ·  confidence: ${v.confidence}`);
+      }
+    });
+
+  cmd
     .command('lessons')
     .description('Show "learned cautions" mined from your RECURRING tool failures (failure-driven learning)')
     .option('--clear', 'Erase the failure log and start over')
