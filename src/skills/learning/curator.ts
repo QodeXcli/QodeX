@@ -61,6 +61,12 @@ export async function curateCandidates(
   result.snapshot = await snapshotSkills(stamp).catch(e => { logger.warn('Skills snapshot failed', { err: e?.message }); return null; });
 
   // Independent judge: the 'reflection' role; author = the capture/default model.
+  // Load ~/.qodex/.env first — this runs outside the main `bootstrap()` (which loads it),
+  // so without this the router sees no cloud API keys and the judge resolves to nothing.
+  try {
+    const { loadEnvFileIntoProcess } = await import('../../setup/env-writer.js');
+    await loadEnvFileIntoProcess();
+  } catch { /* best-effort */ }
   const config = await loadConfig(cwd);
   const authorModel = String((config as any).defaults?.model ?? '');
   const router = new ModelRouter(config);
