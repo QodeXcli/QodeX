@@ -19,11 +19,11 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      # npm install (not `npm ci`) so a slightly out-of-sync package-lock.json
-      # doesn't hard-fail the run. Switch to `npm ci` once the lockfile is known
-      # to be committed and in sync.
+      # `npm ci` — deterministic, lockfile-exact install (the lockfile is committed and
+      # in sync). Faster and reproducible vs. `npm install`, and it hard-fails early if
+      # package.json and package-lock.json ever drift.
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # `npm run build` runs tsc over the whole project — this is the check that
       # catches the real breakages (bad imports, type errors) before they land.
@@ -46,7 +46,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # `npm test` is `vitest run`. The standalone (process.exit) suites are
       # excluded via STANDALONE_SCRIPTS in vitest.config.ts, so this is clean.
