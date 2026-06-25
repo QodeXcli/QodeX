@@ -419,6 +419,9 @@ export interface QodexConfig {
     /** When auto-promoting, require at least this confidence (0–100). Default 0 (the
      *  judge's pass is sufficient); raise it to gate low-confidence captures. */
     autoPromoteMinConfidence?: number;
+    /** `qodex skill eval` cache TTL in hours — skip re-evaluating an unchanged skill
+     *  within this window. Default 24. */
+    evalCacheTtlHours?: number;
   };
   /**
    * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has
