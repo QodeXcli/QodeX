@@ -392,6 +392,25 @@ export interface QodexConfig {
     enabled?: boolean;
   };
   /**
+   * Skill-learning loop — capture reusable methodology from OBJECTIVELY-successful tasks
+   * into quarantined candidate skills, promoted only by an INDEPENDENT judge and never
+   * over a human-authored skill. Off by default (it writes files + costs a judge call).
+   * See src/skills/learning/. Designed to avoid the "self-congratulation" failure mode:
+   * eligibility is gated on verify/completion signals, not the worker's self-grade.
+   */
+  learning?: {
+    /** Capture candidate skills after eligible tasks. Default false. */
+    enabled?: boolean;
+    /** Minimum tool calls for a task to be capture-worthy. Default 5. */
+    minToolCalls?: number;
+    /** Require objective verification to have passed before capturing. Default true.
+     *  Turning this off re-introduces self-grade risk — deliberately loud. */
+    requireObjectiveSuccess?: boolean;
+    /** Auto-promote candidates whose independent judge passes (vs. leaving them for
+     *  a human to review with `qodex skill promote`). Default false. */
+    autoPromote?: boolean;
+  };
+  /**
    * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has
    * finished a coding task, QodeX type-checks the files it touched and, if they don't
    * compile, feeds the errors back and forces a repair round. Whatever model is connected,

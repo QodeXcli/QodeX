@@ -107,6 +107,94 @@ export function buildSkillCommand(): Command {
       }
     });
 
+  // ── Skill-learning loop: capture → candidate → (judge) → promote ──
+
+  cmd
+    .command('candidates')
+    .description('List machine-captured CANDIDATE skills awaiting review (quarantined; not active)')
+    .action(async () => {
+      const { listCandidates } = await import('../skills/learning/candidate-store.js');
+      const cands = await listCandidates();
+      if (cands.length === 0) {
+        console.log('No candidate skills. Enable capture with learning.enabled in ~/.qodex/config.yaml.');
+        return;
+      }
+      console.log(`${cands.length} candidate(s) awaiting review:\n`);
+      for (const c of cands) {
+        console.log(`  ◇ ${c.name}${c.capturedAt ? `  (captured ${c.capturedAt})` : ''}`);
+        console.log(`      ${c.description}`);
+      }
+      console.log('\nPromote:  qodex skill promote <name>   ·   Reject:  qodex skill reject <name>   ·   Auto-judge:  qodex skill curate');
+    });
+
+  cmd
+    .command('promote <name>')
+    .description('Promote a candidate skill to active (you are the independent reviewer). Refuses to overwrite a human-authored skill.')
+    .action(async (name: string) => {
+      const { promoteCandidate } = await import('../skills/learning/candidate-store.js');
+      const res = await promoteCandidate(name, process.cwd());
+      if (res.promoted) {
+        console.log(`✓ Promoted "${name}" → active (${res.dest}).`);
+        await refreshSkillRegistry();
+      } else {
+        console.error(`✗ ${res.reason}`);
+        process.exit(1);
+      }
+    });
+
+  cmd
+    .command('reject <name>')
+    .description('Discard a candidate skill')
+    .action(async (name: string) => {
+      const { archiveCandidate } = await import('../skills/learning/candidate-store.js');
+      const ok = await archiveCandidate(name);
+      console.log(ok ? `Rejected and removed candidate "${name}".` : `No candidate named "${name}".`);
+    });
+
+  cmd
+    .command('snapshots')
+    .description('List skills-directory snapshots (rollback points taken before curation)')
+    .action(async () => {
+      const { listSkillSnapshots } = await import('../skills/learning/snapshot.js');
+      const snaps = await listSkillSnapshots();
+      if (snaps.length === 0) { console.log('No skills snapshots yet.'); return; }
+      console.log(`${snaps.length} snapshot(s) (newest first):`);
+      for (const s of snaps) console.log(`  ${s}`);
+      console.log('\nRestore the whole skills dir from one with:  qodex skill restore <path>');
+    });
+
+  cmd
+    .command('restore <archive>')
+    .description('Roll the entire user skills dir back to a snapshot archive (.tar.gz)')
+    .action(async (archive: string) => {
+      try {
+        const { restoreSkillsSnapshot } = await import('../skills/learning/snapshot.js');
+        await restoreSkillsSnapshot(archive);
+        console.log(`✓ Skills directory restored from ${archive}.`);
+        await refreshSkillRegistry();
+      } catch (e: any) {
+        console.error(`✗ ${e.message}`);
+        process.exit(1);
+      }
+    });
+
+  cmd
+    .command('curate')
+    .description('Run the INDEPENDENT judge over candidate skills and promote the ones it approves (snapshots first; never overwrites a human skill)')
+    .option('--yes', 'Skip the confirmation prompt')
+    .action(async () => {
+      try {
+        const { curateCandidates } = await import('../skills/learning/curator.js');
+        const res = await curateCandidates(process.cwd(), { onProgress: m => console.log(`  ${m}`) });
+        console.log(`\nCurate complete: ${res.promoted.length} promoted, ${res.rejected.length} kept/rejected, ${res.skipped.length} skipped.`);
+        if (res.snapshot) console.log(`Rollback point: ${res.snapshot}`);
+        if (res.promoted.length) await refreshSkillRegistry();
+      } catch (e: any) {
+        console.error(`✗ ${e.message}`);
+        process.exit(1);
+      }
+    });
+
   cmd
     .command('enable <name>')
     .description('Re-enable a previously disabled user-scope skill')

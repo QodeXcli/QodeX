@@ -137,6 +137,11 @@ export function parseSkill(
     files: asStringArray(fields.files),
     author: fields.author as string | undefined,
     source: fields.source as string | undefined,
+    // Anti-self-congratulation: an ABSENT provenance means a human authored/installed
+    // it → protected. Only the capture loop writes `provenance: machine`.
+    provenance: fields.provenance === 'machine' ? 'machine' : 'user',
+    humanEdited: String(fields['humanedited'] ?? fields['human-edited'] ?? '').toLowerCase() === 'true',
+    status: fields.status === 'candidate' ? 'candidate' : 'active',
   };
 }
 
