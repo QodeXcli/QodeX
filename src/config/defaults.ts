@@ -433,6 +433,20 @@ export interface QodexConfig {
     /** `qodex skill eval` cache TTL in hours — skip re-evaluating an unchanged skill
      *  within this window. Default 24. */
     evalCacheTtlHours?: number;
+    /**
+     * Failure-driven learning — record tool failures and, once a pattern RECURS across
+     * tasks, inject a deterministic "learned caution" into the system prompt so the agent
+     * stops repeating it. Off by default. See src/skills/learning/failures.ts.
+     */
+    failureLessons?: {
+      enabled?: boolean;
+      /** Min total occurrences before a pattern is learned. Default 3. */
+      minOccurrences?: number;
+      /** Min DISTINCT tasks the pattern must span (a one-off never teaches). Default 2. */
+      minDistinctTasks?: number;
+      /** Max cautions injected into the prompt. Default 5. */
+      maxInjected?: number;
+    };
   };
   /**
    * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has

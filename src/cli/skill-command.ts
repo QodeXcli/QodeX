@@ -191,6 +191,30 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('lessons')
+    .description('Show "learned cautions" mined from your RECURRING tool failures (failure-driven learning)')
+    .option('--clear', 'Erase the failure log and start over')
+    .action(async (opts: { clear?: boolean }) => {
+      const { readFailures, detectFailurePatterns, buildLesson } = await import('../skills/learning/failures.js');
+      const { loadConfig } = await import('../config/loader.js');
+      const os = await import('os'); const path = await import('path'); const { promises: fs } = await import('fs');
+      if (opts.clear) {
+        await fs.rm(path.join(os.homedir(), '.qodex', 'failures.jsonl'), { force: true });
+        console.log('Failure log cleared.');
+        return;
+      }
+      const cfg = (await loadConfig(process.cwd()) as any).learning?.failureLessons ?? {};
+      const events = await readFailures();
+      const patterns = detectFailurePatterns(events, { minOccurrences: cfg.minOccurrences ?? 3, minDistinctTasks: cfg.minDistinctTasks ?? 2 });
+      console.log(`${events.length} failure(s) logged · ${patterns.length} recurring pattern(s) learned\n`);
+      if (patterns.length === 0) {
+        console.log('No recurring patterns yet. (Enable with learning.failureLessons.enabled; cautions appear once a failure repeats across tasks.)');
+        return;
+      }
+      for (const p of patterns) console.log(`  ⚠ ${buildLesson(p)}`);
+    });
+
+  cmd
     .command('promote <name>')
     .description('Promote a candidate skill to active (you are the independent reviewer). Refuses to overwrite a human-authored skill.')
     .action(async (name: string) => {
