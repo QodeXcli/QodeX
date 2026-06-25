@@ -81,6 +81,14 @@ async function bootstrap(): Promise<{
     logger.debug('Claude Code integration skipped', { err: e?.message });
   }
   setActiveConfig(config);
+  // Browser CDP attach: if configured, the browser_* tools attach to the user's running
+  // browser instead of launching a fresh headless one. (QODEX_BROWSER_CDP_URL env wins.)
+  if ((config as any).browser?.cdpUrl) {
+    try {
+      const { setBrowserCdpUrl } = await import('./tools/browser/session.js');
+      setBrowserCdpUrl((config as any).browser.cdpUrl);
+    } catch { /* browser module optional */ }
+  }
   const router = new ModelRouter(config);
   const registry = new ToolRegistry();
   const permissions = new PermissionEngine(config);

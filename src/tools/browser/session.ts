@@ -39,6 +39,9 @@ interface BrowserSession {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  /** True when we ATTACHED to an already-running browser over CDP (vs launched our
+   *  own). When attached we must never kill the user's browser on cleanup. */
+  attached: boolean;
   /** Console messages captured since session start (cleared on navigate). */
   consoleBuffer: Array<{ type: string; text: string; location?: string }>;
   /** Network requests captured (URL + status). Cleared on navigate. */
@@ -49,6 +52,22 @@ interface BrowserSession {
 
 let session: BrowserSession | null = null;
 let initInFlight: Promise<BrowserSession> | null = null;
+
+/** CDP endpoint to ATTACH to instead of launching a fresh Chromium. Set from config
+ *  (`browser.cdpUrl`) by bootstrap; `QODEX_BROWSER_CDP_URL` env overrides it. */
+let configuredCdpUrl: string | undefined;
+export function setBrowserCdpUrl(url: string | undefined): void {
+  configuredCdpUrl = (url ?? '').trim() || undefined;
+}
+/**
+ * Where to attach, if anywhere. Accepts a full CDP/DevTools URL
+ * (http://127.0.0.1:9222) — drive your OWN logged-in Chrome / Brave / Arc / Edge (or any
+ * Chromium browser, e.g. an upcoming AI browser) started with `--remote-debugging-port`,
+ * with your real cookies + sessions. Empty → launch a fresh headless Chromium (default).
+ */
+export function resolveBrowserCdpUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return (env.QODEX_BROWSER_CDP_URL ?? '').trim() || configuredCdpUrl;
+}
 
 /**
  * Lazily import playwright. Throws a clear error if not installed.
@@ -77,61 +96,39 @@ export async function getSession(): Promise<BrowserSession> {
 
   initInFlight = (async () => {
     const playwright = await importPlaywright();
-    const headed = process.env.QODEX_BROWSER_HEADED === '1';
-    const browser = await playwright.chromium.launch({
-      headless: !headed,
-      // --disable-blink-features prevents the "Chrome is being controlled by
-      // automated test software" infobar from interfering with element positions.
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 QodeX/0.7',
-    });
-    const page = await context.newPage();
-    const s: BrowserSession = {
-      browser,
-      context,
-      page,
-      consoleBuffer: [],
-      requestBuffer: [],
-      errorBuffer: [],
-    };
-    // Wire up event listeners that fill the buffers. The tools read from
-    // these buffers rather than installing per-call listeners (cleaner
-    // and avoids missing events between calls).
-    page.on('console', (msg: ConsoleMessage) => {
-      s.consoleBuffer.push({
-        type: msg.type(),
-        text: msg.text(),
-        location: msg.location()?.url,
+    const cdpUrl = resolveBrowserCdpUrl();
+
+    let browser: Browser, context: BrowserContext, page: Page, attached = false;
+    if (cdpUrl) {
+      // ATTACH to an already-running browser (the user's own, with real logins). Reuse
+      // its existing default context + an open tab so cookies/sessions are intact; only
+      // open a fresh tab if none exist. We never create our own isolated context here —
+      // that would defeat the point (a blank, logged-OUT session).
+      browser = await playwright.chromium.connectOverCDP(cdpUrl);
+      context = browser.contexts()[0] ?? (await browser.newContext());
+      const open = (context.pages() as Page[]).find((p: Page) => !p.isClosed?.());
+      page = open ?? (await context.newPage());
+      attached = true;
+      logger.info('Browser session ATTACHED over CDP', { cdpUrl });
+    } else {
+      const headed = process.env.QODEX_BROWSER_HEADED === '1';
+      browser = await playwright.chromium.launch({
+        headless: !headed,
+        // --disable-blink-features prevents the "Chrome is being controlled by
+        // automated test software" infobar from interfering with element positions.
+        args: ['--disable-blink-features=AutomationControlled'],
       });
-      // Cap buffer to avoid unbounded growth on chatty pages.
-      if (s.consoleBuffer.length > 500) s.consoleBuffer.splice(0, 100);
-    });
-    page.on('pageerror', (err: Error) => {
-      s.errorBuffer.push({ message: err.message, stack: err.stack });
-      if (s.errorBuffer.length > 100) s.errorBuffer.splice(0, 20);
-    });
-    page.on('requestfinished', async (req: any) => {
-      const resp = await req.response();
-      s.requestBuffer.push({
-        url: req.url(),
-        method: req.method(),
-        status: resp?.status(),
-        ok: resp?.ok(),
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 800 },
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 QodeX/0.7',
       });
-      if (s.requestBuffer.length > 500) s.requestBuffer.splice(0, 100);
-    });
-    page.on('requestfailed', (req: any) => {
-      s.requestBuffer.push({
-        url: req.url(),
-        method: req.method(),
-        ok: false,
-      });
-    });
+      page = await context.newPage();
+      logger.info('Browser session launched', { headed });
+    }
+
+    const s: BrowserSession = { browser, context, page, attached, consoleBuffer: [], requestBuffer: [], errorBuffer: [] };
+    wireSessionListeners(s, page);
     session = s;
-    logger.info('Browser session launched', { headed });
     return s;
   })();
 
@@ -142,6 +139,27 @@ export async function getSession(): Promise<BrowserSession> {
   }
 }
 
+/** Install the console/pageerror/network listeners that fill the read buffers. Tools
+ *  read from these rather than installing per-call listeners (avoids missing events). */
+function wireSessionListeners(s: BrowserSession, page: Page): void {
+  page.on('console', (msg: ConsoleMessage) => {
+    s.consoleBuffer.push({ type: msg.type(), text: msg.text(), location: msg.location()?.url });
+    if (s.consoleBuffer.length > 500) s.consoleBuffer.splice(0, 100);
+  });
+  page.on('pageerror', (err: Error) => {
+    s.errorBuffer.push({ message: err.message, stack: err.stack });
+    if (s.errorBuffer.length > 100) s.errorBuffer.splice(0, 20);
+  });
+  page.on('requestfinished', async (req: any) => {
+    const resp = await req.response();
+    s.requestBuffer.push({ url: req.url(), method: req.method(), status: resp?.status(), ok: resp?.ok() });
+    if (s.requestBuffer.length > 500) s.requestBuffer.splice(0, 100);
+  });
+  page.on('requestfailed', (req: any) => {
+    s.requestBuffer.push({ url: req.url(), method: req.method(), ok: false });
+  });
+}
+
 /** Clear the per-page buffers. Called automatically on browser_navigate. */
 export function clearBuffers(s: BrowserSession): void {
   s.consoleBuffer.length = 0;
@@ -149,9 +167,15 @@ export function clearBuffers(s: BrowserSession): void {
   s.errorBuffer.length = 0;
 }
 
-/** Close the browser. Idempotent. */
+/** Close the browser. Idempotent. When ATTACHED to the user's own browser we drop the
+ *  connection WITHOUT closing it — killing someone's logged-in Chrome would be hostile. */
 export async function closeBrowser(): Promise<void> {
   if (!session) return;
+  if (session.attached) {
+    logger.debug('Browser was attached over CDP — disconnecting, not closing');
+    session = null; // let the CDP socket GC; the user's browser keeps running
+    return;
+  }
   try {
     await session.browser.close();
   } catch (e: any) {
@@ -174,12 +198,12 @@ export async function isPlaywrightAvailable(): Promise<boolean> {
 // Ctrl+C's QodeX without cleanup. Best-effort: if it doesn't fire (SIGKILL etc),
 // Playwright's own subprocess management catches it.
 process.on('exit', () => {
-  if (session) {
+  if (session && !session.attached) {
     try { session.browser.close(); } catch { /* ignore */ }
   }
 });
 process.on('SIGINT', () => {
-  if (session) {
+  if (session && !session.attached) {
     try { session.browser.close(); } catch { /* ignore */ }
   }
 });
