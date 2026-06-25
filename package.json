@@ -3,14 +3,14 @@
   "version": "2.4.0",
   "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
   "license": "Apache-2.0",
-  "author": "7 SEVEN <REPLACE_WITH_YOUR_EMAIL>",
+  "author": "7 SEVEN",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex.git"
+    "url": "git+https://github.com/QodeXcli/QodeX.git"
   },
-  "homepage": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex#readme",
+  "homepage": "https://github.com/QodeXcli/QodeX#readme",
   "bugs": {
-    "url": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex/issues"
+    "url": "https://github.com/QodeXcli/QodeX/issues"
   },
   "keywords": [
     "ai",
