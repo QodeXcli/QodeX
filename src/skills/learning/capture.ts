@@ -39,6 +39,11 @@ export function captureEligible(signal: CaptureSignal, policy: CapturePolicy = D
   if (signal.toolCalls < policy.minToolCalls) {
     return { eligible: false, reason: `only ${signal.toolCalls} tool calls (< ${policy.minToolCalls}) — too trivial to be a reusable skill` };
   }
+  // Edge case: a task that changed no files has no concrete procedure to encode as a
+  // coding skill (it was reads/searches/a one-off command). Don't capture it.
+  if (signal.filesChanged.length === 0) {
+    return { eligible: false, reason: 'no files were changed — nothing concrete to capture as a reusable coding skill' };
+  }
   if (policy.requireObjectiveSuccess) {
     if (!signal.verifyClean) return { eligible: false, reason: 'objective verification did not pass (new errors in touched files) — not a success worth learning' };
     if (!signal.completionHonest) return { eligible: false, reason: 'completion-claim gate did not pass (claims not backed by evidence) — refusing to learn a self-reported success' };

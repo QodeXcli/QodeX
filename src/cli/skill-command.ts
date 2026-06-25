@@ -130,6 +130,7 @@ export function buildSkillCommand(): Command {
 
   cmd
     .command('learning-stats')
+    .alias('stats')
     .description('Show learning-loop metrics: captured / promoted / rejected / merged, promotion rate, avg confidence')
     .action(async () => {
       const { readLearningEvents, aggregateStats } = await import('../skills/learning/ledger.js');
