@@ -124,6 +124,7 @@ export class AgentLoop {
    *  ADDS to this — never drops — so the tools block stays a byte-stable cache prefix
    *  across turns (a sliding per-turn set would flip and invalidate the prompt cache). */
   private sessionToolNames = new Set<string>();
+  private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
   /** Auto tool profile: null = not yet derived this session; then a ratcheting list. */
   private autoDisabledTools: string[] | null = null;
   /** Live context windows read from LM Studio's native API, fetched once per session. */
@@ -629,6 +630,36 @@ export class AgentLoop {
             });
           } catch (e: any) {
             logger.debug('Flywheel record skipped', { err: e?.message });
+          }
+        }
+        // ── Skill-learning: capture a CANDIDATE skill (opt-in, quarantined) ──
+        // We're on the objectively-successful path: the sandbox compiled and squash-merged,
+        // having already passed the inner verify + completion gates. So capture is gated on
+        // real signals, never the model's self-grade. The candidate is written to a separate
+        // quarantine dir; it is NOT loaded and CANNOT overwrite a human skill until an
+        // independent judge promotes it (see src/skills/learning/).
+        const learningCfg = (this.config as any).learning;
+        if (learningCfg?.enabled) {
+          try {
+            const { captureEligible } = await import('../skills/learning/capture.js');
+            const elig = captureEligible(
+              { toolCalls: this.totalToolCalls, verifyClean: true, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
+              { minToolCalls: learningCfg.minToolCalls ?? 5, requireObjectiveSuccess: learningCfg.requireObjectiveSuccess !== false },
+            );
+            if (elig.eligible) {
+              const { buildCandidateSkill } = await import('../skills/learning/capture.js');
+              const { writeCandidate } = await import('../skills/learning/candidate-store.js');
+              const candidate = buildCandidateSkill(
+                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
+                { nowIso: new Date().toISOString() },
+              );
+              await writeCandidate(candidate);
+              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+            } else {
+              logger.debug('Skill capture skipped', { reason: elig.reason });
+            }
+          } catch (e: any) {
+            logger.debug('Skill capture skipped (error)', { err: e?.message });
           }
         }
       } else if (reachedFinal && !merged) {
@@ -1754,6 +1785,7 @@ export class AgentLoop {
       }
 
       // Execute tools — read-only in parallel, mutating sequentially
+      this.totalToolCalls += toolCalls.length; // task-complexity signal for skill capture
       const txn = await journal.begin(sessionId);
       const toolMessages: Message[] = [];
 

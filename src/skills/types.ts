@@ -53,6 +53,26 @@ export interface SkillSpec {
   author?: string;
   /** Provenance (e.g. "local:/path", "gh:user/repo", "npm:pkg"). */
   source?: string;
+  /**
+   * WHO authored this skill — the anti-self-congratulation guard.
+   *   'user'    : a human wrote or installed it. NEVER overwritten by the machine.
+   *   'machine' : auto-captured from a successful task by the learning loop.
+   * Absent in the frontmatter → treated as 'user' (every pre-existing, hand-written
+   * or installed skill is protected by default; only the capture loop stamps 'machine').
+   */
+  provenance?: 'user' | 'machine';
+  /**
+   * Set true once a human edits a machine-captured skill. Promotes it to protected
+   * status so a later capture/curator pass can't clobber the human's refinements.
+   */
+  humanEdited?: boolean;
+  /**
+   * Lifecycle status.
+   *   'active'    : loaded into the registry and offered to the model (default).
+   *   'candidate' : quarantined — captured but NOT loaded until an independent judge
+   *                 promotes it. Candidates live in a separate dir; see learning/.
+   */
+  status?: 'active' | 'candidate';
 }
 
 export interface SkillSummary {
