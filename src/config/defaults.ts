@@ -435,6 +435,10 @@ export interface QodexConfig {
     /** Explicit model id for the independent judge. Must differ from defaults.model
      *  (self-grade is rejected). Falls back to the 'reflection' routing role when unset. */
     judgeModel?: string;
+    /** Tier-2 (heavy/cloud) judge for the escalating cascade — used ONLY when the Tier-1
+     *  judge is unsure (grey-zone average or high cross-dimension variance). Must differ from
+     *  defaults.model and judgeModel. Unset ⇒ no escalation (Tier-1 verdict stands). */
+    judgeModelTier2?: string;
     /** When auto-promoting, require at least this confidence (0–100). Default 0 (the
      *  judge's pass is sufficient); raise it to gate low-confidence captures. */
     autoPromoteMinConfidence?: number;
