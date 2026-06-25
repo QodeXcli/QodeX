@@ -41,6 +41,43 @@ export function buildJudgePrompt(candidateMd: string, existingSkillNames: string
  * verdict is a REJECT — unlike the critic (which fails open to avoid blocking shipping),
  * a skill we can't confirm is good must NOT enter the library.
  */
+/**
+ * Build the MERGE prompt for two near-duplicate machine skills. The independent judge
+ * decides whether they should be one skill and, if so, returns a single comprehensive
+ * SKILL.md that subsumes both. Asked to keep frontmatter `provenance: machine` and
+ * `status: candidate` so the merged result re-enters the same quarantine → independent
+ * promotion pipeline (a merge never auto-activates).
+ */
+export function buildMergePrompt(a: { name: string; md: string }, b: { name: string; md: string }): { system: string; user: string } {
+  const system =
+    'You are an independent curator merging two machine-captured skills that look like ' +
+    'near-duplicates. If they are genuinely the same capability, produce ONE comprehensive ' +
+    'SKILL.md that covers both cases — broader "When to use", a superset of tools, the ' +
+    'clearer instructions. If they are actually DISTINCT and should stay separate, do not ' +
+    'force a merge.\n\n' +
+    'Respond with STRICT JSON only:\n' +
+    '{"merge": boolean, "name": "kebab-id", "skillMd": "<full SKILL.md if merge=true, else empty>"}\n' +
+    'The skillMd MUST keep frontmatter `provenance: machine` and `status: candidate`.';
+  const user =
+    `## Skill A: ${a.name}\n\`\`\`\n${a.md.slice(0, 6000)}\n\`\`\`\n\n` +
+    `## Skill B: ${b.name}\n\`\`\`\n${b.md.slice(0, 6000)}\n\`\`\`\n\n` +
+    `Decide and return the strict-JSON now.`;
+  return { system, user };
+}
+
+export interface MergeResult { merge: boolean; name: string; skillMd: string }
+
+/** Parse the merge judge's response. Fails CLOSED: anything unparseable ⇒ no merge. */
+export function parseMergeResult(text: string): MergeResult {
+  const parsed = tryParseJson(text) as any;
+  if (parsed && typeof parsed === 'object' && parsed.merge === true
+      && typeof parsed.name === 'string' && /^[a-z][a-z0-9-]*$/.test(parsed.name)
+      && typeof parsed.skillMd === 'string' && parsed.skillMd.includes('provenance: machine')) {
+    return { merge: true, name: parsed.name, skillMd: parsed.skillMd };
+  }
+  return { merge: false, name: '', skillMd: '' };
+}
+
 export function parseJudgeVerdict(text: string, judgeModel: string): JudgeVerdict {
   const parsed = tryParseJson(text) as any;
   if (parsed && typeof parsed === 'object' && typeof parsed.pass === 'boolean') {

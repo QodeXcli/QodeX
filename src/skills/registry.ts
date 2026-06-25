@@ -100,9 +100,37 @@ export async function setSkillEnabled(name: string, enabled: boolean): Promise<v
  */
 const INLINE_LIMIT = 14;
 
-export function buildSkillsSystemBlock(): string {
+export function buildSkillsSystemBlock(opts: { prompt?: string; topK?: number } = {}): string {
   const skills = listSkills();
   if (skills.length === 0) return '';
+
+  // Prompt-aware RETRIEVAL at scale: when many skills are installed AND we know the
+  // user's request, list only the few most relevant (by keyword/semantic score) instead
+  // of every name. This bounds the always-present prompt cost as the captured-skill
+  // library grows into the hundreds, and is the runtime "skill router" — the model still
+  // discovers the rest via search_skills. Falls back to the full roster when nothing
+  // scores (so an off-keyword prompt is never left blind).
+  if (skills.length > INLINE_LIMIT && opts.prompt && opts.prompt.trim()) {
+    const topK = opts.topK ?? 5;
+    const hits = searchInstalledSkills(opts.prompt, topK);
+    if (hits.length > 0) {
+      const lines = [
+        '# Available Skills (most relevant to your request)',
+        '',
+        `${skills.length} skills are installed; the ${hits.length} most relevant to this task are shown. ` +
+        'Call `use_skill name="<id>"` to load one, or `search_skills query="…"` to find others.',
+        '',
+      ];
+      for (const h of hits) {
+        const short = h.description.length > 90 ? h.description.slice(0, 87) + '…' : h.description;
+        lines.push(`- **${h.name}** — ${short}`);
+      }
+      lines.push('');
+      lines.push(`(${skills.length - hits.length} more installed — \`search_skills\` to discover them.)`);
+      return lines.join('\n');
+    }
+    // no keyword hits → fall through to the full compact roster below
+  }
 
   if (skills.length <= INLINE_LIMIT) {
     const lines = ['# Available Skills', '', 'Installed skills you can load by calling `use_skill name="<id>"`. Each is a focused playbook the user has installed — only load when the task at hand matches the description. Don\'t load more than one per turn unless needed.', ''];

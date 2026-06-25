@@ -18,16 +18,25 @@ import { loadConfig } from '../../config/loader.js';
 import { ModelRouter } from '../../llm/router.js';
 import { logger } from '../../utils/logger.js';
 import { loadSkillByName } from '../loader.js';
-import { listCandidates, readCandidate, promoteCandidate } from './candidate-store.js';
-import { buildJudgePrompt, parseJudgeVerdict } from './judge.js';
+import { listCandidates, readCandidate, promoteCandidate, writeCandidate, archiveCandidate } from './candidate-store.js';
+import { buildJudgePrompt, parseJudgeVerdict, buildMergePrompt, parseMergeResult } from './judge.js';
 import { decidePromotion } from './promotion.js';
 import { snapshotSkills } from './snapshot.js';
+import { findSimilarPairs, skillSimilarityText } from './similarity.js';
 
 export interface CurateResult {
   snapshot: string | null;
+  merged: Array<{ from: string[]; into: string }>;
   promoted: string[];
   rejected: Array<{ name: string; reason: string }>;
   skipped: Array<{ name: string; reason: string }>;
+}
+
+/** Pull name + description + body out of a candidate's SKILL.md for similarity scoring. */
+function candidateSimText(md: string, name: string): string {
+  const desc = md.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? '';
+  const body = md.replace(/^---[\s\S]*?---\s*/m, '');
+  return skillSimilarityText(name, desc, body);
 }
 
 async function drainText(stream: AsyncGenerator<any>): Promise<string> {
@@ -40,11 +49,11 @@ async function drainText(stream: AsyncGenerator<any>): Promise<string> {
 
 export async function curateCandidates(
   cwd: string,
-  opts: { onProgress?: (m: string) => void } = {},
+  opts: { onProgress?: (m: string) => void; similarityThreshold?: number } = {},
 ): Promise<CurateResult> {
   const log = opts.onProgress ?? (() => {});
   const candidates = await listCandidates();
-  const result: CurateResult = { snapshot: null, promoted: [], rejected: [], skipped: [] };
+  const result: CurateResult = { snapshot: null, merged: [], promoted: [], rejected: [], skipped: [] };
   if (candidates.length === 0) { log('No candidates to curate.'); return result; }
 
   // 1) Rollback point BEFORE any change.
@@ -66,8 +75,44 @@ export async function curateCandidates(
     return result;
   }
 
-  const existingNames = candidates.map(c => c.name);
-  for (const c of candidates) {
+  const independent = !!judgeRoute.model && judgeRoute.model !== authorModel;
+
+  // ── Merge pass: collapse near-duplicate candidates before promoting them ──
+  // Semantic dedup so the library doesn't accumulate ten variants of one capability.
+  // Lexical cosine finds the suspects (no model, always works); the INDEPENDENT judge
+  // decides whether to actually merge and writes the unified SKILL.md. Skipped entirely
+  // if there's no independent judge (we never merge on a self-grade).
+  const mergedAway = new Set<string>();
+  if (independent) {
+    const threshold = (opts.similarityThreshold ?? 0.6);
+    const texts = await Promise.all(candidates.map(async c => ({ name: c.name, text: candidateSimText((await readCandidate(c.name)) ?? '', c.name) })));
+    const pairs = findSimilarPairs(texts, threshold);
+    for (const pair of pairs) {
+      if (mergedAway.has(pair.a) || mergedAway.has(pair.b)) continue; // each candidate merges once
+      const aMd = await readCandidate(pair.a); const bMd = await readCandidate(pair.b);
+      if (!aMd || !bMd) continue;
+      log(`Similar candidates "${pair.a}" ~ "${pair.b}" (${pair.score.toFixed(2)}) — asking judge to merge …`);
+      try {
+        const { system, user } = buildMergePrompt({ name: pair.a, md: aMd }, { name: pair.b, md: bMd });
+        const text = await drainText(judgeRoute.provider.complete({ model: judgeRoute.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0 } as any));
+        const merge = parseMergeResult(text);
+        if (merge.merge && !mergedAway.has(merge.name)) {
+          await writeCandidate({ name: merge.name, description: '', skillMd: merge.skillMd });
+          // Remove the originals UNLESS one of them is the merge target name itself.
+          for (const orig of [pair.a, pair.b]) if (orig !== merge.name) { await archiveCandidate(orig); mergedAway.add(orig); }
+          result.merged.push({ from: [pair.a, pair.b], into: merge.name });
+          log(`  ⤳ merged into "${merge.name}"`);
+        }
+      } catch (e: any) {
+        log(`  merge skipped: ${e?.message}`);
+      }
+    }
+  }
+
+  // Re-list after the merge pass so promotion sees the collapsed set.
+  const liveCandidates = (await listCandidates()).filter(c => !mergedAway.has(c.name));
+  const existingNames = liveCandidates.map(c => c.name);
+  for (const c of liveCandidates) {
     const md = await readCandidate(c.name);
     if (!md) { result.skipped.push({ name: c.name, reason: 'unreadable' }); continue; }
 
