@@ -413,6 +413,12 @@ export interface QodexConfig {
     /** Auto-promote candidates whose independent judge passes (vs. leaving them for
      *  a human to review with `qodex skill promote`). Default false. */
     autoPromote?: boolean;
+    /** Explicit model id for the independent judge. Must differ from defaults.model
+     *  (self-grade is rejected). Falls back to the 'reflection' routing role when unset. */
+    judgeModel?: string;
+    /** When auto-promoting, require at least this confidence (0–100). Default 0 (the
+     *  judge's pass is sufficient); raise it to gate low-confidence captures. */
+    autoPromoteMinConfidence?: number;
   };
   /**
    * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has

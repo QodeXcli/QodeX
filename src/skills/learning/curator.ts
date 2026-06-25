@@ -23,6 +23,7 @@ import { buildJudgePrompt, parseJudgeVerdict, buildMergePrompt, parseMergeResult
 import { decidePromotion } from './promotion.js';
 import { snapshotSkills } from './snapshot.js';
 import { findSimilarPairs, skillSimilarityText } from './similarity.js';
+import { recordLearningEvent } from './ledger.js';
 
 export interface CurateResult {
   snapshot: string | null;
@@ -72,9 +73,11 @@ export async function curateCandidates(
   const router = new ModelRouter(config);
   await router.initialize();
 
+  // Explicit judge model (learning.judgeModel) wins; else the 'reflection' role.
+  const explicitJudge = String((config as any).learning?.judgeModel ?? '').trim();
   let judgeRoute;
   try {
-    judgeRoute = router.route('reflection', 2000, {});
+    judgeRoute = router.route('reflection', 2000, explicitJudge ? { explicitModel: explicitJudge } : {});
   } catch (e: any) {
     log(`No judge model available (${e?.message}); leaving all candidates quarantined.`);
     for (const c of candidates) result.skipped.push({ name: c.name, reason: 'no judge model' });
@@ -107,6 +110,7 @@ export async function curateCandidates(
           // Remove the originals UNLESS one of them is the merge target name itself.
           for (const orig of [pair.a, pair.b]) if (orig !== merge.name) { await archiveCandidate(orig); mergedAway.add(orig); }
           result.merged.push({ from: [pair.a, pair.b], into: merge.name });
+          await recordLearningEvent({ event: 'merge', name: merge.name, from: [pair.a, pair.b], judge: judgeRoute.model });
           log(`  ⤳ merged into "${merge.name}"`);
         }
       } catch (e: any) {
@@ -147,12 +151,29 @@ export async function curateCandidates(
     const decision = decidePromotion({ authorModel, verdict, activeSameName });
     if (!decision.promote) {
       result.rejected.push({ name: c.name, reason: decision.reason });
+      await recordLearningEvent({ event: 'reject', name: c.name, judge: judgeRoute.model });
       log(`  ✗ ${c.name}: ${decision.reason}`);
       continue;
     }
+    // Confidence floor (learning.autoPromoteMinConfidence): the judge passed, but a
+    // low-confidence capture can be held back for human review rather than auto-promoted.
+    const minConf = Number((config as any).learning?.autoPromoteMinConfidence ?? 0);
+    const conf = Number(md.match(/^confidence:\s*(\d+)/m)?.[1] ?? NaN);
+    if (minConf > 0 && Number.isFinite(conf) && conf < minConf) {
+      result.rejected.push({ name: c.name, reason: `judge passed but confidence ${conf} < ${minConf} — kept for human review` });
+      log(`  ⏸ ${c.name}: confidence ${conf} < ${minConf}, kept as candidate`);
+      continue;
+    }
     const promo = await promoteCandidate(c.name, cwd);
-    if (promo.promoted) { result.promoted.push(c.name); log(`  ✓ promoted ${c.name}`); }
-    else { result.rejected.push({ name: c.name, reason: promo.reason }); log(`  ✗ ${c.name}: ${promo.reason}`); }
+    if (promo.promoted) {
+      result.promoted.push(c.name);
+      await recordLearningEvent({ event: 'promote', name: c.name, judge: judgeRoute.model });
+      log(`  ✓ promoted ${c.name}`);
+    } else {
+      result.rejected.push({ name: c.name, reason: promo.reason });
+      await recordLearningEvent({ event: 'reject', name: c.name, judge: judgeRoute.model });
+      log(`  ✗ ${c.name}: ${promo.reason}`);
+    }
   }
 
   return result;

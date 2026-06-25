@@ -71,16 +71,17 @@ function yamlList(items: string[]): string {
  * tools it needed, and the files it touched. (An optional LLM "distill" pass can enrich
  * the body later; the frontmatter + structure here are deterministic and always valid.)
  */
-export function buildCandidateSkill(traj: TrajectorySlice, opts: { name?: string; nowIso: string } = { nowIso: '' }): CandidateSkill {
+export function buildCandidateSkill(traj: TrajectorySlice, opts: { name?: string; nowIso: string; confidence?: number } = { nowIso: '' }): CandidateSkill {
   const name = (opts.name && /^[a-z][a-z0-9-]*$/.test(opts.name)) ? opts.name : skillIdFromPrompt(traj.prompt);
   const description = (traj.finalSummary || traj.prompt).replace(/\s+/g, ' ').trim().slice(0, 120) || 'Captured procedure';
   const tools = [...new Set(traj.toolsUsed)].sort();
+  const confidenceLine = typeof opts.confidence === 'number' ? `\nconfidence: ${opts.confidence}` : '';
 
   const skillMd = `---
 name: ${name}
 description: ${description}
 provenance: machine
-status: candidate
+status: candidate${confidenceLine}
 allowed-tools:${yamlList(tools)}
 captured-at: ${opts.nowIso}
 ---

@@ -653,19 +653,21 @@ export class AgentLoop {
         if (learningCfg?.enabled) {
           try {
             const { captureEligible } = await import('../skills/learning/capture.js');
-            const elig = captureEligible(
-              { toolCalls: this.totalToolCalls, verifyClean: true, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
-              { minToolCalls: learningCfg.minToolCalls ?? 5, requireObjectiveSuccess: learningCfg.requireObjectiveSuccess !== false },
-            );
+            const signal = { toolCalls: this.totalToolCalls, verifyClean: true, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles };
+            const elig = captureEligible(signal, { minToolCalls: learningCfg.minToolCalls ?? 5, requireObjectiveSuccess: learningCfg.requireObjectiveSuccess !== false });
             if (elig.eligible) {
               const { buildCandidateSkill } = await import('../skills/learning/capture.js');
               const { writeCandidate } = await import('../skills/learning/candidate-store.js');
+              const { scoreConfidence } = await import('../skills/learning/confidence.js');
+              const { recordLearningEvent } = await import('../skills/learning/ledger.js');
+              const confidence = scoreConfidence(signal).score;
               const candidate = buildCandidateSkill(
                 { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
-                { nowIso: new Date().toISOString() },
+                { nowIso: new Date().toISOString(), confidence },
               );
               await writeCandidate(candidate);
-              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+              await recordLearningEvent({ event: 'capture', name: candidate.name, confidence });
+              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
             } else {
               logger.debug('Skill capture skipped', { reason: elig.reason });
             }
