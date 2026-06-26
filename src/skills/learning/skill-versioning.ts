@@ -22,6 +22,29 @@ export interface VersionStats {
   executions: number;
   successes: number;
   totalTokensUsed: number;
+  /** Total wall-clock across executions (ms) — fuels the time term of the composite reward.
+   *  Optional for backward-compat with manifests written before reward weighting. */
+  totalDurationMs?: number;
+}
+
+export interface RewardWeights {
+  /** Weight on the success rate (dominant). */
+  success: number;
+  /** Weight on token efficiency (cheaper = better). */
+  token: number;
+  /** Weight on time efficiency (faster = better). */
+  time: number;
+}
+export const DEFAULT_WEIGHTS: RewardWeights = { success: 0.7, token: 0.15, time: 0.15 };
+
+export interface RouteOptions {
+  /** UCB1 exploration factor `c` (higher = more exploration). Default √2. */
+  explorationFactor?: number;
+  /** Force-route a challenger until it has at least this many trials, BEFORE UCB1 can
+   *  starve it — so a decision is never made on too little signal. Default 5. */
+  minChallengerTrials?: number;
+  /** Composite-reward weights. */
+  weights?: RewardWeights;
 }
 
 export interface VersionDetail {
@@ -40,13 +63,15 @@ export interface SkillManifest {
   skillId: string;
   activeVersion: string;          // the stable champion
   challengerVersion?: string;     // the version under test
-  routingStrategy: 'static' | 'ucb1';
+  /** 'ucb1' (adaptive bandit), 'static' (~25% challenger), or 'champion-only' (UCB OFF —
+   *  always the stable version; for sensitive skills you don't want experimented on). */
+  routingStrategy: 'static' | 'ucb1' | 'champion-only';
   versions: Record<string, VersionDetail>;
 }
 
 /** A fresh manifest for a brand-new skill (its first version is v1, the champion). */
 export function initManifest(skillId: string, author: 'human' | 'machine', confidence = 50, nowIso = ''): { manifest: SkillManifest; fileName: string } {
-  const v: VersionDetail = { version: 'v1', createdAt: nowIso, author, confidence, stats: { executions: 0, successes: 0, totalTokensUsed: 0 } };
+  const v: VersionDetail = { version: 'v1', createdAt: nowIso, author, confidence, stats: { executions: 0, successes: 0, totalTokensUsed: 0, totalDurationMs: 0 } };
   return {
     manifest: { skillId, activeVersion: 'v1', routingStrategy: 'ucb1', versions: { v1: v } },
     fileName: 'SKILL.v1.md',
@@ -92,31 +117,72 @@ export function createNextVersion(
   };
 }
 
-/** UCB1 score for a version given the total trials N. */
-function ucb1(v: VersionDetail, N: number, c: number): number {
-  if (v.stats.executions === 0) return Infinity; // always try an unsampled arm first
-  const mean = v.stats.successes / v.stats.executions;
-  return mean + c * Math.sqrt(Math.log(Math.max(1, N)) / v.stats.executions);
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+const perExec = (total: number, exec: number) => (exec ? total / exec : 0);
+
+interface RewardNorm { maxTokensPerExec: number; maxMsPerExec: number }
+function rewardNorm(arms: VersionDetail[]): RewardNorm {
+  let maxTokensPerExec = 0, maxMsPerExec = 0;
+  for (const v of arms) {
+    maxTokensPerExec = Math.max(maxTokensPerExec, perExec(v.stats.totalTokensUsed, v.stats.executions));
+    maxMsPerExec = Math.max(maxMsPerExec, perExec(v.stats.totalDurationMs ?? 0, v.stats.executions));
+  }
+  return { maxTokensPerExec, maxMsPerExec };
 }
 
 /**
- * Choose which version to inject this turn. No challenger → the champion. UCB1 balances
- * exploring the challenger against exploiting the better arm; an unsampled version is
- * tried first (Infinity), and a challenger whose success rate collapses loses traffic.
+ * COMPOSITE reward in [0,1]: success rate dominates, with token- and time-EFFICIENCY
+ * nudges (cheaper / faster relative to the other arm scores higher). Efficiency terms are
+ * neutral (0.5) when there's no scale to normalize against. PURE.
  */
-export function routeSkillVersion(manifest: SkillManifest, c: number = Math.sqrt(2)): string {
+export function compositeReward(v: VersionDetail, norm: RewardNorm, weights: RewardWeights = DEFAULT_WEIGHTS): number {
+  if (v.stats.executions === 0) return 0;
+  const successRate = v.stats.successes / v.stats.executions;
+  const tokScore = norm.maxTokensPerExec > 0 ? 1 - perExec(v.stats.totalTokensUsed, v.stats.executions) / norm.maxTokensPerExec : 0.5;
+  const timeScore = norm.maxMsPerExec > 0 ? 1 - perExec(v.stats.totalDurationMs ?? 0, v.stats.executions) / norm.maxMsPerExec : 0.5;
+  const w = weights, denom = w.success + w.token + w.time || 1;
+  return (w.success * successRate + w.token * clamp01(tokScore) + w.time * clamp01(timeScore)) / denom;
+}
+
+export interface UcbScore { version: string; reward: number; bonus: number; ucb: number; executions: number }
+
+/** Per-arm UCB breakdown (reward + exploration bonus) for the active+challenger — a pure
+ *  snapshot for debugging / `qodex skill versions` / analysis. */
+export function ucbScores(manifest: SkillManifest, opts: RouteOptions = {}): UcbScore[] {
+  const c = opts.explorationFactor ?? Math.sqrt(2);
+  const arms = [manifest.activeVersion, manifest.challengerVersion]
+    .filter((x): x is string => !!x).map(v => manifest.versions[v]).filter((v): v is VersionDetail => !!v);
+  const norm = rewardNorm(arms);
+  const N = arms.reduce((s, v) => s + v.stats.executions, 0);
+  return arms.map(v => {
+    const reward = compositeReward(v, norm, opts.weights);
+    const bonus = v.stats.executions === 0 ? Infinity : c * Math.sqrt(Math.log(Math.max(1, N)) / v.stats.executions);
+    return { version: v.version, reward, bonus, ucb: reward + bonus, executions: v.stats.executions };
+  });
+}
+
+/**
+ * Choose which version to inject this turn:
+ *   - no challenger / champion-only strategy → the champion (UCB OFF; sensitive skills),
+ *   - static → ~25% challenger,
+ *   - ucb1 → force-explore the challenger until it clears `minChallengerTrials` (so we never
+ *     judge on too little signal), then pick the higher UCB (composite reward + bonus);
+ *     ties go to the champion (don't disturb the stable version).
+ */
+export function routeSkillVersion(manifest: SkillManifest, opts: RouteOptions = {}): string {
   const champ = manifest.activeVersion;
   const chal = manifest.challengerVersion;
   if (!chal || !manifest.versions[chal] || chal === champ) return champ;
+  if (manifest.routingStrategy === 'champion-only') return champ;
+  if (manifest.routingStrategy === 'static') return deterministicStatic(manifest) ? chal : champ;
 
-  if (manifest.routingStrategy === 'static') {
-    return deterministicStatic(manifest) ? chal : champ;
-  }
-  const v1 = manifest.versions[champ]!;
-  const v2 = manifest.versions[chal]!;
-  const N = v1.stats.executions + v2.stats.executions;
-  // Tie → champion (conservative: don't disturb the stable version on a tie).
-  return ucb1(v2, N, c) > ucb1(v1, N, c) ? chal : champ;
+  const minTrials = opts.minChallengerTrials ?? 5;
+  if (manifest.versions[chal]!.stats.executions < minTrials) return chal; // exploration floor
+
+  const scores = ucbScores(manifest, opts);
+  const champU = scores.find(s => s.version === champ)?.ucb ?? -Infinity;
+  const chalU = scores.find(s => s.version === chal)?.ucb ?? -Infinity;
+  return chalU > champU ? chal : champ;
 }
 
 /** Deterministic ~25% challenger pick for the 'static' strategy (no Math.random — keeps the
@@ -131,7 +197,7 @@ function deterministicStatic(manifest: SkillManifest): boolean {
 export function recordVersionExecution(
   manifest: SkillManifest,
   version: string,
-  outcome: { success: boolean; tokens?: number },
+  outcome: { success: boolean; tokens?: number; durationMs?: number },
 ): SkillManifest {
   const v = manifest.versions[version];
   if (!v) return manifest;
@@ -141,6 +207,7 @@ export function recordVersionExecution(
       executions: v.stats.executions + 1,
       successes: v.stats.successes + (outcome.success ? 1 : 0),
       totalTokensUsed: v.stats.totalTokensUsed + (outcome.tokens ?? 0),
+      totalDurationMs: (v.stats.totalDurationMs ?? 0) + (outcome.durationMs ?? 0),
     },
   };
   return { ...manifest, versions: { ...manifest.versions, [version]: updated } };
@@ -152,16 +219,15 @@ export interface ChampionDecision {
   reason: string;
 }
 
-const rate = (v: VersionDetail) => (v.stats.executions ? v.stats.successes / v.stats.executions : 0);
-
 /**
- * Converge the A/B test. Once the challenger has enough samples:
+ * Converge the A/B test on the COMPOSITE reward (success + token + time), once the
+ * challenger has enough samples:
  *   - clearly BETTER than the champion (by `margin`) → PROMOTE it to active.
- *   - clearly WORSE → RETIRE it (drop the challenger, keep the champion).
+ *   - clearly WORSE → RETIRE it (kept in history, marked retired).
  *   - otherwise keep testing. Below `minExecutions` we never decide (too little signal).
  * PURE.
  */
-export function decideChampion(manifest: SkillManifest, opts: { minExecutions?: number; margin?: number } = {}): ChampionDecision {
+export function decideChampion(manifest: SkillManifest, opts: { minExecutions?: number; margin?: number; weights?: RewardWeights } = {}): ChampionDecision {
   const minExec = opts.minExecutions ?? 8;
   const margin = opts.margin ?? 0.1;
   const chal = manifest.challengerVersion;
@@ -171,7 +237,8 @@ export function decideChampion(manifest: SkillManifest, opts: { minExecutions?: 
   const chalV = manifest.versions[chal]!;
   if (chalV.stats.executions < minExec) return { manifest, action: 'keep-testing', reason: `challenger has ${chalV.stats.executions}/${minExec} executions` };
 
-  const cr = rate(chalV), pr = rate(champV);
+  const norm = rewardNorm([champV, chalV]);
+  const cr = compositeReward(chalV, norm, opts.weights), pr = compositeReward(champV, norm, opts.weights);
   if (cr >= pr + margin) {
     const m: SkillManifest = { ...manifest, activeVersion: chal, challengerVersion: undefined };
     return { manifest: m, action: 'promote', reason: `challenger ${(cr * 100).toFixed(0)}% beat champion ${(pr * 100).toFixed(0)}% by ≥${margin * 100}%` };
