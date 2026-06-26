@@ -63,9 +63,9 @@ describe('routeSkillVersion — UCB1 explore/exploit', () => {
 describe('recordVersionExecution — pure stat update', () => {
   it('increments executions/successes/tokens', () => {
     let m = initManifest('s', 'machine', 50, '').manifest;
-    m = recordVersionExecution(m, 'v1', { success: true, tokens: 100 });
-    m = recordVersionExecution(m, 'v1', { success: false, tokens: 50 });
-    expect(m.versions.v1!.stats).toEqual({ executions: 2, successes: 1, totalTokensUsed: 150 });
+    m = recordVersionExecution(m, 'v1', { success: true, tokens: 100, durationMs: 1000 });
+    m = recordVersionExecution(m, 'v1', { success: false, tokens: 50, durationMs: 500 });
+    expect(m.versions.v1!.stats).toEqual({ executions: 2, successes: 1, totalTokensUsed: 150, totalDurationMs: 1500 });
   });
   it('unknown version is a no-op', () => {
     const m = initManifest('s', 'machine', 50, '').manifest;

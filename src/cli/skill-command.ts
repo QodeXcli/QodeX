@@ -196,18 +196,29 @@ export function buildSkillCommand(): Command {
     .action(async (name: string) => {
       const { loadSkillByName } = await import('../skills/loader.js');
       const { readManifest } = await import('../skills/learning/versioned-store.js');
-      const { routeSkillVersion } = await import('../skills/learning/skill-versioning.js');
+      const { routeSkillVersion, ucbScores } = await import('../skills/learning/skill-versioning.js');
+      const { loadConfig } = await import('../config/loader.js');
       const spec = await loadSkillByName(name, process.cwd());
       if (!spec) { console.error(`✗ no skill named "${name}"`); process.exit(1); }
       const m = await readManifest(spec.dir);
       if (!m) { console.log(`"${name}" is a single-version (legacy) skill — no version history yet.`); return; }
-      const routed = routeSkillVersion(m);
+      const vcfg = (await loadConfig(process.cwd()) as any).learning?.versioning ?? {};
+      const opts = {
+        explorationFactor: vcfg.ucbExplorationFactor,
+        minChallengerTrials: vcfg.minChallengerTrials,
+        weights: vcfg.rewardWeights ? { success: vcfg.rewardWeights.success ?? 0.7, token: vcfg.rewardWeights.token ?? 0.15, time: vcfg.rewardWeights.time ?? 0.15 } : undefined,
+      };
+      const routed = routeSkillVersion(m, opts);
+      const scores = new Map(ucbScores(m, opts).map(s => [s.version, s]));
       console.log(`Skill "${m.skillId}"  ·  strategy: ${m.routingStrategy}  ·  routed this turn → ${routed}\n`);
       for (const v of Object.values(m.versions).sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }))) {
         const tag = v.version === m.activeVersion ? '★ champion' : v.version === m.challengerVersion ? '⚡ challenger' : v.retired ? '✗ retired' : '';
         const rate = v.stats.executions ? `${Math.round((v.stats.successes / v.stats.executions) * 100)}% over ${v.stats.executions}` : 'untested';
+        const avgMs = v.stats.executions && v.stats.totalDurationMs ? `  ·  ${Math.round(v.stats.totalDurationMs / v.stats.executions)}ms/run` : '';
         console.log(`  ${v.version}  [${v.author}]  ${tag}`);
-        console.log(`      success: ${rate}  ·  tokens: ${v.stats.totalTokensUsed}  ·  confidence: ${v.confidence}`);
+        console.log(`      success: ${rate}  ·  tokens: ${v.stats.totalTokensUsed}${avgMs}  ·  confidence: ${v.confidence}`);
+        const s = scores.get(v.version);
+        if (s) console.log(`      UCB: reward ${s.reward.toFixed(3)} + bonus ${s.bonus === Infinity ? '∞' : s.bonus.toFixed(3)} = ${s.ucb === Infinity ? '∞' : s.ucb.toFixed(3)}`);
       }
     });
 

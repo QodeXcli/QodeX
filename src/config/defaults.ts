@@ -439,6 +439,20 @@ export interface QodexConfig {
      *  judge is unsure (grey-zone average or high cross-dimension variance). Must differ from
      *  defaults.model and judgeModel. Unset ⇒ no escalation (Tier-1 verdict stands). */
     judgeModelTier2?: string;
+    /** Skill versioning + UCB1 adaptive-bandit routing knobs. */
+    versioning?: {
+      /** UCB1 exploration factor `c` — higher explores challengers more. Default √2 (~1.41). */
+      ucbExplorationFactor?: number;
+      /** Force-route a challenger at least this many times before UCB1 can starve it, so a
+       *  decision is never made on too little signal. Default 5. */
+      minChallengerTrials?: number;
+      /** Composite-reward weights (success + token-efficiency + time-efficiency). Defaults
+       *  { success: 0.7, token: 0.15, time: 0.15 }. */
+      rewardWeights?: { success?: number; token?: number; time?: number };
+      /** Routing strategy when a manifest doesn't pin one: 'ucb1' (default), 'static', or
+       *  'champion-only' (UCB OFF — always the stable version, for sensitive skills). */
+      strategy?: 'ucb1' | 'static' | 'champion-only';
+    };
     /** When auto-promoting, require at least this confidence (0–100). Default 0 (the
      *  judge's pass is sufficient); raise it to gate low-confidence captures. */
     autoPromoteMinConfidence?: number;

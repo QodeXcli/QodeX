@@ -12,7 +12,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import {
-  type SkillManifest, type ChampionDecision,
+  type SkillManifest, type ChampionDecision, type RouteOptions,
   initManifest, createNextVersion, routeSkillVersion, recordVersionExecution, decideChampion, versionFileName,
 } from './skill-versioning.js';
 
@@ -29,11 +29,12 @@ async function writeManifest(skillDir: string, m: SkillManifest): Promise<void> 
   await fs.rename(tmp, manifestPath(skillDir)); // atomic
 }
 
-/** The skill body to inject this turn + which version it is. Falls back to legacy SKILL.md. */
-export async function routedSkillBody(skillDir: string): Promise<{ version: string; body: string } | null> {
+/** The skill body to inject this turn + which version it is. Falls back to legacy SKILL.md.
+ *  `opts` carries the configurable UCB knobs (exploration factor, min trials, weights). */
+export async function routedSkillBody(skillDir: string, opts: RouteOptions = {}): Promise<{ version: string; body: string } | null> {
   const m = await readManifest(skillDir);
   if (m) {
-    const version = routeSkillVersion(m);
+    const version = routeSkillVersion(m, opts);
     try { return { version, body: await fs.readFile(path.join(skillDir, versionFileName(version)), 'utf-8') }; }
     catch { /* fall through to legacy */ }
   }
@@ -64,12 +65,18 @@ export async function addChallenger(skillDir: string, skillId: string, body: str
   return updatedManifest;
 }
 
-/** Record one execution outcome for the routed version, then try to converge the A/B test. */
-export async function recordOutcomeAndConverge(skillDir: string, version: string, outcome: { success: boolean; tokens?: number }): Promise<ChampionDecision | null> {
+/** Record one execution outcome (success + tokens + duration) for the routed version, then
+ *  try to converge the A/B test on the composite reward. */
+export async function recordOutcomeAndConverge(
+  skillDir: string,
+  version: string,
+  outcome: { success: boolean; tokens?: number; durationMs?: number },
+  opts: { minExecutions?: number; margin?: number } = {},
+): Promise<ChampionDecision | null> {
   const m = await readManifest(skillDir);
   if (!m) return null;
   const afterStats = recordVersionExecution(m, version, outcome);
-  const decision = decideChampion(afterStats);
+  const decision = decideChampion(afterStats, opts);
   await writeManifest(skillDir, decision.manifest);
   return decision;
 }
