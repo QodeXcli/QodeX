@@ -133,6 +133,35 @@ qodex skill snapshots           # rollback points;  qodex skill restore <archive
 
 > Every successful task can also be exported as a **ShareGPT JSONL** corpus (`flywheel.datasetExport: true` → `~/.qodex/dataset/`) — a ready-to-use dataset for a future zero-cost local fine-tune. Strictly local; nothing is uploaded.
 
+### Skill versioning & A/B testing (UCB1)
+
+A skill keeps its whole history in **one flat directory** — `manifest.json` + `SKILL.v1.md`, `SKILL.v2.md`, … — no symlinks, identical on every OS. When a new candidate is captured for an existing skill it becomes a **challenger** to the stable **champion**, and QodeX routes traffic between them with the **UCB1 adaptive bandit** instead of a fixed split: it explores the challenger enough to get signal, then favours whichever has the higher score — and a challenger that turns out worse has its traffic driven to **zero automatically**.
+
+The score is a **composite reward**, not just win-rate: *success* dominates, but *token-* and *time-efficiency* (normalized **relative to the champion**) break ties — so between two equally-correct versions, the **cheaper, faster** one wins.
+
+```yaml
+learning:
+  versioning:
+    strategy: ucb1                 # or 'champion-only' to freeze a sensitive skill (UCB off)
+    ucbExplorationFactor: 1.41     # √2 — higher explores challengers more
+    minChallengerTrials: 5         # force a challenger ≥5 runs before judging it
+    rewardWeights: { success: 0.7, token: 0.15, time: 0.15 }
+```
+
+```text
+$ qodex skill versions git-commit-expert
+Skill "git-commit-expert"  ·  strategy: ucb1  ·  routed this turn → v2
+
+  v1  [human]   ★ champion
+      success: 88% over 40  ·  tokens: 60000  ·  1900ms/run  ·  confidence: 75
+      UCB: reward 0.838 + bonus 0.214 = 1.052
+  v2  [machine] ⚡ challenger
+      success: 92% over 12  ·  tokens: 41000  ·  1300ms/run  ·  confidence: 60
+      UCB: reward 0.921 + bonus 0.391 = 1.312     ← higher → gets this turn
+
+$ qodex skill rollback git-commit-expert v1     # snap the champion back to v1 anytime
+```
+
 ## Install
 
 **Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.

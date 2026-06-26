@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   initManifest, createNextVersion, recordVersionExecution, routeSkillVersion, decideChampion,
-  compositeReward, ucbScores, type SkillManifest, type VersionDetail,
+  compositeReward, championRef, ucbScores, type SkillManifest, type VersionDetail,
 } from '../src/skills/learning/skill-versioning.js';
 
 const challenger = () => createNextVersion(initManifest('s', 'machine', 50, '').manifest, 'machine').updatedManifest;
@@ -42,22 +42,28 @@ describe('#1 ucbExplorationFactor — tunes explore vs exploit', () => {
   });
 });
 
-describe('#2 composite reward — success + token + time efficiency', () => {
-  it('between two EQUALLY-successful versions, the cheaper + faster one scores higher', () => {
+describe('#2 composite reward — efficiency normalized RELATIVE TO THE CHAMPION', () => {
+  it('between two EQUALLY-successful versions, the cheaper + faster challenger beats the champion', () => {
     let m = challenger();
     m = feed(m, 'v1', ten(true, 1000, 2000));  // champion: 100% but expensive/slow
     m = feed(m, 'v2', ten(true, 200, 400));    // challenger: 100% but cheap/fast
-    const champReward = compositeReward(m.versions.v1!, { maxTokensPerExec: 1000, maxMsPerExec: 2000 });
-    const chalReward = compositeReward(m.versions.v2!, { maxTokensPerExec: 1000, maxMsPerExec: 2000 });
-    expect(chalReward).toBeGreaterThan(champReward);
-    // and decideChampion promotes the more efficient one
-    expect(decideChampion(m, { minExecutions: 8 }).action).toBe('promote');
+    const ref = championRef(m.versions.v1!);   // normalize vs the champion
+    expect(compositeReward(m.versions.v1!, ref)).toBeCloseTo(0.85, 2); // champion → 0.5 efficiency baseline
+    expect(compositeReward(m.versions.v2!, ref)).toBeGreaterThan(compositeReward(m.versions.v1!, ref));
+    expect(decideChampion(m, { minExecutions: 8 }).action).toBe('promote'); // cheaper wins
+  });
+  it('a challenger TWICE the champion cost is penalized (efficiency → 0)', () => {
+    let m = challenger();
+    m = feed(m, 'v1', ten(true, 500, 1000));
+    m = feed(m, 'v2', ten(true, 1000, 2000)); // 2× the champion's cost, same success
+    const ref = championRef(m.versions.v1!);
+    expect(compositeReward(m.versions.v2!, ref)).toBeLessThan(compositeReward(m.versions.v1!, ref));
   });
   it('success still dominates — a cheap FAILURE never beats an expensive success', () => {
-    const norm = { maxTokensPerExec: 1000, maxMsPerExec: 2000 };
     const good: VersionDetail = { version: 'a', createdAt: '', author: 'machine', confidence: 50, stats: { executions: 10, successes: 9, totalTokensUsed: 10000, totalDurationMs: 20000 } };
     const cheapFail: VersionDetail = { version: 'b', createdAt: '', author: 'machine', confidence: 50, stats: { executions: 10, successes: 2, totalTokensUsed: 100, totalDurationMs: 100 } };
-    expect(compositeReward(good, norm)).toBeGreaterThan(compositeReward(cheapFail, norm));
+    const ref = championRef(good); // champion is the good one
+    expect(compositeReward(good, ref)).toBeGreaterThan(compositeReward(cheapFail, ref));
   });
 });
 

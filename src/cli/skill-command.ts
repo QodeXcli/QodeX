@@ -223,6 +223,25 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('rollback <name> <version>')
+    .description('Roll a versioned skill\'s champion back to an earlier version (e.g. v1) — drops any challenger')
+    .action(async (name: string, version: string) => {
+      const { loadSkillByName } = await import('../skills/loader.js');
+      const { rollbackToVersion } = await import('../skills/learning/versioned-store.js');
+      const spec = await loadSkillByName(name, process.cwd());
+      if (!spec) { console.error(`✗ no skill named "${name}"`); process.exit(1); }
+      const ver = version.startsWith('v') ? version : `v${version}`;
+      const ok = await rollbackToVersion(spec.dir, ver);
+      if (ok) {
+        console.log(`✓ "${name}" rolled back — champion is now ${ver}.`);
+        await refreshSkillRegistry();
+      } else {
+        console.error(`✗ "${name}" has no version ${ver} (or isn't versioned). Run \`qodex skill versions ${name}\`.`);
+        process.exit(1);
+      }
+    });
+
+  cmd
     .command('lessons')
     .description('Show "learned cautions" mined from your RECURRING tool failures (failure-driven learning)')
     .option('--clear', 'Erase the failure log and start over')
