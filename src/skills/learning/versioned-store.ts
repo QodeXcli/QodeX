@@ -65,6 +65,22 @@ export async function addChallenger(skillDir: string, skillId: string, body: str
   return updatedManifest;
 }
 
+/** Roll a skill's champion back to an earlier version: set it active, drop any challenger,
+ *  and un-retire it if it had lost a past A/B. Returns false if the version doesn't exist. */
+export async function rollbackToVersion(skillDir: string, version: string): Promise<boolean> {
+  const m = await readManifest(skillDir);
+  if (!m || !m.versions[version]) return false;
+  const v = { ...m.versions[version]!, retired: false };
+  const updated: SkillManifest = {
+    ...m,
+    activeVersion: version,
+    challengerVersion: m.challengerVersion === version ? undefined : m.challengerVersion,
+    versions: { ...m.versions, [version]: v },
+  };
+  await writeManifest(skillDir, updated);
+  return true;
+}
+
 /** Record one execution outcome (success + tokens + duration) for the routed version, then
  *  try to converge the A/B test on the composite reward. */
 export async function recordOutcomeAndConverge(

@@ -120,28 +120,36 @@ export function createNextVersion(
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 const perExec = (total: number, exec: number) => (exec ? total / exec : 0);
 
-interface RewardNorm { maxTokensPerExec: number; maxMsPerExec: number }
-function rewardNorm(arms: VersionDetail[]): RewardNorm {
-  let maxTokensPerExec = 0, maxMsPerExec = 0;
-  for (const v of arms) {
-    maxTokensPerExec = Math.max(maxTokensPerExec, perExec(v.stats.totalTokensUsed, v.stats.executions));
-    maxMsPerExec = Math.max(maxMsPerExec, perExec(v.stats.totalDurationMs ?? 0, v.stats.executions));
-  }
-  return { maxTokensPerExec, maxMsPerExec };
+/** The CHAMPION's per-execution cost/latency — the reference everything is normalized
+ *  against, so efficiency means "vs the stable version". */
+export interface RewardRef { champTokensPerExec: number; champMsPerExec: number }
+export function championRef(champion: VersionDetail): RewardRef {
+  return {
+    champTokensPerExec: perExec(champion.stats.totalTokensUsed, champion.stats.executions),
+    champMsPerExec: perExec(champion.stats.totalDurationMs ?? 0, champion.stats.executions),
+  };
+}
+
+/** Efficiency in [0,1] normalized against the champion: at champion cost → 0.5 (baseline),
+ *  free → 1.0, twice the champion's cost → 0.0. Neutral (0.5) when the champion has no scale. */
+function efficiency(vPerExec: number, champPerExec: number): number {
+  if (champPerExec <= 0) return 0.5;
+  return clamp01(1 - 0.5 * (vPerExec / champPerExec));
 }
 
 /**
- * COMPOSITE reward in [0,1]: success rate dominates, with token- and time-EFFICIENCY
- * nudges (cheaper / faster relative to the other arm scores higher). Efficiency terms are
- * neutral (0.5) when there's no scale to normalize against. PURE.
+ * COMPOSITE reward in [0,1]: success rate dominates, with token- and time-EFFICIENCY nudges
+ * measured RELATIVE TO THE CHAMPION (the stable version is the baseline a challenger must
+ * beat). A version cheaper/faster than the champion scores above the 0.5 efficiency
+ * baseline; one twice as costly scores 0. PURE.
  */
-export function compositeReward(v: VersionDetail, norm: RewardNorm, weights: RewardWeights = DEFAULT_WEIGHTS): number {
+export function compositeReward(v: VersionDetail, ref: RewardRef, weights: RewardWeights = DEFAULT_WEIGHTS): number {
   if (v.stats.executions === 0) return 0;
   const successRate = v.stats.successes / v.stats.executions;
-  const tokScore = norm.maxTokensPerExec > 0 ? 1 - perExec(v.stats.totalTokensUsed, v.stats.executions) / norm.maxTokensPerExec : 0.5;
-  const timeScore = norm.maxMsPerExec > 0 ? 1 - perExec(v.stats.totalDurationMs ?? 0, v.stats.executions) / norm.maxMsPerExec : 0.5;
+  const tokScore = efficiency(perExec(v.stats.totalTokensUsed, v.stats.executions), ref.champTokensPerExec);
+  const timeScore = efficiency(perExec(v.stats.totalDurationMs ?? 0, v.stats.executions), ref.champMsPerExec);
   const w = weights, denom = w.success + w.token + w.time || 1;
-  return (w.success * successRate + w.token * clamp01(tokScore) + w.time * clamp01(timeScore)) / denom;
+  return (w.success * successRate + w.token * tokScore + w.time * timeScore) / denom;
 }
 
 export interface UcbScore { version: string; reward: number; bonus: number; ucb: number; executions: number }
@@ -152,10 +160,10 @@ export function ucbScores(manifest: SkillManifest, opts: RouteOptions = {}): Ucb
   const c = opts.explorationFactor ?? Math.sqrt(2);
   const arms = [manifest.activeVersion, manifest.challengerVersion]
     .filter((x): x is string => !!x).map(v => manifest.versions[v]).filter((v): v is VersionDetail => !!v);
-  const norm = rewardNorm(arms);
+  const ref = championRef(manifest.versions[manifest.activeVersion]!);
   const N = arms.reduce((s, v) => s + v.stats.executions, 0);
   return arms.map(v => {
-    const reward = compositeReward(v, norm, opts.weights);
+    const reward = compositeReward(v, ref, opts.weights);
     const bonus = v.stats.executions === 0 ? Infinity : c * Math.sqrt(Math.log(Math.max(1, N)) / v.stats.executions);
     return { version: v.version, reward, bonus, ucb: reward + bonus, executions: v.stats.executions };
   });
@@ -237,8 +245,8 @@ export function decideChampion(manifest: SkillManifest, opts: { minExecutions?: 
   const chalV = manifest.versions[chal]!;
   if (chalV.stats.executions < minExec) return { manifest, action: 'keep-testing', reason: `challenger has ${chalV.stats.executions}/${minExec} executions` };
 
-  const norm = rewardNorm([champV, chalV]);
-  const cr = compositeReward(chalV, norm, opts.weights), pr = compositeReward(champV, norm, opts.weights);
+  const ref = championRef(champV);
+  const cr = compositeReward(chalV, ref, opts.weights), pr = compositeReward(champV, ref, opts.weights);
   if (cr >= pr + margin) {
     const m: SkillManifest = { ...manifest, activeVersion: chal, challengerVersion: undefined };
     return { manifest: m, action: 'promote', reason: `challenger ${(cr * 100).toFixed(0)}% beat champion ${(pr * 100).toFixed(0)}% by ≥${margin * 100}%` };
