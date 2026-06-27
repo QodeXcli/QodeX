@@ -389,6 +389,17 @@ program
     console.log(JSON.stringify(config, null, 2));
   });
 
+program
+  .command('bot')
+  .description('Run the Telegram/Discord bot front-end (drives the agent from chat)')
+  .option('--telegram', 'start only Telegram')
+  .option('--discord', 'start only Discord')
+  .action(async (opts: { telegram?: boolean; discord?: boolean }) => {
+    const { config, router, registry, permissions } = await bootstrap();
+    const { startBots } = await import('./bot/start.js');
+    await startBots({ config, router, registry, permissions, cwd: process.cwd() }, opts);
+  });
+
 const mcpCmd = program
   .command('mcp')
   .description('Manage MCP servers (status, catalog, add, remove)');

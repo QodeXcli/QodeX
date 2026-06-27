@@ -210,6 +210,17 @@ export interface QodexConfig {
     showTokenCount: boolean;
     showCost: boolean;
   };
+  /**
+   * Telegram/Discord bot front-end (`qodex bot`). Tokens are NOT here — they're secrets read
+   * from ~/.qodex/.env (TELEGRAM_BOT_TOKEN / DISCORD_TOKEN). Only the (non-secret) allowlists
+   * live in config. `allowedUsers` is DENY-by-default: an empty list lets nobody in; the
+   * literal '*' opts a platform into public access (a deliberate foot-gun — a coding agent
+   * runs shell on your host). Optional for back-compat; defaults applied at load.
+   */
+  bot?: {
+    telegram?: { enabled?: boolean; allowedUsers?: string[] };
+    discord?: { enabled?: boolean; allowedUsers?: string[] };
+  };
   mcp: {
     servers: Record<string, {
       command?: string;
@@ -657,6 +668,10 @@ export const DEFAULT_CONFIG: QodexConfig = {
     showThinking: true,
     showTokenCount: true,
     showCost: true,
+  },
+  bot: {
+    telegram: { enabled: false, allowedUsers: [] },
+    discord: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

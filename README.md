@@ -317,6 +317,25 @@ Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 QodeX will: read `Header.tsx` → add the button (shown as an approvable diff) → `dev_server_start npm run dev` → `browser_navigate` localhost → click the button → check the console for errors → screenshot → `vision_analyze` to confirm it looks right → run the type-checker on the touched file → stop the server and report. One agent loop, with the guardrails above running throughout.
 
+## Telegram / Discord bot
+
+Drive the same agent from chat — stream tasks to QodeX from your phone:
+
+```bash
+# 1. put the token(s) in ~/.qodex/.env (secrets never go in config)
+echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
+
+# 2. enable the platform + allowlist your user id (deny-by-default) in config
+#    bot:
+#      telegram: { enabled: true, allowedUsers: ["<your-telegram-id>"] }
+#      discord:  { enabled: true, allowedUsers: ["<your-discord-id>"] }   # needs: npm i discord.js
+
+# 3. run it from the project directory you want it to work in
+qodex bot                 # all enabled platforms · --telegram / --discord to pick one
+```
+
+One transport-agnostic gateway does all the work; the platform adapters are thin. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately). `/new` starts a fresh session, `/stop` aborts the running turn.
+
 ## Architecture notes
 
 - **One agent loop** with per-task budget caps (tokens / cost / wall-clock / iterations), a consecutive-failure circuit breaker, and auto-recovery.
