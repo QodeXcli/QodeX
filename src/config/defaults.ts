@@ -428,6 +428,14 @@ export interface QodexConfig {
    * See src/skills/learning/. Designed to avoid the "self-congratulation" failure mode:
    * eligibility is gated on verify/completion signals, not the worker's self-grade.
    */
+  /** Memory injection. 'full' (default) injects every learned fact into the prompt; 'lightweight'
+   *  injects only `!important`-tagged facts + as many recent facts as fit `injectMaxTokens`, leaving
+   *  the rest to load on demand via recall / `/memory`; 'auto' picks lightweight on a small context
+   *  window and full on a roomy one. The DB + markdown mirror are unaffected. */
+  memory?: {
+    mode?: 'full' | 'lightweight' | 'auto';
+    injectMaxTokens?: number;
+  };
   learning?: {
     /** Capture candidate skills after eligible tasks. Default false. */
     enabled?: boolean;
