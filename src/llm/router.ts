@@ -75,9 +75,10 @@ export class ModelRouter {
       draftModel: ollamaCfg.draftModel,
       numCtxCeiling: ollamaNumCtxCeiling(this.config.hardware),
     }));
-    // Anthropic prompt caching is opt-in via config. Default off — first run after
-    // `qx setup` may flip this on when the user opts in.
-    const anthropicUseCaching = (this.config.providers.anthropic as any)?.useCaching === true;
+    // Anthropic prompt caching is ON by default — strictly cheaper for multi-iteration agent
+    // loops (the shared tools+system+history prefix is served at 0.1× instead of full price
+    // each turn). Opt out with providers.anthropic.useCaching: false.
+    const anthropicUseCaching = (this.config.providers.anthropic as any)?.useCaching !== false;
     this.providers.set('anthropic', new AnthropicProvider(
       process.env[this.config.providers.anthropic.apiKeyEnv],
       { useCaching: anthropicUseCaching },
