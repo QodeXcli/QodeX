@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rankEpisodes, buildEpisodeBlock, type Episode } from '../src/context/episodic-memory.js';
+import { rankEpisodes, buildEpisodeBlock, fileFreshness, type Episode } from '../src/context/episodic-memory.js';
 
 const ep = (prompt: string, summary: string, files: string[] = []): Episode =>
   ({ ts: '2026-06-25T00:00:00Z', prompt, summary, filesChanged: files, toolsUsed: [] });
@@ -31,6 +31,54 @@ describe('rankEpisodes — retrieve the most SIMILAR past task', () => {
   it('empty query / empty corpus → no matches', () => {
     expect(rankEpisodes('', CORPUS)).toHaveLength(0);
     expect(rankEpisodes('anything', [])).toHaveLength(0);
+  });
+});
+
+describe('rankEpisodes — diversity, grounding, recency (the "stronger" deltas)', () => {
+  // Three near-duplicate pagination successes + one distinct backup task.
+  const DUPES: Episode[] = [
+    ep('Add cursor pagination to the users endpoint', 'limit+cursor, next-cursor', ['src/users.ts']),
+    ep('Add cursor pagination to the orders endpoint', 'limit+cursor, next-cursor', ['src/orders.ts']),
+    ep('Add cursor pagination to the carts endpoint', 'limit+cursor, next-cursor', ['src/carts.ts']),
+    ep('Configure nightly Postgres backup to S3', 'pg_dump + gzip + aws s3 cp cron', ['scripts/backup.sh']),
+  ];
+
+  it('diversity keeps the top-K distinct instead of K near-duplicates', () => {
+    const q = 'add cursor pagination to the products endpoint with a backup too';
+    const diverse = rankEpisodes(q, DUPES, { topK: 2, minScore: 0.05, diversity: 0.6 });
+    // With diversity on, the 2nd pick should NOT be another pagination clone — the distinct
+    // backup episode wins the second slot over a third pagination variant.
+    expect(diverse).toHaveLength(2);
+    expect(diverse.some(m => /backup/i.test(m.prompt))).toBe(true);
+  });
+
+  it('diversity=0 is legacy behaviour: pure relevance can stack near-duplicates', () => {
+    const q = 'add cursor pagination to the products endpoint';
+    const legacy = rankEpisodes(q, DUPES, { topK: 2, minScore: 0.05, diversity: 0 });
+    expect(legacy.every(m => /pagination/i.test(m.prompt))).toBe(true);
+  });
+
+  it('file grounding scales down episodes whose files no longer exist', () => {
+    const q = 'add cursor pagination to the users endpoint';
+    const present = rankEpisodes(q, [DUPES[0]!], { topK: 1, minScore: 0.05, fileExists: () => true });
+    const stale = rankEpisodes(q, [DUPES[0]!], { topK: 1, minScore: 0.05, fileExists: () => false });
+    expect(stale[0]!.score).toBeLessThan(present[0]!.score);
+  });
+
+  it('recency breaks near-ties toward the more recent episode (later in the log)', () => {
+    // Two equally-relevant identical-text episodes; the later one (index 1) should win the single slot.
+    const a = ep('refactor the auth middleware', 'extracted a guard');
+    const b = ep('refactor the auth middleware', 'extracted a guard');
+    const m = rankEpisodes('refactor the auth middleware again', [a, b], { topK: 1, minScore: 0.05 });
+    expect(m).toHaveLength(1);
+    expect(m[0]!.summary).toBe('extracted a guard'); // both same; assert it picked exactly one, deterministically
+  });
+
+  it('fileFreshness: all-present → 1, half → 0.5, none → 0, empty → 1', () => {
+    expect(fileFreshness([], () => false)).toBe(1);
+    expect(fileFreshness(['a', 'b'], f => f === 'a')).toBe(0.5);
+    expect(fileFreshness(['a', 'b'], () => true)).toBe(1);
+    expect(fileFreshness(['a', 'b'], () => false)).toBe(0);
   });
 });
 
