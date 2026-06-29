@@ -33,6 +33,11 @@ export interface Message {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+  /** Transient (not persisted): char offset where the STABLE core of a system prompt ends.
+   *  content[0..cacheBoundary] is identical across turns (instructions + tools) → it gets its
+   *  own prompt-cache breakpoint; the volatile remainder (memory/retrieval/tree) doesn't.
+   *  Only the Anthropic provider reads it; every other provider just reads `content`. */
+  cacheBoundary?: number;
 }
 
 export interface ToolCall {

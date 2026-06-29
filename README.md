@@ -66,8 +66,8 @@ Long agent sessions burn tokens on a growing history, not the (cached) system pr
 
 Standard agent caching pins only the static system block. QodeX goes further with a **multi-tier rolling-breakpoint** cache (Anthropic, on by default), so the part that actually grows — the conversation — is cached too:
 
-- **Immutable tier** — core instructions + 70+ tool schemas (unchanged for the whole run).
-- **Ephemeral / rolling tier** — conversation history and retrieval context, pinned with a **breakpoint that advances every turn**.
+- **Immutable tier** — core instructions + 70+ tool schemas, byte-identical across *every turn of the session*. A static/volatile boundary splits the system prompt so this core gets its own breakpoint and stays a cache **hit** the whole conversation — not just within one task.
+- **Ephemeral / rolling tier** — per-turn injections (memory, retrieval, dir-tree) and the conversation history, pinned with a **breakpoint that advances every turn**.
 
 In a deep agentic loop the re-sent prefix dominates each call, and it's now served at **0.1×** instead of full price — **up to ~90% off the input cost of every iteration after the first** (the `C × N` blow-up, defused) — with no loss of granular state and no shrinking of the context window. Caching the *growing history*, not just the system block, is the lever; opt out with `providers.anthropic.useCaching: false`.
 

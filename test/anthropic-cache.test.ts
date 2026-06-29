@@ -55,4 +55,30 @@ describe('withCacheBreakpoints — hierarchical prompt cache', () => {
     expect(r.tools).toBeUndefined();
     expect(r.system).toEqual([{ type: 'text', text: 's', cache_control: EPH }]);
   });
+
+  it('with a static/volatile boundary, caches ONLY the stable core block', () => {
+    const sys = 'STABLE CORE INSTRUCTIONS' + '\n\nVOLATILE: retrieved files + memory';
+    const boundary = 'STABLE CORE INSTRUCTIONS'.length;
+    const { system } = withCacheBreakpoints(sys, messages, tools, boundary);
+    expect(system).toEqual([
+      { type: 'text', text: 'STABLE CORE INSTRUCTIONS', cache_control: EPH }, // cached, stable across turns
+      { type: 'text', text: '\n\nVOLATILE: retrieved files + memory' },        // NOT cached (changes per turn)
+    ]);
+  });
+
+  it('falls back to a single cached block when the boundary is absent or out of range', () => {
+    const one = [{ type: 'text', text: 'whole thing', cache_control: EPH }];
+    expect(withCacheBreakpoints('whole thing', messages, tools).system).toEqual(one);          // no boundary
+    expect(withCacheBreakpoints('whole thing', messages, tools, 0).system).toEqual(one);        // 0 = nothing stable
+    expect(withCacheBreakpoints('whole thing', messages, tools, 999).system).toEqual(one);      // past the end
+  });
+
+  it('still uses ≤4 breakpoints with the split (core + last tool + last message)', () => {
+    const { system, tools: t, messages: out } = withCacheBreakpoints('AAA\n\nBBB', messages, tools, 3);
+    const count =
+      system.filter((b: any) => b.cache_control).length +     // 1 (core only; volatile uncached)
+      t!.filter((x: any) => x.cache_control).length +          // 1
+      out.flatMap((m: any) => (Array.isArray(m.content) ? m.content : [])).filter((b: any) => b.cache_control).length; // 1
+    expect(count).toBe(3);
+  });
 });
