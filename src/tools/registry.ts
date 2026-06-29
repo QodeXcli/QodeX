@@ -92,6 +92,7 @@ import { GatherTool } from './builtin/gather.js';
 import { AutoFixTool } from './builtin/auto-fix.js';
 import { DiagnosticsTool } from './diagnostics/diagnostics-tool.js';
 import { RememberTool, RecallTool, ForgetTool } from './builtin/memory.js';
+import { AddProviderTool } from './builtin/add-provider.js';
 // v1.40 — infrastructure tool groups
 import { NetworkOptimizeTool } from './network/network-optimize.js';
 import { DockerPsTool, DockerLogsTool, DockerInspectTool, DockerExecTool, DockerBuildTool, DockerComposeTool } from './docker/docker-tools.js';
@@ -283,6 +284,7 @@ export class ToolRegistry {
       new RememberTool(),
       new RecallTool(),
       new ForgetTool(),
+      new AddProviderTool(),
       new ProjectLogTool(),
       new ProjectRecallTool(),
       new BackgroundJobStartTool(),

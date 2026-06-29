@@ -400,6 +400,18 @@ program
     await startBots({ config, router, registry, permissions, cwd: process.cwd() }, opts);
   });
 
+program
+  .command('dashboard')
+  .alias('dash')
+  .description('Open a live visual dashboard of your QodeX — providers, sessions, token/cost usage, memory, skills')
+  .action(async () => {
+    const { runDashboard } = await import('./cli/dashboard.js');
+    const out = await runDashboard(process.cwd());
+    console.log(`\n📊 QodeX dashboard → ${out}`);
+    console.log('   Opened in your browser. Re-run `qodex dashboard` to refresh the snapshot.\n');
+    process.exit(0);
+  });
+
 const mcpCmd = program
   .command('mcp')
   .description('Manage MCP servers (status, catalog, add, remove)');
