@@ -18,7 +18,7 @@ import { logger } from '../utils/logger.js';
 import { notifyDesktop } from '../utils/notify.js';
 import { buildRecipePrompt } from './recipes.js';
 import { parseDeliveryTarget, formatRunSummary, deliverRun } from './delivery.js';
-import { parseReceipt, formatReceipt } from './receipt.js';
+import { parseReceipt, formatReceipt, readReceiptFile } from './receipt.js';
 
 const LOCK_PATH = path.join(QODEX_HOME, 'scheduler.lock');
 const RUN_LOG_DIR = path.join(QODEX_HOME, 'schedule-logs');
@@ -110,10 +110,14 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
   // is on PATH; in dev we may need to point at bin/qodex.mjs directly.
   const cliPath = resolveCliPath();
 
+  // Ask the child to write a ground-truth receipt here (built by QodeX from the git diff +
+  // the checkers it ran, not the model). We prefer it over parsing the model's stdout block.
+  const receiptFile = path.join(RUN_LOG_DIR, `${entry.id}.${runId}.receipt.json`);
+
   return new Promise<void>((resolve) => {
     const child = spawn(cliPath, args, {
       cwd: entry.cwd,
-      env: { ...process.env, QODEX_SCHEDULED: '1' },
+      env: { ...process.env, QODEX_SCHEDULED: '1', QODEX_RECEIPT_FILE: receiptFile },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -133,16 +137,17 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
       resolve();
     });
 
-    child.on('close', (code, signal) => {
+    child.on('close', async (code, signal) => {
       clearTimeout(hardKill);
       const exitCode = code ?? (signal ? 128 : 1);
       const status: 'success' | 'error' = exitCode === 0 ? 'success' : 'error';
       const tail = output.slice(-500).trim().replace(/\s+/g, ' ');
       logStream.end(`\n# finished: ${new Date().toISOString()} exit=${exitCode} (${status})\n`);
       store.recordRunFinish(runId, entry.id, status, exitCode, tail, Date.now() - startMs);
-      // Proof-carrying autonomy: extract the run's audit receipt (what ran / verified / opened)
-      // and persist it, so an unattended run is checkable, not just claimed.
-      const receipt = parseReceipt(output);
+      // Proof-carrying autonomy: prefer the GROUND-TRUTH receipt QodeX wrote (git diff + the
+      // checkers it ran) over parsing the model's stdout block. Fall back to stdout if absent.
+      const receipt = (await readReceiptFile(receiptFile)) ?? parseReceipt(output);
+      await fs.unlink(receiptFile).catch(() => {});
       if (receipt) store.attachReceipt(runId, JSON.stringify(receipt));
       // Let the user know a background task finished — they may have closed the
       // terminal. Fire-and-forget; a failed notification never affects the run.

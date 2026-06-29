@@ -477,7 +477,7 @@ qodex schedule add --name nightly-flaky-fix \
 
 That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie.
 
-**Proof-carrying autonomy — every run comes with a receipt.** An unattended action is only trustworthy if you can *audit* it. Because QodeX verifies, each run emits a structured **trust receipt** — what it set out to do, the branch, **which checks ran and whether they passed**, the files it touched, and the PR it opened (or why it didn't). The runner captures it, stores it, and leads the chat message with it:
+**Proof-carrying autonomy — every run comes with a receipt.** An unattended action is only trustworthy if you can *audit* it. Each run emits a structured **trust receipt** — what it set out to do, **which checks ran and whether they passed**, the files it touched, and the PR it opened (or why it didn't). Crucially, the hard facts are **measured by QodeX, not claimed by the model**: the `filesChanged` come from a real `git diff` and the `verification` entries from the checkers the agent loop *actually ran* — written out by QodeX itself, so the model can't fabricate a green receipt. The runner captures it, stores it, and leads the chat message with it:
 
 ```text
 ✅ QodeX schedule: nightly-flaky-fix
