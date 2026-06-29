@@ -75,6 +75,49 @@ function coerce(o: any): RunReceipt | null {
 
 const str = (x: any): string | undefined => (typeof x === 'string' && x.trim() ? x.trim() : undefined);
 
+/**
+ * Assemble a receipt from QodeX's OWN ground-truth signals (a git diff it ran, checkers it
+ * ran) rather than the model's say-so. Verification entries are deduped by command keeping the
+ * LAST result (the repair loop re-runs a checker; the final pass/fail is what counts). PURE.
+ * This is the uncounterfeitable half: filesChanged + verification are facts QodeX measured.
+ */
+export function buildGroundTruthReceipt(input: {
+  status: RunReceipt['status'];
+  prUrl?: string;
+  reason?: string;
+  filesChanged?: string[];
+  verification?: ReceiptCheck[];
+  summary?: string;
+}): RunReceipt {
+  const byCmd = new Map<string, boolean>();
+  for (const c of input.verification ?? []) if (c.command) byCmd.set(c.command, !!c.passed);
+  const verification = [...byCmd].map(([command, passed]) => ({ command, passed }));
+  return {
+    status: input.status,
+    prUrl: str(input.prUrl),
+    reason: str(input.reason),
+    summary: str(input.summary),
+    filesChanged: input.filesChanged?.length ? dedupeStr(input.filesChanged) : undefined,
+    verification: verification.length ? verification : undefined,
+  };
+}
+
+function dedupeStr(xs: string[]): string[] {
+  const seen = new Set<string>(); const out: string[] = [];
+  for (const x of xs) if (x && !seen.has(x)) { seen.add(x); out.push(x); }
+  return out;
+}
+
+/** Read a receipt JSON file QodeX wrote at end-of-run. Returns null if absent/unreadable. */
+export async function readReceiptFile(filePath: string): Promise<RunReceipt | null> {
+  try {
+    const { promises: fs } = await import('fs');
+    const raw = await fs.readFile(filePath, 'utf-8');
+    const obj = JSON.parse(raw);
+    return coerce(obj);
+  } catch { return null; }
+}
+
 /** Compact, scannable receipt for a chat message. PURE. */
 export function formatReceipt(r: RunReceipt): string {
   const lines = ['🧾 Receipt'];

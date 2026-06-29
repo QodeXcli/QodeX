@@ -126,6 +126,9 @@ export class AgentLoop {
   private sessionToolNames = new Set<string>();
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
   private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
+  // Ground-truth verification ledger: every checker QodeX actually ran this run + its result.
+  // Feeds the trust receipt — uncounterfeitable because the WORKER measured it, not the model.
+  private verifyLedger: Array<{ command: string; passed: boolean }> = [];
   private styleBlock: string | null = null; // inferred code-style block, computed once per session
 
   /** Record a tool failure to episodic memory (best-effort, opt-in). Only fires when
@@ -685,7 +688,7 @@ export class AgentLoop {
       // Capture the changed-file list from git BEFORE finishing (the sandbox
       // branch still has the diff). Best-effort.
       let changedFiles: string[] = [];
-      if (flywheelEnabled && reachedFinal) {
+      if ((flywheelEnabled || process.env.QODEX_RECEIPT_FILE) && reachedFinal) {
         try {
           const { git } = await import('../tools/git/git-runner.js');
           const diff = await git(['diff', '--name-only', sandbox.baseCommitRef() ?? 'HEAD'], { cwd: this.cwd, signal: options.signal });
@@ -826,6 +829,40 @@ export class AgentLoop {
       } else {
         yield { type: 'notice', data: { message: '🔒 Sandbox: task did not complete — your branch was left untouched' } };
       }
+
+      // Ground-truth trust receipt for unattended/scheduled runs. QodeX writes it from ITS OWN
+      // signals — the git diff + the checkers it actually ran — so the model can't fabricate it.
+      await this.writeRunReceipt({ reachedFinal, merged, finalContent, changedFiles, signal: options.signal });
+    }
+  }
+
+  /** Write an audit receipt to QODEX_RECEIPT_FILE (set by the scheduler) from ground-truth
+   *  signals: the git diff + the verify ledger. Status/PR come from the model's headline (a
+   *  checkable claim); the FACTS (files, checks) are what QodeX measured. Best-effort. */
+  private async writeRunReceipt(opts: { reachedFinal: boolean; merged: boolean; finalContent: string; changedFiles: string[]; signal?: AbortSignal }): Promise<void> {
+    const file = process.env.QODEX_RECEIPT_FILE;
+    if (!file) return;
+    try {
+      const { parseReceipt, buildGroundTruthReceipt } = await import('../schedule/receipt.js');
+      const headline = parseReceipt(opts.finalContent); // the model's claimed status + PR url
+      const status: 'opened' | 'blocked' | 'done' | 'failed' =
+        headline?.status === 'opened' ? 'opened'
+        : headline?.status === 'blocked' ? 'blocked'
+        : opts.merged ? 'done'
+        : opts.reachedFinal ? 'blocked'
+        : 'failed';
+      const receipt = buildGroundTruthReceipt({
+        status,
+        prUrl: headline?.prUrl,
+        reason: headline?.reason,
+        filesChanged: opts.changedFiles,
+        verification: this.verifyLedger,
+        summary: opts.finalContent.replace(/\s+/g, ' ').trim().slice(0, 200) || undefined,
+      });
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(file, JSON.stringify(receipt), 'utf-8');
+    } catch (e: any) {
+      logger.debug('run receipt not written', { err: e?.message });
     }
   }
 
@@ -1671,6 +1708,8 @@ export class AgentLoop {
               timeoutMs: verifyCfg.timeoutMs,
               baseline: verifyBaseline,
             });
+            // Record what QodeX actually verified (ground truth for the trust receipt).
+            if (vr.ran && vr.checker) this.verifyLedger.push({ command: vr.checker, passed: vr.errorCount === 0 });
             if (vr.ran && vr.errorCount > 0) {
               if (verifyRepairAttempts < maxRepair) {
                 verifyRepairAttempts++;
