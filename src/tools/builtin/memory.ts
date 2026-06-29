@@ -56,15 +56,16 @@ export class RememberTool extends Tool<z.infer<typeof RememberArgs>> {
 }
 
 const RecallArgs = z.object({
+  query: z.string().optional().describe('Full-text search remembered facts by relevance (e.g. "build command", "deploy key"). Omit to list the most recent. Use this to find a specific older fact instead of dumping everything.'),
   limit: z.number().int().min(1).max(100).optional().describe('Max facts to return. Default 20.'),
   scope: z.enum(['project', 'user', 'all']).optional().describe(
-    "Which facts to list: 'all' (default) shows user + project, 'project' only this cwd, 'user' only global preferences."
+    "Which facts to search/list: 'all' (default) shows user + project, 'project' only this cwd, 'user' only global preferences."
   ),
 });
 
 export class RecallTool extends Tool<z.infer<typeof RecallArgs>> {
   name = 'recall';
-  description = 'List facts persisted via `remember`. By default shows both global user preferences and this project\'s facts. They are also auto-included in your system prompt; use this for a clean enumeration. Read-only.';
+  description = 'Search or list facts persisted via `remember`. Pass `query` to full-text search by relevance; omit it to list the most recent. By default covers both global user preferences and this project\'s facts. Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = RecallArgs;
@@ -73,18 +74,22 @@ export class RecallTool extends Tool<z.infer<typeof RecallArgs>> {
     const cwd = ctx.cwd ?? process.cwd();
     const limit = args.limit ?? 20;
     const scope = args.scope ?? 'all';
+    const q = args.query?.trim();
     const store = getSessionStore();
+    const get = (s: 'user' | 'project') => q ? store.searchFacts(q, s, cwd, limit) : store.getFactsByScope(s, cwd, limit);
     const sections: string[] = [];
     if (scope === 'all' || scope === 'user') {
-      const u = store.getFactsByScope('user', cwd, limit);
+      const u = get('user');
       if (u.length) sections.push(`User memory (all projects) — ${u.length}:\n${u.map(f => '  - ' + f).join('\n')}`);
     }
     if (scope === 'all' || scope === 'project') {
-      const p = store.getFactsByScope('project', cwd, limit);
+      const p = get('project');
       if (p.length) sections.push(`Project memory (${cwd}) — ${p.length}:\n${p.map(f => '  - ' + f).join('\n')}`);
     }
-    if (sections.length === 0) return { content: `No ${scope === 'all' ? '' : scope + ' '}facts stored yet.` };
-    return { content: sections.join('\n\n') };
+    if (sections.length === 0) {
+      return { content: q ? `No facts matching "${q}"${scope === 'all' ? '' : ` in ${scope}`}.` : `No ${scope === 'all' ? '' : scope + ' '}facts stored yet.` };
+    }
+    return { content: (q ? `🔎 Search "${q}":\n\n` : '') + sections.join('\n\n') };
   }
 }
 
