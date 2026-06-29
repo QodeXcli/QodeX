@@ -1077,8 +1077,25 @@ schedule
     if (runs.length === 0) { console.log('No runs yet.'); return; }
     for (const r of runs) {
       const dur = r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—';
-      console.log(`  ${r.started_at}  ${(r.status ?? 'running').padEnd(8)}  exit=${r.exit_code ?? '—'}  ${dur}  ${(r.message ?? '').slice(0, 80)}`);
+      let verdict = '';
+      if (r.receipt) { try { const rc = JSON.parse(r.receipt); verdict = `  🧾 ${rc.status}${rc.prUrl ? ` ${rc.prUrl}` : ''}`; } catch {} }
+      console.log(`  ${r.started_at}  ${(r.status ?? 'running').padEnd(8)}  exit=${r.exit_code ?? '—'}  ${dur}  ${(r.message ?? '').slice(0, 80)}${verdict}`);
     }
+  });
+
+schedule
+  .command('receipt <idOrName>')
+  .description('Show the trust receipt of the latest run (what ran, what verified, the PR)')
+  .action(async (idOrName: string) => {
+    const { getScheduleStore } = await import('./schedule/store.js');
+    const { formatReceipt } = await import('./schedule/receipt.js');
+    const store = getScheduleStore();
+    const e = store.resolve(idOrName);
+    if (!e) { console.error(`No schedule matches "${idOrName}".`); process.exit(1); }
+    const withReceipt = store.recentRuns(e.id, 20).find(r => r.receipt);
+    if (!withReceipt?.receipt) { console.log('No receipt yet (only `verified-pr`/receipt-emitting runs produce one).'); return; }
+    try { console.log(`\n${formatReceipt(JSON.parse(withReceipt.receipt))}\n  run: ${withReceipt.started_at}\n`); }
+    catch { console.log(withReceipt.receipt); }
   });
 
 schedule

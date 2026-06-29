@@ -18,6 +18,7 @@ import { logger } from '../utils/logger.js';
 import { notifyDesktop } from '../utils/notify.js';
 import { buildRecipePrompt } from './recipes.js';
 import { parseDeliveryTarget, formatRunSummary, deliverRun } from './delivery.js';
+import { parseReceipt, formatReceipt } from './receipt.js';
 
 const LOCK_PATH = path.join(QODEX_HOME, 'scheduler.lock');
 const RUN_LOG_DIR = path.join(QODEX_HOME, 'schedule-logs');
@@ -139,6 +140,10 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
       const tail = output.slice(-500).trim().replace(/\s+/g, ' ');
       logStream.end(`\n# finished: ${new Date().toISOString()} exit=${exitCode} (${status})\n`);
       store.recordRunFinish(runId, entry.id, status, exitCode, tail, Date.now() - startMs);
+      // Proof-carrying autonomy: extract the run's audit receipt (what ran / verified / opened)
+      // and persist it, so an unattended run is checkable, not just claimed.
+      const receipt = parseReceipt(output);
+      if (receipt) store.attachReceipt(runId, JSON.stringify(receipt));
       // Let the user know a background task finished — they may have closed the
       // terminal. Fire-and-forget; a failed notification never affects the run.
       const secs = Math.round((Date.now() - startMs) / 1000);
@@ -151,8 +156,10 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
       // Deliver the result to chat (Telegram/Discord) when the schedule asked for it —
       // this is what makes the scheduler "24/7 to your phone", not just a desktop ping.
       const target = parseDeliveryTarget(entry.deliver);
+      const summary = formatRunSummary({ name: entry.name, status, exitCode, durationSec: secs, tail, recipe: entry.recipe });
+      const message = receipt ? `${summary}\n\n${formatReceipt(receipt)}` : summary;
       const deliver = target
-        ? deliverRun(target, formatRunSummary({ name: entry.name, status, exitCode, durationSec: secs, tail, recipe: entry.recipe }))
+        ? deliverRun(target, message)
             .then(ok => { if (ok) logger.info('schedule result delivered', { id: entry.id, to: `${target.platform}:${target.chatId}` }); })
             .catch(() => {})
         : Promise.resolve();
