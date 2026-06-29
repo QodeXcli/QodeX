@@ -53,6 +53,10 @@ export class TelegramTransport implements Transport {
           this.offset = u.update_id + 1;
           if (u.message?.text) {
             onMessage({ platform: 'telegram', chatId: String(u.message.chat.id), userId: String(u.message.from?.id), userName: u.message.from?.username, text: u.message.text });
+          } else if (u.message?.voice || u.message?.audio) {
+            // Voice memo → transcribe (local-first) → feed as text. Fire-and-forget so the
+            // poll loop keeps flowing; failures reply with a note instead of crashing.
+            void this.handleVoice(u.message, onMessage);
           } else if (u.callback_query) {
             const cq = u.callback_query;
             onMessage({ platform: 'telegram', chatId: String(cq.message?.chat?.id), userId: String(cq.from?.id), text: '', callbackData: cq.data, callbackId: cq.id });
@@ -68,6 +72,37 @@ export class TelegramTransport implements Transport {
   async send(chatId: string, text: string, buttons?: Button[][]): Promise<MessageRef> {
     const r = await this.api('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true, ...this.keyboard(buttons) });
     return { id: String(r.result?.message_id ?? '') };
+  }
+
+  /** Download a voice/audio message, transcribe it (local-first), and emit it as a text turn. */
+  private async handleVoice(message: any, onMessage: (m: Incoming) => void): Promise<void> {
+    const chatId = String(message.chat.id);
+    const fileId = message.voice?.file_id ?? message.audio?.file_id;
+    const { promises: fs } = await import('fs');
+    const os = await import('os');
+    const path = await import('path');
+    let tmp = '';
+    try {
+      const gf = await this.api('getFile', { file_id: fileId });
+      const filePath = gf?.result?.file_path;
+      if (!filePath) throw new Error('getFile returned no path');
+      const dl = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+      if (!dl.ok) throw new Error(`download ${dl.status}`);
+      const buf = Buffer.from(await dl.arrayBuffer());
+      tmp = path.join(os.tmpdir(), `qodex-voice-${Date.now()}-${fileId.slice(-8)}.${filePath.split('.').pop() ?? 'oga'}`);
+      await fs.writeFile(tmp, buf);
+      const { transcribeAudio } = await import('../../audio/transcribe.js');
+      const text = await transcribeAudio(tmp);
+      if (!text) throw new Error('empty transcript');
+      // Confirm what was heard, then run the agent on it.
+      await this.api('sendMessage', { chat_id: chatId, text: `🎙️ “${text.slice(0, 300)}”` }).catch(() => {});
+      onMessage({ platform: 'telegram', chatId, userId: String(message.from?.id), userName: message.from?.username, text });
+    } catch (e: any) {
+      logger.warn('voice transcription failed', { err: e?.message });
+      await this.api('sendMessage', { chat_id: chatId, text: `🎙️ Couldn’t transcribe that (${e?.message ?? 'error'}). Set QODEX_TRANSCRIBE_CMD or OPENAI_API_KEY — or just type.` }).catch(() => {});
+    } finally {
+      if (tmp) { const { promises: fsp } = await import('fs'); await fsp.unlink(tmp).catch(() => {}); }
+    }
   }
 
   async edit(chatId: string, ref: MessageRef, text: string, buttons?: Button[][]): Promise<void> {
