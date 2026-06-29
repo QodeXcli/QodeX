@@ -48,6 +48,8 @@ export class RememberTool extends Tool<z.infer<typeof RememberArgs>> {
     const cwd = ctx.cwd ?? process.cwd();
     const scope = args.scope ?? 'project';
     getSessionStore().addFact(ctx.sessionId, cwd, args.fact, scope);
+    const { exportMemory } = await import('../../context/memory-mirror.js');
+    await exportMemory(cwd); // keep the human-readable MEMORY.md mirror in sync (best-effort)
     const where = scope === 'user' ? 'all projects (user memory)' : cwd;
     return { content: `Remembered for ${where}:\n  ${args.fact}` };
   }
@@ -114,11 +116,14 @@ export class ForgetTool extends Tool<z.infer<typeof ForgetArgs>> {
     const scopeWhere = scope === 'user' ? `scope = 'user'` : `cwd = ? AND scope = 'project'`;
     const scopeArgs = scope === 'user' ? [] : [cwd];
     const label = scope === 'user' ? 'user memory' : cwd;
+    const { exportMemory } = await import('../../context/memory-mirror.js');
     if (args.all) {
       const result = db.prepare(`DELETE FROM session_facts WHERE ${scopeWhere}`).run(...scopeArgs);
+      await exportMemory(cwd); // keep the MEMORY.md mirror in sync
       return { content: `Forgot ${result.changes} fact(s) from ${label}.` };
     }
     const result = db.prepare(`DELETE FROM session_facts WHERE ${scopeWhere} AND fact LIKE ?`).run(...scopeArgs, `%${args.fact_contains}%`);
+    await exportMemory(cwd); // keep the MEMORY.md mirror in sync
     return { content: `Forgot ${result.changes} fact(s) matching "${args.fact_contains}" from ${label}.` };
   }
 }

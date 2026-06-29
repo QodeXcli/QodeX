@@ -953,9 +953,11 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       const store = getSessionStore();
       const parts = (arg ?? '').trim().split(/\s+/);
       const verb = parts[0] ?? '';
+      const mirror = await import('../context/memory-mirror.js');
       if (verb === 'clear') {
         const db = (store as any).db;
         const result = db.prepare(`DELETE FROM session_facts WHERE cwd = ?`).run(cwd);
+        await mirror.exportMemory(cwd);
         return { handled: true, message: `Cleared ${result.changes} fact(s) for ${cwd}.` };
       }
       if (verb === 'forget') {
@@ -963,7 +965,17 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         if (!needle) return { handled: true, message: 'Usage: /memory forget <substring>' };
         const db = (store as any).db;
         const result = db.prepare(`DELETE FROM session_facts WHERE cwd = ? AND fact LIKE ?`).run(cwd, `%${needle}%`);
+        await mirror.exportMemory(cwd);
         return { handled: true, message: `Forgot ${result.changes} fact(s) matching "${needle}".` };
+      }
+      if (verb === 'export' || verb === 'edit') {
+        const paths = await mirror.exportMemory(cwd);
+        return { handled: true, message: `Wrote the human-readable memory mirror:\n  project: ${paths.project}\n  user:    ${paths.user}\nEdit either file, then run /memory import to save changes back.` };
+      }
+      if (verb === 'import') {
+        const r = await mirror.importMemory(cwd);
+        const n = r.user + r.project;
+        return { handled: true, message: n ? `Imported ${n} new fact(s) from markdown (${r.project} project, ${r.user} user).` : 'No new facts in the markdown files — DB already up to date.' };
       }
       // Default: list
       const facts = store.getFactsForCwd(cwd, 100);
@@ -979,8 +991,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         ...facts.map((f, i) => `  ${(i + 1).toString().padStart(2)}. ${f}`),
         '',
         'Commands:',
-        '  /memory clear            — wipe all',
+        '  /memory export           — write the human-readable MEMORY.md mirror',
+        '  /memory import           — pull hand-edited facts from the markdown back into the DB',
         '  /memory forget <sub>     — drop facts containing this substring',
+        '  /memory clear            — wipe all',
       ];
       return { handled: true, message: lines.join('\n') };
     }
