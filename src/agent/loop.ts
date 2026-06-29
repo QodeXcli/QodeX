@@ -754,7 +754,18 @@ export class AgentLoop {
               );
               await writeCandidate(candidate);
               await recordLearningEvent({ event: 'capture', name: candidate.name, confidence });
-              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+              // Code-graph grounding: how much of this skill references symbols that really exist here.
+              let fitSuffix = '';
+              try {
+                const { getCodeGraphDB } = await import('../codegraph/tools.js');
+                const db = getCodeGraphDB();
+                if (db) {
+                  const { extractSymbolHints, codebaseFitScore } = await import('../skills/learning/codebase-fit.js');
+                  const fit = codebaseFitScore(extractSymbolHints(candidate.skillMd), n => db.findSymbolsByName(n, undefined, 1).length > 0);
+                  if (!fit.noSignal) fitSuffix = ` · codebase-fit ${Math.round(fit.score * 100)}%`;
+                }
+              } catch { /* code graph optional */ }
+              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100${fitSuffix}) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
 
               // Auto-Evaluation (opt-in): immediately replay the captured skill in a clean
               // worktree and record whether it produces verified code. Costs a model call +
