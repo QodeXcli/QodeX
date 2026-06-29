@@ -221,6 +221,18 @@ It all lives under `~/.qodex/` — **nothing is uploaded**, the same privacy lin
 
 ## Install
 
+### One line (macOS · Linux · WSL)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+Checks for **git + Node 20+** (installs Node via your package manager if it's missing or too old), clones QodeX to `~/.qodex-src`, builds it, and puts `qodex` and `qx` on your PATH. **Idempotent** — re-run it to update. Knobs: `QODEX_SRC_DIR`, `QODEX_BRANCH`, `QODEX_NO_LINK=1`; preview without touching anything via `QODEX_DRY_RUN=1`.
+
+> Prefer to read before you pipe to `bash`? The script is [`install.sh`](install.sh) in this repo — or follow the manual steps below.
+
+### Manual
+
 **Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.
 
 ### macOS
