@@ -988,7 +988,8 @@ schedule
       const last = e.last_run_at
         ? `${new Date(e.last_run_at).toLocaleString()} (${e.last_status})`
         : 'never';
-      console.log(`${flag} ${e.id.slice(0, 8)}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}`);
+      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : ''].filter(Boolean).join('  ');
+      console.log(`${flag} ${e.id.slice(0, 8)}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}${tags ? `  ${tags}` : ''}`);
     }
   });
 
@@ -1001,9 +1002,19 @@ schedule
   .option('--cwd <dir>', 'Working directory for the run (default: current cwd)')
   .option('--model <id>', 'Model to use (default: configured default)')
   .option('--allow <tools>', 'Comma-separated tool allowlist (default: all)')
+  .option('--deliver <target>', 'Send the result to chat, e.g. "telegram:<chatId>" or "discord:<channelId>"')
+  .option('--recipe <kind>', 'Run a protocol instead of a bare prompt: "verified-pr" (sandbox branch → verify → open PR only if green)')
   .action(async (opts: any) => {
     const { getScheduleStore } = await import('./schedule/store.js');
+    const { isRecipe, RECIPES } = await import('./schedule/recipes.js');
+    const { parseDeliveryTarget } = await import('./schedule/delivery.js');
     try {
+      if (opts.recipe && !isRecipe(opts.recipe)) {
+        throw new Error(`Unknown recipe "${opts.recipe}". Available: ${RECIPES.join(', ')}.`);
+      }
+      if (opts.deliver && !parseDeliveryTarget(opts.deliver)) {
+        throw new Error(`Invalid --deliver "${opts.deliver}". Use "telegram:<chatId>" or "discord:<channelId>".`);
+      }
       const entry = getScheduleStore().add({
         name: opts.name,
         cron: opts.cron,
@@ -1011,8 +1022,12 @@ schedule
         cwd: opts.cwd ?? process.cwd(),
         model: opts.model,
         allowedTools: opts.allow ? opts.allow.split(',').map((s: string) => s.trim()).filter(Boolean) : undefined,
+        deliver: opts.deliver,
+        recipe: opts.recipe,
       });
       console.log(`✓ Scheduled "${entry.name}" (${entry.id.slice(0, 8)}).`);
+      if (entry.recipe) console.log(`  Recipe:   ${entry.recipe}`);
+      if (entry.deliver) console.log(`  Delivers: ${entry.deliver}`);
       if (entry.next_run_at) console.log(`  Next run: ${new Date(entry.next_run_at).toLocaleString()}`);
       console.log(`  Make sure the tick is installed: \`qodex schedule install\``);
     } catch (e: any) {

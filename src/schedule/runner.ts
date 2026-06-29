@@ -16,6 +16,8 @@ import { QODEX_HOME } from '../config/defaults.js';
 import { getScheduleStore, type ScheduleEntry } from './store.js';
 import { logger } from '../utils/logger.js';
 import { notifyDesktop } from '../utils/notify.js';
+import { buildRecipePrompt } from './recipes.js';
+import { parseDeliveryTarget, formatRunSummary, deliverRun } from './delivery.js';
 
 const LOCK_PATH = path.join(QODEX_HOME, 'scheduler.lock');
 const RUN_LOG_DIR = path.join(QODEX_HOME, 'schedule-logs');
@@ -97,8 +99,10 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
 
   // Build child args: qodex --print <prompt> --yes [--model ...]
   // We use --yes so permission prompts auto-approve; without it the headless run
-  // would deny everything and the schedule would be useless.
-  const args: string[] = ['--print', entry.prompt, '--yes'];
+  // would deny everything and the schedule would be useless. A recipe (e.g. verified-pr)
+  // wraps the goal in an unattended-safe protocol before it's fed to the agent.
+  const runPrompt = buildRecipePrompt(entry.recipe, entry.prompt);
+  const args: string[] = ['--print', runPrompt, '--yes'];
   if (entry.model) { args.push('--model', entry.model); }
 
   // Resolve the qodex CLI path. In production the user runs `npm link` so `qodex`
@@ -138,12 +142,21 @@ async function runOne(entry: ScheduleEntry): Promise<void> {
       // Let the user know a background task finished — they may have closed the
       // terminal. Fire-and-forget; a failed notification never affects the run.
       const secs = Math.round((Date.now() - startMs) / 1000);
-      void notifyDesktop({
+      const notify = notifyDesktop({
         title: status === 'success' ? `✓ QodeX: ${entry.name}` : `✗ QodeX: ${entry.name}`,
         subtitle: status === 'success' ? `Done in ${secs}s` : `Failed (exit ${exitCode}) after ${secs}s`,
         message: tail ? tail.slice(0, 180) : (status === 'success' ? 'Task completed.' : 'Task failed — check the log.'),
         sound: true,
-      }).finally(() => resolve());
+      });
+      // Deliver the result to chat (Telegram/Discord) when the schedule asked for it —
+      // this is what makes the scheduler "24/7 to your phone", not just a desktop ping.
+      const target = parseDeliveryTarget(entry.deliver);
+      const deliver = target
+        ? deliverRun(target, formatRunSummary({ name: entry.name, status, exitCode, durationSec: secs, tail, recipe: entry.recipe }))
+            .then(ok => { if (ok) logger.info('schedule result delivered', { id: entry.id, to: `${target.platform}:${target.chatId}` }); })
+            .catch(() => {})
+        : Promise.resolve();
+      void Promise.allSettled([notify, deliver]).finally(() => resolve());
     });
   });
 }
