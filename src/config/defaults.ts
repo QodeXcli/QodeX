@@ -489,6 +489,9 @@ export interface QodexConfig {
       topK?: number;
       /** Min lexical similarity (0–1) to inject — below this, nothing. Default 0.18. */
       minSimilarity?: number;
+      /** Diversity weight (0–1) for MMR selection — keeps the injected top-K distinct rather
+       *  than K near-duplicates of one recurring task. 0 = pure relevance. Default 0.3. */
+      diversity?: number;
     };
     /**
      * Failure-driven learning — record tool failures and, once a pattern RECURS across

@@ -588,6 +588,7 @@ export class AgentLoop {
         const block = await loadEpisodeBlock(this.cwd, String(userPrompt), {
           topK: emCfg.topK ?? 2,
           minScore: emCfg.minSimilarity ?? 0.18,
+          diversity: emCfg.diversity ?? 0.3,
         });
         if (block) { sysPrompt += `\n\n${block}`; logger.info('Episodic memory injected'); }
       } catch (e: any) {
@@ -736,6 +737,7 @@ export class AgentLoop {
                 summary: finalContent.slice(0, 300),
                 filesChanged: changedFiles,
                 toolsUsed: [...this.sessionToolNames],
+                toolCalls: this.totalToolCalls,
               });
             } catch (e: any) {
               logger.debug('Episode record skipped', { err: e?.message });
