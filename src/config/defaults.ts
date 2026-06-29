@@ -338,15 +338,15 @@ export interface QodexConfig {
     dependencyMap?: boolean;
     /** Stale large tool results are stubbed after they age. Set false to disable. */
     resultAging?: boolean;
-    /** Age tool results after this many assistant turns. Default 3 (2 when efficient). */
+    /** Age tool results after this many assistant turns. Default 3 (1 when efficient). */
     resultAgingMinTurns?: number;
-    /** Only age results larger than this many chars. Default 8000 (4000 when efficient). */
+    /** Only age results larger than this many chars. Default 6000 (2000 when efficient). */
     resultAgingMaxChars?: number;
-    /** Efficiency profile — opt-in aggressive token saving for long sessions on weak/
-     *  local models: ages results sooner (minTurns 2, maxChars 4000) and compacts
-     *  earlier (threshold 0.60). Default false. Explicit values above/in `compaction`
-     *  always override the profile. Trade-off: the model may occasionally re-read an
-     *  aged-out file. */
+    /** Efficiency profile — opt-in "sliding token window" for long sessions on weak/local
+     *  models (the volatile tier where prompt-caching doesn't apply): ages large results the
+     *  very next turn (minTurns 1, maxChars 2000) and compacts earlier (threshold 0.55).
+     *  Default false. Explicit values above/in `compaction` always override the profile.
+     *  Trade-off: the model may occasionally re-read an aged-out file. */
     efficient?: boolean;
   };
   /**
