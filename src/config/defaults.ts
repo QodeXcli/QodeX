@@ -220,6 +220,9 @@ export interface QodexConfig {
   bot?: {
     telegram?: { enabled?: boolean; allowedUsers?: string[] };
     discord?: { enabled?: boolean; allowedUsers?: string[] };
+    /** Slack via Socket Mode. Tokens (SLACK_APP_TOKEN + SLACK_BOT_TOKEN) live in ~/.qodex/.env;
+     *  needs `npm i @slack/socket-mode @slack/web-api`. allowedUsers holds Slack user ids. */
+    slack?: { enabled?: boolean; allowedUsers?: string[] };
   };
   mcp: {
     servers: Record<string, {
@@ -683,6 +686,7 @@ export const DEFAULT_CONFIG: QodexConfig = {
   bot: {
     telegram: { enabled: false, allowedUsers: [] },
     discord: { enabled: false, allowedUsers: [] },
+    slack: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

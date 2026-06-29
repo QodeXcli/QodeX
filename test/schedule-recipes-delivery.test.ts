@@ -36,7 +36,7 @@ describe('delivery — parse + format', () => {
   it('parses telegram/discord targets, rejects malformed', () => {
     expect(parseDeliveryTarget('telegram:12345')).toEqual({ platform: 'telegram', chatId: '12345' });
     expect(parseDeliveryTarget('  Discord : 99887766 ')).toEqual({ platform: 'discord', chatId: '99887766' });
-    expect(parseDeliveryTarget('slack:1')).toBeNull();
+    expect(parseDeliveryTarget('whatsapp:1')).toBeNull();  // unsupported platform
     expect(parseDeliveryTarget('telegram:')).toBeNull();
     expect(parseDeliveryTarget('')).toBeNull();
     expect(parseDeliveryTarget(undefined)).toBeNull();

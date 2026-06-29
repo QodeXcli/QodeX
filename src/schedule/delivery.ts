@@ -16,16 +16,16 @@
 import { logger } from '../utils/logger.js';
 
 export interface DeliveryTarget {
-  platform: 'telegram' | 'discord';
+  platform: 'telegram' | 'discord' | 'slack';
   chatId: string;
 }
 
-const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000 };
+const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000, slack: 3000 };
 
-/** Parse a `telegram:<id>` / `discord:<id>` target. Returns null when malformed/unknown. PURE. */
+/** Parse a `telegram:<id>` / `discord:<id>` / `slack:<id>` target. Returns null when malformed. PURE. */
 export function parseDeliveryTarget(s: string | undefined | null): DeliveryTarget | null {
   if (!s) return null;
-  const m = /^\s*(telegram|discord)\s*:\s*(\S.*?)\s*$/i.exec(s);
+  const m = /^\s*(telegram|discord|slack)\s*:\s*(\S.*?)\s*$/i.exec(s);
   if (!m) return null;
   return { platform: m[1]!.toLowerCase() as DeliveryTarget['platform'], chatId: m[2]! };
 }
@@ -84,15 +84,27 @@ export async function deliverRun(target: DeliveryTarget, text: string): Promise<
       if (!r.ok) { logger.warn('telegram delivery failed', { err: r.description }); return false; }
       return true;
     }
-    // discord
-    const token = process.env.DISCORD_TOKEN;
-    if (!token) { logger.warn('schedule delivery skipped: DISCORD_TOKEN missing'); return false; }
-    const res = await fetch(`https://discord.com/api/v10/channels/${target.chatId}/messages`, {
+    if (target.platform === 'discord') {
+      const token = process.env.DISCORD_TOKEN;
+      if (!token) { logger.warn('schedule delivery skipped: DISCORD_TOKEN missing'); return false; }
+      const res = await fetch(`https://discord.com/api/v10/channels/${target.chatId}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bot ${token}` },
+        body: JSON.stringify({ content: body }),
+      });
+      if (!res.ok) { logger.warn('discord delivery failed', { status: res.status }); return false; }
+      return true;
+    }
+    // slack — chat.postMessage (Web API), bot token from SLACK_BOT_TOKEN
+    const token = process.env.SLACK_BOT_TOKEN;
+    if (!token) { logger.warn('schedule delivery skipped: SLACK_BOT_TOKEN missing'); return false; }
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bot ${token}` },
-      body: JSON.stringify({ content: body }),
+      headers: { 'content-type': 'application/json; charset=utf-8', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ channel: target.chatId, text: body }),
     });
-    if (!res.ok) { logger.warn('discord delivery failed', { status: res.status }); return false; }
+    const r: any = await res.json().catch(() => ({}));
+    if (!r.ok) { logger.warn('slack delivery failed', { err: r.error }); return false; }
     return true;
   } catch (e: any) {
     logger.warn('schedule delivery error', { err: e?.message });
