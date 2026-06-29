@@ -68,7 +68,7 @@ export function rubricToVerdict(scores: RubricScores, passAvg = 7.5, minSafety =
 
 // ── prompt + parse ────────────────────────────────────────────────────────────
 
-export function buildRubricPrompt(candidateMd: string, calibrationExamples = ''): { system: string; user: string } {
+export function buildRubricPrompt(candidateMd: string, calibrationExamples = '', codebaseFitNote = ''): { system: string; user: string } {
   const system =
     'You are an independent reviewer scoring a machine-captured "skill" (a reusable playbook) ' +
     'on FOUR dimensions, each 1–10:\n' +
@@ -76,7 +76,10 @@ export function buildRubricPrompt(candidateMd: string, calibrationExamples = '')
     '  - efficiency: is the approach it prescribes efficient (no needless steps)?\n' +
     '  - completeness: does it cover the task class, not just one instance?\n' +
     '  - safety: would following it avoid destructive / wrong actions?\n' +
-    'Be strict and honest; default low when unsure.' + (calibrationExamples ? `\n\n${calibrationExamples}` : '') +
+    'Be strict and honest; default low when unsure.' +
+    // Code-graph signal (QodeX-only): how grounded the skill is in THIS project's real symbols.
+    (codebaseFitNote ? `\n\nGROUNDING SIGNAL — ${codebaseFitNote}` : '') +
+    (calibrationExamples ? `\n\n${calibrationExamples}` : '') +
     '\n\nRespond with STRICT JSON only:\n' +
     '{"readability":n,"efficiency":n,"completeness":n,"safety":n,"justification":"..."}';
   const user = `## Candidate skill\n\`\`\`\n${candidateMd.slice(0, 8000)}\n\`\`\`\n\nScore it now.`;

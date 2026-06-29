@@ -151,8 +151,20 @@ export async function curateCandidates(
   const driftRecords = await readDrift();
   const calibration = buildCalibrationBlock(driftRecords, 3);
 
+  // Code Graph in the judge (QodeX's differentiator): give the reviewer a grounding signal — how many
+  // of the candidate's referenced symbols actually exist in this project's code graph. Best-effort.
+  const fitNoteFor = async (md: string): Promise<string> => {
+    try {
+      const { getCodeGraphDB } = await import('../../codegraph/tools.js');
+      const db = getCodeGraphDB();
+      if (!db) return '';
+      const { extractSymbolHints, codebaseFitScore, fitNote } = await import('./codebase-fit.js');
+      return fitNote(codebaseFitScore(extractSymbolHints(md), n => db.findSymbolsByName(n, undefined, 1).length > 0));
+    } catch { return ''; }
+  };
+
   const scoreWith = async (route: NonNullable<typeof tier2Route>, md: string, calib: string): Promise<RubricScores | null> => {
-    const { system, user } = buildRubricPrompt(md, calib);
+    const { system, user } = buildRubricPrompt(md, calib, await fitNoteFor(md));
     const text = await drainText(route.provider.complete({ model: route.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0 } as any));
     return parseRubricScores(text);
   };
