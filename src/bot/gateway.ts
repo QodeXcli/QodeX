@@ -13,9 +13,10 @@
  * The agent itself is injected (`AgentRunner`) so the gateway is fully unit-testable with a
  * fake transport + fake agent — no LLM, no network.
  */
-import type { Transport, Incoming, AgentRunner, TurnSink } from './types.js';
+import type { Transport, Incoming, AgentRunner, TurnSink, ArtifactCard, Button } from './types.js';
 import { StreamPump } from './stream-pump.js';
 import { isAuthorized, type AllowConfig } from './auth.js';
+import { findCommand, menuDescriptors, type GatewayControls } from './commands.js';
 
 interface PendingAsk { resolve: (v: string) => void; options: string[] }
 
@@ -30,6 +31,7 @@ export class BotGateway {
   private busy = new Map<string, AbortController>();  // key → running turn
   private queue = new Map<string, string[]>();        // key → pending user texts
   private asks = new Map<string, PendingAsk>();       // key → awaiting permission answer
+  private pendingEdit = new Map<string, string>();    // key → artifactId awaiting an "/edit" instruction
   private now: () => number;
 
   constructor(private opts: GatewayOptions) {
@@ -37,7 +39,10 @@ export class BotGateway {
   }
 
   async start(): Promise<void> {
-    for (const t of this.opts.transports) await t.start(m => void this.onMessage(t, m));
+    for (const t of this.opts.transports) {
+      await t.start(m => void this.onMessage(t, m));
+      await t.setCommands?.(menuDescriptors()).catch(() => {}); // native `/` menu — best-effort
+    }
   }
   async stop(): Promise<void> {
     for (const ac of this.busy.values()) ac.abort();
@@ -45,6 +50,31 @@ export class BotGateway {
   }
 
   private key(t: Transport, m: Incoming): string { return `${t.platform}:${m.chatId}`; }
+
+  /** The small control surface a command may drive for this conversation. */
+  private controlsFor(t: Transport, chatId: string, key: string): GatewayControls {
+    return {
+      isBusy: () => this.busy.has(key),
+      queueDepth: () => this.queue.get(key)?.length ?? 0,
+      abort: () => { const ac = this.busy.get(key); if (!ac) return false; ac.abort(); return true; },
+      reset: async () => { this.busy.get(key)?.abort(); this.queue.delete(key); await this.opts.agent.reset?.(key); },
+      runTask: (txt) => this.runAndDrain(t, chatId, key, txt),
+    };
+  }
+
+  /** Run `text` as a turn, serialized per chat: if busy, queue it; else run + drain the queue. */
+  private async runAndDrain(t: Transport, chatId: string, key: string, text: string): Promise<void> {
+    if (this.busy.has(key)) {
+      const q = this.queue.get(key) ?? [];
+      q.push(text); this.queue.set(key, q);
+      await t.send(chatId, `⏳ Busy — queued (#${q.length}). \`/stop\` to cancel the current task.`);
+      return;
+    }
+    await this.runOne(t, chatId, key, text);
+    let next: string | undefined;
+    while ((next = this.queue.get(key)?.shift())) await this.runOne(t, chatId, key, next);
+    this.queue.delete(key);
+  }
 
   /** Single entry point for every inbound event from any adapter. */
   async onMessage(t: Transport, m: Incoming): Promise<void> {
@@ -56,7 +86,14 @@ export class BotGateway {
       return;
     }
 
-    // 2) A pending permission prompt swallows the next tap/reply (not a new turn).
+    // 2) Living-artifact card actions (Approve / Edit / Reject) — handled before permission asks.
+    if (m.callbackData?.startsWith('art:')) {
+      if (m.callbackId && t.ackCallback) await t.ackCallback(m.callbackId);
+      await this.handleCardAction(t, m.chatId, key, m.callbackData);
+      return;
+    }
+
+    // 3) A pending permission prompt swallows the next tap/reply (not a new turn).
     if (this.asks.has(key)) {
       const answer = m.callbackData ? this.stripAsk(m.callbackData) : m.text.trim();
       if (m.callbackId && t.ackCallback) await t.ackCallback(m.callbackId);
@@ -64,41 +101,30 @@ export class BotGateway {
     }
     if (m.callbackData) { if (m.callbackId && t.ackCallback) await t.ackCallback(m.callbackId); return; }
 
-    const text = m.text.trim();
+    let text = m.text.trim();
     if (!text) return;
 
-    // 3) Commands.
-    if (text === '/help' || text === '/start') {
-      await t.send(m.chatId, HELP);
-      return;
+    // 4) An "Edit" tap left this chat awaiting the change instruction → fold it into an update turn.
+    const editId = this.pendingEdit.get(key);
+    if (editId && !text.startsWith('/')) {
+      this.pendingEdit.delete(key);
+      text = `Update the "${editId}" artifact and keep it live: ${text}`;
     }
-    if (text === '/stop') {
-      const ac = this.busy.get(key);
-      if (ac) { ac.abort(); await t.send(m.chatId, '🛑 Stopped.'); }
-      else await t.send(m.chatId, 'Nothing is running.');
-      return;
-    }
-    if (text === '/new') {
-      this.busy.get(key)?.abort();
-      this.queue.delete(key);
-      await this.opts.agent.reset?.(key);
-      await t.send(m.chatId, '🆕 Started a fresh conversation.');
+
+    // 5) Commands — dispatched through the declarative registry (drives the native `/` menu + /help).
+    if (text.startsWith('/')) {
+      const hit = findCommand(text);
+      if (!hit) { await t.send(m.chatId, `Unknown command \`${text.split(/\s/)[0]}\`. Try /help.`); return; }
+      await hit.cmd.run({
+        args: hit.args, key, agent: this.opts.agent,
+        gateway: this.controlsFor(t, m.chatId, key),
+        reply: async (s, b) => { await t.send(m.chatId, s, b); },
+      });
       return;
     }
 
-    // 4) One turn at a time per chat; otherwise queue.
-    if (this.busy.has(key)) {
-      const q = this.queue.get(key) ?? [];
-      q.push(text); this.queue.set(key, q);
-      await t.send(m.chatId, `⏳ Busy — queued (#${q.length}). \`/stop\` to cancel the current task.`);
-      return;
-    }
-
-    await this.runOne(t, m.chatId, key, text);
-    // Drain anything queued while we were busy.
-    let next: string | undefined;
-    while ((next = this.queue.get(key)?.shift())) await this.runOne(t, m.chatId, key, next);
-    this.queue.delete(key);
+    // 6) Run it as a turn (serialized per chat; queued if one is already running).
+    await this.runAndDrain(t, m.chatId, key, text);
   }
 
   private async runOne(t: Transport, chatId: string, key: string, text: string): Promise<void> {
@@ -114,10 +140,12 @@ export class BotGateway {
     const drainTimer = setInterval(() => void pump.drain(), t.minEditIntervalMs);
     if (typeof (drainTimer as any).unref === 'function') (drainTimer as any).unref();
 
+    let turnCard: ArtifactCard | undefined;
     const sink: TurnSink = {
       onDelta: s => pump.push(s),
       onStatus: () => {},                          // tool/status lines stay quiet to avoid noise
       ask: (prompt, options) => this.askUser(t, chatId, key, prompt, options),
+      artifact: card => { turnCard = card; },      // held until the stream finishes, then rendered below
     };
 
     try {
@@ -136,6 +164,36 @@ export class BotGateway {
     await pump.finish().catch(() => {});
     this.busy.delete(key);
     this.asks.delete(key);
+    if (turnCard) await this.presentCard(t, chatId, turnCard).catch(() => {});
+  }
+
+  /** Render a finished living-artifact: the screenshot (if any) + verdict + the live link, with
+   *  Approve / Edit / Reject buttons. Falls back to text when the adapter can't send a photo. */
+  private async presentCard(t: Transport, chatId: string, card: ArtifactCard): Promise<void> {
+    const mark = { looks_good: '✅ Looks good', needs_work: '🛠 Needs work', broken: '❌ Broken', unverified: '👁 Unverified' };
+    const lines = [`*${card.title ?? card.artifactId}*${card.type ? ` _(${card.type})_` : ''}`];
+    if (card.verdict) lines.push(`Vision review: ${mark[card.verdict]}`);
+    if (card.verdict !== 'looks_good' && card.issues?.length) lines.push('• ' + card.issues.slice(0, 4).join('\n• '));
+    if (card.liveUrl) lines.push(`🔗 Live (hot-reload): ${card.liveUrl}`);
+    const caption = lines.join('\n');
+    const buttons: Button[][] = [[
+      { label: '✅ Approve', data: `art:approve:${card.artifactId}` },
+      { label: '✏️ Edit', data: `art:edit:${card.artifactId}` },
+      { label: '🗑 Reject', data: `art:reject:${card.artifactId}` },
+    ]];
+    if (card.screenshotPath && t.sendPhoto) {
+      try { await t.sendPhoto(chatId, card.screenshotPath, caption, buttons); return; }
+      catch { /* fall through to text */ }
+    }
+    await t.send(chatId, caption, buttons);
+  }
+
+  /** Resolve an Approve/Edit/Reject tap on a presented artifact card. */
+  private async handleCardAction(t: Transport, chatId: string, key: string, data: string): Promise<void> {
+    const [, action, id = ''] = data.split(':');
+    if (action === 'approve') { await t.send(chatId, `✅ Approved “${id}” — keeping it live.`); return; }
+    if (action === 'reject') { this.pendingEdit.delete(key); await t.send(chatId, `🗑 Rejected “${id}”. Send a new task whenever you like.`); return; }
+    if (action === 'edit') { this.pendingEdit.set(key, id); await t.send(chatId, `✏️ What should I change about “${id}”? Send the tweak and I’ll update it live.`); return; }
   }
 
   private askUser(t: Transport, chatId: string, key: string, prompt: string, options: string[]): Promise<string> {
@@ -157,14 +215,3 @@ export class BotGateway {
     ask.resolve(match);
   }
 }
-
-const HELP = [
-  '🤖 *QodeX bot*',
-  'Just send a coding task and I’ll work in the project, streaming as I go.',
-  '',
-  '`/new`  — start a fresh conversation (new session)',
-  '`/stop` — abort the current task',
-  '`/help` — this message',
-  '',
-  'When I need approval to run something, I’ll show buttons — tap one (or reply yes/no).',
-].join('\n');

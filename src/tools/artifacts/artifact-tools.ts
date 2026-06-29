@@ -288,7 +288,9 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
 
     return {
       content: out + extra,
-      metadata: { artifactId: manifest.id, version, verdict: report.verdict, issueCount: report.issues.length, sawScreenshot },
+      // `issues` + `screenshotPath` are echoed so a front-end (the bot card) can render the verdict,
+      // the concrete problems, and the rendered screenshot from this single tool result.
+      metadata: { artifactId: manifest.id, version, verdict: report.verdict, issues: report.issues, issueCount: report.issues.length, sawScreenshot, screenshotPath: args.screenshot_path, title: manifest.title, type: manifest.type },
     };
   }
 }

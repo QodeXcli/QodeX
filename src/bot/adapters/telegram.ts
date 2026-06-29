@@ -78,4 +78,25 @@ export class TelegramTransport implements Transport {
 
   async ackCallback(id: string): Promise<void> { await this.api('answerCallbackQuery', { callback_query_id: id }); }
   async typing(chatId: string): Promise<void> { await this.api('sendChatAction', { chat_id: chatId, action: 'typing' }); }
+
+  /** Register the native `/` command menu (Telegram clients show it as a tappable picker + autocomplete). */
+  async setCommands(commands: { command: string; description: string }[]): Promise<void> {
+    const r = await this.api('setMyCommands', { commands });
+    if (!r.ok) logger.warn('telegram setMyCommands failed', { err: r.description });
+  }
+
+  /** Upload a local image (a preview screenshot) with an optional caption + buttons (multipart). */
+  async sendPhoto(chatId: string, photoPath: string, caption?: string, buttons?: Button[][]): Promise<MessageRef> {
+    const { readFile } = await import('fs/promises');
+    const bytes = await readFile(photoPath);                          // throws → caller falls back to text
+    const form = new FormData();
+    form.append('chat_id', chatId);
+    if (caption) form.append('caption', caption);
+    if (buttons) form.append('reply_markup', JSON.stringify(this.keyboard(buttons).reply_markup));
+    form.append('photo', new Blob([new Uint8Array(bytes)], { type: 'image/png' }), 'preview.png');
+    const res = await fetch(`https://api.telegram.org/bot${this.token}/sendPhoto`, { method: 'POST', body: form });
+    const r: any = await res.json();
+    if (!r.ok) { logger.warn('telegram sendPhoto failed', { err: r.description }); throw new Error(r.description ?? 'sendPhoto failed'); }
+    return { id: String(r.result?.message_id ?? '') };
+  }
 }

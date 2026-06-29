@@ -15,6 +15,7 @@
 - **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
 - **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model can't ship broken or unverified code.
 - **Self-learning skills (safe by design)** — QodeX captures the winning approach from an *objectively-successful* task as a quarantined skill; only an **independent judge model** can promote it, and it **never overwrites a human-written skill**.
+- **Remembers across sessions** — a layered memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions), all **local under `~/.qodex/`**, so the agent builds real context about *you* and *this* codebase instead of starting every session cold.
 - **Live, shareable artifacts** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel.
 - **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
 - **100+ built-in tools** — Tree-sitter code-graph, real Playwright browser automation, dev-servers, web search, vision, Docker / DB / WordPress, and any MCP server.
@@ -162,6 +163,32 @@ Skill "git-commit-expert"  ·  strategy: ucb1  ·  routed this turn → v2
 $ qodex skill rollback git-commit-expert v1     # snap the champion back to v1 anytime
 ```
 
+## Memory & continuity
+
+Most CLI agents are amnesiac — every session starts from a blank slate and you re-explain the same things. QodeX **remembers**, across five layers that each answer a different question, so a model on *your* machine accumulates real context about you and your codebase over time:
+
+| Layer | Answers | Where it lives | Author |
+|---|---|---|---|
+| **Curated rules** | "What are the rules here?" | `QODEX.md` in the repo + `~/.qodex/QODEX.md` (global) | **you** — version-controlled, authoritative |
+| **Learned facts** | "What did I learn about this codebase / this user?" | `session_facts` in `~/.qodex/sessions.db`, scoped `project` (per-cwd) or `user` (global) | the **agent**, mid-task |
+| **Project worklog** | "What's been done here lately?" | `project_worklog` (per-cwd) | the agent + `/project log` |
+| **Episodic memory** | "How did I solve a task like this before?" | `~/.qodex/episodes/*.jsonl` | the agent, after a *verified* success |
+| **Sessions** | "Pick up exactly where we left off." | `sessions` + `messages` in `sessions.db` | every turn — `/resume <id>` |
+
+The split is **deliberate**: *your* curated rules (`QODEX.md`, git-tracked) stay separate from the *agent's* auto-learned scratchpad (the DB) — no machine write ever touches your authoritative file, and there are no merge conflicts. Facts are **scoped** — a `project` fact (a build command, a gotcha) is auto-injected only when you start in that directory; a `user` fact (*"prefers Persian comments"*, *"always run tests before saying done"*) follows you into **every** project. Recall is smart, not heavy: episodic memory injects only the single most-similar past task above a threshold (an unrelated task recalls nothing) — a one-line reminder, never a full transcript.
+
+```text
+> the build here is `npm run build:prod`, not `npm run build`
+🧠 remembered (project)              # silently re-injected next time you start in this dir
+
+/memory                              # show what's stored for this project
+/memory forget <substring>          # drop matching facts
+/project        ·  /project log <e>  # this project's worklog (view · append)
+/sessions       ·  /resume <id>      # list past sessions · rehydrate one
+```
+
+It all lives under `~/.qodex/` — **nothing is uploaded**, the same privacy line as your code.
+
 ## Install
 
 **Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.
@@ -285,6 +312,7 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 | **Browser** | navigate, click, fill, screenshot, console, evaluate, get_text, wait_for |
 | **Dev server / jobs** | dev_server_start/stop/log, background_job_start/status/wait/cancel |
 | **Skills** | use_skill, search_skills, install_skill (security-scanned) |
+| **Memory** | remember, recall, forget (project/user-scoped, local) |
 | **Sub-agents** | task, orchestrate, gather, present_plan, todo_read/write, auto_fix |
 | **Vision** | vision_analyze |
 | **Domain** | Docker, database, WordPress, media (ffmpeg), frontend/print, OpenAPI |
@@ -304,6 +332,8 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /cost  /tokens     Token / cost usage
 /index [--force]   Build/refresh the code graph
 /mcp               List connected MCP servers
+/memory            Show / forget what the agent has learned here (project + user facts)
+/project [log <e>] This project's worklog — view, or append an entry
 /sessions  /resume <id>  /clear  /exit
 ```
 
@@ -334,7 +364,23 @@ echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
 qodex bot                 # all enabled platforms · --telegram / --discord to pick one
 ```
 
-One transport-agnostic gateway does all the work; the platform adapters are thin. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately). `/new` starts a fresh session, `/stop` aborts the running turn.
+One transport-agnostic gateway does all the work; the platform adapters are thin. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately).
+
+**Full agent control from your phone.** Commands live in one declarative registry, so every command is also pushed to the client as a **native `/` menu** (tap-to-pick, with descriptions) — no memorizing:
+
+| Command | What it does |
+|---|---|
+| `/help` | every command, generated from the registry |
+| `/new` | fresh conversation (new session) |
+| `/stop` | abort the running task |
+| `/status` | running/queued · model · project · session · auto state |
+| `/auto on \| off` | auto-approve actions (skip the buttons) — handy on mobile, off by default |
+| `/model [id]` | show or switch the model for this conversation |
+| `/sessions` · `/resume <id>` | list past sessions and continue one (same store as the CLI) |
+| `/episodes` | past tasks solved here, from episodic memory |
+| `/impact <symbol>` · `/rename <old> <new>` | code-graph shortcuts — blast-radius of a symbol · AST-safe rename (with approval) |
+
+Adding a command is **one entry** — both Telegram and Discord gain the command, its menu item, and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash.
 
 ## Architecture notes
 
@@ -342,6 +388,7 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 - **Capability-tiered system prompt** — frontier models get a compressed prompt; weak/local models keep the full guidance they depend on (cache-safe per session).
 - **Per-tool permissions** — read-only tools auto-approved; mutating tools ask once; "allow once / session / pattern / always" picker.
 - **Code-graph index** — Tree-sitter-backed, persists to `.qodex/codegraph.db`, incremental.
+- **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`. All local, all under `~/.qodex/`.
 - **Multi-provider router** — Ollama, LM Studio, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter all first-class.
 - **ESM strict** throughout; **hooks** (pre/post-tool) for guardrails or instrumentation.
 
