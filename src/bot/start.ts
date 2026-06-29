@@ -23,7 +23,7 @@ export interface StartBotsDeps {
   permissions: PermissionEngine;
   cwd?: string;
 }
-export interface StartBotsOptions { telegram?: boolean; discord?: boolean }
+export interface StartBotsOptions { telegram?: boolean; discord?: boolean; slack?: boolean }
 
 export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<void> {
   const cwd = deps.cwd ?? process.cwd();
@@ -31,9 +31,10 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
   const allow: AllowConfig = {
     telegram: { allowedUsers: botCfg.telegram?.allowedUsers ?? [] },
     discord: { allowedUsers: botCfg.discord?.allowedUsers ?? [] },
+    slack: { allowedUsers: botCfg.slack?.allowedUsers ?? [] },
   };
   // No platform flag ⇒ start every platform that's enabled in config.
-  const want = (p: 'telegram' | 'discord') => (!opts.telegram && !opts.discord) || !!opts[p];
+  const want = (p: 'telegram' | 'discord' | 'slack') => (!opts.telegram && !opts.discord && !opts.slack) || !!opts[p];
 
   const transports: Transport[] = [];
   const notes: string[] = [];
@@ -57,9 +58,22 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
     }
   }
 
+  if (want('slack') && (botCfg.slack?.enabled ?? false)) {
+    const appToken = process.env.SLACK_APP_TOKEN;
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    if (!appToken || !botToken) notes.push('slack is enabled but SLACK_APP_TOKEN / SLACK_BOT_TOKEN is missing — add both to ~/.qodex/.env');
+    else if (!allow.slack!.allowedUsers!.length) notes.push('slack allowlist is empty — set bot.slack.allowedUsers');
+    else {
+      try {
+        const { createSlackTransport } = await import('./adapters/slack.js');
+        transports.push(await createSlackTransport(appToken, botToken));
+      } catch (e: any) { notes.push(e?.message ?? 'slack transport failed'); }
+    }
+  }
+
   for (const n of notes) console.error('⚠️  ' + n);
   if (!transports.length) {
-    console.error('No bot transports started. Enable bot.telegram/discord in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
+    console.error('No bot transports started. Enable bot.telegram/discord/slack in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
     return;
   }
 

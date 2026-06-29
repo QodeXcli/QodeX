@@ -15,7 +15,7 @@
 - **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
 - **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.
 - **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills, an **independent judge model** promotes them, **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. Your agent next week is measurably better than today's — and it never overwrites a skill you wrote.
-- **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
+- **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord / Slack service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
 - **Remembers across sessions** — a layered, **local** memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions) with a **human-readable Markdown mirror** you can edit and git-commit, and a **budget-aware Light Memory Mode** for small context windows. The agent builds real context about *you* and *this* codebase instead of starting every session cold.
 - **Live, shareable artifacts + a project dashboard** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel. `qodex dashboard` renders a live snapshot of providers, sessions, token/cost, memory, and skills.
 - **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
@@ -29,7 +29,7 @@
 
 An "autonomous 24/7 agent" is easy to *say* and hard to *mean* — most of the time it's a chatbot wrapped in a cron job. QodeX's always-on story is three systems that actually exist, that you can read in this repo, and that each have tests:
 
-- **Reachable any time** — the **transport-agnostic bot gateway** runs as a persistent service, so the agent is one message away from your phone. One turn per chat at a time (no interleaving), permission prompts as inline buttons, **deny-by-default auth**. ([Telegram / Discord](#telegram--discord-bot))
+- **Reachable any time** — the **transport-agnostic bot gateway** runs as a persistent service, so the agent is one message away from your phone. One turn per chat at a time (no interleaving), permission prompts as inline buttons, **deny-by-default auth**. ([Telegram / Discord / Slack](#telegram--discord--slack-bot))
 - **Improves between sessions, on its own** — capture → **independent-judge** promotion → **UCB1** version A/B → **episodic recall** → **failure-lesson** injection. The loop is gated on *objective* success signals, not the model's self-grade, and a new **code-graph "fit" signal** grounds the judge in *your* codebase. ([Self-learning skills](#self-learning-skills))
 - **Runs while you sleep — verifiably** — a built-in **cron scheduler** (launchd / crontab) runs tasks unattended and delivers the result to your phone. The headline recipe, **Autonomous Verified PR**, works on a sandbox branch, **verifies**, and opens a PR *only if it passed* — per-task **budget caps**, a **circuit breaker**, the **git sandbox**, and the guardrail gates all run too, so a 3am run **can't quietly ship broken code or melt your token budget**. ([Scheduled & autonomous](#scheduled--autonomous--the-real-247))
 
@@ -389,24 +389,28 @@ Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 QodeX will: read `Header.tsx` → add the button (shown as an approvable diff) → `dev_server_start npm run dev` → `browser_navigate` localhost → click the button → check the console for errors → screenshot → `vision_analyze` to confirm it looks right → run the type-checker on the touched file → stop the server and report. One agent loop, with the guardrails above running throughout.
 
-## Telegram / Discord bot
+## Telegram / Discord / Slack bot
 
 Drive the same agent from chat — stream tasks to QodeX from your phone:
 
 ```bash
 # 1. put the token(s) in ~/.qodex/.env (secrets never go in config)
 echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
+#   Slack uses Socket Mode (no public URL needed) and TWO tokens:
+#   echo 'SLACK_APP_TOKEN=xapp-...' >> ~/.qodex/.env
+#   echo 'SLACK_BOT_TOKEN=xoxb-...' >> ~/.qodex/.env
 
 # 2. enable the platform + allowlist your user id (deny-by-default) in config
 #    bot:
 #      telegram: { enabled: true, allowedUsers: ["<your-telegram-id>"] }
 #      discord:  { enabled: true, allowedUsers: ["<your-discord-id>"] }   # needs: npm i discord.js
+#      slack:    { enabled: true, allowedUsers: ["<your-slack-user-id>"] } # needs: npm i @slack/socket-mode @slack/web-api
 
 # 3. run it from the project directory you want it to work in
-qodex bot                 # all enabled platforms · --telegram / --discord to pick one
+qodex bot                 # all enabled platforms · --telegram / --discord / --slack to pick one
 ```
 
-One transport-agnostic gateway does all the work; the platform adapters are thin. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately).
+One transport-agnostic gateway does all the work; the platform adapters are thin — **Telegram** needs zero installs, **Discord** and **Slack** are optional lazy-loaded deps. Adding a platform is one adapter implementing the same `Transport` seam, so behaviour never drifts between them. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately).
 
 **Full agent control from your phone.** Commands live in one declarative registry, so every command is also pushed to the client as a **native `/` menu** (tap-to-pick, with descriptions) — no memorizing:
 
@@ -422,7 +426,7 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 | `/episodes` | past tasks solved here, from episodic memory |
 | `/impact <symbol>` · `/rename <old> <new>` | code-graph shortcuts — blast-radius of a symbol · AST-safe rename (with approval) |
 
-Adding a command is **one entry** — both Telegram and Discord gain the command, its menu item, and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash.
+Adding a command is **one entry** — Telegram, Discord, and Slack all gain the command, its menu item, and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash.
 
 **Living Artifacts in chat — with an AI vision review.** Ask for a dashboard, a landing page, or a chart from your phone and QodeX doesn't dump code at you — it builds a **versioned artifact**, renders it, and (for web types) runs a **vision self-review** that actually *looks* at the result and verdicts it **LOOKS_GOOD / NEEDS_WORK / BROKEN**, listing concrete issues. You get back a compact **card**:
 
@@ -451,7 +455,7 @@ qodex schedule add --name nightly-deps \
 qodex schedule list      ·  runs <id>  ·  enable/disable <id>  ·  rm <id>
 ```
 
-**Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
+**Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>` / `slack:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
 
 **Autonomous *Verified* PR — the differentiator.** `--recipe verified-pr` doesn't just run a prompt; it wraps your goal in an unattended-safe **protocol**:
 
@@ -476,7 +480,7 @@ That's the honest version of an always-on agent: it works while you sleep, but t
 - **Per-tool permissions** — read-only tools auto-approved; mutating tools ask once; "allow once / session / pattern / always" picker.
 - **Code-graph index** — Tree-sitter-backed, persists to `.qodex/codegraph.db`, incremental.
 - **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`; a human-readable **Markdown mirror** (`/memory export|import`) and a budget-aware **Light Memory Mode** over the same store. All local, all under `~/.qodex/`.
-- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review.
+- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord / Slack adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review.
 - **Multi-provider router** — Ollama, LM Studio, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter all first-class.
 - **ESM strict** throughout; **hooks** (pre/post-tool) for guardrails or instrumentation.
 
