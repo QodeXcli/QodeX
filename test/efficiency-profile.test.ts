@@ -10,20 +10,20 @@ function check(name: string, cond: boolean) {
   else { failed++; console.log(`  ✗ ${name}`); }
 }
 
-console.log('— balanced (default, OFF) keeps existing behavior —');
+console.log('— balanced (default, OFF) stays cache-coherent —');
 {
   const b = efficiencyDefaults(false);
   check('minTurns 3', b.agingMinTurns === 3);
-  check('maxChars 8000', b.agingMaxChars === 8000);
+  check('maxChars 6000', b.agingMaxChars === 6000);
   check('compact threshold 0.75', b.compactThreshold === 0.75);
 }
 
-console.log('— aggressive (efficient ON) tightens all three —');
+console.log('— aggressive (efficient ON) = sliding token window —');
 {
   const a = efficiencyDefaults(true);
-  check('minTurns 2 (sooner)', a.agingMinTurns === 2);
-  check('maxChars 4000 (more aged)', a.agingMaxChars === 4000);
-  check('compact threshold 0.60 (earlier)', a.compactThreshold === 0.60);
+  check('minTurns 1 (next turn)', a.agingMinTurns === 1);
+  check('maxChars 2000 (more aged)', a.agingMaxChars === 2000);
+  check('compact threshold 0.55 (earlier)', a.compactThreshold === 0.55);
   const b = efficiencyDefaults(false);
   check('aggressive is strictly tighter than balanced', a.agingMinTurns < b.agingMinTurns && a.agingMaxChars < b.agingMaxChars && a.compactThreshold < b.compactThreshold);
 }
@@ -41,7 +41,7 @@ console.log('— resolveSetting: explicit user value always wins —');
 console.log('— returned objects are copies (no shared mutation) —');
 {
   const a = efficiencyDefaults(true); a.agingMaxChars = 1;
-  check('mutating result does not poison the next call', efficiencyDefaults(true).agingMaxChars === 4000);
+  check('mutating result does not poison the next call', efficiencyDefaults(true).agingMaxChars === 2000);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
