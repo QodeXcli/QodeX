@@ -4,7 +4,7 @@
 
 > If you're looking for an **LLM agent**, a **CLI agent**, an **AI coding agent**, or an **autonomous terminal agent** that doesn't ship your code to someone else's cloud — that's QodeX.
 
-**Version 2.4.0** · 100+ built-in tools · English & Persian · Apache-2.0
+**Version 2.5.0** · 100+ built-in tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
 
@@ -13,14 +13,27 @@
 ## Highlights
 
 - **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
-- **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model can't ship broken or unverified code.
-- **Self-learning skills (safe by design)** — QodeX captures the winning approach from an *objectively-successful* task as a quarantined skill; only an **independent judge model** can promote it, and it **never overwrites a human-written skill**.
-- **Remembers across sessions** — a layered memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions), all **local under `~/.qodex/`**, so the agent builds real context about *you* and *this* codebase instead of starting every session cold.
-- **Live, shareable artifacts** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel.
+- **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.
+- **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills, an **independent judge model** promotes them, **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. Your agent next week is measurably better than today's — and it never overwrites a skill you wrote.
+- **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
+- **Remembers across sessions** — a layered, **local** memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions) with a **human-readable Markdown mirror** you can edit and git-commit, and a **budget-aware Light Memory Mode** for small context windows. The agent builds real context about *you* and *this* codebase instead of starting every session cold.
+- **Live, shareable artifacts + a project dashboard** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel. `qodex dashboard` renders a live snapshot of providers, sessions, token/cost, memory, and skills.
 - **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
 - **100+ built-in tools** — Tree-sitter code-graph, real Playwright browser automation, dev-servers, web search, vision, Docker / DB / WordPress, and any MCP server.
 - **Persian-first** — prompts, skill matching, *and* generated artifact copy follow your chat language, not a fixed default.
 - **Token-efficient** — sub-agent delegation, result-aging, compaction, and tool-gating keep the working context small on long sessions.
+
+---
+
+## Always-on, and it compounds
+
+An "autonomous 24/7 agent" is easy to *say* and hard to *mean* — most of the time it's a chatbot wrapped in a cron job. QodeX's always-on story is three systems that actually exist, that you can read in this repo, and that each have tests:
+
+- **Reachable any time** — the **transport-agnostic bot gateway** runs as a persistent service, so the agent is one message away from your phone. One turn per chat at a time (no interleaving), permission prompts as inline buttons, **deny-by-default auth**. ([Telegram / Discord](#telegram--discord-bot))
+- **Improves between sessions, on its own** — capture → **independent-judge** promotion → **UCB1** version A/B → **episodic recall** → **failure-lesson** injection. The loop is gated on *objective* success signals, not the model's self-grade, and a new **code-graph "fit" signal** grounds the judge in *your* codebase. ([Self-learning skills](#self-learning-skills))
+- **Safe to leave running** — per-task **budget caps** (tokens / cost / wall-clock / iterations), a **consecutive-failure circuit breaker**, a **git-backed sandbox** with checkpoints, and the guardrail gates mean a long, unattended run **can't quietly ship broken code or melt your token budget**.
+
+We're not going to claim a model thinks for you around the clock. We built the parts that make *unattended, repeated, real* work trustworthy — and we'd rather show the code than the slogan.
 
 ---
 
@@ -73,6 +86,8 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Skills** — install from a curated registry or any GitHub repo (single / multi / catalog), security-scanned on the way in; `search_skills` to find them.
 - **Sub-agents & orchestration** — `task` delegates to a separate model/window; `orchestrate` runs a DAG of sub-agents; `gather` fans out reads in parallel.
 - **MCP** — connect any MCP-compatible server; its tools join the same registry as built-ins.
+- **Live project dashboard** — `qodex dashboard` (alias `dash`) renders a single self-contained HTML page — providers & models, recent sessions, token/cost usage, learned memory, and skills — and opens it in your browser. A glanceable health view of *your* QodeX, generated locally.
+- **Add a provider by just asking** — tell QodeX *"add Groq with my key"* and the `add_provider` tool wires the gateway into `~/.qodex/config.yaml` (key stays in `~/.qodex/.env`, never the config); or run `qodex provider add` for a guided setup. Unknown providers are refused unless you give a base URL + key-env, so nothing is silently misconfigured.
 - **Domain tools** — Docker, databases, WordPress (`php -l` linting), media (ffmpeg), frontend/print, OpenAPI digest, and more.
 
 ## Self-learning skills
@@ -83,10 +98,10 @@ QodeX can **learn reusable playbooks from your successful tasks** — without th
 
 1. **Capture** — when a task finishes in the git sandbox and *objectively* succeeds (it compiled / type-checked, the completion-claim gate passed, and it took at least a few tool calls and changed a file), QodeX distills the winning approach into a `SKILL.md` and assigns it a **confidence score (0–100)** from those objective signals.
 2. **Quarantine** — the new skill is written to `~/.qodex/skills-candidates/` (a dir QodeX never auto-loads), stamped `provenance: machine`, `status: candidate`. It can't affect the model until promoted.
-3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
+3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). The judge is **grounded in your codebase**: a Tree-sitter **code-graph "fit" signal** checks how many of the symbols a candidate references actually exist here, so a skill that name-drops APIs your project doesn't have scores lower (and the capture notice shows it: *"confidence 82/100 · codebase-fit 90%"*). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
 4. **Auto-evaluation** — `qodex skill eval <name>` (or `learning.autoEval` to run it right after capture) **replays the skill's original task in a throwaway git worktree** and runs the **real** verifier (`tsc`/`ruff`/…) on the code it produces, recording **pass / fail / inconclusive** into the skill. It tests whether the skill actually *works*, not just whether a judge likes it. Content-hash cached.
 5. **Learning from failures** — with `learning.failureLessons.enabled`, QodeX records tool failures and, once a mistake **recurs across tasks**, injects a deterministic "learned caution" into the prompt (e.g. *"verify a symbol exists before `edit_symbol`"*) so it stops repeating it. One-offs never teach; see `qodex skill lessons`.
-6. **Episodic memory** — with `learning.episodicMemory.enabled`, QodeX records a lean episode after each successful task and, at the start of a new one, recalls the **most similar past task on this project** and injects a one-line reminder of what worked — so it reuses its own approach instead of rediscovering it. Smart retrieval: only the top match above a similarity threshold (an unrelated task recalls nothing).
+6. **Episodic memory** — with `learning.episodicMemory.enabled`, QodeX records a lean episode after each successful task and, at the start of a new one, recalls **similar past tasks on this project** and injects a one-line reminder of what worked — so it reuses its own approach instead of rediscovering it. Retrieval is **smart, not noisy**: an unrelated task recalls nothing, and the top-K are selected for **relevance *and* diversity** (MMR — so a recurring task doesn't inject K copies of itself), **grounded** against the current tree (episodes pointing at files that no longer exist are demoted, like the skill-judge's codebase-fit), with a **recency tie-break** toward your more recent solution.
 
 QodeX also **auto-matches your code style** (indentation, quotes, semicolons, naming — inferred from the project + `.editorconfig`) so generated code blends in without you having to spell it out. Off via `context.styleProfile: false`.
 
@@ -101,7 +116,9 @@ learning:
   failureLessons:
     enabled: true                   # learn from RECURRING tool failures
   episodicMemory:
-    enabled: true                   # recall the most similar past task and reuse what worked
+    enabled: true                   # recall similar past tasks and reuse what worked
+    topK: 2                         # how many past episodes to inject
+    diversity: 0.3                  # 0–1: keep the top-K distinct, not K clones of one task
 ```
 
 **A worked example.** With `learning.enabled` + an independent `judgeModel`, a typical loop:
@@ -175,16 +192,29 @@ Most CLI agents are amnesiac — every session starts from a blank slate and you
 | **Episodic memory** | "How did I solve a task like this before?" | `~/.qodex/episodes/*.jsonl` | the agent, after a *verified* success |
 | **Sessions** | "Pick up exactly where we left off." | `sessions` + `messages` in `sessions.db` | every turn — `/resume <id>` |
 
-The split is **deliberate**: *your* curated rules (`QODEX.md`, git-tracked) stay separate from the *agent's* auto-learned scratchpad (the DB) — no machine write ever touches your authoritative file, and there are no merge conflicts. Facts are **scoped** — a `project` fact (a build command, a gotcha) is auto-injected only when you start in that directory; a `user` fact (*"prefers Persian comments"*, *"always run tests before saying done"*) follows you into **every** project. Recall is smart, not heavy: episodic memory injects only the single most-similar past task above a threshold (an unrelated task recalls nothing) — a one-line reminder, never a full transcript.
+The split is **deliberate**: *your* curated rules (`QODEX.md`, git-tracked) stay separate from the *agent's* auto-learned scratchpad (the DB) — no machine write ever touches your authoritative file, and there are no merge conflicts. Facts are **scoped** — a `project` fact (a build command, a gotcha) is auto-injected only when you start in that directory; a `user` fact (*"prefers Persian comments"*, *"always run tests before saying done"*) follows you into **every** project. Recall is smart, not heavy: episodic memory injects only relevant, **de-duplicated** past tasks above a threshold (an unrelated task recalls nothing) — a one-line reminder, never a full transcript.
+
+**A Markdown mirror you can read, edit, and git-commit.** `/memory export` writes the agent's learned facts to a human-readable `MEMORY.md` (project) and `~/.qodex/memory.md` (user). Edit them by hand — fix a wrong fact, add three — and `/memory import` folds your changes back into the DB (additive). The DB stays the source of truth; the Markdown is the window into it.
+
+**Light Memory Mode for small context windows.** On a roomy model, every fact is injected (`memory.mode: full`). On a tight local model, set `memory.mode: lightweight` (or `auto`) — QodeX injects your `!important`-tagged facts plus as many recent ones as fit a token budget, and leaves the rest to load on demand. Your memory doesn't shrink; only what's *pushed into each prompt* does.
 
 ```text
 > the build here is `npm run build:prod`, not `npm run build`
 🧠 remembered (project)              # silently re-injected next time you start in this dir
 
 /memory                              # show what's stored for this project
+/memory export                       # write the human-readable MEMORY.md mirror
+/memory import                       # pull hand-edited facts from the markdown back in
 /memory forget <substring>          # drop matching facts
 /project        ·  /project log <e>  # this project's worklog (view · append)
 /sessions       ·  /resume <id>      # list past sessions · rehydrate one
+```
+
+```yaml
+# ~/.qodex/config.yaml — tune what gets pushed into each prompt (DB + mirror are unaffected)
+memory:
+  mode: auto              # full | lightweight | auto (lightweight on small context windows)
+  injectMaxTokens: 2000   # budget for facts in lightweight mode (!important always included)
 ```
 
 It all lives under `~/.qodex/` — **nothing is uploaded**, the same privacy line as your code.
@@ -332,7 +362,7 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /cost  /tokens     Token / cost usage
 /index [--force]   Build/refresh the code graph
 /mcp               List connected MCP servers
-/memory            Show / forget what the agent has learned here (project + user facts)
+/memory [export|import|forget <s>|clear]   Learned facts — show · mirror to MEMORY.md · import edits · drop · wipe
 /project [log <e>] This project's worklog — view, or append an entry
 /sessions  /resume <id>  /clear  /exit
 ```
@@ -382,13 +412,26 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 
 Adding a command is **one entry** — both Telegram and Discord gain the command, its menu item, and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash.
 
+**Living Artifacts in chat — with an AI vision review.** Ask for a dashboard, a landing page, or a chart from your phone and QodeX doesn't dump code at you — it builds a **versioned artifact**, renders it, and (for web types) runs a **vision self-review** that actually *looks* at the result and verdicts it **LOOKS_GOOD / NEEDS_WORK / BROKEN**, listing concrete issues. You get back a compact **card**:
+
+```text
+📊  Sales dashboard  ·  html · v3
+🔎  vision review: NEEDS_WORK
+    • legend overlaps the Q4 bars
+    • contrast too low on the dark header
+[ ✅ Approve ]   [ ✏️ Edit ]   [ ❌ Reject ]   [ 🔗 Open live ]
+```
+
+Tap **Edit** and reply with the change in plain language; tap **Open live** for the hot-reloading, token-protected https link. The agent iterates create → preview → review → fix until the vision check passes — the same loop the CLI runs, now driven from chat.
+
 ## Architecture notes
 
 - **One agent loop** with per-task budget caps (tokens / cost / wall-clock / iterations), a consecutive-failure circuit breaker, and auto-recovery.
 - **Capability-tiered system prompt** — frontier models get a compressed prompt; weak/local models keep the full guidance they depend on (cache-safe per session).
 - **Per-tool permissions** — read-only tools auto-approved; mutating tools ask once; "allow once / session / pattern / always" picker.
 - **Code-graph index** — Tree-sitter-backed, persists to `.qodex/codegraph.db`, incremental.
-- **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`. All local, all under `~/.qodex/`.
+- **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`; a human-readable **Markdown mirror** (`/memory export|import`) and a budget-aware **Light Memory Mode** over the same store. All local, all under `~/.qodex/`.
+- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review.
 - **Multi-provider router** — Ollama, LM Studio, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter all first-class.
 - **ESM strict** throughout; **hooks** (pre/post-tool) for guardrails or instrumentation.
 
