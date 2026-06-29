@@ -198,6 +198,8 @@ The split is **deliberate**: *your* curated rules (`QODEX.md`, git-tracked) stay
 
 **Light Memory Mode for small context windows.** On a roomy model, every fact is injected (`memory.mode: full`). On a tight local model, set `memory.mode: lightweight` (or `auto`) — QodeX injects your `!important`-tagged facts plus as many recent ones as fit a token budget, and leaves the rest to load on demand. Your memory doesn't shrink; only what's *pushed into each prompt* does.
 
+**Searchable memory (FTS5).** As facts pile up, dumping the newest N isn't enough — `recall query="deploy key"` does a **relevance-ranked full-text search** (SQLite FTS5) over your facts and pulls out the specific one, so the agent finds an old gotcha instead of rediscovering it. This is the on-demand half of Light Memory Mode: lightweight mode keeps prompts small, and search retrieves anything it left out. The index stays in sync automatically and falls back to a substring scan if a build lacks FTS5.
+
 ```text
 > the build here is `npm run build:prod`, not `npm run build`
 🧠 remembered (project)              # silently re-injected next time you start in this dir

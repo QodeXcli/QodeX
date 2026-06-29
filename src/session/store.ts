@@ -2,6 +2,30 @@ import type Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_SESSION_DB } from '../config/defaults.js';
+import { logger } from '../utils/logger.js';
+
+/** Pull searchable word tokens out of free text (alphanumerics + underscore, length ≥ 2). PURE. */
+export function factTokens(raw: string): string[] {
+  return (raw.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? []);
+}
+
+/** De-dupe preserving order. */
+function dedupe(xs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of xs) { if (!seen.has(x)) { seen.add(x); out.push(x); } }
+  return out;
+}
+
+/**
+ * Turn free-text into a safe FTS5 MATCH expression: each token is double-quoted (neutralizing
+ * FTS operators like AND/OR/NEAR/"/*) and OR-joined so recall is broad. Returns '' when there's
+ * nothing searchable, so the caller can fall back. PURE — unit-tested. */
+export function buildFtsMatch(raw: string): string {
+  const toks = dedupe(factTokens(raw));
+  if (!toks.length) return '';
+  return toks.map(t => `"${t}"`).join(' OR ');
+}
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -130,6 +154,8 @@ export class SessionStore {
     }
     // Safe now that the column is guaranteed to exist (new schema or just-migrated).
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_scope ON session_facts(scope)`);
+
+    this.initFactsFts();
 
     this.insertSession = this.db.prepare(`
       INSERT INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, ?)
@@ -310,6 +336,72 @@ export class SessionStore {
     const rows = this.db.prepare(
       `SELECT DISTINCT fact FROM session_facts WHERE cwd = ? AND scope = 'project' ORDER BY id DESC LIMIT ?`,
     ).all(cwd, limit) as { fact: string }[];
+    return rows.map(r => r.fact);
+  }
+
+  private ftsReady = false;
+
+  /**
+   * Build a full-text index over `session_facts` so memory can be SEARCHED, not just dumped
+   * newest-first. Uses an FTS5 external-content table (no data duplication — it indexes the
+   * existing rows) kept in sync by triggers, plus a one-time rebuild for rows that predate it.
+   * All best-effort: if this SQLite build lacks FTS5, searchFacts falls back to a LIKE scan.
+   */
+  private initFactsFts(): void {
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_facts_fts USING fts5(fact, content='session_facts', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS session_facts_ai AFTER INSERT ON session_facts BEGIN
+          INSERT INTO session_facts_fts(rowid, fact) VALUES (new.id, new.fact);
+        END;
+        CREATE TRIGGER IF NOT EXISTS session_facts_ad AFTER DELETE ON session_facts BEGIN
+          INSERT INTO session_facts_fts(session_facts_fts, rowid, fact) VALUES('delete', old.id, old.fact);
+        END;
+        CREATE TRIGGER IF NOT EXISTS session_facts_au AFTER UPDATE ON session_facts BEGIN
+          INSERT INTO session_facts_fts(session_facts_fts, rowid, fact) VALUES('delete', old.id, old.fact);
+          INSERT INTO session_facts_fts(rowid, fact) VALUES (new.id, new.fact);
+        END;
+      `);
+      // Backfill rows that existed before the index/triggers (FTS empty but facts present).
+      const ftsN = (this.db.prepare(`SELECT count(*) AS n FROM session_facts_fts`).get() as { n: number }).n;
+      const factN = (this.db.prepare(`SELECT count(*) AS n FROM session_facts`).get() as { n: number }).n;
+      if (ftsN === 0 && factN > 0) {
+        this.db.exec(`INSERT INTO session_facts_fts(session_facts_fts) VALUES('rebuild')`);
+      }
+      this.ftsReady = true;
+    } catch (e: any) {
+      logger.debug('FTS over facts unavailable; recall search will fall back to LIKE', { err: e?.message });
+      this.ftsReady = false;
+    }
+  }
+
+  /**
+   * Search remembered facts by relevance (FTS5 bm25 rank), scoped like getFactsByScope.
+   * Empty/again-unusable query ⇒ []. Falls back to a LIKE scan when FTS5 isn't available.
+   */
+  searchFacts(query: string, scope: 'project' | 'user', cwd: string, limit = 20): string[] {
+    const where = scope === 'user' ? `f.scope = 'user'` : `f.cwd = ? AND f.scope = 'project'`;
+    const scopeArgs = scope === 'user' ? [] : [cwd];
+    const match = buildFtsMatch(query);
+    if (this.ftsReady && match) {
+      try {
+        const rows = this.db.prepare(
+          `SELECT f.fact AS fact FROM session_facts_fts ft JOIN session_facts f ON f.id = ft.rowid
+           WHERE session_facts_fts MATCH ? AND ${where} ORDER BY rank LIMIT ?`,
+        ).all(match, ...scopeArgs, limit * 4) as { fact: string }[];
+        return dedupe(rows.map(r => r.fact)).slice(0, limit);
+      } catch (e: any) {
+        logger.debug('FTS search failed; falling back to LIKE', { err: e?.message });
+      }
+    }
+    // Fallback: AND of LIKE clauses over the raw tokens, newest-first.
+    const tokens = factTokens(query);
+    if (!tokens.length) return [];
+    const likeClauses = tokens.map(() => `fact LIKE ?`).join(' AND ');
+    const likeArgs = tokens.map(t => `%${t}%`);
+    const rows = this.db.prepare(
+      `SELECT DISTINCT fact FROM session_facts WHERE ${where.replace(/f\./g, '')} AND ${likeClauses} ORDER BY id DESC LIMIT ?`,
+    ).all(...scopeArgs, ...likeArgs, limit) as { fact: string }[];
     return rows.map(r => r.fact);
   }
 
