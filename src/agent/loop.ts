@@ -1449,7 +1449,7 @@ export class AgentLoop {
       const toolCalls: ToolCall[] = [];
       const toolCallBuffers = new Map<number, { id?: string; name?: string; args: string }>();
       let assistantText = '';
-      let lastUsage = { input: 0, output: 0 };
+      let lastUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
       let streamError: string | null = null;
 
       // Turn timing. TTFT (time-to-first-token) is what the user FEELS as "how long
@@ -1501,7 +1501,12 @@ export class AgentLoop {
           }
 
           case 'usage':
-            lastUsage = event.usage!;
+            lastUsage = {
+              input: event.usage!.input,
+              output: event.usage!.output,
+              cacheRead: event.usage!.cacheRead ?? 0,
+              cacheCreation: event.usage!.cacheCreation ?? 0,
+            };
             break;
 
           case 'error':
@@ -1544,9 +1549,19 @@ export class AgentLoop {
       // Track budget
       const cost = computeCost(lastUsage, route.modelInfo);
       budget.consume({ tokens: lastUsage.input + lastUsage.output, costUsd: cost });
+      // Cache hit-rate: cached reads ÷ total input the model saw (fresh + cached). Lets the
+      // status line PROVE the hierarchical cache is working (and how much it's saving).
+      const cacheRead = (lastUsage as any).cacheRead ?? 0;
+      const totalInputSeen = lastUsage.input + cacheRead;
+      const cacheHitRate = totalInputSeen > 0 ? cacheRead / totalInputSeen : 0;
       yield {
         type: 'budget_update',
-        data: { ...budget.getUsage(), lastInputTokens: lastUsage.input, lastOutputTokens: lastUsage.output, lastCostUsd: cost, contextWindow: route.modelInfo.contextWindow },
+        data: {
+          ...budget.getUsage(),
+          lastInputTokens: lastUsage.input, lastOutputTokens: lastUsage.output, lastCostUsd: cost,
+          lastCacheRead: cacheRead, lastCacheCreation: (lastUsage as any).cacheCreation ?? 0, cacheHitRate,
+          contextWindow: route.modelInfo.contextWindow,
+        },
       };
 
       // Build the toolCalls array from buffers

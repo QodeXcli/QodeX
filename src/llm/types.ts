@@ -48,7 +48,10 @@ export interface StreamEvent {
   toolCallId?: string;
   toolName?: string;
   toolArgsDelta?: string;
-  usage?: { input: number; output: number };
+  /** `input`/`output` are FRESH (non-cached) tokens. `cacheRead`/`cacheCreation` (Anthropic
+   *  prompt caching) are reported separately so cost can apply the 0.1×/1.25× pricing and the
+   *  UI can show a cache hit-rate. */
+  usage?: { input: number; output: number; cacheRead?: number; cacheCreation?: number };
   error?: string;
 }
 

@@ -354,6 +354,19 @@ export class ModelRouter {
   }
 }
 
-export function computeCost(usage: { input: number; output: number }, info: ModelInfo): number {
-  return (usage.input * info.inputCostPerMillion + usage.output * info.outputCostPerMillion) / 1_000_000;
+/**
+ * Cost for one call. `input`/`output` are FRESH tokens at full price. Anthropic prompt-cache
+ * tokens are priced separately: cacheRead at 0.1× input, cacheCreation at 1.25× input — so a
+ * cached agent loop reports its REAL (much lower) cost instead of billing every re-sent token
+ * at full price. PURE. Absent cache fields ⇒ the old plain formula.
+ */
+export function computeCost(
+  usage: { input: number; output: number; cacheRead?: number; cacheCreation?: number },
+  info: ModelInfo,
+): number {
+  const inP = info.inputCostPerMillion;
+  const fresh = usage.input * inP;
+  const read = (usage.cacheRead ?? 0) * inP * 0.1;
+  const write = (usage.cacheCreation ?? 0) * inP * 1.25;
+  return (fresh + read + write + usage.output * info.outputCostPerMillion) / 1_000_000;
 }

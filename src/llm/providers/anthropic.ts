@@ -244,6 +244,8 @@ export class AnthropicProvider extends Provider {
 
       let inputTokens = 0;
       let outputTokens = 0;
+      let cacheCreation = 0;
+      let cacheRead = 0;
       const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
 
       for await (const event of stream) {
@@ -257,8 +259,8 @@ export class AnthropicProvider extends Provider {
           // Capture cache metrics — present when prompt caching is in use.
           // cache_creation: tokens written to cache this call (priced at 1.25x base input)
           // cache_read:     tokens served from cache this call (priced at 0.1x base input)
-          const cacheCreation = (event.message.usage as any).cache_creation_input_tokens ?? 0;
-          const cacheRead = (event.message.usage as any).cache_read_input_tokens ?? 0;
+          cacheCreation = (event.message.usage as any).cache_creation_input_tokens ?? 0;
+          cacheRead = (event.message.usage as any).cache_read_input_tokens ?? 0;
           if (this.useCaching && (cacheCreation > 0 || cacheRead > 0)) {
             // Log it so users can confirm caching is actually hitting in production.
             // (Cost adjustment is handled by the budget tracker via these fields.)
@@ -302,7 +304,7 @@ export class AnthropicProvider extends Provider {
         }
       }
 
-      yield { type: 'usage', usage: { input: inputTokens, output: outputTokens } };
+      yield { type: 'usage', usage: { input: inputTokens, output: outputTokens, cacheRead, cacheCreation } };
       yield { type: 'done' };
     } catch (e: any) {
       yield {
