@@ -19,7 +19,11 @@ const EPHEMERAL = { type: 'ephemeral' as const };
  * max 4 markers. We use three tiers:
  *
  *   1. last tool      → caches the whole tools block (immutable for the run).
- *   2. system         → caches tools + system (the static instruction core).
+ *   2. system core    → with a static/volatile boundary, the STABLE core (instructions, byte-
+ *      identical across every turn) is one cached block and the per-turn injections (memory,
+ *      retrieval, dir-tree) are a second, un-cached block — so the core stays a cache HIT across
+ *      the whole session, not just within one task. Without a boundary, the whole system is one
+ *      cached block (still fine within a task).
  *   3. last message   → ROLLING breakpoint: caches the conversation prefix so far. THIS is what
  *      QodeX was missing — without it the growing history is re-billed at full price every
  *      iteration (the root of the ~9× burn vs. caching agents). On the next request the prior
@@ -31,14 +35,28 @@ export function withCacheBreakpoints(
   systemText: string,
   messages: any[],
   tools: any[] | undefined,
+  systemBoundary?: number,
 ): { system: any; messages: any[]; tools: any[] | undefined } {
-  const system = systemText
-    ? [{ type: 'text', text: systemText, cache_control: EPHEMERAL }]
-    : systemText;
+  const system = buildSystemBlocks(systemText, systemBoundary);
   const toolsOut = tools && tools.length > 0
     ? tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: EPHEMERAL } : t))
     : tools;
   return { system, messages: markLastMessage(messages), tools: toolsOut };
+}
+
+/** Split the system into a cached static core + an un-cached volatile tail when a boundary is
+ *  given and lands strictly inside the text; otherwise cache the whole thing as one block. */
+function buildSystemBlocks(systemText: string, boundary?: number): any {
+  if (!systemText) return systemText;
+  if (typeof boundary === 'number' && boundary > 0 && boundary < systemText.length) {
+    const core = systemText.slice(0, boundary);
+    const volatileTail = systemText.slice(boundary);
+    return [
+      { type: 'text', text: core, cache_control: EPHEMERAL },
+      { type: 'text', text: volatileTail },
+    ];
+  }
+  return [{ type: 'text', text: systemText, cache_control: EPHEMERAL }];
 }
 
 /** Add a cache breakpoint to the last content block of the last message (the rolling prefix). */
@@ -82,8 +100,9 @@ export class AnthropicProvider extends Provider {
 
   // We use a loose type for Anthropic.MessageParam because the SDK occasionally renames
   // or restructures these. The runtime shape is the contract; the SDK validates the rest.
-  private convertMessages(messages: Message[]): { system: string; messages: any[] } {
+  private convertMessages(messages: Message[]): { system: string; systemBoundary?: number; messages: any[] } {
     let system = '';
+    let systemBoundary: number | undefined;
     const out: any[] = [];
     let pendingToolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
 
@@ -101,6 +120,11 @@ export class AnthropicProvider extends Provider {
 
     for (const m of messages) {
       if (m.role === 'system') {
+        // Capture the static/volatile boundary from the FIRST system message (the main one),
+        // offset by anything already accumulated, so caching can split core vs per-turn injects.
+        if (systemBoundary === undefined && typeof m.cacheBoundary === 'number') {
+          systemBoundary = (system ? system.length + 2 : 0) + m.cacheBoundary;
+        }
         system += (system ? '\n\n' : '') + (m.content ?? '');
         continue;
       }
@@ -202,7 +226,7 @@ export class AnthropicProvider extends Provider {
       return;
     }
 
-    const { system, messages } = this.convertMessages(req.messages);
+    const { system, systemBoundary, messages } = this.convertMessages(req.messages);
 
     const tools = req.tools?.map(t => ({
       name: t.function.name,
@@ -221,7 +245,7 @@ export class AnthropicProvider extends Provider {
     let toolsForApi: any = tools;
     let messagesForApi: any = messages;
     if (this.useCaching && system) {
-      const prepped = withCacheBreakpoints(system, messages, tools);
+      const prepped = withCacheBreakpoints(system, messages, tools, systemBoundary);
       systemForApi = prepped.system;
       messagesForApi = prepped.messages;
       toolsForApi = prepped.tools;

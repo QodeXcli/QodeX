@@ -511,6 +511,12 @@ export class AgentLoop {
         `\n\n# Provider-specific guidance (${providerName})\n${providerPromptCfg.append}`;
     }
 
+    // Static/volatile boundary: everything up to HERE (identity + base prompt + provider
+    // guidance) is byte-stable across every turn of the session, so it gets its own prompt-
+    // cache breakpoint. The per-turn injections below (retrieval, memory, tree, episodic,
+    // lessons) are volatile and sit AFTER the boundary so they never invalidate the core cache.
+    const coreBoundary = sysPrompt.length;
+
     // ── Auto-retrieval pre-pass (best-effort) ──
     // Embed the request and inject the most semantically-relevant files so the model
     // starts at the right place in a large codebase instead of grepping blind. Only for
@@ -619,7 +625,7 @@ export class AgentLoop {
     }
 
     return [
-      { role: 'system', content: sysPrompt },
+      { role: 'system', content: sysPrompt, cacheBoundary: coreBoundary },
       { role: 'user', content: userPrompt },
     ];
   }
