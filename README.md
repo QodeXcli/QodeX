@@ -60,6 +60,7 @@ Long agent sessions burn tokens on a growing history, not the (cached) system pr
 - **Result-aging** — stale large tool outputs are stubbed after a few turns (re-read on demand).
 - **Compaction** — history is structured-summarized as the window fills.
 - **Tool-gating** — only relevant tool schemas are sent each turn (a greeting sees ~20 tools, a real task ~50, out of 100+).
+- **Hierarchical prompt cache (Anthropic, on by default)** — cache breakpoints pin the static prefix (tools + system) *and* a **rolling breakpoint on the conversation history**, so iterations 2..N read the shared prefix at 0.1× instead of re-billing it in full. Caching the *growing history* — not just the system block — is the big lever; opt out with `providers.anthropic.useCaching: false`.
 - **Opt-in `context.efficient: true`** tightens all of the above for weak local models.
 
 A live `12.4k/200k ████░░░░░░ 8%` meter in the status bar shows how full the context window is.
