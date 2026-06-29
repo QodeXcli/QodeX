@@ -402,7 +402,19 @@ export class AgentLoop {
       // Trellis harness (.trellis/ spec+tasks+journals), if the project uses it.
       loadTrellisContext(this.cwd),
     ]);
-    const knowledgeFacts = getSessionStore().getFactsForCwd(this.cwd);
+    // Light Memory Mode: in 'lightweight' the prompt carries only !important facts + the newest
+    // others within a token budget (the rest stay in the DB, recall-on-demand); 'auto' switches to
+    // lightweight on a small context window; 'full' (default) injects everything.
+    const { selectInjectedFacts, resolveMemoryMode } = await import('../context/memory-select.js');
+    const memCfg = (this.config as any).memory ?? {};
+    const memMode = resolveMemoryMode(memCfg.mode, this.defaultContextWindow);
+    const allFacts = getSessionStore().getFactsForCwd(this.cwd);
+    const knowledgeFacts = selectInjectedFacts(allFacts, { mode: memMode, injectMaxTokens: memCfg.injectMaxTokens });
+    if (memMode === 'lightweight' && knowledgeFacts.length < allFacts.length) {
+      // Transparency: tell the model (and the log) that memory was injected as a budgeted subset.
+      logger.info('Light memory: injected a budgeted subset of facts', { shown: knowledgeFacts.length, total: allFacts.length });
+      knowledgeFacts.unshift(`(light memory active — ${knowledgeFacts.length} of ${allFacts.length} learned facts shown within budget; ask me to recall the rest)`);
+    }
     // Project memory: prepend a brief of what was done in this project in earlier
     // sessions, so a new/resumed session continues instead of restarting. Rides the
     // existing facts-injection path (no prompt-assembly surgery), and is skipped
