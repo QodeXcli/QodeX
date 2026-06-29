@@ -1928,7 +1928,7 @@ export class AgentLoop {
         for (let i = 0; i < readOnlyCalls.length; i++) {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
-          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           noteResult(tc.function.name, r);
           // Emit any UI events captured during execution
@@ -1958,7 +1958,7 @@ export class AgentLoop {
           // Single → execute as before
           const tc = batch[0]!;
           const r = await this.executeToolCall(tc, txn, sessionId, options);
-          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           noteResult(tc.function.name, r);
           for (const ev of r.uiEvents) {
@@ -1979,7 +1979,7 @@ export class AgentLoop {
           for (let i = 0; i < batch.length; i++) {
             const tc = batch[i]!;
             const r = results[i]!;
-            yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+            yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
             noteResult(tc.function.name, r);
             for (const ev of r.uiEvents) yield { type: 'tool_ui', data: ev };
@@ -2094,7 +2094,7 @@ export class AgentLoop {
     transaction: Transaction,
     sessionId: string,
     options: AgentOptions,
-  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[] }> {
+  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[]; metadata?: Record<string, unknown> }> {
     const uiEvents: ToolUIEvent[] = [];
     let args: any;
     try {
@@ -2331,7 +2331,7 @@ export class AgentLoop {
         }
       }
 
-      return { content: finalContent, isError: result.isError, uiEvents };
+      return { content: finalContent, isError: result.isError, uiEvents, metadata: result.metadata as Record<string, unknown> | undefined };
     } catch (e: any) {
       // Timeout or outer cancel → both surfaced as user-friendly observations.
       const timedOut = e.code === 'TOOL_TIMEOUT' || toolAbort.signal.reason === 'TOOL_TIMEOUT';

@@ -32,6 +32,20 @@ export interface MessageRef { id: string }
 /** An inline button (approve/deny prompts). */
 export interface Button { label: string; data: string }
 
+/** A "living artifact" result the bot renders as a rich card (screenshot + verdict + Approve/Edit/Reject). */
+export interface ArtifactCard {
+  artifactId: string;
+  title?: string;
+  type?: string;
+  /** The vision verdict from artifact_review. */
+  verdict?: 'looks_good' | 'needs_work' | 'broken' | 'unverified';
+  issues?: string[];
+  /** The hot-reload live URL from artifact_live. */
+  liveUrl?: string;
+  /** Absolute path to the preview screenshot, for sendPhoto. */
+  screenshotPath?: string;
+}
+
 /**
  * What every platform adapter must provide. `maxLen` and `minEditIntervalMs` let the core
  * tune chunking + edit-throttling per platform without knowing which platform it is.
@@ -50,10 +64,17 @@ export interface Transport {
   send(chatId: string, text: string, buttons?: Button[][]): Promise<MessageRef>;
   edit(chatId: string, ref: MessageRef, text: string, buttons?: Button[][]): Promise<void>;
 
+  /** Best-effort: send an image (a preview screenshot) with an optional caption + buttons. Falls
+   *  back to a text message with a link when the adapter or file is unavailable. */
+  sendPhoto?(chatId: string, photoPath: string, caption?: string, buttons?: Button[][]): Promise<MessageRef>;
+
   /** Best-effort: acknowledge a button tap so the client stops its spinner. */
   ackCallback?(callbackId: string): Promise<void>;
   /** Best-effort: show a "typing…" indicator. */
   typing?(chatId: string): Promise<void>;
+  /** Best-effort: register the command menu so the client shows a native `/` picker
+   *  (Telegram setMyCommands). The gateway calls this once on start with the full registry. */
+  setCommands?(commands: { command: string; description: string }[]): Promise<void>;
 }
 
 /** Injected agent runner — the gateway stays decoupled from AgentLoop for testability. */
@@ -64,6 +85,17 @@ export interface TurnSink {
   ask(prompt: string, options: string[]): Promise<string>;
   /** Called for a short status line (tool start, notice). */
   onStatus(text: string): void | Promise<void>;
+  /** Called once at the end of a turn that produced a live artifact — the bot renders a rich card
+   *  (screenshot + vision verdict + Approve / Edit / Reject). Optional; absent on plain text fronts. */
+  artifact?(card: ArtifactCard): void | Promise<void>;
+}
+
+/** A point-in-time view of a conversation, for the `/status` command. */
+export interface RunnerStatus {
+  model: string;
+  cwd: string;
+  sessionId?: string;
+  auto: boolean;
 }
 
 export interface AgentRunner {
@@ -74,4 +106,19 @@ export interface AgentRunner {
   runTurn(convKey: string, userText: string, sink: TurnSink, signal: AbortSignal): Promise<string>;
   /** Forget the conversation's session so the next turn starts fresh. */
   reset?(convKey: string): Promise<void>;
+
+  // ── Optional capabilities. A command that needs one degrades gracefully ("not supported here")
+  //    when the runner doesn't implement it — so a minimal/fake runner still works. ──
+  /** Current model / cwd / bound session / auto-approve state for this conversation. */
+  status?(convKey: string): Promise<RunnerStatus>;
+  /** Override the model for this conversation; returns the model now in effect. */
+  setModel?(convKey: string, model: string): Promise<string>;
+  /** Toggle per-conversation auto-approve (skip permission prompts). */
+  setAuto?(convKey: string, on: boolean): Promise<void>;
+  /** Recent resumable sessions for this bot's working directory. */
+  listSessions?(limit?: number): Promise<{ id: string; title: string; when: string }[]>;
+  /** Rebind this conversation to a past session; returns false if the id is unknown. */
+  resume?(convKey: string, sessionId: string): Promise<boolean>;
+  /** Recent EPISODIC-memory entries (past tasks QodeX solved here) for the working directory. */
+  listEpisodes?(limit?: number): Promise<{ when: string; prompt: string; summary: string }[]>;
 }
