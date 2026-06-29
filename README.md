@@ -31,7 +31,7 @@ An "autonomous 24/7 agent" is easy to *say* and hard to *mean* — most of the t
 
 - **Reachable any time** — the **transport-agnostic bot gateway** runs as a persistent service, so the agent is one message away from your phone. One turn per chat at a time (no interleaving), permission prompts as inline buttons, **deny-by-default auth**. ([Telegram / Discord](#telegram--discord-bot))
 - **Improves between sessions, on its own** — capture → **independent-judge** promotion → **UCB1** version A/B → **episodic recall** → **failure-lesson** injection. The loop is gated on *objective* success signals, not the model's self-grade, and a new **code-graph "fit" signal** grounds the judge in *your* codebase. ([Self-learning skills](#self-learning-skills))
-- **Safe to leave running** — per-task **budget caps** (tokens / cost / wall-clock / iterations), a **consecutive-failure circuit breaker**, a **git-backed sandbox** with checkpoints, and the guardrail gates mean a long, unattended run **can't quietly ship broken code or melt your token budget**.
+- **Runs while you sleep — verifiably** — a built-in **cron scheduler** (launchd / crontab) runs tasks unattended and delivers the result to your phone. The headline recipe, **Autonomous Verified PR**, works on a sandbox branch, **verifies**, and opens a PR *only if it passed* — per-task **budget caps**, a **circuit breaker**, the **git sandbox**, and the guardrail gates all run too, so a 3am run **can't quietly ship broken code or melt your token budget**. ([Scheduled & autonomous](#scheduled--autonomous--the-real-247))
 
 We're not going to claim a model thinks for you around the clock. We built the parts that make *unattended, repeated, real* work trustworthy — and we'd rather show the code than the slogan.
 
@@ -423,6 +423,39 @@ Adding a command is **one entry** — both Telegram and Discord gain the command
 ```
 
 Tap **Edit** and reply with the change in plain language; tap **Open live** for the hot-reloading, token-protected https link. The agent iterates create → preview → review → fix until the vision check passes — the same loop the CLI runs, now driven from chat.
+
+## Scheduled & autonomous — the real "24/7"
+
+Plenty of agents *say* "autonomous 24/7." QodeX has a plain, boring scheduler that actually does it — and, crucially, **runs every unattended job through the same guardrails as an interactive one**, so leaving it running can't quietly ship broken code.
+
+A built-in cron (5-field expressions + `@daily`/`@hourly`/… aliases) installs as a **macOS LaunchAgent** or a **Linux crontab** line, ticks every minute, and runs each due task as an **isolated headless process** (file-locked, 30-min hard cap, per-run logs under `~/.qodex/schedule-logs/`).
+
+```bash
+qodex schedule install                       # macOS launchd / Linux crontab — runs the tick every minute
+qodex schedule add --name nightly-deps \
+  --cron "@daily" \
+  --prompt "check for outdated deps and summarize what changed" \
+  --deliver telegram:<your-chat-id>          # result lands on your phone, not just a desktop ping
+qodex schedule list      ·  runs <id>  ·  enable/disable <id>  ·  rm <id>
+```
+
+**Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
+
+**Autonomous *Verified* PR — the differentiator.** `--recipe verified-pr` doesn't just run a prompt; it wraps your goal in an unattended-safe **protocol**:
+
+> work on a fresh **sandbox branch** → make the change → **run the tests + per-language verifiers** → and **open a PR only if verification actually passed**. If it fails, it opens *nothing*, claims *nothing*, and reports exactly what broke.
+
+```bash
+qodex schedule add --name nightly-flaky-fix \
+  --cron "0 3 * * *" \
+  --recipe verified-pr \
+  --prompt "find and fix flaky tests in this repo" \
+  --deliver telegram:<your-chat-id>
+# 3am: works on a branch, verifies, and either DMs you "VERIFIED-PR: opened <url>"
+#      for your morning review — or "VERIFIED-PR: blocked — <reason>". Never a false green.
+```
+
+That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie.
 
 ## Architecture notes
 
