@@ -188,6 +188,14 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
         return { ok: true, message: `Removed "${name}".` };
       }
+      case 'maintain.preview': {
+        const { runMaintainPreview } = await import('./maintain-preview.js');
+        const p = runMaintainPreview(cwd);
+        if (!p.ran) return { ok: false, message: 'Couldn\'t run the detection (is this a TS project with tsc?).' };
+        if (p.count === 0) return { ok: true, message: '✓ Nothing to clean — no unused symbols detected.' };
+        const eg = p.sample.slice(0, 3).map(c => c.name).join(', ');
+        return { ok: true, message: `🔍 ${p.count} unused symbol(s) maintain could clean (e.g. ${eg}). Schedule \`unused-imports\` / \`unused-locals\`.` };
+      }
       case 'app.update': {
         const { selfUpdate } = await import('./self-update.js');
         const r = await selfUpdate();
