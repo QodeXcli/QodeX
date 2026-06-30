@@ -71,22 +71,24 @@ function verifiedPrPrompt(goal: string): string {
 }
 
 /** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
-export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params';
-export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params'] as const;
+export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params' | 'lint-fix' | 'dep-bump';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump'] as const;
 
 /** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
- *  Forms: "" (→ dead-code) · "unused-imports src/" · "unused-params --dry-run" · "src/utils". */
+ *  Forms: "" (→ dead-code) · "unused-imports src/" · "lint-fix --dry-run" · "dep-bump" · "src/utils". */
 export function parseMaintainScope(prompt: string): { scope: MaintainScope; focus: string; dryRun: boolean } {
   let rest = (prompt ?? '').trim();
   const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
   rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
   let scope: MaintainScope = 'dead-code';
-  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|dead[-_]?code)\b/i.exec(rest);
+  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|lint[-_]?fix|lint|dep[-_]?bump|deps?|dependenc(?:y|ies)|dead[-_]?code)\b/i.exec(rest);
   if (m) {
     const k = m[1]!;
     scope = /imports/i.test(k) ? 'unused-imports'
       : /locals/i.test(k) ? 'unused-locals'
       : /params/i.test(k) ? 'unused-params'
+      : /lint/i.test(k) ? 'lint-fix'
+      : /dep/i.test(k) ? 'dep-bump'
       : 'dead-code';
     rest = rest.slice(m[0].length).trim();
   }
@@ -152,6 +154,34 @@ const UNUSED_PARAMS_SELECTION = [
   'd. The `_`-prefix is your GOAL. Change nothing else.',
 ];
 
+const LINT_FIX_SELECTION = [
+  'SCOPE (v5 — SAFE LINT AUTOFIX): apply the project linter\'s AUTOFIXABLE rules only — the',
+  'mechanical fixes (`eslint --fix`, `ruff check --fix`, `gofmt`). No manual edits, no rule whose',
+  'fix could change behavior.',
+  '',
+  'SELECTION — autofix, then prove nothing broke:',
+  'a. Detect the linter from the project (eslint / ruff / biome …). If there is none, BLOCK.',
+  'b. Run its autofix on the focus area only (a dir/file you were given, else a small bounded set —',
+  '   do NOT --fix the whole repo in one shot).',
+  'c. Restrict to AUTOFIXABLE rules. Never apply a fixer that rewrites logic (e.g. no-unsafe-*,',
+  '   prefer-const on exported API). If a fix is semantic or you are unsure, leave it.',
+  'd. The autofix diff IS your GOAL. Keep it small and reviewable.',
+];
+
+const DEP_BUMP_SELECTION = [
+  'SCOPE (v6 — ONE DEPENDENCY BUMP, test-verified): bump exactly ONE dependency to a newer PATCH',
+  'or MINOR version and prove the tests still pass. NEVER a major version (breaking changes).',
+  '',
+  'SELECTION — one safe bump, proven by the suite:',
+  'a. REQUIRE a real test command (npm test / pytest / go test …). If the project has no tests,',
+  '   BLOCK — a dep bump without tests is unverifiable.',
+  'b. List outdated deps (`npm outdated` / equivalent). Pick ONE with a patch/minor update only.',
+  '   Skip anything whose new major differs, and skip pinned/peer-critical deps if unsure.',
+  'c. Update that one version in the manifest, install, and run the FULL test suite.',
+  'd. If the suite passes it ships; if anything fails, BLOCK and report (do not "fix" the dep).',
+  'e. The single version bump IS your GOAL — touch no other dependency.',
+];
+
 /**
  * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
  * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
@@ -163,6 +193,8 @@ function maintainPrompt(prompt: string): string {
   const selection = scope === 'unused-imports' ? UNUSED_IMPORTS_SELECTION
     : scope === 'unused-locals' ? UNUSED_LOCALS_SELECTION
     : scope === 'unused-params' ? UNUSED_PARAMS_SELECTION
+    : scope === 'lint-fix' ? LINT_FIX_SELECTION
+    : scope === 'dep-bump' ? DEP_BUMP_SELECTION
     : DEAD_CODE_SELECTION;
   const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
   const dryRunBlock = dryRun ? [

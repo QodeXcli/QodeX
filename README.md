@@ -525,6 +525,8 @@ That's the honest version of an always-on agent: it works while you sleep, but t
 - **`unused-imports`** — removes import bindings referenced zero times in their file (proven via the linter / `tsc --noUnusedLocals`); never touches side-effect imports.
 - **`unused-locals`** — removes unused `const`/`let` bindings, with an extra **side-effect gate**: only when the initializer is provably side-effect-free (a literal/regex/pure expression — never a call/`await`/`new`), and **never a function parameter**.
 - **`unused-params`** — silences unused parameters by **prefixing `_`** (the convention `tsc`/eslint ignore) — never removes them (that would change the signature), and skips destructured props.
+- **`lint-fix`** — applies the project linter's **autofixable rules only** (`eslint --fix`, `ruff --fix`, …), bounded to the focus area, never a fixer that rewrites logic.
+- **`dep-bump`** — bumps **one** dependency a patch/minor (never major) and ships only if the **full test suite** passes (blocks if the project has no tests).
 
 The scope (and an optional path + `--dry-run` preview) goes in the prompt:
 
