@@ -80,6 +80,27 @@ export interface MaintainWeekly {
   priorOpened: number; openedDelta: number;
 }
 
+/** Opened-cleanups per week over the last `weeks` (oldest→newest) — a sparkline series. PURE. */
+export function trendByWeek(runs: MaintainRun[], nowMs: number, weeks = 8): number[] {
+  const DAY = 86_400_000;
+  const buckets = new Array(weeks).fill(0);
+  for (const r of runs) {
+    if (r.status !== 'opened' || !r.at) continue;
+    const t = Date.parse(r.at);
+    if (!Number.isFinite(t)) continue;
+    const weeksAgo = Math.floor((nowMs - t) / (7 * DAY));
+    if (weeksAgo >= 0 && weeksAgo < weeks) buckets[weeks - 1 - weeksAgo]++;   // newest at the end
+  }
+  return buckets;
+}
+
+/** Project the going rate forward: cleanups + minutes saved per month, from the last 28 days. PURE. */
+export function projectMonthly(runs: MaintainRun[], nowMs: number): { cleanupsPerMonth: number; minutesPerMonth: number } {
+  const since = nowMs - 28 * 86_400_000;
+  const recent = runs.filter(r => r.status === 'opened' && r.at && Date.parse(r.at) >= since).length;
+  return { cleanupsPerMonth: recent, minutesPerMonth: recent * 5 };
+}
+
 /** Week-over-week self-improvement report from run timestamps. PURE (pass `nowMs`). */
 export function weeklyReport(runs: MaintainRun[], nowMs: number): MaintainWeekly {
   const DAY = 86_400_000;

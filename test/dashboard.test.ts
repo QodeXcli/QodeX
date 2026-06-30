@@ -24,6 +24,8 @@ const data: DashboardData = {
   maintainStats: { totalRuns: 3, opened: 2, blocked: 1, failed: 0, successRate: 0.66, filesCleaned: 10, estMinutesSaved: 10, byScope: [{ scope: 'unused-imports', runs: 2, opened: 2 }], lastRun: { when: '2h ago', status: 'opened', scope: 'unused-imports' } },
   maintainWeekly: { opened: 2, blocked: 1, filesCleaned: 10, minutesSaved: 10, priorOpened: 1, openedDelta: 1 },
   maintainNext: { scope: 'dead-code', why: 'never run here yet — try it' },
+  maintainTrend: [0, 0, 1, 0, 2, 1, 0, 3],
+  maintainProjection: { cleanupsPerMonth: 6, minutesPerMonth: 30 },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
