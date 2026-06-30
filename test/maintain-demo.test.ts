@@ -20,4 +20,17 @@ describe('buildMaintainDemoHtml', () => {
     expect(html).toContain('verified: ✓ npm test');
     expect(html).toMatch(/can’t fabricate a green receipt/);
   });
+
+  it('is interactive: a play button animates the loop and a scope picker swaps the receipt', () => {
+    expect(html).toContain('▶ Play the nightly run');         // animate the nightly run
+    expect(html).toContain('id="play"');
+    expect(html).toContain('data-scope="2"');                  // clickable scope cards
+    expect(html).toContain('<script>');                        // self-contained JS, no deps
+    expect(html).not.toContain('http://');                     // no external scripts/styles
+  });
+
+  it('teaches the verify-or-block gate with a real safe-block example', () => {
+    expect(html).toContain('safe-block');                      // the unused-locals verdict tag
+    expect(html).toMatch(/blocked[\s\S]*side-effect initializer/); // ships nothing, says why
+  });
 });
