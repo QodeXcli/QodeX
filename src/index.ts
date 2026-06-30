@@ -694,6 +694,28 @@ providerCmd
   });
 
 program
+  .command('tunnel')
+  .description('SSH-tunnel to a remote model server (run the heavy model on a workstation, drive from here)')
+  .requiredOption('--host <host>', 'Remote host (workstation running Ollama / LM Studio)')
+  .option('--user <user>', 'SSH user')
+  .option('--port <n>', 'SSH port (default 22)')
+  .option('--remote-port <n>', 'Remote inference port', '11434')
+  .option('--local-port <n>', 'Local port to forward', '11434')
+  .option('--identity <file>', 'SSH private key file')
+  .action(async (opts: any) => {
+    const { openTunnel, buildTunnelArgs } = await import('./cli/ssh-tunnel.js');
+    const t = { host: opts.host, user: opts.user, port: opts.port ? Number(opts.port) : undefined,
+      localPort: Number(opts.localPort), remotePort: Number(opts.remotePort), identityFile: opts.identity };
+    console.log(`\n🔌 ssh ${buildTunnelArgs(t).join(' ')}`);
+    try {
+      await openTunnel(t);
+      console.log(`✓ Tunnel up — point providers.ollama.baseUrl at http://localhost:${t.localPort}. Ctrl-C to close.\n`);
+      process.on('SIGINT', () => process.exit(0));
+      await new Promise<never>(() => {});
+    } catch (e: any) { console.error(`✗ ${e?.message ?? e}`); process.exit(1); }
+  });
+
+program
   .command('update')
   .description('Self-update the QodeX git checkout (git pull → npm install → npm run build)')
   .action(async () => {
