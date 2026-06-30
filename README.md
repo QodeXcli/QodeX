@@ -517,7 +517,7 @@ qodex schedule add --name nightly-flaky-fix \
 #      for your morning review — or "VERIFIED-PR: blocked — <reason>". Never a false green.
 ```
 
-That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie.
+That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie. See it as a one-page story: `qodex maintain-demo`.
 
 **`--recipe maintain` — a codebase that improves itself.** The self-improving loop, built on the moat. Each **scope** is a conservative, *provable* cleanup shipped through the verified-PR protocol above — opt-in, and every run lands in the dashboard's receipts panel (tagged with its scope):
 

@@ -694,6 +694,16 @@ providerCmd
   });
 
 program
+  .command('maintain-demo')
+  .description('Open a self-contained "Maintain in action" demo page (the self-improvement loop, visually)')
+  .action(async () => {
+    const { runMaintainDemo } = await import('./cli/maintain-demo.js');
+    const out = await runMaintainDemo();
+    console.log(`\n🎬 Maintain demo → ${out}\n   Opened in your browser.\n`);
+    process.exit(0);
+  });
+
+program
   .command('maintain-report')
   .description('Self-Improvement Report — the maintain recipe\'s cleanups, files cleaned, and time saved')
   .action(async () => {
