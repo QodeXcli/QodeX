@@ -404,13 +404,23 @@ program
 program
   .command('dashboard')
   .alias('dash')
-  .description('Open a live visual dashboard of your QodeX — providers, sessions, token/cost usage, memory, skills')
-  .action(async () => {
+  .description('Open a live CONTROL dashboard — view AND change providers, settings, memory, schedules, offloading')
+  .option('--static', 'Write a read-only HTML snapshot instead of starting the control server')
+  .action(async (opts: { static?: boolean }) => {
+    if (opts.static) {
+      const { writeStaticDashboard } = await import('./cli/dashboard.js');
+      const out = await writeStaticDashboard(process.cwd());
+      console.log(`\n📊 QodeX dashboard (read-only) → ${out}\n`);
+      process.exit(0);
+    }
     const { runDashboard } = await import('./cli/dashboard.js');
-    const out = await runDashboard(process.cwd());
-    console.log(`\n📊 QodeX dashboard → ${out}`);
-    console.log('   Opened in your browser. Re-run `qodex dashboard` to refresh the snapshot.\n');
-    process.exit(0);
+    const url = await runDashboard(process.cwd());
+    console.log(`\n📊 QodeX control dashboard → ${url}`);
+    console.log('   Live & local (127.0.0.1, token-protected). Toggle settings, manage schedules,');
+    console.log('   forget facts, apply offloading — changes hit your real config. Ctrl-C to stop.\n');
+    const shutdown = () => process.exit(0);
+    process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+    await new Promise<never>(() => {}); // keep the server alive
   });
 
 const mcpCmd = program

@@ -9,6 +9,11 @@ const data: DashboardData = {
   facts: ['build is npm run build:prod'],
   episodes: [{ when: '1d ago', prompt: 'add pagination', summary: 'cursor pagination' }],
   skills: [{ name: 'living-artifact', description: 'build artifacts the right way' }],
+  controls: [
+    { path: 'context.efficient', label: 'Efficient mode', group: 'Performance', type: 'bool', current: 'false' },
+    { path: 'memory.mode', label: 'Memory injection', group: 'Memory', type: 'enum', values: ['full', 'lightweight', 'auto'], current: 'auto' },
+  ],
+  schedules: [{ id: 'sched1234', name: 'nightly-deps', cron: '@daily', enabled: true, recipe: 'verified-pr' }],
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -31,10 +36,22 @@ describe('qodex dashboard (pure render)', () => {
   });
 
   it('handles an empty/fresh install gracefully', () => {
-    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
+    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
     const html = buildDashboardHtml(empty);
     expect(html).toContain('No sessions yet');
     expect(html).toContain('Nothing learned yet');
+  });
+
+  it('read-only render shows control STATE but no action JS; live render wires the API', () => {
+    const ro = buildDashboardHtml(data);
+    expect(ro).toContain('Efficient mode');
+    expect(ro).not.toContain('function act(');            // no controls without a token
+    expect(ro).toContain('Read-only snapshot');
+    const live = buildDashboardHtml(data, { token: 'tok123' });
+    expect(live).toContain('function act(');               // live: action JS wired
+    expect(live).toContain('tok123');
+    expect(live).toContain("act('schedule.setEnabled'");    // schedule controls present
+    expect(live).toContain("act('config.set'");            // config toggles present
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it
