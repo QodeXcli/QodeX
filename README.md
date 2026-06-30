@@ -368,6 +368,13 @@ e.g. a 48 GB MoE on a 12 GB GPU → *keep ~14/64 layers on the GPU, the rest on 
 
 Two things make local fast here: **`keep_alive`** keeps the model resident so there's no cold reload, and QodeX's **byte-stable prompt prefix** (hierarchical cache work above) means the engine's **KV prefix cache hits** instead of re-prefilling the whole context every turn — the local counterpart to Anthropic prompt caching.
 
+**Run the model on another box — `qodex tunnel`.** Local-first answer to remote backends: SSH-forward to a workstation running Ollama/LM Studio and drive it from your laptop, code and execution staying local.
+
+```bash
+qodex tunnel --host workstation --user me --remote-port 11434 --local-port 11434
+# → point providers.ollama.baseUrl at http://localhost:11434; the 70B/MoE model runs over there.
+```
+
 Cloud providers are opt-in. Web-search keys are read from the environment, never the config file:
 
 ```bash
