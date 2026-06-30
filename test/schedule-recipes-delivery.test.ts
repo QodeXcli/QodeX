@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { buildRecipePrompt, isRecipe, RECIPES } from '../src/schedule/recipes.js';
+import { buildRecipePrompt, isRecipe, RECIPES, parseMaintainScope } from '../src/schedule/recipes.js';
 import { parseDeliveryTarget, formatRunSummary, clampForPlatform } from '../src/schedule/delivery.js';
 import { ScheduleStore } from '../src/schedule/store.js';
 
@@ -51,6 +51,30 @@ describe('recipes — Autonomous Verified PR', () => {
     const p = buildRecipePrompt('maintain', '');
     expect(p).not.toContain('Focus area');
     expect(p).toContain('SAFE DEAD CODE ONLY');
+  });
+
+  it('parseMaintainScope: scope keyword, path focus, and --dry-run', () => {
+    expect(parseMaintainScope('')).toEqual({ scope: 'dead-code', focus: '', dryRun: false });
+    expect(parseMaintainScope('src/utils')).toEqual({ scope: 'dead-code', focus: 'src/utils', dryRun: false });
+    expect(parseMaintainScope('unused-imports src/')).toEqual({ scope: 'unused-imports', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('unused-imports --dry-run')).toEqual({ scope: 'unused-imports', focus: '', dryRun: true });
+    expect(parseMaintainScope('dead-code --dry-run app/')).toEqual({ scope: 'dead-code', focus: 'app/', dryRun: true });
+  });
+
+  it('maintain scope=unused-imports targets only zero-reference bindings, excludes side-effect imports', () => {
+    const p = buildRecipePrompt('maintain', 'unused-imports src/');
+    expect(p).toContain('UNUSED IMPORTS ONLY');
+    expect(p).toMatch(/referenced ZERO times in its own file/i);
+    expect(p).toMatch(/NEVER remove a bare `import/i);          // side-effect guardrail
+    expect(p).toContain('src/');
+    expect(p).toContain('```qodex-receipt');                     // still ships via verified-PR
+    expect(p).not.toContain('SAFE DEAD CODE ONLY');              // the other scope is not mixed in
+  });
+
+  it('maintain --dry-run previews without modifying or opening a PR', () => {
+    const p = buildRecipePrompt('maintain', 'unused-imports --dry-run');
+    expect(p).toMatch(/DRY RUN: do NOT modify/i);
+    expect(p).toMatch(/blocked — dry-run/i);
   });
 });
 

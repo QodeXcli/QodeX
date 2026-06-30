@@ -519,12 +519,19 @@ qodex schedule add --name nightly-flaky-fix \
 
 That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie.
 
-**`--recipe maintain` — a codebase that improves itself.** The self-improving loop, built on the moat: nightly, QodeX uses its **code-graph** to find *one* piece of provably-unused dead code (proven safe via `analyze_impact` / `find_references` — zero references or it blocks), removes only that, and ships it through the verified-PR protocol above. Conservative by design (a wrong "improvement" at 3am is worse than none), opt-in, and every run lands in the dashboard's receipts panel.
+**`--recipe maintain` — a codebase that improves itself.** The self-improving loop, built on the moat. Each **scope** is a conservative, *provable* cleanup shipped through the verified-PR protocol above — opt-in, and every run lands in the dashboard's receipts panel (tagged with its scope):
+
+- **`dead-code`** (default) — code-graph finds *one* provably-unused item (`analyze_impact`/`find_references` → zero references or it blocks), removes only that.
+- **`unused-imports`** — removes import bindings referenced zero times in their file (proven via the linter / `tsc --noUnusedLocals`); never touches side-effect imports.
+
+The scope (and an optional path + `--dry-run` preview) goes in the prompt:
 
 ```bash
 qodex schedule add --name nightly-tidy --cron "0 4 * * *" --recipe maintain \
-  --prompt "src/" --deliver telegram:<your-chat-id>
-# 4am: code-graph → prove-unused → remove one dead item → verify → PR for your review (or 🧾 blocked).
+  --prompt "unused-imports src/" --deliver telegram:<your-chat-id>
+# 4am: prove-unused → remove → verify → PR for your review (or 🧾 blocked).
+qodex schedule add --name preview --cron "@weekly" --recipe maintain --prompt "dead-code --dry-run"
+# --dry-run: lists what it WOULD remove, changes nothing.
 ```
 
 **Proof-carrying autonomy — every run comes with a receipt.** An unattended action is only trustworthy if you can *audit* it. Each run emits a structured **trust receipt** — what it set out to do, **which checks ran and whether they passed**, the files it touched, and the PR it opened (or why it didn't). Crucially, the hard facts are **measured by QodeX, not claimed by the model**: the `filesChanged` come from a real `git diff` and the `verification` entries from the checkers the agent loop *actually ran* — written out by QodeX itself, so the model can't fabricate a green receipt. The runner captures it, stores it, and leads the chat message with it:

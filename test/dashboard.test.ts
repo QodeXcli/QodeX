@@ -16,7 +16,7 @@ const data: DashboardData = {
   schedules: [{ id: 'sched1234', name: 'nightly-deps', cron: '@daily', enabled: true, recipe: 'verified-pr' }],
   models: ['qwen3-coder', 'anthropic/claude-3.5'],
   candidates: [{ name: 'add-pagination', description: 'cursor pagination playbook', confidence: 82 }],
-  runs: [{ schedule: 'nightly-deps', when: '3h ago', status: 'success', receipt: { status: 'opened', prUrl: 'https://h/pr/9', verification: [{ command: 'tsc', passed: true }] } }],
+  runs: [{ schedule: 'nightly-deps', recipe: 'maintain · unused-imports', when: '3h ago', status: 'success', receipt: { status: 'opened', prUrl: 'https://h/pr/9', verification: [{ command: 'tsc', passed: true }] } }],
   bot: { running: false },
   health: [{ label: 'Provider keys', ok: true, detail: '1/1 cloud keys set' }, { label: 'Bot', ok: true, detail: 'stopped' }],
   logs: ['2026-06-30 INFO started', '2026-06-30 INFO ready'],
