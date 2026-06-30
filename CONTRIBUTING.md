@@ -52,6 +52,13 @@ weak local model can't ship broken or unverified code. When adding a capability,
 (off by default). New model-facing tools should be relevance-gated so they don't bloat the
 prompt.
 
+### Extending the self-improvement loop
+
+The `maintain` recipe is how QodeX improves a codebase unattended without ever shipping an
+unverified change. To add a new cleanup **scope** (or just to understand how it stays safe),
+read **[docs/MAINTAIN.md](docs/MAINTAIN.md)** — it covers the verified-PR protocol, the existing
+scopes, and a step-by-step guide to adding one.
+
 ## Reporting bugs
 
 Open an issue at https://github.com/QodeXcli/QodeX/issues with the QodeX version
