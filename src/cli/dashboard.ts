@@ -67,7 +67,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const addForm = live ? `<div class="addform">
     <input id="s_name" placeholder="name (e.g. nightly-fix)">
     <input id="s_cron" placeholder="cron (@daily, 0 3 * * *)">
-    <input id="s_prompt" placeholder="prompt — or for maintain: dead-code | unused-imports | unused-locals [--dry-run] [path]" style="flex:2">
+    <input id="s_prompt" placeholder="prompt — or maintain: dead-code | unused-imports | unused-locals | unused-params [--dry-run] [path]" style="flex:2">
     <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option><option value="maintain">maintain (self-improving → verified PR)</option></select>
     <input id="s_deliver" placeholder="deliver (telegram:&lt;id&gt;)">
     <button onclick="act('schedule.add',{name:s_name.value,cron:s_cron.value,prompt:s_prompt.value,recipe:s_recipe.value,deliver:s_deliver.value})">Schedule</button>
