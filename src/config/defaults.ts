@@ -448,6 +448,9 @@ export interface QodexConfig {
   learning?: {
     /** Capture candidate skills after eligible tasks. Default false. */
     enabled?: boolean;
+    /** When `enabled` is OFF, still SUGGEST capturing a skill after a successful task that looks
+     *  like a reusable pattern (judged from the code graph). Default true; set false to silence. */
+    suggestSkills?: boolean;
     /** Auto-run `skill eval` immediately after a capture (replay in a clean worktree +
      *  objective verify, recorded into the candidate). Costs a model call + worktree per
      *  capture, so it's opt-in. Default false; otherwise run `qodex skill eval` on demand. */
