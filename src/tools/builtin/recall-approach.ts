@@ -34,17 +34,17 @@ export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
     const store = getSessionStore();
 
     const worklog = (() => {
-      try { return store.getWorklog(cwd, 100).map((w: any) => ({ kind: 'worklog' as const, text: w.entry, when: relTime(w.created_at), detail: w.kind })); }
+      try { return store.getWorklog(cwd, 100).map((w: any) => ({ kind: 'worklog' as const, text: w.entry, when: relTime(w.created_at), at: w.created_at, detail: w.kind })); }
       catch { return []; }
     })();
     const episodes = await (async () => {
       try {
         const { readEpisodes } = await import('../../context/episodic-memory.js');
-        return (await readEpisodes(cwd)).map(e => ({ kind: 'episode' as const, text: `${e.prompt} ${e.summary}`, when: relTime(e.ts), files: e.filesChanged, detail: e.summary }));
+        return (await readEpisodes(cwd)).map(e => ({ kind: 'episode' as const, text: `${e.prompt} ${e.summary}`, when: relTime(e.ts), at: e.ts, files: e.filesChanged, detail: e.summary }));
       } catch { return []; }
     })();
 
-    const matches = rankApproaches(args.query, [...episodes, ...worklog], { topK: args.limit ?? 5 });
+    const matches = rankApproaches(args.query, [...episodes, ...worklog], { topK: args.limit ?? 5, nowMs: Date.now() });
     return { content: formatApproaches(args.query, matches), metadata: { matches: matches.length, episodes: episodes.length, worklog: worklog.length } };
   }
 }
