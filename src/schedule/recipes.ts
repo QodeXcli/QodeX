@@ -71,19 +71,19 @@ function verifiedPrPrompt(goal: string): string {
 }
 
 /** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
-export type MaintainScope = 'dead-code' | 'unused-imports';
-export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports'] as const;
+export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals'] as const;
 
 /** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
- *  Forms: "" (→ dead-code) · "unused-imports src/" · "dead-code --dry-run" · "src/utils". */
+ *  Forms: "" (→ dead-code) · "unused-imports src/" · "unused-locals --dry-run" · "src/utils". */
 export function parseMaintainScope(prompt: string): { scope: MaintainScope; focus: string; dryRun: boolean } {
   let rest = (prompt ?? '').trim();
   const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
   rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
   let scope: MaintainScope = 'dead-code';
-  const m = /^(unused[-_]?imports|imports|dead[-_]?code)\b/i.exec(rest);
+  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|dead[-_]?code)\b/i.exec(rest);
   if (m) {
-    scope = /imports/i.test(m[1]!) ? 'unused-imports' : 'dead-code';
+    scope = /imports/i.test(m[1]!) ? 'unused-imports' : /locals/i.test(m[1]!) ? 'unused-locals' : 'dead-code';
     rest = rest.slice(m[0].length).trim();
   }
   return { scope, focus: rest, dryRun };
@@ -117,6 +117,22 @@ const UNUSED_IMPORTS_SELECTION = [
   'd. Removing them IS your GOAL.',
 ];
 
+const UNUSED_LOCALS_SELECTION = [
+  'SCOPE (v3 — UNUSED LOCALS, with EXTRA caution): remove local/module bindings (const/let) that',
+  'are declared but referenced ZERO times.',
+  '',
+  'SELECTION — prove unused AND side-effect-free, or block:',
+  'a. Find candidates with the type-checker (`tsc --noUnusedLocals`, or the linter\'s no-unused-vars),',
+  '   or `find_references`. The binding must be referenced ZERO times.',
+  'b. EXCLUDE function PARAMETERS entirely — never remove a parameter (it may be required by a',
+  '   signature/interface, or sit in the middle of the list). If the only fix is a param, BLOCK.',
+  'c. SIDE-EFFECT GATE (critical): only remove a binding whose initializer is provably side-effect-',
+  '   free — a literal, regex, array/object literal, or a pure expression. If the right-hand side',
+  '   has ANY function/method call, `await`, `new`, or could trigger a getter, DO NOT remove it',
+  '   (its effect may matter even though the value is unused): choose `blocked` with that reason.',
+  'd. Remove only the proven-safe bindings. Touch nothing else.',
+];
+
 /**
  * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
  * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
@@ -125,7 +141,9 @@ const UNUSED_IMPORTS_SELECTION = [
  */
 function maintainPrompt(prompt: string): string {
   const { scope, focus, dryRun } = parseMaintainScope(prompt);
-  const selection = scope === 'unused-imports' ? UNUSED_IMPORTS_SELECTION : DEAD_CODE_SELECTION;
+  const selection = scope === 'unused-imports' ? UNUSED_IMPORTS_SELECTION
+    : scope === 'unused-locals' ? UNUSED_LOCALS_SELECTION
+    : DEAD_CODE_SELECTION;
   const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
   const dryRunBlock = dryRun ? [
     '',

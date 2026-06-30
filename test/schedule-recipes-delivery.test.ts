@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { buildRecipePrompt, isRecipe, RECIPES, parseMaintainScope } from '../src/schedule/recipes.js';
+import { buildRecipePrompt, isRecipe, RECIPES, parseMaintainScope, MAINTAIN_SCOPES } from '../src/schedule/recipes.js';
 import { parseDeliveryTarget, formatRunSummary, clampForPlatform } from '../src/schedule/delivery.js';
 import { ScheduleStore } from '../src/schedule/store.js';
 
@@ -75,6 +75,19 @@ describe('recipes — Autonomous Verified PR', () => {
     const p = buildRecipePrompt('maintain', 'unused-imports --dry-run');
     expect(p).toMatch(/DRY RUN: do NOT modify/i);
     expect(p).toMatch(/blocked — dry-run/i);
+  });
+
+  it('maintain scope=unused-locals: excludes params + has a side-effect gate', () => {
+    expect(parseMaintainScope('unused-locals src/')).toEqual({ scope: 'unused-locals', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('locals --dry-run')).toEqual({ scope: 'unused-locals', focus: '', dryRun: true });
+    const p = buildRecipePrompt('maintain', 'unused-locals');
+    expect(p).toContain('UNUSED LOCALS');
+    expect(p).toMatch(/EXCLUDE function PARAMETERS/i);     // never remove a param
+    expect(p).toMatch(/SIDE-EFFECT GATE/i);                // only side-effect-free initializers
+    expect(p).toMatch(/function\/method call, `await`, `new`/i);
+    expect(p).toContain('```qodex-receipt');               // still ships via verified-PR
+    expect(p).not.toContain('UNUSED IMPORTS ONLY');
+    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals']);
   });
 });
 
