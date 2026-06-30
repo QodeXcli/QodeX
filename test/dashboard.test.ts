@@ -82,6 +82,7 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('cleanups shipped');            // maintain stat card
     expect(live).toContain('This week');                   // weekly trend
     expect(live).toContain('Suggested next');              // auto scope recommendation
+    expect(live).toContain("act('maintain.preview'");      // "Run maintain now (preview)" button
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it

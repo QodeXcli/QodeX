@@ -89,7 +89,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
 
   // Maintain status & analytics (self-improvement loop at a glance).
   const ms = d.maintainStats;
-  const maintainPanel = ms && ms.totalRuns > 0 ? `<div class="panel"><h2>Maintain status — self-improvement</h2>
+  const maintainPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px"><h2 style="margin:0">Maintain status — self-improvement</h2>${live ? `<button onclick="act('maintain.preview',{})">🔍 Run maintain now (preview)</button>` : ''}</div>${ms && ms.totalRuns > 0 ? `
     <div class="cards" style="grid-template-columns:repeat(4,1fr);margin:0 0 14px">
       ${card('cleanups shipped', String(ms.opened), 'var(--green)')}
       ${card('safely blocked', String(ms.blocked), 'var(--amber)')}
@@ -103,7 +103,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     ${d.maintainTrend ? `<div class="ctl"><span>8-week trend</span><span class="mono ok">${(() => { const t = d.maintainTrend!; const max = Math.max(1, ...t); const b = '▁▂▃▄▅▆▇█'; return t.map(n => b[Math.min(7, Math.round((n / max) * 7))]).join(''); })()}</span></div>` : ''}
     ${d.maintainProjection ? `<div class="ctl"><span>Projected</span><span class="dim">~${d.maintainProjection.cleanupsPerMonth} cleanups/mo · ~${d.maintainProjection.minutesPerMonth} min/mo</span></div>` : ''}
     ${d.maintainNext ? `<div class="ctl" style="border:0"><span>Suggested next</span><b class="ok">${esc(d.maintainNext.scope)}</b> <span class="dim">— ${esc(d.maintainNext.why)}</span>${live ? ` <button onclick="act('schedule.add',{name:'maintain-${esc(d.maintainNext.scope)}',cron:'0 4 * * *',prompt:'${esc(d.maintainNext.scope)}',recipe:'maintain'})">Schedule it</button>` : ''}</div>` : '<div class="ctl" style="border:0"><span class="dim">All scopes exercised.</span></div>'}
-  </div>` : '';
+  ` : '<p class="dim" style="margin:0">No maintain runs yet — schedule one, or use “Run maintain now (preview)” above to see what it would clean.</p>'}</div>`;
 
   // Bot lifecycle: status + start/stop (it still needs a token + allowlist in config to connect).
   const botCtl = live
