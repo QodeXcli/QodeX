@@ -511,11 +511,13 @@ export class AgentLoop {
         `\n\n# Provider-specific guidance (${providerName})\n${providerPromptCfg.append}`;
     }
 
-    // Static/volatile boundary: everything up to HERE (identity + base prompt + provider
-    // guidance) is byte-stable across every turn of the session, so it gets its own prompt-
-    // cache breakpoint. The per-turn injections below (retrieval, memory, tree, episodic,
-    // lessons) are volatile and sit AFTER the boundary so they never invalidate the core cache.
-    const coreBoundary = sysPrompt.length;
+    // Static/volatile split: injections are routed into two buffers so the prompt-cache
+    // boundary lands between them. `stableTail` holds session-stable guidance (code style,
+    // failure lessons) that is byte-identical across turns → folded into the CACHED core.
+    // `volatileTail` holds genuinely per-turn context (retrieval, dep-graph, episodic recall)
+    // that changes with the query → kept AFTER the boundary so it never invalidates the core.
+    let stableTail = '';
+    let volatileTail = '';
 
     // ── Auto-retrieval pre-pass (best-effort) ──
     // Embed the request and inject the most semantically-relevant files so the model
@@ -540,7 +542,7 @@ export class AgentLoop {
           });
           if (files && files.length > 0) {
             const block = formatRetrievalBlock(files);
-            if (block) sysPrompt += `\n\n${block}`;
+            if (block) volatileTail += `\n\n${block}`;
             logger.info('Auto-retrieval injected relevant files', { count: files.length });
 
             // ── Symbol-graph daemon: proactive ripple-effect meta-context ──
@@ -556,7 +558,7 @@ export class AgentLoop {
                   const deps = dependencyContextFor(graph, seeds);
                   const depBlock = renderDependencyContext(deps);
                   if (depBlock) {
-                    sysPrompt += `\n\n${depBlock}`;
+                    volatileTail += `\n\n${depBlock}`;
                     logger.debug('Symbol-graph meta-context injected', { seeds: seeds.length, withDeps: deps.length });
                   }
                 }
@@ -580,7 +582,7 @@ export class AgentLoop {
           const { scanProjectStyle, buildStyleBlock } = await import('../context/style-profile.js');
           this.styleBlock = buildStyleBlock(await scanProjectStyle(this.cwd));
         }
-        if (this.styleBlock) sysPrompt += `\n\n${this.styleBlock}`;
+        if (this.styleBlock) stableTail += `\n\n${this.styleBlock}`;
       } catch (e: any) {
         logger.debug('Style-profile injection skipped', { err: e?.message });
         this.styleBlock = ''; // don't retry every turn on failure
@@ -599,7 +601,7 @@ export class AgentLoop {
           minScore: emCfg.minSimilarity ?? 0.18,
           diversity: emCfg.diversity ?? 0.3,
         });
-        if (block) { sysPrompt += `\n\n${block}`; logger.info('Episodic memory injected'); }
+        if (block) { volatileTail += `\n\n${block}`; logger.info('Episodic memory injected'); }
       } catch (e: any) {
         logger.debug('Episodic recall skipped', { err: e?.message });
       }
@@ -618,14 +620,16 @@ export class AgentLoop {
           minDistinctTasks: flCfg.minDistinctTasks ?? 2,
           topK: flCfg.maxInjected ?? 5,
         });
-        if (block) { sysPrompt += `\n\n${block}`; logger.info('Learned cautions injected'); }
+        if (block) { stableTail += `\n\n${block}`; logger.info('Learned cautions injected'); }
       } catch (e: any) {
         logger.debug('Failure-lessons injection skipped', { err: e?.message });
       }
     }
 
+    // Assemble: [ cached core = base + stable guidance ] [ boundary ] [ volatile per-turn ctx ].
+    const cachedCore = sysPrompt + stableTail;
     return [
-      { role: 'system', content: sysPrompt, cacheBoundary: coreBoundary },
+      { role: 'system', content: cachedCore + volatileTail, cacheBoundary: cachedCore.length },
       { role: 'user', content: userPrompt },
     ];
   }
