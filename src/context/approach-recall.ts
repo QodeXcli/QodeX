@@ -10,7 +10,7 @@
 import { tokenize, termFreq, cosineSim } from '../skills/learning/similarity.js';
 
 export interface ApproachSource {
-  kind: 'episode' | 'worklog';
+  kind: 'episode' | 'worklog' | 'fact';
   /** The searchable text (prompt + summary, or the worklog entry). */
   text: string;
   when: string;
@@ -60,7 +60,7 @@ export function formatApproaches(query: string, matches: ApproachMatch[]): strin
   if (matches.length === 0) return `No past work on this project resembles "${query}".`;
   const lines = [`How you approached similar work before — "${query}":`, ''];
   for (const m of matches) {
-    const tag = m.kind === 'episode' ? '🎯 task' : `📝 ${m.detail ?? 'worklog'}`;
+    const tag = m.kind === 'episode' ? '🎯 task' : m.kind === 'fact' ? '🧠 fact' : `📝 ${m.detail ?? 'worklog'}`;
     const head = m.text.replace(/\s+/g, ' ').trim().slice(0, 140);
     const files = m.files?.length ? `  (touched: ${m.files.slice(0, 4).join(', ')})` : '';
     lines.push(`- [${tag} · ${m.when}] ${head}${files}`);

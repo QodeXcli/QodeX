@@ -13,6 +13,13 @@ describe('rankApproaches', () => {
     expect(m[0]!.kind).toBe('worklog');
     expect(m[0]!.text).toMatch(/JWT auth/);
   });
+  it('searches learned facts too (full history), tagged 🧠', () => {
+    const withFact = [...SOURCES, { kind: 'fact' as const, text: 'the deploy key is in .env as DEPLOY_KEY', when: '' }];
+    const m = rankApproaches('where is the deploy key?', withFact, { minScore: 0.05 });
+    expect(m[0]!.kind).toBe('fact');
+    expect(formatApproaches('deploy key', m)).toMatch(/🧠 fact/);
+  });
+
   it('finds the pagination episode (with its files) for a pagination query', () => {
     const m = rankApproaches('add pagination cursor to an endpoint', SOURCES, { topK: 1, minScore: 0.05 });
     expect(m).toHaveLength(1);
