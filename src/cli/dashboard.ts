@@ -17,16 +17,47 @@ export interface DashboardData {
   facts: string[];
   episodes: { when: string; prompt: string; summary: string }[];
   skills: { name: string; description: string }[];
+  controls: { path: string; label: string; group: string; type: 'bool' | 'enum'; values?: string[]; current: string }[];
+  schedules: { id: string; name: string; cron: string; enabled: boolean; recipe?: string }[];
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
 const esc = (s: string) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 const num = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
 
-/** Render the dashboard as one self-contained HTML page (PURE). Chart.js via CDN; everything else inline. */
-export function buildDashboardHtml(d: DashboardData): string {
+/** Render the dashboard as one self-contained HTML page (PURE). Chart.js via CDN; everything else
+ *  inline. When `token` is given the page is a live CONTROL panel (toggles/buttons call the local
+ *  API); without it the same page renders read-only. */
+export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = {}): string {
+  const live = !!opts.token;
   const card = (label: string, value: string, accent: string) =>
     `<div class="card"><div class="v" style="color:${accent}">${value}</div><div class="l">${label}</div></div>`;
+
+  // ── Controls: config toggles/selects grouped, + scheduled tasks with enable/remove ──
+  const groups = [...new Set(d.controls.map(c => c.group))];
+  const controlPanel = d.controls.length === 0 ? '' : groups.map(g => {
+    const rows = d.controls.filter(c => c.group === g).map(c => {
+      if (c.type === 'bool') {
+        const on = c.current === 'true';
+        const btn = live
+          ? `<button class="tg ${on ? 'on' : ''}" onclick="act('config.set',{key:'${c.path}',value:${!on}})">${on ? 'ON' : 'OFF'}</button>`
+          : `<span class="${on ? 'ok' : 'dim'}">${on ? 'ON' : 'OFF'}</span>`;
+        return `<div class="ctl"><span>${esc(c.label)}</span>${btn}</div>`;
+      }
+      const sel = live
+        ? `<select onchange="act('config.set',{key:'${c.path}',value:this.value})">${(c.values ?? []).map(v => `<option${v === c.current ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>`
+        : `<span class="mono">${esc(c.current)}</span>`;
+      return `<div class="ctl"><span>${esc(c.label)}</span>${sel}</div>`;
+    }).join('');
+    return `<div class="panel"><h2>${esc(g)}</h2>${rows}</div>`;
+  }).join('');
+
+  const scheduleRows = d.schedules.length ? d.schedules.map(s => `<tr>
+    <td>${s.enabled ? '🟢' : '⚪'} <b>${esc(s.name)}</b>${s.recipe ? ` <span class="mono dim">${esc(s.recipe)}</span>` : ''}</td>
+    <td class="mono dim">${esc(s.cron)}</td>
+    <td class="r">${live ? `<button onclick="act('schedule.setEnabled',{id:'${esc(s.id)}',enabled:${!s.enabled}})">${s.enabled ? 'Disable' : 'Enable'}</button> <button class="danger" onclick="if(confirm('Remove ${esc(s.name)}?'))act('schedule.remove',{id:'${esc(s.id)}'})">Remove</button>` : `<span class="dim">${s.enabled ? 'enabled' : 'disabled'}</span>`}</td>
+  </tr>`).join('') : '<tr><td colspan="3" class="dim">No scheduled tasks. Add one with `qodex schedule add`.</td></tr>';
+  const schedulePanel = `<div class="panel"><h2>Scheduled tasks</h2><table><thead><tr><th>task</th><th>cron</th><th class="r">${live ? 'actions' : 'state'}</th></tr></thead><tbody>${scheduleRows}</tbody></table></div>`;
   const providerRows = d.providers.map(p => `<tr>
     <td>${p.isDefault ? '⭐ ' : ''}<b>${esc(p.name)}</b></td>
     <td class="mono dim">${esc(p.baseUrl || '—')}</td>
@@ -64,6 +95,14 @@ export function buildDashboardHtml(d: DashboardData): string {
   .dim{color:var(--dim)}.ok{color:var(--green)}.warn{color:var(--amber)}
   ul{margin:0;padding-left:18px}li{margin:5px 0}
   .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .ctl{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--line)}
+  .ctl:last-child{border-bottom:0}
+  button,select{font:inherit;color:var(--ink);background:#1b2233;border:1px solid var(--line);border-radius:8px;padding:5px 12px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  .tg.on{background:rgba(91,227,167,.15);border-color:var(--green);color:var(--green)}
+  .tg{min-width:54px}.danger:hover{border-color:#ff6b6b;color:#ff6b6b}
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--accent);border-radius:10px;padding:10px 18px;opacity:0;transition:opacity .2s;pointer-events:none}
+  #toast.show{opacity:1}
   @media(max-width:820px){.cards{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
   <header><h1>QodeX</h1><div class="sub">${esc(d.project)} · model <span class="mono">${esc(d.model)}</span> · ${esc(d.generatedAt)}</div></header>
@@ -76,6 +115,9 @@ export function buildDashboardHtml(d: DashboardData): string {
     ${card('skills', String(d.totals.skills), 'var(--accent)')}
   </div>
   <div class="panel"><h2>Tokens per recent session</h2><canvas id="chart" height="90"></canvas></div>
+  ${live ? '' : '<p class="dim" style="margin:-6px 0 14px">Read-only snapshot. Run <b>qodex dashboard</b> (server mode) for live controls.</p>'}
+  <div class="two">${controlPanel}</div>
+  ${schedulePanel}
   <div class="panel"><h2>Providers &amp; models</h2><table><thead><tr><th>Provider</th><th>Base URL</th><th>Models</th><th>API key</th></tr></thead><tbody>${providerRows}</tbody></table></div>
   <div class="panel"><h2>Recent sessions</h2><table><thead><tr><th>id</th><th>title</th><th>model</th><th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th>when</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
   <div class="two">
@@ -85,10 +127,23 @@ export function buildDashboardHtml(d: DashboardData): string {
   <div class="panel"><h2>Skills</h2><ul>${skillList}</ul></div>
   <p class="dim" style="text-align:center">Generated by <b>qodex dashboard</b> — all data is local, under ~/.qodex/.</p>
 </div>
+<div id="toast"></div>
 <script>
   new Chart(document.getElementById('chart'),{type:'bar',
     data:{labels:${chartLabels},datasets:[{label:'tokens',data:${chartTokens},backgroundColor:'#7c9cff',borderRadius:6}]},
     options:{plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8a93a6'},grid:{display:false}},y:{ticks:{color:'#8a93a6'},grid:{color:'#222838'}}}}});
+${live ? `
+  const TOKEN = ${JSON.stringify(opts.token)};
+  function toast(msg, ok){ const t=document.getElementById('toast'); t.textContent=msg; t.style.borderColor=ok?'var(--green)':'#ff6b6b'; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
+  async function act(action, params){
+    try{
+      const r = await fetch('/api/action?k='+encodeURIComponent(TOKEN),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,params})});
+      const j = await r.json();
+      toast(j.message || (j.ok?'Done':'Failed'), j.ok);
+      if(j.ok) setTimeout(()=>location.reload(), 700);
+    }catch(e){ toast(String(e), false); }
+  }
+` : ''}
 </script></body></html>`;
 }
 
@@ -141,9 +196,22 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     catch { return []; }
   })();
 
+  // Controllable settings: current value of each whitelisted knob (for the toggles/selects).
+  const { CONFIG_KNOBS, getDeep } = await import('./dashboard-control.js');
+  const controls = CONFIG_KNOBS.map(k => {
+    const cur = getDeep(config, k.path);
+    const dflt = k.path === 'providers.anthropic.useCaching' ? true : (k.type === 'enum' ? (k.values?.[0] ?? '') : false);
+    const current = cur === undefined ? dflt : cur;
+    return { path: k.path, label: k.label, group: k.group, type: k.type, values: k.values, current: String(current) };
+  });
+  const schedules = await (async () => {
+    try { const { getScheduleStore } = await import('../schedule/store.js'); return getScheduleStore().list().map(s => ({ id: s.id, name: s.name, cron: s.cron, enabled: !!s.enabled, recipe: s.recipe })); }
+    catch { return []; }
+  })();
+
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-    providers, sessions, facts, episodes, skills,
+    providers, sessions, facts, episodes, skills, controls, schedules,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,
@@ -151,15 +219,30 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
   };
 }
 
-/** Build the dashboard, write it to ~/.qodex/dashboard.html, and open it in the browser. */
+/** Start the LIVE control dashboard: a local (127.0.0.1, token-protected) server that serves the
+ *  interactive page and the action API, and open it in the browser. Returns the tokened URL.
+ *  Runs until the process is stopped. */
 export async function runDashboard(cwd: string): Promise<string> {
+  const { ensureQodexHome } = await import('../config/loader.js');
+  await ensureQodexHome().catch(() => {});
+  const { startDashboardServer } = await import('./dashboard-server.js');
+  const server = await startDashboardServer({
+    cwd,
+    buildHtml: async (token) => buildDashboardHtml(await gatherDashboardData(cwd), { token }),
+    getState: async () => gatherDashboardData(cwd),
+  });
+  try { const { openUrl } = await import('../artifacts/open-browser.js'); await openUrl(server.url); } catch { /* best-effort — print the URL */ }
+  return server.url;
+}
+
+/** Build a static, read-only dashboard file (no server) — kept for `qodex dashboard --static`. */
+export async function writeStaticDashboard(cwd: string): Promise<string> {
   const { ensureQodexHome } = await import('../config/loader.js');
   const { QODEX_HOME } = await import('../config/defaults.js');
   await ensureQodexHome().catch(() => {});
-  const data = await gatherDashboardData(cwd);
   const out = path.join(QODEX_HOME, 'dashboard.html');
-  await fs.writeFile(out, buildDashboardHtml(data));
-  try { const { openUrl } = await import('../artifacts/open-browser.js'); await openUrl('file://' + out); } catch { /* best-effort — print the path */ }
+  await fs.writeFile(out, buildDashboardHtml(await gatherDashboardData(cwd)));
+  try { const { openUrl } = await import('../artifacts/open-browser.js'); await openUrl('file://' + out); } catch { /* best-effort */ }
   return out;
 }
 
