@@ -23,6 +23,18 @@ describe('rankApproaches', () => {
     expect(rankApproaches('upgrade kubernetes ingress', SOURCES, { minScore: 0.2 })).toHaveLength(0);
     expect(rankApproaches('', SOURCES)).toHaveLength(0);
   });
+
+  it('on near-equal relevance, the more RECENT approach surfaces first', () => {
+    const now = Date.parse('2026-07-01T00:00:00Z');
+    const iso = (d: number) => new Date(now - d * 86_400_000).toISOString();
+    const two = [
+      { kind: 'episode' as const, text: 'add login auth flow', when: 'old', at: iso(200) },   // stale
+      { kind: 'episode' as const, text: 'add login auth flow', when: 'new', at: iso(2) },      // recent
+    ];
+    const m = rankApproaches('add login auth flow', two, { topK: 1, minScore: 0.1, nowMs: now });
+    expect(m[0]!.when).toBe('new');                 // recency tilt breaks the tie
+    expect(m[0]!.score).toBeGreaterThan(0.9);       // displayed score is the honest relevance
+  });
 });
 
 describe('formatApproaches', () => {
