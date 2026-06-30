@@ -27,6 +27,8 @@ export interface DashboardData {
   logs: string[];
   userModel: { preferences: string[]; recentThemes: string[]; taskCount: number; summary: string };
   maintainStats?: import('./maintain-stats.js').MaintainStats;
+  maintainWeekly?: import('./maintain-stats.js').MaintainWeekly;
+  maintainNext?: { scope: string; why: string };
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -94,7 +96,9 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     </div>
     <div class="ctl"><span>Success rate (opened ÷ runs)</span><b class="${ms.successRate >= 0.5 ? 'ok' : 'dim'}">${Math.round(ms.successRate * 100)}% of ${ms.totalRuns}</b></div>
     ${ms.lastRun ? `<div class="ctl"><span>Last run</span><span class="dim">${esc(ms.lastRun.scope)} · ${esc(ms.lastRun.status)} · ${esc(ms.lastRun.when)}</span></div>` : ''}
-    <div class="ctl" style="border:0"><span>By scope</span><span class="mono dim">${ms.byScope.map(s => `${esc(s.scope)} ${s.opened}/${s.runs}`).join(' · ') || '—'}</span></div>
+    <div class="ctl"><span>By scope</span><span class="mono dim">${ms.byScope.map(s => `${esc(s.scope)} ${s.opened}/${s.runs}`).join(' · ') || '—'}</span></div>
+    ${d.maintainWeekly ? `<div class="ctl"><span>This week</span><span class="dim">${d.maintainWeekly.opened} PR(s) · ${d.maintainWeekly.filesCleaned} files · ${d.maintainWeekly.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(d.maintainWeekly.openedDelta)} vs last week</span></div>` : ''}
+    ${d.maintainNext ? `<div class="ctl" style="border:0"><span>Suggested next</span><b class="ok">${esc(d.maintainNext.scope)}</b> <span class="dim">— ${esc(d.maintainNext.why)}</span>${live ? ` <button onclick="act('schedule.add',{name:'maintain-${esc(d.maintainNext.scope)}',cron:'0 4 * * *',prompt:'${esc(d.maintainNext.scope)}',recipe:'maintain'})">Schedule it</button>` : ''}</div>` : '<div class="ctl" style="border:0"><span class="dim">All scopes exercised.</span></div>'}
   </div>` : '';
 
   // Bot lifecycle: status + start/stop (it still needs a token + allowlist in config to connect).
@@ -329,25 +333,28 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
       return all.slice(0, 12);
     } catch { return []; }
   })();
-  // Maintain analytics: aggregate ALL maintain runs (not just recent 12) into status stats.
-  const maintainStats = await (async () => {
+  // Maintain analytics: aggregate ALL maintain runs (not just recent 12) into status stats,
+  // a week-over-week report, and an auto-recommended next scope.
+  const maintain = await (async () => {
     try {
       const { getScheduleStore } = await import('../schedule/store.js');
-      const { parseMaintainScope } = await import('../schedule/recipes.js');
-      const { buildMaintainStats } = await import('./maintain-stats.js');
+      const { parseMaintainScope, MAINTAIN_SCOPES } = await import('../schedule/recipes.js');
+      const { buildMaintainStats, weeklyReport, recommendNextScope } = await import('./maintain-stats.js');
       const store = getScheduleStore();
-      const mruns: { scope: string; status: string; filesChanged: number; when: string }[] = [];
+      const mruns: import('./maintain-stats.js').MaintainRun[] = [];
       for (const s of store.list().filter(s => s.recipe === 'maintain')) {
         const scope = parseMaintainScope(s.prompt).scope;
         for (const r of store.recentRuns(s.id, 50)) {
           let status = r.status ?? 'running'; let files = 0;
           if (r.receipt) { try { const rc = JSON.parse(r.receipt); status = rc.status ?? status; files = (rc.filesChanged ?? []).length; } catch { /* ignore */ } }
-          mruns.push({ scope, status, filesChanged: files, when: relTime(r.started_at) });
+          mruns.push({ scope, status, filesChanged: files, when: relTime(r.started_at), at: r.started_at });
         }
       }
-      return buildMaintainStats(mruns);
+      const stats = buildMaintainStats(mruns);
+      return { stats, weekly: weeklyReport(mruns, Date.now()), next: recommendNextScope(mruns, stats, MAINTAIN_SCOPES) };
     } catch { return undefined; }
   })();
+  const maintainStats = maintain?.stats;
   const bot = await (async () => {
     try { const { botStatus } = await import('./bot-process.js'); return await botStatus(); }
     catch { return { running: false }; }
@@ -372,7 +379,8 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
 
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel, maintainStats,
+    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel,
+    maintainStats, maintainWeekly: maintain?.weekly, maintainNext: maintain?.next ?? undefined,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,

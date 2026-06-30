@@ -9,6 +9,7 @@ export interface MaintainRun {
   status: string;           // receipt status: opened | blocked | done | failed (or run status)
   filesChanged: number;     // from the receipt
   when: string;             // relative time, newest first expected
+  at?: string;              // ISO timestamp (for week-over-week trends)
 }
 
 export interface MaintainStats {
@@ -54,4 +55,47 @@ export function buildMaintainStats(runs: MaintainRun[]): MaintainStats {
 export function suggestNextScopes(stats: MaintainStats, allScopes: readonly string[]): string[] {
   const seen = new Set(stats.byScope.map(s => s.scope));
   return allScopes.filter(s => !seen.has(s));
+}
+
+/** Auto-recommend the next scope to run, with a reason. Prefers a never-run scope; else the scope
+ *  blocking most often (a backlog it can't currently clear); else the least-used. PURE. */
+export function recommendNextScope(
+  runs: MaintainRun[],
+  stats: MaintainStats,
+  allScopes: readonly string[],
+): { scope: string; why: string } | null {
+  const never = suggestNextScopes(stats, allScopes);
+  if (never.length) return { scope: never[0]!, why: 'never run here yet — try it' };
+  // count blocks per scope (a scope that keeps blocking has a backlog worth a look)
+  const blocks = new Map<string, number>();
+  for (const r of runs) if (r.status === 'blocked') blocks.set(r.scope, (blocks.get(r.scope) ?? 0) + 1);
+  const topBlock = [...blocks.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (topBlock && topBlock[1] >= 2) return { scope: topBlock[0], why: `blocked ${topBlock[1]}× recently — review the backlog` };
+  const leastUsed = [...stats.byScope].sort((a, b) => a.runs - b.runs)[0];
+  return leastUsed ? { scope: leastUsed.scope, why: 'least-exercised scope' } : null;
+}
+
+export interface MaintainWeekly {
+  opened: number; blocked: number; filesCleaned: number; minutesSaved: number;
+  priorOpened: number; openedDelta: number;
+}
+
+/** Week-over-week self-improvement report from run timestamps. PURE (pass `nowMs`). */
+export function weeklyReport(runs: MaintainRun[], nowMs: number): MaintainWeekly {
+  const DAY = 86_400_000;
+  const inWindow = (r: MaintainRun, from: number, to: number) => {
+    const t = r.at ? Date.parse(r.at) : NaN;
+    return Number.isFinite(t) && t >= from && t < to;
+  };
+  const thisWeek = runs.filter(r => inWindow(r, nowMs - 7 * DAY, nowMs));
+  const priorWeek = runs.filter(r => inWindow(r, nowMs - 14 * DAY, nowMs - 7 * DAY));
+  const opened = thisWeek.filter(r => r.status === 'opened');
+  return {
+    opened: opened.length,
+    blocked: thisWeek.filter(r => r.status === 'blocked').length,
+    filesCleaned: opened.reduce((a, r) => a + (r.filesChanged || 0), 0),
+    minutesSaved: opened.length * 5,
+    priorOpened: priorWeek.filter(r => r.status === 'opened').length,
+    openedDelta: opened.length - priorWeek.filter(r => r.status === 'opened').length,
+  };
 }

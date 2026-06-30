@@ -22,6 +22,8 @@ const data: DashboardData = {
   logs: ['2026-06-30 INFO started', '2026-06-30 INFO ready'],
   userModel: { preferences: ['prefers Persian comments'], recentThemes: ['pagination', 'auth'], taskCount: 3, summary: '1 stated preference · recent focus: pagination, auth' },
   maintainStats: { totalRuns: 3, opened: 2, blocked: 1, failed: 0, successRate: 0.66, filesCleaned: 10, estMinutesSaved: 10, byScope: [{ scope: 'unused-imports', runs: 2, opened: 2 }], lastRun: { when: '2h ago', status: 'opened', scope: 'unused-imports' } },
+  maintainWeekly: { opened: 2, blocked: 1, filesCleaned: 10, minutesSaved: 10, priorOpened: 1, openedDelta: 1 },
+  maintainNext: { scope: 'dead-code', why: 'never run here yet — try it' },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -76,6 +78,8 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('Health');                      // health badges
     expect(live).toContain('Maintain status');             // maintain analytics panel
     expect(live).toContain('cleanups shipped');            // maintain stat card
+    expect(live).toContain('This week');                   // weekly trend
+    expect(live).toContain('Suggested next');              // auto scope recommendation
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it
