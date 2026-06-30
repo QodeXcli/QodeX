@@ -694,6 +694,36 @@ providerCmd
   });
 
 program
+  .command('maintain-report')
+  .description('Self-Improvement Report — the maintain recipe\'s cleanups, files cleaned, and time saved')
+  .action(async () => {
+    const { getScheduleStore } = await import('./schedule/store.js');
+    const { parseMaintainScope, MAINTAIN_SCOPES } = await import('./schedule/recipes.js');
+    const { buildMaintainStats, weeklyReport, recommendNextScope } = await import('./cli/maintain-stats.js');
+    const store = getScheduleStore();
+    const runs: import('./cli/maintain-stats.js').MaintainRun[] = [];
+    for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+      const scope = parseMaintainScope(s.prompt).scope;
+      for (const r of store.recentRuns(s.id, 100)) {
+        let status = r.status ?? 'running'; let files = 0;
+        if (r.receipt) { try { const rc = JSON.parse(r.receipt); status = rc.status ?? status; files = (rc.filesChanged ?? []).length; } catch { /* ignore */ } }
+        runs.push({ scope, status, filesChanged: files, when: '', at: r.started_at });
+      }
+    }
+    const stats = buildMaintainStats(runs);
+    const wk = weeklyReport(runs, Date.now());
+    const next = recommendNextScope(runs, stats, MAINTAIN_SCOPES);
+    console.log('\n🔧 QodeX Self-Improvement Report\n');
+    if (stats.totalRuns === 0) { console.log('  No maintain runs yet. `qodex schedule add --recipe maintain --prompt "unused-imports"`.\n'); process.exit(0); }
+    console.log(`  All time:   ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
+    console.log(`  This week:  ${wk.opened} PR(s) · ${wk.filesCleaned} files · ${wk.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(wk.openedDelta)} vs last week`);
+    console.log(`  By scope:   ${stats.byScope.map(s => `${s.scope} ${s.opened}/${s.runs}`).join(' · ') || '—'}`);
+    if (next) console.log(`  Suggested:  qodex schedule add --recipe maintain --prompt "${next.scope}"   (${next.why})`);
+    console.log('');
+    process.exit(0);
+  });
+
+program
   .command('whoami')
   .description('Show what QodeX has learned about you — stated preferences + the focus of recent tasks')
   .action(async () => {
