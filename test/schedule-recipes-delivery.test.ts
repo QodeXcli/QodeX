@@ -30,6 +30,28 @@ describe('recipes — Autonomous Verified PR', () => {
     expect(buildRecipePrompt(undefined, 'just do it')).toBe('just do it');
     expect(buildRecipePrompt('mystery', 'just do it')).toBe('just do it');
   });
+
+  it('maintain is a recipe: conservative dead-code cleanup THROUGH the verified-PR protocol', () => {
+    expect(isRecipe('maintain')).toBe(true);
+    expect(RECIPES).toContain('maintain');
+    const p = buildRecipePrompt('maintain', 'src/utils');
+    // code-graph-driven selection
+    expect(p).toContain('find_dead_code');
+    expect(p).toMatch(/analyze_impact|find_references/);
+    expect(p).toMatch(/ZERO references/i);
+    expect(p).toMatch(/ONE piece of provably-unused/i); // exactly one, conservative
+    expect(p).toMatch(/Do NOT refactor, rename/i);       // strict scope guardrail
+    expect(p).toContain('src/utils');                    // focus hint threaded in
+    // reuses the verified-PR protocol → still produces a receipt
+    expect(p).toContain('VERIFIED-PR: opened');
+    expect(p).toContain('```qodex-receipt');
+  });
+
+  it('maintain works with no focus hint', () => {
+    const p = buildRecipePrompt('maintain', '');
+    expect(p).not.toContain('Focus area');
+    expect(p).toContain('SAFE DEAD CODE ONLY');
+  });
 });
 
 describe('delivery — parse + format', () => {
