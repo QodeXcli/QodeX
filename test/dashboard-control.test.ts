@@ -50,6 +50,12 @@ describe('dispatchAction — unknown + validation rejection (no disk writes)', (
   it('memory.forget needs a substring', async () => {
     expect((await dispatchAction('memory.forget', { substring: '' }, '/tmp')).ok).toBe(false);
   });
+  it('the second-batch actions validate their input before doing anything', async () => {
+    expect((await dispatchAction('model.set', { model: '' }, '/tmp')).ok).toBe(false);
+    expect((await dispatchAction('memory.add', { fact: '   ' }, '/tmp')).ok).toBe(false);
+    expect((await dispatchAction('skill.promote', { name: '' }, '/tmp')).ok).toBe(false);
+    expect((await dispatchAction('skill.reject', { name: '' }, '/tmp')).ok).toBe(false);
+  });
 });
 
 describe('handleRequest — token auth + routing', () => {

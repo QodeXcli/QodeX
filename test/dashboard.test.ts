@@ -14,6 +14,8 @@ const data: DashboardData = {
     { path: 'memory.mode', label: 'Memory injection', group: 'Memory', type: 'enum', values: ['full', 'lightweight', 'auto'], current: 'auto' },
   ],
   schedules: [{ id: 'sched1234', name: 'nightly-deps', cron: '@daily', enabled: true, recipe: 'verified-pr' }],
+  models: ['qwen3-coder', 'anthropic/claude-3.5'],
+  candidates: [{ name: 'add-pagination', description: 'cursor pagination playbook', confidence: 82 }],
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -36,7 +38,7 @@ describe('qodex dashboard (pure render)', () => {
   });
 
   it('handles an empty/fresh install gracefully', () => {
-    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
+    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
     const html = buildDashboardHtml(empty);
     expect(html).toContain('No sessions yet');
     expect(html).toContain('Nothing learned yet');
@@ -52,6 +54,10 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('tok123');
     expect(live).toContain("act('schedule.setEnabled'");    // schedule controls present
     expect(live).toContain("act('config.set'");            // config toggles present
+    expect(live).toContain("act('model.set'");             // model switcher
+    expect(live).toContain("act('memory.add'");            // remember input
+    expect(live).toContain("act('skill.promote'");         // candidate promote
+    expect(live).toContain('add-pagination');              // candidate listed
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it
