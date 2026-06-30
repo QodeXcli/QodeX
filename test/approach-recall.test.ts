@@ -31,6 +31,23 @@ describe('rankApproaches', () => {
     expect(rankApproaches('', SOURCES)).toHaveLength(0);
   });
 
+  it('diversity (MMR) spreads distinct approaches instead of near-duplicates filling every slot', () => {
+    const sources: ApproachSource[] = [
+      { kind: 'episode', text: 'remove unused imports from the auth module', when: 'a' },
+      { kind: 'episode', text: 'remove unused imports from the auth module again', when: 'b' },
+      { kind: 'episode', text: 'remove unused imports from the auth module once more', when: 'c' },
+      { kind: 'episode', text: 'auth module: add a refresh-token rotation flow', when: 'd' },
+    ];
+    const q = 'work on the auth module';
+    // Without diversity: the three near-identical "unused imports" episodes outrank the distinct one.
+    const plain = rankApproaches(q, sources, { topK: 2, minScore: 0.05 });
+    expect(plain.every(m => /unused imports/.test(m.text))).toBe(true);
+    // With diversity: the distinct refresh-token approach is pulled into the top-2.
+    const diverse = rankApproaches(q, sources, { topK: 2, minScore: 0.05, diversity: 0.5 });
+    expect(diverse[0]!.text).toMatch(/unused imports/);          // top pick unchanged
+    expect(diverse.some(m => /refresh-token/.test(m.text))).toBe(true);
+  });
+
   it('on near-equal relevance, the more RECENT approach surfaces first', () => {
     const now = Date.parse('2026-07-01T00:00:00Z');
     const iso = (d: number) => new Date(now - d * 86_400_000).toISOString();
