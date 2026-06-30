@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import simpleGit, { SimpleGit } from 'simple-git';
+import simpleGit from 'simple-git';
 import type Database from 'better-sqlite3';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_TXN_DB, QODEX_BLOBS_DIR } from '../config/defaults.js';

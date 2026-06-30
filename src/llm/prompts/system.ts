@@ -1,5 +1,4 @@
 import * as os from 'os';
-import * as path from 'path';
 import { isStrictMode, STRICT_MODE_SYSTEM_ADDENDUM } from '../../safety/strict-mode.js';
 import { systemAddendumFor } from './task-addenda.js';
 

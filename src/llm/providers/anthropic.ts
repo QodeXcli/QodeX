@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } from '../types.js';
-import { ProviderError } from '../../utils/errors.js';
 import type { Message } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 

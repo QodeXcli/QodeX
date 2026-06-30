@@ -66,7 +66,6 @@ import type { Diagnostic } from '../tools/diagnostics/parsers.js';
 import { buildCriticPrompt, parseCriticVerdict, buildCriticRepairMessage, type DiffFile } from './critic.js';
 import { GitSandbox } from './git-sandbox.js';
 import { logger } from '../utils/logger.js';
-import { CancelledError } from '../utils/errors.js';
 
 export interface AgentEvent {
   type: 'thinking_start' | 'text_delta' | 'thinking_done'
