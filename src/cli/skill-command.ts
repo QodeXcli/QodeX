@@ -290,6 +290,49 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('export <name>')
+    .description('Export a skill in the agentskills.io open standard (to a directory, or stdout)')
+    .option('--out <dir>', 'Write <name>/SKILL.md under this directory (default: print to stdout)')
+    .action(async (name: string, opts: { out?: string }) => {
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+      const { userSkillsDir, projectSkillsDir } = await import('../skills/loader.js');
+      const { toAgentSkill } = await import('../skills/interop.js');
+      let md = '';
+      for (const c of [path.join(userSkillsDir(), name, 'SKILL.md'), path.join(projectSkillsDir(process.cwd()), name, 'SKILL.md')]) {
+        try { md = await fs.readFile(c, 'utf-8'); break; } catch { /* try next */ }
+      }
+      if (!md) { console.error(`No skill "${name}".`); process.exit(1); }
+      const std = toAgentSkill(md, name);
+      if (opts.out) {
+        const dir = path.join(opts.out, name); await fs.mkdir(dir, { recursive: true });
+        const dest = path.join(dir, 'SKILL.md'); await fs.writeFile(dest, std);
+        console.log(`✓ Exported "${name}" (agentskills.io standard) → ${dest}`);
+      } else { console.log(std); }
+    });
+
+  cmd
+    .command('import <file>')
+    .description('Import an agentskills.io-standard SKILL.md into your skills (security-scanned, provenance: imported)')
+    .action(async (file: string) => {
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+      const { userSkillsDir } = await import('../skills/loader.js');
+      const { fromAgentSkill, skillSlug } = await import('../skills/interop.js');
+      const { scanSkillContent, formatScanReport } = await import('../skills/security-scan.js');
+      let raw = '';
+      try { raw = await fs.readFile(file, 'utf-8'); } catch { console.error(`Can't read ${file}.`); process.exit(1); }
+      const scan = scanSkillContent(raw);
+      if (scan.severity === 'dangerous') { console.error(`✗ Import blocked — security scan:\n${formatScanReport(scan, file)}`); process.exit(1); }
+      if (scan.severity === 'suspicious') console.error(`⚠ ${formatScanReport(scan, file)}\n(importing anyway — review it.)`);
+      const slug = skillSlug(raw, path.basename(file).replace(/\.md$/i, ''));
+      const dir = path.join(userSkillsDir(), slug); await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'SKILL.md'), fromAgentSkill(raw, { name: slug }));
+      console.log(`✓ Imported "${slug}" → ${dir} (provenance: imported)`);
+      await refreshSkillRegistry();
+    });
+
+  cmd
     .command('snapshots')
     .description('List skills-directory snapshots (rollback points taken before curation)')
     .action(async () => {
