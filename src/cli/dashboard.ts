@@ -12,7 +12,7 @@ export interface DashboardData {
   project: string;
   model: string;
   generatedAt: string;
-  providers: { name: string; baseUrl: string; keyEnv?: string; keySet?: boolean; models: string[]; isDefault: boolean }[];
+  providers: { name: string; baseUrl: string; keyEnv?: string; keySet?: boolean; models: string[]; isDefault: boolean; custom?: boolean }[];
   sessions: { id: string; title: string; model: string; turns: number; tokens: number; cost: number; when: string }[];
   facts: string[];
   episodes: { when: string; prompt: string; summary: string }[];
@@ -22,6 +22,7 @@ export interface DashboardData {
   models: string[];
   candidates: { name: string; description: string; confidence?: number }[];
   runs: { schedule: string; when: string; status: string; receipt?: { status: string; prUrl?: string; verification?: { command: string; passed: boolean }[] } }[];
+  bot: { running: boolean; pid?: number };
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -78,6 +79,14 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   }).join('') : '<tr><td colspan="4" class="dim">No runs yet. A verified-pr schedule produces a 🧾 receipt.</td></tr>';
   const runsPanel = `<div class="panel"><h2>Run history &amp; receipts</h2><table><thead><tr><th>schedule</th><th>when</th><th>status</th><th>receipt</th></tr></thead><tbody>${runRows}</tbody></table></div>`;
 
+  // Bot lifecycle: status + start/stop (it still needs a token + allowlist in config to connect).
+  const botCtl = live
+    ? (d.bot.running
+      ? `<button class="danger" onclick="act('bot.stop',{})">Stop</button>`
+      : `<button onclick="act('bot.start',{})">Start</button>`)
+    : `<span class="dim">${d.bot.running ? 'running' : 'stopped'}</span>`;
+  const botPanel = `<div class="panel"><div class="ctl"><span>Telegram / Discord / Slack bot — <b class="${d.bot.running ? 'ok' : 'dim'}">${d.bot.running ? `running (pid ${d.bot.pid})` : 'stopped'}</b></span>${botCtl}</div></div>`;
+
   // Model switcher (live: a dropdown of known models; read-only: just the current one).
   const modelCtl = live && d.models.length
     ? `<select onchange="act('model.set',{model:this.value})">${d.models.map(m => `<option${m === d.model ? ' selected' : ''}>${esc(m)}</option>`).join('')}</select>`
@@ -92,7 +101,15 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     <td class="mono dim">${esc(p.baseUrl || '—')}</td>
     <td>${p.models.length ? p.models.map(esc).join('<br>') : '<span class="dim">auto-discover</span>'}</td>
     <td>${p.keyEnv ? (p.keySet ? `<span class="ok">✓ ${esc(p.keyEnv)}</span>` : `<span class="warn">set ${esc(p.keyEnv)}</span>`) : '<span class="dim">local</span>'}</td>
+    ${live ? `<td class="r">${p.baseUrl ? `<button onclick="act('provider.test',{name:'${esc(p.name)}'})">Test</button>` : ''}${p.custom ? ` <button class="danger" onclick="if(confirm('Remove ${esc(p.name)}?'))act('provider.remove',{name:'${esc(p.name)}'})">Remove</button>` : ''}</td>` : ''}
   </tr>`).join('');
+  const providerAddForm = live ? `<div class="addform">
+    <input id="p_name" placeholder="name (e.g. openrouter)">
+    <input id="p_url" placeholder="base URL (https://…/v1)" style="flex:2">
+    <input id="p_key" placeholder="key env var (OPENROUTER_API_KEY)">
+    <input id="p_model" placeholder="model id (optional)">
+    <button onclick="act('provider.add',{name:p_name.value,baseUrl:p_url.value,keyEnv:p_key.value,model:p_model.value})">Add &amp; test</button>
+  </div><p class="dim" style="margin:8px 0 0">The key itself goes in <span class="mono">~/.qodex/.env</span> as the named env var — never here.</p>` : '';
   const sessionRows = d.sessions.map(s => `<tr>
     <td class="mono dim">${esc(s.id.slice(0, 8))}</td><td>${esc(s.title)}</td>
     <td class="mono dim">${esc(s.model)}</td><td class="r">${s.turns}</td>
@@ -152,7 +169,8 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   <div class="two">${controlPanel}</div>
   ${schedulePanel}
   ${runsPanel}
-  <div class="panel"><h2>Providers &amp; models</h2><table><thead><tr><th>Provider</th><th>Base URL</th><th>Models</th><th>API key</th></tr></thead><tbody>${providerRows}</tbody></table></div>
+  <div class="panel"><h2>Providers &amp; models</h2><table><thead><tr><th>Provider</th><th>Base URL</th><th>Models</th><th>API key</th>${live ? '<th class="r">test / remove</th>' : ''}</tr></thead><tbody>${providerRows}</tbody></table>${providerAddForm}</div>
+  ${botPanel}
   <div class="panel"><h2>Recent sessions</h2><table><thead><tr><th>id</th><th>title</th><th>model</th><th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th>when</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
   <div class="two">
     <div class="panel"><h2>Memory · learned facts</h2><ul>${factList}</ul>${live ? `<div class="ctl" style="border:0;padding-top:10px"><input id="newfact" placeholder="Remember a fact about this project…" style="flex:1;margin-right:8px;background:#1b2233;border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--ink)"><button onclick="const i=document.getElementById('newfact');if(i.value.trim())act('memory.add',{fact:i.value.trim()})">Remember</button></div>` : ''}</div>
@@ -210,7 +228,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
       name: c.name, baseUrl: c.baseUrl ?? '', keyEnv: c.apiKeyEnv,
       keySet: c.apiKeyEnv ? !!process.env[c.apiKeyEnv] : undefined,
       models: (c.models ?? []).map((m: any) => m.id).filter(Boolean),
-      isDefault: c.name === defProvider,
+      isDefault: c.name === defProvider, custom: true,
     });
   }
 
@@ -270,10 +288,14 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
       return all.slice(0, 12);
     } catch { return []; }
   })();
+  const bot = await (async () => {
+    try { const { botStatus } = await import('./bot-process.js'); return await botStatus(); }
+    catch { return { running: false }; }
+  })();
 
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs,
+    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,

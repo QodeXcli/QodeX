@@ -17,6 +17,7 @@ const data: DashboardData = {
   models: ['qwen3-coder', 'anthropic/claude-3.5'],
   candidates: [{ name: 'add-pagination', description: 'cursor pagination playbook', confidence: 82 }],
   runs: [{ schedule: 'nightly-deps', when: '3h ago', status: 'success', receipt: { status: 'opened', prUrl: 'https://h/pr/9', verification: [{ command: 'tsc', passed: true }] } }],
+  bot: { running: false },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -39,7 +40,7 @@ describe('qodex dashboard (pure render)', () => {
   });
 
   it('handles an empty/fresh install gracefully', () => {
-    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
+    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], bot: { running: false }, totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
     const html = buildDashboardHtml(empty);
     expect(html).toContain('No sessions yet');
     expect(html).toContain('Nothing learned yet');
@@ -63,6 +64,9 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('Run history');                 // receipts panel
     expect(live).toContain('🧾 opened');                    // receipt verdict surfaced
     expect(live).toContain('https://h/pr/9');              // receipt PR link
+    expect(live).toContain("act('provider.add'");          // provider add form
+    expect(live).toContain("act('provider.test'");         // per-provider test button
+    expect(live).toContain("act('bot.start'");             // bot lifecycle (stopped → Start)
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it
