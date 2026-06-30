@@ -6,8 +6,9 @@ import { computeThroughput } from '../cache-layout.js';
 export interface OllamaOptions {
   /** `keep_alive` — how long to keep the model resident. Default '30m'. */
   keepAlive?: string;
-  /** Extra runtime options merged into every request's `options` (num_ctx, num_batch, …). */
-  options?: Record<string, number>;
+  /** Extra runtime options merged into every request's `options` (num_ctx, num_batch, num_gpu,
+   *  … — numbers, strings, or bools so any llama.cpp/Ollama runtime flag passes through). */
+  options?: Record<string, number | string | boolean>;
   /** Draft model for speculative decoding, passed through if the server supports it. */
   draftModel?: string;
   /**

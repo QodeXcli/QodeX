@@ -89,10 +89,16 @@ export interface QodexConfig {
       /** Ollama `keep_alive` — how long the model stays resident after a request.
        *  Longer avoids a cold reload (and full prefill) between turns. Default '30m'. */
       keepAlive?: string;
-      /** Extra Ollama runtime `options` merged into every request (num_ctx, num_batch,
-       *  num_gpu, …). `num_ctx` defaults to the routed model's context window so long
-       *  sessions aren't silently truncated by the server's default 2k/4k window. */
-      options?: Record<string, number>;
+      /** Extra Ollama runtime `options` merged verbatim into every request. Numbers, strings,
+       *  and bools all pass through, so any llama.cpp/Ollama runtime flag works — including the
+       *  ones that matter for large MoE coders on limited VRAM:
+       *    - `num_gpu`: layers to keep on the GPU (the rest run on CPU). Lower it to fit a big
+       *      MoE model in VRAM. See src/llm/offload.ts `suggestGpuLayers` for a sensible value.
+       *    - `num_ctx`: defaults to the routed model's context window so long sessions aren't
+       *      silently truncated by the server's 2k/4k default. Bigger num_ctx ⇒ bigger KV cache.
+       *  `keep_alive` (above) keeps the model + its KV cache warm between turns — the local
+       *  "turbo cache" that, with QodeX's byte-stable prompt prefix, avoids a full re-prefill. */
+      options?: Record<string, number | string | boolean>;
       /** Draft model for speculative decoding, if the local server supports it. Passed
        *  through verbatim; servers that don't read it ignore it. */
       draftModel?: string;
