@@ -49,7 +49,7 @@ export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
       catch { return []; }
     })();
 
-    const matches = rankApproaches(args.query, [...episodes, ...worklog, ...facts], { topK: args.limit ?? 5, nowMs: Date.now() });
+    const matches = rankApproaches(args.query, [...episodes, ...worklog, ...facts], { topK: args.limit ?? 5, nowMs: Date.now(), diversity: 0.35 });
     return { content: formatApproaches(args.query, matches), metadata: { matches: matches.length, episodes: episodes.length, worklog: worklog.length } };
   }
 }
