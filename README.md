@@ -355,7 +355,16 @@ providers:
       num_ctx: 32768          # KV-cache size; QodeX already defaults this to the model's window
 ```
 
-Not sure what `num_gpu` to use? `suggestGpuLayers({ modelSizeGB, vramBudgetGB, totalLayers })` (`src/llm/offload.ts`) turns a VRAM budget into a sensible value (e.g. a 48 GB MoE on a 12 GB GPU → keep ~14/64 layers on the GPU).
+Not sure what `num_gpu` to use? Let QodeX figure it out:
+
+```bash
+qodex offload                 # auto-detects VRAM (nvidia-smi / Apple unified memory) + the
+                              # model's size & layer count from Ollama, and suggests a num_gpu
+qodex offload --apply         # …and writes it to providers.ollama.options.num_gpu
+qodex offload --vram 12       # override the VRAM budget if auto-detect is off
+```
+
+e.g. a 48 GB MoE on a 12 GB GPU → *keep ~14/64 layers on the GPU, the rest on CPU*. (The pure core is `suggestGpuLayers` in `src/llm/offload.ts`.)
 
 Two things make local fast here: **`keep_alive`** keeps the model resident so there's no cold reload, and QodeX's **byte-stable prompt prefix** (hierarchical cache work above) means the engine's **KV prefix cache hits** instead of re-prefilling the whole context every turn — the local counterpart to Anthropic prompt caching.
 

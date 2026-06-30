@@ -684,6 +684,49 @@ providerCmd
   });
 
 program
+  .command('offload')
+  .description('Auto-detect VRAM + model size and suggest a num_gpu for running large/MoE models locally')
+  .option('--model <id>', 'Ollama model to plan for (default: configured default model)')
+  .option('--vram <gb>', 'Override the VRAM budget in GB (skip auto-detect)')
+  .option('--apply', 'Write the suggested num_gpu into config (providers.ollama.options.num_gpu)')
+  .action(async (opts: { model?: string; vram?: string; apply?: boolean }) => {
+    const config = await loadConfig(process.cwd());
+    const baseUrl = (config as any).providers?.ollama?.baseUrl ?? 'http://localhost:11434';
+    const model = opts.model ?? (config as any).defaults?.model;
+    if (!model) { console.error('No model — pass --model <id> or set defaults.model.'); process.exit(1); }
+    const { planOffload, detectVramGB } = await import('./setup/offload-detect.js');
+    const { describeOffload } = await import('./llm/offload.js');
+    const vramBudgetGB = opts.vram ? Number(opts.vram) : undefined;
+    const sug = await planOffload({ baseUrl, model, vramBudgetGB });
+    if (!sug) {
+      const vram = vramBudgetGB ?? detectVramGB();
+      console.error(!vram
+        ? `Couldn't detect VRAM. Re-run with --vram <gb> to set a budget manually.`
+        : `Couldn't read model facts — is "${model}" pulled in Ollama at ${baseUrl}? (Ollama-only; LM Studio not supported here.)`);
+      process.exit(1);
+    }
+    console.log(`\nModel: ${model}`);
+    console.log(`  ~${sug.facts.modelSizeGB.toFixed(1)} GB · ${sug.facts.totalLayers} layers · VRAM budget ${sug.vramGB} GB`);
+    console.log(`  ${describeOffload(sug.plan, sug.facts.totalLayers)}\n`);
+    if (opts.apply) {
+      const fs = await import('fs/promises');
+      const yaml = await import('js-yaml');
+      const { QODEX_CONFIG_FILE } = await import('./config/defaults.js');
+      let raw = ''; try { raw = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8'); } catch {}
+      const cfg: any = raw.trim() ? (yaml.load(raw) ?? {}) : {};
+      cfg.providers ??= {}; cfg.providers.ollama ??= {}; cfg.providers.ollama.options ??= {};
+      cfg.providers.ollama.options.num_gpu = sug.plan.numGpu;
+      const { writeFileAtomic } = await import('./utils/atomic-write.js');
+      await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
+      console.log(`✓ Wrote providers.ollama.options.num_gpu: ${sug.plan.numGpu} to ${QODEX_CONFIG_FILE}`);
+    } else {
+      console.log('Re-run with --apply to write it, or add manually:');
+      console.log(`  providers: { ollama: { options: { num_gpu: ${sug.plan.numGpu} } } }`);
+    }
+    process.exit(0);
+  });
+
+program
   .command('speculative')
   .alias('spec')
   .description('Detect and configure a draft model for speculative decoding (faster local generation)')
