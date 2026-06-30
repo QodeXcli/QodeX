@@ -68,7 +68,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     <input id="s_name" placeholder="name (e.g. nightly-fix)">
     <input id="s_cron" placeholder="cron (@daily, 0 3 * * *)">
     <input id="s_prompt" placeholder="prompt / goal" style="flex:2">
-    <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option></select>
+    <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option><option value="maintain">maintain (nightly dead-code cleanup → verified PR)</option></select>
     <input id="s_deliver" placeholder="deliver (telegram:&lt;id&gt;)">
     <button onclick="act('schedule.add',{name:s_name.value,cron:s_cron.value,prompt:s_prompt.value,recipe:s_recipe.value,deliver:s_deliver.value})">Schedule</button>
   </div>` : '';
