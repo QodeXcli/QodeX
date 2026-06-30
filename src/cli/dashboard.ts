@@ -21,7 +21,7 @@ export interface DashboardData {
   schedules: { id: string; name: string; cron: string; enabled: boolean; recipe?: string }[];
   models: string[];
   candidates: { name: string; description: string; confidence?: number }[];
-  runs: { schedule: string; when: string; status: string; receipt?: { status: string; prUrl?: string; verification?: { command: string; passed: boolean }[] } }[];
+  runs: { schedule: string; recipe?: string; when: string; status: string; receipt?: { status: string; prUrl?: string; verification?: { command: string; passed: boolean }[] } }[];
   bot: { running: boolean; pid?: number };
   health: { label: string; ok: boolean; detail: string }[];
   logs: string[];
@@ -67,8 +67,8 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const addForm = live ? `<div class="addform">
     <input id="s_name" placeholder="name (e.g. nightly-fix)">
     <input id="s_cron" placeholder="cron (@daily, 0 3 * * *)">
-    <input id="s_prompt" placeholder="prompt / goal" style="flex:2">
-    <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option><option value="maintain">maintain (nightly dead-code cleanup → verified PR)</option></select>
+    <input id="s_prompt" placeholder="prompt — or for maintain: 'dead-code' | 'unused-imports' [--dry-run] [path]" style="flex:2">
+    <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option><option value="maintain">maintain (self-improving → verified PR)</option></select>
     <input id="s_deliver" placeholder="deliver (telegram:&lt;id&gt;)">
     <button onclick="act('schedule.add',{name:s_name.value,cron:s_cron.value,prompt:s_prompt.value,recipe:s_recipe.value,deliver:s_deliver.value})">Schedule</button>
   </div>` : '';
@@ -78,9 +78,9 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const runRows = d.runs.length ? d.runs.map(r => {
     const rc = r.receipt;
     const verdict = rc ? `<span class="${rc.status === 'opened' || rc.status === 'done' ? 'ok' : rc.status === 'blocked' ? 'warn' : 'dim'}">🧾 ${esc(rc.status)}</span>${rc.prUrl ? ` <a href="${esc(rc.prUrl)}" target="_blank" class="mono">PR</a>` : ''}${rc.verification?.length ? ` <span class="dim mono">${rc.verification.map(v => (v.passed ? '✓' : '✗') + v.command).join(' ')}</span>` : ''}` : '<span class="dim">—</span>';
-    return `<tr><td><b>${esc(r.schedule)}</b></td><td class="dim">${esc(r.when)}</td><td>${esc(r.status)}</td><td>${verdict}</td></tr>`;
-  }).join('') : '<tr><td colspan="4" class="dim">No runs yet. A verified-pr schedule produces a 🧾 receipt.</td></tr>';
-  const runsPanel = `<div class="panel"><h2>Run history &amp; receipts</h2><table><thead><tr><th>schedule</th><th>when</th><th>status</th><th>receipt</th></tr></thead><tbody>${runRows}</tbody></table></div>`;
+    return `<tr><td><b>${esc(r.schedule)}</b>${r.recipe ? ` <span class="mono dim">${esc(r.recipe)}</span>` : ''}</td><td class="dim">${esc(r.when)}</td><td>${esc(r.status)}</td><td>${verdict}</td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="dim">No runs yet. A verified-pr / maintain schedule produces a 🧾 receipt.</td></tr>';
+  const runsPanel = `<div class="panel"><h2>Run history &amp; receipts</h2><table><thead><tr><th>schedule · recipe</th><th>when</th><th>status</th><th>receipt</th></tr></thead><tbody>${runRows}</tbody></table></div>`;
 
   // Bot lifecycle: status + start/stop (it still needs a token + allowlist in config to connect).
   const botCtl = live
@@ -297,13 +297,17 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
   const runs = await (async () => {
     try {
       const { getScheduleStore } = await import('../schedule/store.js');
+      const { parseMaintainScope } = await import('../schedule/recipes.js');
       const store = getScheduleStore();
       const all: DashboardData['runs'] = [];
       for (const s of store.list()) {
+        const recipeLabel = s.recipe === 'maintain'
+          ? `maintain · ${parseMaintainScope(s.prompt).scope}${parseMaintainScope(s.prompt).dryRun ? ' (dry-run)' : ''}`
+          : s.recipe;
         for (const r of store.recentRuns(s.id, 3)) {
           let receipt: DashboardData['runs'][number]['receipt'];
           if (r.receipt) { try { const rc = JSON.parse(r.receipt); receipt = { status: rc.status, prUrl: rc.prUrl, verification: rc.verification }; } catch { /* ignore */ } }
-          all.push({ schedule: s.name, when: relTime(r.started_at), status: r.status ?? 'running', receipt });
+          all.push({ schedule: s.name, recipe: recipeLabel, when: relTime(r.started_at), status: r.status ?? 'running', receipt });
         }
       }
       return all.slice(0, 12);

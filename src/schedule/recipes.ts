@@ -70,32 +70,79 @@ function verifiedPrPrompt(goal: string): string {
   return [...UNATTENDED_HEADER, '', `GOAL: ${goal.trim()}`, '', ...VERIFIED_PR_PROTOCOL].join('\n');
 }
 
+/** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
+export type MaintainScope = 'dead-code' | 'unused-imports';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports'] as const;
+
+/** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
+ *  Forms: "" (→ dead-code) · "unused-imports src/" · "dead-code --dry-run" · "src/utils". */
+export function parseMaintainScope(prompt: string): { scope: MaintainScope; focus: string; dryRun: boolean } {
+  let rest = (prompt ?? '').trim();
+  const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
+  rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
+  let scope: MaintainScope = 'dead-code';
+  const m = /^(unused[-_]?imports|imports|dead[-_]?code)\b/i.exec(rest);
+  if (m) {
+    scope = /imports/i.test(m[1]!) ? 'unused-imports' : 'dead-code';
+    rest = rest.slice(m[0].length).trim();
+  }
+  return { scope, focus: rest, dryRun };
+}
+
+const DEAD_CODE_SELECTION = [
+  'SCOPE (v1 — SAFE DEAD CODE ONLY): find and remove exactly ONE piece of provably-unused code.',
+  '',
+  'SELECTION — use the CODE GRAPH, do not guess:',
+  'a. Orient with `project_overview`, then `find_dead_code` to list candidates.',
+  'b. Pick the SINGLE safest one (an unexported/unreferenced function, a dead file, an unused',
+  '   internal export).',
+  'c. PROVE it is safe: run `analyze_impact` / `find_references` on it. It must have ZERO',
+  '   references anywhere — including tests, re-exports, and dynamic/string imports. If you',
+  '   CANNOT prove zero references, do NOT remove it: choose `blocked` with that reason.',
+  'd. Removing it IS your GOAL. Make only that single removal.',
+];
+
+const UNUSED_IMPORTS_SELECTION = [
+  'SCOPE (v2 — UNUSED IMPORTS ONLY): remove import bindings that are referenced ZERO times in the',
+  'file that imports them.',
+  '',
+  'SELECTION — prove unused with the toolchain, do not guess:',
+  'a. Find unused imports — run the project linter / type-checker (eslint, ruff, or',
+  '   `tsc --noUnusedLocals`), or `find_references` on each imported binding. A binding is',
+  '   removable ONLY if it is referenced ZERO times in its own file.',
+  'b. EXCLUDE side-effect imports — NEVER remove a bare `import "x"` / `import "./styles.css"`:',
+  '   those run for effect, not a binding.',
+  'c. Remove only the unused bindings (drop the whole import line if it becomes empty). Touch',
+  '   nothing else — no reordering, no reformatting of used imports.',
+  'd. Removing them IS your GOAL.',
+];
+
 /**
- * `maintain` — the self-improving codebase recipe. v1 is deliberately the SAFEST improvement
- * there is: remove ONE piece of provably-unused dead code, proven safe via the code-graph, then
- * ship it through the same verified-PR protocol. Conservative by design — a wrong "improvement"
- * at 3am is worse than none — so it must PROVE zero references or block.
+ * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
+ * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
+ * by design — a wrong "improvement" at 3am is worse than none — so it must PROVE safety or block.
+ * `--dry-run` previews candidates without changing anything (always blocks).
  */
-function maintainPrompt(focus: string): string {
-  const focusLine = focus.trim() ? `Focus area (optional hint): ${focus.trim()}.` : '';
+function maintainPrompt(prompt: string): string {
+  const { scope, focus, dryRun } = parseMaintainScope(prompt);
+  const selection = scope === 'unused-imports' ? UNUSED_IMPORTS_SELECTION : DEAD_CODE_SELECTION;
+  const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
+  const dryRunBlock = dryRun ? [
+    '',
+    'DRY RUN: do NOT modify any files and do NOT open a PR. Identify the candidates you WOULD',
+    'remove, then end with `VERIFIED-PR: blocked — dry-run: <n> candidate(s)` and a receipt',
+    '(status blocked) whose summary lists them. Preview only.',
+  ] : [];
   return [
     ...UNATTENDED_HEADER,
     '',
     'ROLE: you are a nightly code-maintenance agent. Be CONSERVATIVE — doing nothing is better',
     'than a risky change no one is watching.',
-    '',
-    'SCOPE (v1 — SAFE DEAD CODE ONLY): find and remove exactly ONE piece of provably-unused code.',
     'Do NOT refactor, rename, reformat, change behavior, or touch public APIs.',
     focusLine,
+    ...dryRunBlock,
     '',
-    'SELECTION — use the CODE GRAPH, do not guess:',
-    'a. Orient with `project_overview`, then `find_dead_code` to list candidates.',
-    'b. Pick the SINGLE safest one (an unexported/unreferenced function, a dead file, an unused',
-    '   internal export).',
-    'c. PROVE it is safe: run `analyze_impact` / `find_references` on it. It must have ZERO',
-    '   references anywhere — including tests, re-exports, and dynamic/string imports. If you',
-    '   CANNOT prove zero references, do NOT remove it: choose `blocked` with that reason.',
-    'd. Removing it IS your GOAL. Make only that single removal.',
+    ...selection,
     '',
     ...VERIFIED_PR_PROTOCOL,
   ].join('\n');
