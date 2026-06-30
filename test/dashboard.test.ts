@@ -20,7 +20,7 @@ const data: DashboardData = {
   bot: { running: false },
   health: [{ label: 'Provider keys', ok: true, detail: '1/1 cloud keys set' }, { label: 'Bot', ok: true, detail: 'stopped' }],
   logs: ['2026-06-30 INFO started', '2026-06-30 INFO ready'],
-  userModel: { preferences: ['prefers Persian comments'], recentThemes: ['pagination', 'auth'], taskCount: 3, summary: '1 stated preference · recent focus: pagination, auth' },
+  userModel: { preferences: ['prefers Persian comments'], recentThemes: ['pagination', 'auth'], favoriteAreas: ['src/api'], taskCount: 3, summary: '1 stated preference · recent focus: pagination, auth · works mostly in src/api' },
   maintainStats: { totalRuns: 3, opened: 2, blocked: 1, failed: 0, successRate: 0.66, filesCleaned: 10, estMinutesSaved: 10, byScope: [{ scope: 'unused-imports', runs: 2, opened: 2 }], lastRun: { when: '2h ago', status: 'opened', scope: 'unused-imports' } },
   maintainWeekly: { opened: 2, blocked: 1, filesCleaned: 10, minutesSaved: 10, priorOpened: 1, openedDelta: 1 },
   maintainNext: { scope: 'dead-code', why: 'never run here yet — try it' },
@@ -46,7 +46,7 @@ describe('qodex dashboard (pure render)', () => {
   });
 
   it('handles an empty/fresh install gracefully', () => {
-    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], bot: { running: false }, health: [], logs: [], userModel: { preferences: [], recentThemes: [], taskCount: 0, summary: '' }, totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
+    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], bot: { running: false }, health: [], logs: [], userModel: { preferences: [], recentThemes: [], favoriteAreas: [], taskCount: 0, summary: '' }, totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
     const html = buildDashboardHtml(empty);
     expect(html).toContain('No sessions yet');
     expect(html).toContain('Nothing learned yet');

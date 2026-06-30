@@ -733,7 +733,7 @@ program
     const cwd = process.cwd();
     const userFacts = (() => { try { return getSessionStore().getFactsByScope('user', cwd, 100); } catch { return []; } })();
     const eps = await readEpisodes(cwd).catch(() => []);
-    console.log('\n' + renderUserModel(buildUserModel({ userFacts, episodePrompts: eps.map(e => e.prompt) })) + '\n');
+    console.log('\n' + renderUserModel(buildUserModel({ userFacts, episodes: eps.map(e => ({ prompt: e.prompt, files: e.filesChanged })) })) + '\n');
     process.exit(0);
   });
 

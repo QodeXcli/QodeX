@@ -25,7 +25,7 @@ export interface DashboardData {
   bot: { running: boolean; pid?: number };
   health: { label: string; ok: boolean; detail: string }[];
   logs: string[];
-  userModel: { preferences: string[]; recentThemes: string[]; taskCount: number; summary: string };
+  userModel: { preferences: string[]; recentThemes: string[]; favoriteAreas: string[]; taskCount: number; summary: string };
   maintainStats?: import('./maintain-stats.js').MaintainStats;
   maintainWeekly?: import('./maintain-stats.js').MaintainWeekly;
   maintainNext?: { scope: string; why: string };
@@ -118,7 +118,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const um = d.userModel;
   const umPanel = `<div class="panel"><h2>About you</h2>${
     um.preferences.length ? `<ul>${um.preferences.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : '<p class="dim">No stated preferences yet — tell me with “Remember” above.</p>'
-  }${um.recentThemes.length ? `<p class="dim">Recent focus: ${um.recentThemes.map(esc).join(' · ')}</p>` : ''}</div>`;
+  }${um.recentThemes.length ? `<p class="dim">Recent focus: ${um.recentThemes.map(esc).join(' · ')}</p>` : ''}${um.favoriteAreas.length ? `<p class="dim">Works mostly in: ${um.favoriteAreas.map(esc).join(', ')}</p>` : ''}</div>`;
 
   // Model switcher (live: a dropdown of known models; read-only: just the current one).
   const modelCtl = live && d.models.length
@@ -373,8 +373,8 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
       const { buildUserModel } = await import('../context/user-model.js');
       const userFacts = (() => { try { return store.getFactsByScope('user', cwd, 100); } catch { return []; } })();
       const eps = await (async () => { try { const { readEpisodes } = await import('../context/episodic-memory.js'); return await readEpisodes(cwd); } catch { return []; } })();
-      return buildUserModel({ userFacts, episodePrompts: eps.map(e => e.prompt) });
-    } catch { return { preferences: [], recentThemes: [], taskCount: 0, summary: '' }; }
+      return buildUserModel({ userFacts, episodes: eps.map(e => ({ prompt: e.prompt, files: e.filesChanged })) });
+    } catch { return { preferences: [], recentThemes: [], favoriteAreas: [], taskCount: 0, summary: '' }; }
   })();
 
   return {

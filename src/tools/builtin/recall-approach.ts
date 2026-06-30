@@ -22,7 +22,7 @@ function relTime(iso: string): string {
 
 export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
   name = 'recall_approach';
-  description = 'Search YOUR OWN past work on this project — solved tasks (episodic memory) and the project worklog — for how a similar thing was done before. Use when the user asks "how did we do X before", or before re-solving a recurring task, to reuse the proven approach (and see which files it touched). Read-only.';
+  description = 'Search YOUR OWN history on this project — solved tasks (episodic memory), the project worklog, AND learned facts — for how a similar thing was done before. Use when the user asks "how did we do X before", or before re-solving a recurring task, to reuse the proven approach (and see which files it touched). Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = Args;
@@ -44,7 +44,12 @@ export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
       } catch { return []; }
     })();
 
-    const matches = rankApproaches(args.query, [...episodes, ...worklog], { topK: args.limit ?? 5, nowMs: Date.now() });
+    const facts = (() => {
+      try { return store.getFactsForCwd(cwd, 200).map((f: string) => ({ kind: 'fact' as const, text: f, when: '', detail: 'fact' })); }
+      catch { return []; }
+    })();
+
+    const matches = rankApproaches(args.query, [...episodes, ...worklog, ...facts], { topK: args.limit ?? 5, nowMs: Date.now() });
     return { content: formatApproaches(args.query, matches), metadata: { matches: matches.length, episodes: episodes.length, worklog: worklog.length } };
   }
 }

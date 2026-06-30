@@ -17,6 +17,8 @@ const STOP = new Set([
 export interface UserModel {
   preferences: string[];
   recentThemes: string[];
+  /** Directories the user works in most, from the files their tasks touched. */
+  favoriteAreas: string[];
   taskCount: number;
   summary: string;
 }
@@ -37,18 +39,31 @@ export function extractThemes(prompts: string[], topK = 6): string[] {
     .map(([w]) => w);
 }
 
-export function buildUserModel(input: { userFacts: string[]; episodePrompts: string[] }): UserModel {
+/** Directories the user works in most, from the files their episodes touched (2-level). PURE. */
+export function favoriteAreas(fileLists: string[][], topK = 3): string[] {
+  const freq = new Map<string, number>();
+  for (const files of fileLists) for (const f of files) {
+    const area = f.split('/').slice(0, 2).join('/');
+    if (area) freq.set(area, (freq.get(area) ?? 0) + 1);
+  }
+  return [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, topK).map(([a]) => a);
+}
+
+export function buildUserModel(input: { userFacts: string[]; episodes: { prompt: string; files?: string[] }[] }): UserModel {
   const preferences = input.userFacts
     .map(f => f.replace(/!important\b/gi, '').replace(/^\s*[\-*]\s*/, '').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
-  const recentThemes = extractThemes(input.episodePrompts);
+  const recentThemes = extractThemes(input.episodes.map(e => e.prompt));
+  const areas = favoriteAreas(input.episodes.map(e => e.files ?? []));
   const bits: string[] = [];
   if (preferences.length) bits.push(`${preferences.length} stated preference${preferences.length === 1 ? '' : 's'}`);
   if (recentThemes.length) bits.push(`recent focus: ${recentThemes.slice(0, 3).join(', ')}`);
+  if (areas.length) bits.push(`works mostly in ${areas[0]}`);
   return {
     preferences,
     recentThemes,
-    taskCount: input.episodePrompts.length,
+    favoriteAreas: areas,
+    taskCount: input.episodes.length,
     summary: bits.length ? bits.join(' · ') : 'Nothing learned about you yet.',
   };
 }
@@ -60,5 +75,6 @@ export function renderUserModel(m: UserModel): string {
   if (m.preferences.length) { lines.push('', 'Preferences (you told me):'); for (const p of m.preferences) lines.push(`  • ${p}`); }
   else lines.push('', 'No stated preferences yet — tell me with `remember` / `/memory`.');
   if (m.recentThemes.length) lines.push('', `Recent focus: ${m.recentThemes.join(', ')}`);
+  if (m.favoriteAreas.length) lines.push(`Works mostly in: ${m.favoriteAreas.join(', ')}`);
   return lines.join('\n');
 }
