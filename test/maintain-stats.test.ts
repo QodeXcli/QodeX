@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildMaintainStats, suggestNextScopes, recommendNextScope, weeklyReport } from '../src/cli/maintain-stats.ts';
+import { buildMaintainStats, suggestNextScopes, recommendNextScope, weeklyReport, trendByWeek, projectMonthly } from '../src/cli/maintain-stats.ts';
 
 const R = (scope: string, status: string, filesChanged = 0, when = '1h ago', at?: string) => ({ scope, status, filesChanged, when, at });
 
@@ -69,5 +69,28 @@ describe('weeklyReport', () => {
     expect(wk.priorOpened).toBe(1);
     expect(wk.openedDelta).toBe(1);                    // 2 this week vs 1 prior
     expect(wk.minutesSaved).toBe(10);
+  });
+});
+
+describe('trendByWeek / projectMonthly', () => {
+  const now = Date.parse('2026-07-01T00:00:00Z');
+  const iso = (d: number) => new Date(now - d * 86_400_000).toISOString();
+  const runs = [
+    R('unused-imports', 'opened', 1, '', iso(1)),    // week 0 (newest)
+    R('unused-imports', 'opened', 1, '', iso(2)),    // week 0
+    R('dead-code', 'opened', 1, '', iso(10)),        // ~week 1
+    R('dead-code', 'blocked', 0, '', iso(3)),        // not opened — excluded
+  ];
+  it('buckets opened runs by week, newest at the end', () => {
+    const t = trendByWeek(runs, now, 4);
+    expect(t).toHaveLength(4);
+    expect(t[3]).toBe(2);   // this week
+    expect(t[2]).toBe(1);   // last week
+    expect(t[0]).toBe(0);   // 3–4 weeks ago
+  });
+  it('projects the last-28-day opened rate to a monthly figure', () => {
+    const p = projectMonthly(runs, now);
+    expect(p.cleanupsPerMonth).toBe(3);          // 3 opened within 28d
+    expect(p.minutesPerMonth).toBe(15);
   });
 });
