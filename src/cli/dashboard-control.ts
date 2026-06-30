@@ -147,6 +147,55 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         const ok = getScheduleStore().remove(String(params?.id ?? ''));
         return ok ? { ok: true, message: 'Schedule removed.' } : { ok: false, message: 'No such schedule.' };
       }
+      case 'provider.add': {
+        const name = String(params?.name ?? '').trim();
+        const baseUrl = String(params?.baseUrl ?? '').trim();
+        const keyEnv = String(params?.keyEnv ?? '').trim();
+        if (!name || !baseUrl || !keyEnv) return { ok: false, message: 'Need a name, base URL, and key-env var.' };
+        try {
+          const { buildCustomEntry } = await import('../setup/gateways.js');
+          const { addProviderToConfig } = await import('../setup/provider-writer.js');
+          const entry = buildCustomEntry({ name, baseUrl, apiKeyEnv: keyEnv, modelId: params?.model ? String(params.model) : undefined });
+          await addProviderToConfig(entry, params?.model ? { defaultModel: String(params.model) } : {});
+          const { probeProvider } = await import('../setup/provider-test.js');
+          const test = await probeProvider({ baseUrl, keyEnv });
+          return { ok: true, message: `Added "${name}". Test: ${test.ok ? '✓ ' : '✗ '}${test.detail}` };
+        } catch (e: any) { return { ok: false, message: `Add failed: ${e?.message ?? e}` }; }
+      }
+      case 'provider.test': {
+        const name = String(params?.name ?? '').trim();
+        const { loadConfig } = await import('../config/loader.js');
+        const cfg: any = await loadConfig(cwd).catch(() => ({}));
+        const builtin = cfg?.providers?.[name];
+        const custom = (cfg?.providers?.custom ?? []).find((c: any) => c?.name === name);
+        const p = custom ?? builtin;
+        if (!p) return { ok: false, message: `No provider "${name}".` };
+        const { probeProvider } = await import('../setup/provider-test.js');
+        const r = await probeProvider({ baseUrl: p.baseUrl, keyEnv: p.apiKeyEnv });
+        return { ok: r.ok, message: `${name}: ${r.ok ? '✓ ' : '✗ '}${r.detail}` };
+      }
+      case 'provider.remove': {
+        const name = String(params?.name ?? '').trim();
+        const fs = await import('fs/promises');
+        const yaml = await import('js-yaml');
+        const { QODEX_CONFIG_FILE } = await import('../config/defaults.js');
+        let raw = ''; try { raw = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8'); } catch { return { ok: false, message: 'No config file.' }; }
+        const cfg: any = raw.trim() ? (yaml.load(raw) ?? {}) : {};
+        const custom = cfg?.providers?.custom;
+        if (!Array.isArray(custom) || !custom.some((c: any) => c?.name === name)) return { ok: false, message: `No custom provider "${name}".` };
+        cfg.providers.custom = custom.filter((c: any) => c?.name !== name);
+        const { writeFileAtomic } = await import('../utils/atomic-write.js');
+        await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
+        return { ok: true, message: `Removed "${name}".` };
+      }
+      case 'bot.start': {
+        const { startBot } = await import('./bot-process.js');
+        return startBot(cwd);
+      }
+      case 'bot.stop': {
+        const { stopBot } = await import('./bot-process.js');
+        return stopBot();
+      }
       case 'offload.apply': {
         const { loadConfig } = await import('../config/loader.js');
         const cfg: any = await loadConfig(cwd).catch(() => ({}));
