@@ -20,6 +20,7 @@ const data: DashboardData = {
   bot: { running: false },
   health: [{ label: 'Provider keys', ok: true, detail: '1/1 cloud keys set' }, { label: 'Bot', ok: true, detail: 'stopped' }],
   logs: ['2026-06-30 INFO started', '2026-06-30 INFO ready'],
+  userModel: { preferences: ['prefers Persian comments'], recentThemes: ['pagination', 'auth'], taskCount: 3, summary: '1 stated preference · recent focus: pagination, auth' },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -42,7 +43,7 @@ describe('qodex dashboard (pure render)', () => {
   });
 
   it('handles an empty/fresh install gracefully', () => {
-    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], bot: { running: false }, health: [], logs: [], totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
+    const empty: DashboardData = { project: 'x', model: 'm', generatedAt: 't', providers: [], sessions: [], facts: [], episodes: [], skills: [], controls: [], schedules: [], models: [], candidates: [], runs: [], bot: { running: false }, health: [], logs: [], userModel: { preferences: [], recentThemes: [], taskCount: 0, summary: '' }, totals: { sessions: 0, tokens: 0, cost: 0, facts: 0, episodes: 0, skills: 0 } };
     const html = buildDashboardHtml(empty);
     expect(html).toContain('No sessions yet');
     expect(html).toContain('Nothing learned yet');

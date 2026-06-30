@@ -25,6 +25,7 @@ export interface DashboardData {
   bot: { running: boolean; pid?: number };
   health: { label: string; ok: boolean; detail: string }[];
   logs: string[];
+  userModel: { preferences: string[]; recentThemes: string[]; taskCount: number; summary: string };
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -93,6 +94,12 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const healthBadges = d.health.map(h => `<span class="badge ${h.ok ? 'ok' : 'warn'}">${h.ok ? '✓' : '!'} ${esc(h.label)}: ${esc(h.detail)}</span>`).join('');
   const healthPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px"><h2 style="margin:0">Health</h2>${live ? `<button onclick="if(confirm('Pull + rebuild QodeX now?'))act('app.update',{})">⟳ Update QodeX</button>` : ''}</div><div class="badges">${healthBadges}</div></div>`;
   const logsPanel = d.logs.length ? `<div class="panel"><h2>Recent log</h2><pre class="logs">${d.logs.map(esc).join('\n')}</pre></div>` : '';
+
+  // "What QodeX knows about you" — preferences + recent task themes (transparent user model).
+  const um = d.userModel;
+  const umPanel = `<div class="panel"><h2>About you</h2>${
+    um.preferences.length ? `<ul>${um.preferences.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : '<p class="dim">No stated preferences yet — tell me with “Remember” above.</p>'
+  }${um.recentThemes.length ? `<p class="dim">Recent focus: ${um.recentThemes.map(esc).join(' · ')}</p>` : ''}</div>`;
 
   // Model switcher (live: a dropdown of known models; read-only: just the current one).
   const modelCtl = live && d.models.length
@@ -188,6 +195,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     <div class="panel"><h2>Memory · learned facts</h2><ul>${factList}</ul>${live ? `<div class="ctl" style="border:0;padding-top:10px"><input id="newfact" placeholder="Remember a fact about this project…" style="flex:1;margin-right:8px;background:#1b2233;border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--ink)"><button onclick="const i=document.getElementById('newfact');if(i.value.trim())act('memory.add',{fact:i.value.trim()})">Remember</button></div>` : ''}</div>
     <div class="panel"><h2>Episodic memory · past tasks</h2><ul>${epList}</ul></div>
   </div>
+  ${umPanel}
   <div class="panel"><h2>Skills</h2><ul>${skillList}</ul></div>
   ${candidatePanel}
   ${logsPanel}
@@ -314,10 +322,18 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     try { const { QODEX_LOG_FILE } = await import('../config/defaults.js'); return tailLines(await fs.readFile(QODEX_LOG_FILE, 'utf-8'), 40); }
     catch { return []; }
   })();
+  const userModel = await (async () => {
+    try {
+      const { buildUserModel } = await import('../context/user-model.js');
+      const userFacts = (() => { try { return store.getFactsByScope('user', cwd, 100); } catch { return []; } })();
+      const eps = await (async () => { try { const { readEpisodes } = await import('../context/episodic-memory.js'); return await readEpisodes(cwd); } catch { return []; } })();
+      return buildUserModel({ userFacts, episodePrompts: eps.map(e => e.prompt) });
+    } catch { return { preferences: [], recentThemes: [], taskCount: 0, summary: '' }; }
+  })();
 
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs,
+    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,
