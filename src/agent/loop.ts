@@ -763,6 +763,7 @@ export class AgentLoop {
         // quarantine dir; it is NOT loaded and CANNOT overwrite a human skill until an
         // independent judge promotes it (see src/skills/learning/).
         const learningCfg = (this.config as any).learning;
+        let capturedThisRun = false;
         if (learningCfg?.enabled) {
           try {
             const { captureEligible } = await import('../skills/learning/capture.js');
@@ -779,6 +780,7 @@ export class AgentLoop {
                 { nowIso: new Date().toISOString(), confidence },
               );
               await writeCandidate(candidate);
+              capturedThisRun = true;
               await recordLearningEvent({ event: 'capture', name: candidate.name, confidence });
               // Code-graph grounding: how much of this skill references symbols that really exist here.
               let fitSuffix = '';
@@ -823,18 +825,24 @@ export class AgentLoop {
             logger.debug('Skill capture skipped (error)', { err: e?.message });
           }
         }
-        // ── Code-graph skill SUGGESTION ── When the full learning pipeline is OFF, still nudge the
-        // user when the work looks like a REUSABLE pattern, judged from the SHAPE of the change via
-        // the code graph (focused + cohesive + multi-file). The judgment a code-graph-less agent
-        // can't make. Off via learning.suggestSkills:false. Conservative (only fires for real patterns).
-        if (!learningCfg?.enabled && learningCfg?.suggestSkills !== false && changedFiles.length >= 2) {
+        // ── Code-graph skill SUGGESTION ── Whenever nothing was captured (learning off, OR on but
+        // the task wasn't capture-eligible), still nudge the user when the work looks like a REUSABLE
+        // pattern, judged from the SHAPE of the change via the code graph (focused + cohesive +
+        // multi-file). The judgment a code-graph-less agent can't make. A gentle one-liner; off via
+        // learning.suggestSkills:false; conservative (only fires for real patterns), never duplicative.
+        if (!capturedThisRun && learningCfg?.suggestSkills !== false && changedFiles.length >= 2) {
           try {
             const { suggestSkillFromSession, commonArea } = await import('../skills/learning/skill-suggest.js');
             const area = commonArea(changedFiles);
             const inArea = changedFiles.filter(f => f.split('/').slice(0, 2).join('/') === area).length;
             const cohesion = changedFiles.length ? inArea / changedFiles.length : 0;
             const s = suggestSkillFromSession({ prompt: String(firstUserMsg), changedFiles, cohesion });
-            if (s.worth) yield { type: 'notice', data: { message: `💡 This looks reusable ("${s.proposedName}") — ${s.reason} Enable \`learning.enabled\` to auto-capture skills like this.` } };
+            if (s.worth) {
+              const how = learningCfg?.enabled
+                ? `run \`qodex skill candidates\` to capture it`
+                : `enable \`learning.enabled\` to auto-capture skills like this`;
+              yield { type: 'notice', data: { message: `💡 This looks reusable ("${s.proposedName}") — ${s.reason} ${how}.` } };
+            }
           } catch { /* best-effort */ }
         }
       } else if (reachedFinal && !merged) {
