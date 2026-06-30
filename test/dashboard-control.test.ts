@@ -56,6 +56,12 @@ describe('dispatchAction — unknown + validation rejection (no disk writes)', (
     expect((await dispatchAction('skill.promote', { name: '' }, '/tmp')).ok).toBe(false);
     expect((await dispatchAction('skill.reject', { name: '' }, '/tmp')).ok).toBe(false);
   });
+  it('schedule.add validates required fields, the cron, recipe, and deliver target', async () => {
+    expect((await dispatchAction('schedule.add', { name: 'x', cron: '@daily' }, '/tmp')).ok).toBe(false);          // missing prompt
+    expect((await dispatchAction('schedule.add', { name: 'x', cron: 'not-a-cron', prompt: 'p' }, '/tmp')).ok).toBe(false); // bad cron
+    expect((await dispatchAction('schedule.add', { name: 'x', cron: '@daily', prompt: 'p', recipe: 'bogus' }, '/tmp')).ok).toBe(false); // bad recipe
+    expect((await dispatchAction('schedule.add', { name: 'x', cron: '@daily', prompt: 'p', deliver: 'sms:1' }, '/tmp')).ok).toBe(false); // bad deliver
+  });
 });
 
 describe('handleRequest — token auth + routing', () => {

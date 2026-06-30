@@ -122,6 +122,21 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         try { const { exportMemory } = await import('../context/memory-mirror.js'); await exportMemory(cwd); } catch { /* mirror best-effort */ }
         return { ok: true, message: `Forgot ${r.changes} fact(s) matching "${sub}".` };
       }
+      case 'schedule.add': {
+        const name = String(params?.name ?? '').trim();
+        const cron = String(params?.cron ?? '').trim();
+        const prompt = String(params?.prompt ?? '').trim();
+        if (!name || !cron || !prompt) return { ok: false, message: 'Need a name, cron, and prompt.' };
+        const recipe = String(params?.recipe ?? '').trim() || undefined;
+        const deliver = String(params?.deliver ?? '').trim() || undefined;
+        if (recipe) { const { isRecipe } = await import('../schedule/recipes.js'); if (!isRecipe(recipe)) return { ok: false, message: `Unknown recipe "${recipe}".` }; }
+        if (deliver) { const { parseDeliveryTarget } = await import('../schedule/delivery.js'); if (!parseDeliveryTarget(deliver)) return { ok: false, message: 'Deliver must be telegram:<id> / discord:<id> / slack:<id>.' }; }
+        const { getScheduleStore } = await import('../schedule/store.js');
+        try {
+          const e = getScheduleStore().add({ name, cron, prompt, cwd, recipe, deliver }); // parseCron throws on bad cron
+          return { ok: true, message: `Scheduled "${e.name}"${e.next_run_at ? ` — next ${new Date(e.next_run_at).toLocaleString()}` : ''}. Run \`qodex schedule install\` once.` };
+        } catch (e: any) { return { ok: false, message: `Bad cron or input: ${e?.message}` }; }
+      }
       case 'schedule.setEnabled': {
         const { getScheduleStore } = await import('../schedule/store.js');
         const e = getScheduleStore().setEnabled(String(params?.id ?? ''), !!params?.enabled);

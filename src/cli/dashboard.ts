@@ -21,6 +21,7 @@ export interface DashboardData {
   schedules: { id: string; name: string; cron: string; enabled: boolean; recipe?: string }[];
   models: string[];
   candidates: { name: string; description: string; confidence?: number }[];
+  runs: { schedule: string; when: string; status: string; receipt?: { status: string; prUrl?: string; verification?: { command: string; passed: boolean }[] } }[];
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -59,7 +60,23 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     <td class="mono dim">${esc(s.cron)}</td>
     <td class="r">${live ? `<button onclick="act('schedule.setEnabled',{id:'${esc(s.id)}',enabled:${!s.enabled}})">${s.enabled ? 'Disable' : 'Enable'}</button> <button class="danger" onclick="if(confirm('Remove ${esc(s.name)}?'))act('schedule.remove',{id:'${esc(s.id)}'})">Remove</button>` : `<span class="dim">${s.enabled ? 'enabled' : 'disabled'}</span>`}</td>
   </tr>`).join('') : '<tr><td colspan="3" class="dim">No scheduled tasks. Add one with `qodex schedule add`.</td></tr>';
-  const schedulePanel = `<div class="panel"><h2>Scheduled tasks</h2><table><thead><tr><th>task</th><th>cron</th><th class="r">${live ? 'actions' : 'state'}</th></tr></thead><tbody>${scheduleRows}</tbody></table></div>`;
+  const addForm = live ? `<div class="addform">
+    <input id="s_name" placeholder="name (e.g. nightly-fix)">
+    <input id="s_cron" placeholder="cron (@daily, 0 3 * * *)">
+    <input id="s_prompt" placeholder="prompt / goal" style="flex:2">
+    <select id="s_recipe"><option value="">plain</option><option value="verified-pr">verified-pr</option></select>
+    <input id="s_deliver" placeholder="deliver (telegram:&lt;id&gt;)">
+    <button onclick="act('schedule.add',{name:s_name.value,cron:s_cron.value,prompt:s_prompt.value,recipe:s_recipe.value,deliver:s_deliver.value})">Schedule</button>
+  </div>` : '';
+  const schedulePanel = `<div class="panel"><h2>Scheduled tasks</h2><table><thead><tr><th>task</th><th>cron</th><th class="r">${live ? 'actions' : 'state'}</th></tr></thead><tbody>${scheduleRows}</tbody></table>${addForm}</div>`;
+
+  // Run history + trust receipts (proof-carrying autonomy, surfaced).
+  const runRows = d.runs.length ? d.runs.map(r => {
+    const rc = r.receipt;
+    const verdict = rc ? `<span class="${rc.status === 'opened' || rc.status === 'done' ? 'ok' : rc.status === 'blocked' ? 'warn' : 'dim'}">🧾 ${esc(rc.status)}</span>${rc.prUrl ? ` <a href="${esc(rc.prUrl)}" target="_blank" class="mono">PR</a>` : ''}${rc.verification?.length ? ` <span class="dim mono">${rc.verification.map(v => (v.passed ? '✓' : '✗') + v.command).join(' ')}</span>` : ''}` : '<span class="dim">—</span>';
+    return `<tr><td><b>${esc(r.schedule)}</b></td><td class="dim">${esc(r.when)}</td><td>${esc(r.status)}</td><td>${verdict}</td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="dim">No runs yet. A verified-pr schedule produces a 🧾 receipt.</td></tr>';
+  const runsPanel = `<div class="panel"><h2>Run history &amp; receipts</h2><table><thead><tr><th>schedule</th><th>when</th><th>status</th><th>receipt</th></tr></thead><tbody>${runRows}</tbody></table></div>`;
 
   // Model switcher (live: a dropdown of known models; read-only: just the current one).
   const modelCtl = live && d.models.length
@@ -113,6 +130,9 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   button:hover{border-color:var(--accent)}
   .tg.on{background:rgba(91,227,167,.15);border-color:var(--green);color:var(--green)}
   .tg{min-width:54px}.danger:hover{border-color:#ff6b6b;color:#ff6b6b}
+  .addform{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .addform input,.addform select{flex:1;min-width:120px;background:#1b2233;border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--ink);font:inherit}
+  a{color:var(--accent)}
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--accent);border-radius:10px;padding:10px 18px;opacity:0;transition:opacity .2s;pointer-events:none}
   #toast.show{opacity:1}
   @media(max-width:820px){.cards{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:1fr}}
@@ -131,6 +151,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   ${modelPanel}
   <div class="two">${controlPanel}</div>
   ${schedulePanel}
+  ${runsPanel}
   <div class="panel"><h2>Providers &amp; models</h2><table><thead><tr><th>Provider</th><th>Base URL</th><th>Models</th><th>API key</th></tr></thead><tbody>${providerRows}</tbody></table></div>
   <div class="panel"><h2>Recent sessions</h2><table><thead><tr><th>id</th><th>title</th><th>model</th><th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th>when</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
   <div class="two">
@@ -233,10 +254,26 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     try { const { listCandidates } = await import('../skills/learning/candidate-store.js'); return (await listCandidates()).map(c => ({ name: c.name, description: (c.description ?? '').slice(0, 90), confidence: c.confidence })); }
     catch { return []; }
   })();
+  // Run history + trust receipts: the most recent runs across all schedules.
+  const runs = await (async () => {
+    try {
+      const { getScheduleStore } = await import('../schedule/store.js');
+      const store = getScheduleStore();
+      const all: DashboardData['runs'] = [];
+      for (const s of store.list()) {
+        for (const r of store.recentRuns(s.id, 3)) {
+          let receipt: DashboardData['runs'][number]['receipt'];
+          if (r.receipt) { try { const rc = JSON.parse(r.receipt); receipt = { status: rc.status, prUrl: rc.prUrl, verification: rc.verification }; } catch { /* ignore */ } }
+          all.push({ schedule: s.name, when: relTime(r.started_at), status: r.status ?? 'running', receipt });
+        }
+      }
+      return all.slice(0, 12);
+    } catch { return []; }
+  })();
 
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates,
+    providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,
