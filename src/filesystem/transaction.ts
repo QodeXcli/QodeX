@@ -49,10 +49,6 @@ INSERT OR IGNORE INTO counters (name, value) VALUES ('next_txn_id', 1);
 -- Idempotent migration: add new columns if upgrading from a v0.1.0 db
 `;
 
-const MIGRATIONS: Array<{ check: string; sql: string }> = [
-  { check: "PRAGMA table_info(transactions)", sql: "ALTER TABLE transactions ADD COLUMN git_status TEXT" },
-  { check: "PRAGMA table_info(transactions)", sql: "ALTER TABLE transactions ADD COLUMN git_fail_reason TEXT" },
-];
 
 function hashContent(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
