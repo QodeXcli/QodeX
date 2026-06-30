@@ -32,7 +32,6 @@
  */
 
 import { createHash } from 'crypto';
-import * as path from 'path';
 import { getParser, detectLanguage } from '../tools/ast/parser.js';
 import type { Chunk } from './retrieval.js';
 
