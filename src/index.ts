@@ -694,6 +694,20 @@ providerCmd
   });
 
 program
+  .command('whoami')
+  .description('Show what QodeX has learned about you — stated preferences + the focus of recent tasks')
+  .action(async () => {
+    const { getSessionStore } = await import('./session/store.js');
+    const { readEpisodes } = await import('./context/episodic-memory.js');
+    const { buildUserModel, renderUserModel } = await import('./context/user-model.js');
+    const cwd = process.cwd();
+    const userFacts = (() => { try { return getSessionStore().getFactsByScope('user', cwd, 100); } catch { return []; } })();
+    const eps = await readEpisodes(cwd).catch(() => []);
+    console.log('\n' + renderUserModel(buildUserModel({ userFacts, episodePrompts: eps.map(e => e.prompt) })) + '\n');
+    process.exit(0);
+  });
+
+program
   .command('tunnel')
   .description('SSH-tunnel to a remote model server (run the heavy model on a workstation, drive from here)')
   .requiredOption('--host <host>', 'Remote host (workstation running Ollama / LM Studio)')
