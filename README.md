@@ -342,6 +342,23 @@ subagents:
   mode: parallel            # off | sequential | parallel
 ```
 
+### Large (MoE) models on limited VRAM + local "turbo cache"
+
+Big Mixture-of-Experts coders (Qwen3-Coder-MoE, DeepSeek-MoE) don't have to fit entirely in VRAM — keep some layers on the GPU and the rest on the CPU via Ollama's `num_gpu`, which QodeX forwards verbatim:
+
+```yaml
+providers:
+  ollama:
+    keepAlive: 30m            # keep the model + its KV cache warm between turns — the local "turbo cache"
+    options:
+      num_gpu: 14             # layers on GPU; the rest run on CPU (lower = fits a bigger model)
+      num_ctx: 32768          # KV-cache size; QodeX already defaults this to the model's window
+```
+
+Not sure what `num_gpu` to use? `suggestGpuLayers({ modelSizeGB, vramBudgetGB, totalLayers })` (`src/llm/offload.ts`) turns a VRAM budget into a sensible value (e.g. a 48 GB MoE on a 12 GB GPU → keep ~14/64 layers on the GPU).
+
+Two things make local fast here: **`keep_alive`** keeps the model resident so there's no cold reload, and QodeX's **byte-stable prompt prefix** (hierarchical cache work above) means the engine's **KV prefix cache hits** instead of re-prefilling the whole context every turn — the local counterpart to Anthropic prompt caching.
+
 Cloud providers are opt-in. Web-search keys are read from the environment, never the config file:
 
 ```bash
