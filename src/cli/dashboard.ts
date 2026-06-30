@@ -91,7 +91,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
 
   // Observability: health badges + a tail of the local log.
   const healthBadges = d.health.map(h => `<span class="badge ${h.ok ? 'ok' : 'warn'}">${h.ok ? '✓' : '!'} ${esc(h.label)}: ${esc(h.detail)}</span>`).join('');
-  const healthPanel = `<div class="panel"><h2>Health</h2><div class="badges">${healthBadges}</div></div>`;
+  const healthPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px"><h2 style="margin:0">Health</h2>${live ? `<button onclick="if(confirm('Pull + rebuild QodeX now?'))act('app.update',{})">⟳ Update QodeX</button>` : ''}</div><div class="badges">${healthBadges}</div></div>`;
   const logsPanel = d.logs.length ? `<div class="panel"><h2>Recent log</h2><pre class="logs">${d.logs.map(esc).join('\n')}</pre></div>` : '';
 
   // Model switcher (live: a dropdown of known models; read-only: just the current one).
