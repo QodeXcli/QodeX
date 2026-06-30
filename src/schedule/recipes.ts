@@ -71,19 +71,23 @@ function verifiedPrPrompt(goal: string): string {
 }
 
 /** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
-export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals';
-export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals'] as const;
+export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params'] as const;
 
 /** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
- *  Forms: "" (→ dead-code) · "unused-imports src/" · "unused-locals --dry-run" · "src/utils". */
+ *  Forms: "" (→ dead-code) · "unused-imports src/" · "unused-params --dry-run" · "src/utils". */
 export function parseMaintainScope(prompt: string): { scope: MaintainScope; focus: string; dryRun: boolean } {
   let rest = (prompt ?? '').trim();
   const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
   rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
   let scope: MaintainScope = 'dead-code';
-  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|dead[-_]?code)\b/i.exec(rest);
+  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|dead[-_]?code)\b/i.exec(rest);
   if (m) {
-    scope = /imports/i.test(m[1]!) ? 'unused-imports' : /locals/i.test(m[1]!) ? 'unused-locals' : 'dead-code';
+    const k = m[1]!;
+    scope = /imports/i.test(k) ? 'unused-imports'
+      : /locals/i.test(k) ? 'unused-locals'
+      : /params/i.test(k) ? 'unused-params'
+      : 'dead-code';
     rest = rest.slice(m[0].length).trim();
   }
   return { scope, focus: rest, dryRun };
@@ -133,6 +137,21 @@ const UNUSED_LOCALS_SELECTION = [
   'd. Remove only the proven-safe bindings. Touch nothing else.',
 ];
 
+const UNUSED_PARAMS_SELECTION = [
+  'SCOPE (v4 — UNUSED PARAMETERS): silence unused function parameters by PREFIXING them with an',
+  'underscore (`foo` → `_foo`). NEVER remove a parameter — that would change the signature/arity',
+  'and break callers. The `_` prefix is the convention tsc (`noUnusedParameters`) and eslint',
+  '(`argsIgnorePattern: ^_`) already ignore, so it removes the warning with ZERO behavior change.',
+  '',
+  'SELECTION — prove unused, rename only:',
+  'a. Find unused parameters with `tsc --noUnusedParameters` or the linter. The parameter must be',
+  '   referenced ZERO times in its function body.',
+  'b. For a simple positional parameter `foo`, rename it to `_foo` AT ITS DECLARATION only.',
+  'c. EXCLUDE destructured props (`{ x }`) and already-`_`-prefixed params — renaming a destructured',
+  '   prop changes the object shape callers pass. If the only fix is a destructured prop, BLOCK.',
+  'd. The `_`-prefix is your GOAL. Change nothing else.',
+];
+
 /**
  * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
  * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
@@ -143,6 +162,7 @@ function maintainPrompt(prompt: string): string {
   const { scope, focus, dryRun } = parseMaintainScope(prompt);
   const selection = scope === 'unused-imports' ? UNUSED_IMPORTS_SELECTION
     : scope === 'unused-locals' ? UNUSED_LOCALS_SELECTION
+    : scope === 'unused-params' ? UNUSED_PARAMS_SELECTION
     : DEAD_CODE_SELECTION;
   const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
   const dryRunBlock = dryRun ? [

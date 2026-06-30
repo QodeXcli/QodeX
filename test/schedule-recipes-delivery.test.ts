@@ -87,7 +87,18 @@ describe('recipes — Autonomous Verified PR', () => {
     expect(p).toMatch(/function\/method call, `await`, `new`/i);
     expect(p).toContain('```qodex-receipt');               // still ships via verified-PR
     expect(p).not.toContain('UNUSED IMPORTS ONLY');
-    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals']);
+  });
+
+  it('maintain scope=unused-params: prefix `_`, NEVER remove, exclude destructured props', () => {
+    expect(parseMaintainScope('unused-params src/')).toEqual({ scope: 'unused-params', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('params --dry-run')).toEqual({ scope: 'unused-params', focus: '', dryRun: true });
+    const p = buildRecipePrompt('maintain', 'unused-params');
+    expect(p).toContain('UNUSED PARAMETERS');
+    expect(p).toMatch(/PREFIXING them with an\s*\n?\s*underscore/i);
+    expect(p).toMatch(/NEVER remove a parameter/i);          // rename, not remove
+    expect(p).toMatch(/EXCLUDE destructured props/i);        // signature-shape guardrail
+    expect(p).toContain('```qodex-receipt');                 // still ships via verified-PR
+    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params']);
   });
 });
 
