@@ -98,7 +98,29 @@ describe('recipes — Autonomous Verified PR', () => {
     expect(p).toMatch(/NEVER remove a parameter/i);          // rename, not remove
     expect(p).toMatch(/EXCLUDE destructured props/i);        // signature-shape guardrail
     expect(p).toContain('```qodex-receipt');                 // still ships via verified-PR
-    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params']);
+  });
+
+  it('maintain scope=lint-fix: autofixable rules only, focused, no behavior change', () => {
+    expect(parseMaintainScope('lint-fix src/')).toEqual({ scope: 'lint-fix', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('lint --dry-run')).toEqual({ scope: 'lint-fix', focus: '', dryRun: true });
+    const p = buildRecipePrompt('maintain', 'lint-fix');
+    expect(p).toContain('SAFE LINT AUTOFIX');
+    expect(p).toMatch(/AUTOFIXABLE rules only/i);
+    expect(p).toMatch(/do NOT --fix the whole repo/i);       // bounded, reviewable
+    expect(p).toMatch(/never apply a fixer that rewrites logic/i);
+    expect(p).toContain('```qodex-receipt');
+  });
+
+  it('maintain scope=dep-bump: ONE patch/minor bump, requires tests, never major', () => {
+    expect(parseMaintainScope('dep-bump')).toEqual({ scope: 'dep-bump', focus: '', dryRun: false });
+    expect(parseMaintainScope('dependencies --dry-run')).toEqual({ scope: 'dep-bump', focus: '', dryRun: true });
+    const p = buildRecipePrompt('maintain', 'dep-bump');
+    expect(p).toContain('ONE DEPENDENCY BUMP');
+    expect(p).toMatch(/NEVER a major version/i);
+    expect(p).toMatch(/REQUIRE a real test command/i);       // unverifiable without tests → block
+    expect(p).toMatch(/run the FULL test suite/i);
+    expect(p).toMatch(/touch no other dependency/i);
+    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump']);
   });
 });
 
