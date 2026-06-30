@@ -28,7 +28,6 @@ export interface RubricScores {
   justification: string;
 }
 
-const DIMS = ['readability', 'efficiency', 'completeness', 'safety'] as const;
 
 function dimValues(s: RubricScores): number[] {
   return [s.readability, s.efficiency, s.completeness, s.safety];

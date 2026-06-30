@@ -42,7 +42,6 @@ export interface ImportGraph {
   files: Set<string>;
 }
 
-const SOURCE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.php', '.java', '.rb'];
 const RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.php', '.java', '.rb', ''];
 const INDEX_FILES = ['index.ts', 'index.tsx', 'index.js', 'index.jsx', '__init__.py', 'mod.rs'];
 
