@@ -84,6 +84,35 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         await writeConfigKnob(String(params.key), v.coerced);
         return { ok: true, message: `Set ${params.key} = ${v.coerced}. Takes effect on the next run.` };
       }
+      case 'model.set': {
+        const model = String(params?.model ?? '').trim();
+        if (!model) return { ok: false, message: 'Pick a model.' };
+        await writeConfigKnob('defaults.model', model);
+        return { ok: true, message: `Default model → ${model}. Takes effect on the next run.` };
+      }
+      case 'memory.add': {
+        const fact = String(params?.fact ?? '').trim();
+        if (!fact) return { ok: false, message: 'Nothing to remember.' };
+        const scope = params?.scope === 'user' ? 'user' : 'project';
+        const { getSessionStore } = await import('../session/store.js');
+        getSessionStore().addFact('dashboard', cwd, fact, scope);
+        try { const { exportMemory } = await import('../context/memory-mirror.js'); await exportMemory(cwd); } catch { /* mirror best-effort */ }
+        return { ok: true, message: `Remembered (${scope}): ${fact.slice(0, 60)}` };
+      }
+      case 'skill.promote': {
+        const name = String(params?.name ?? '').trim();
+        if (!name) return { ok: false, message: 'No candidate named.' };
+        const { promoteCandidate } = await import('../skills/learning/candidate-store.js');
+        const r = await promoteCandidate(name, cwd);
+        return r.promoted ? { ok: true, message: `Promoted "${name}".` } : { ok: false, message: r.reason ?? 'Promotion blocked.' };
+      }
+      case 'skill.reject': {
+        const name = String(params?.name ?? '').trim();
+        if (!name) return { ok: false, message: 'No candidate named.' };
+        const { archiveCandidate } = await import('../skills/learning/candidate-store.js');
+        const ok = await archiveCandidate(name);
+        return ok ? { ok: true, message: `Rejected "${name}".` } : { ok: false, message: 'No such candidate.' };
+      }
       case 'memory.forget': {
         const sub = String(params?.substring ?? '').trim();
         if (!sub) return { ok: false, message: 'Provide a substring to forget.' };
