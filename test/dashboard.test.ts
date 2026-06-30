@@ -69,6 +69,9 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain("act('provider.add'");          // provider add form
     expect(live).toContain("act('provider.test'");         // per-provider test button
     expect(live).toContain("act('bot.start'");             // bot lifecycle (stopped → Start)
+    expect(live).toContain("act('app.update'");            // self-update button
+    expect(live).toContain('Recent log');                  // observability log panel
+    expect(live).toContain('Health');                      // health badges
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it

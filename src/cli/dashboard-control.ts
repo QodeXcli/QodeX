@@ -188,6 +188,11 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
         return { ok: true, message: `Removed "${name}".` };
       }
+      case 'app.update': {
+        const { selfUpdate } = await import('./self-update.js');
+        const r = await selfUpdate();
+        return { ok: r.ok, message: r.message };
+      }
       case 'bot.start': {
         const { startBot } = await import('./bot-process.js');
         return startBot(cwd);

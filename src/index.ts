@@ -694,6 +694,18 @@ providerCmd
   });
 
 program
+  .command('update')
+  .description('Self-update the QodeX git checkout (git pull → npm install → npm run build)')
+  .action(async () => {
+    const { selfUpdate } = await import('./cli/self-update.js');
+    console.log('\n🔄 Updating QodeX…');
+    const r = await selfUpdate(line => console.log('  ' + line));
+    for (const l of r.log) console.log('  ' + l);
+    console.log(`\n${r.ok ? '✓' : '✗'} ${r.message}\n`);
+    process.exit(r.ok ? 0 : 1);
+  });
+
+program
   .command('offload')
   .description('Auto-detect VRAM + model size and suggest a num_gpu for running large/MoE models locally')
   .option('--model <id>', 'Ollama model to plan for (default: configured default model)')
