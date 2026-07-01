@@ -9,6 +9,30 @@
  */
 import { tokenize, termFreq, cosineSim } from '../skills/learning/similarity.js';
 
+/**
+ * Light rule-based stemmer — collapse a word to a common root so lexically-different but
+ * semantically-equal terms match: pagination↔paginate, authentication↔authenticate,
+ * backups↔backup, migrating↔migrate. Longest suffix first; never reduces below 3 chars. PURE.
+ * Localized to recall (not the shared tokenizer) so skill-dedup thresholds are unaffected.
+ */
+const SUFFIXES = ['ation', 'ising', 'izing', 'ings', 'ing', 'ers', 'ies', 'er', 'ed', 'es', 'ate', 'ly', 's'];
+export function stem(word: string): string {
+  if (word.length <= 4) return word;
+  for (const suf of SUFFIXES) {
+    if (word.endsWith(suf) && word.length - suf.length >= 3) {
+      let root = word.slice(0, word.length - suf.length);
+      if (suf === 'ies') root += 'y';           // categories → category
+      return root;
+    }
+  }
+  return word;
+}
+
+/** Tokenize + stem — the recall ranker's semantic-lexical vocabulary. PURE. */
+export function semanticTokens(text: string): string[] {
+  return tokenize(text).map(stem);
+}
+
 export interface ApproachSource {
   kind: 'episode' | 'worklog' | 'fact';
   /** The searchable text (prompt + summary, or the worklog entry). */
@@ -51,11 +75,11 @@ export function rankApproaches(
   const topK = opts.topK ?? 5;
   const minScore = opts.minScore ?? 0.12;
   const lambda = Math.max(0, Math.min(1, opts.diversity ?? 0));
-  const qv = termFreq(tokenize(query));
+  const qv = termFreq(semanticTokens(query));
   if (qv.size === 0) return [];
   const scored: { m: ApproachMatch; eff: number; tf: Map<string, number> }[] = [];
   for (const s of sources) {
-    const tf = termFreq(tokenize(s.text));
+    const tf = termFreq(semanticTokens(s.text));
     const score = cosineSim(qv, tf);
     if (score >= minScore) scored.push({ m: { ...s, score }, eff: score + recencyBoost(s.at, opts.nowMs), tf });
   }
