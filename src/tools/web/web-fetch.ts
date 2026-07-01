@@ -241,6 +241,7 @@ export class WebFetchTool extends Tool<z.infer<typeof WebFetchArgs>> {
         storedPath = await storeFullText(response.url, output);
         const sel = selectRelevantPassages(output, { query: args.query, budget: maxChars });
         mode = sel.mode;
+        void import('./extract-metrics.js').then(m => m.recordExtract(sel.mode)).catch(() => {});
         const recovery = storedPath
           ? `Full clean text (${output.length} chars) stored at:\n${storedPath}\nRead the omitted parts with: read_file path="${storedPath}" offset=<line> limit=<n>`
           : `Full page is ${output.length} chars; re-fetch with a higher max_chars${args.query ? '' : ' or a `query` to target the relevant passages'} to see more.`;

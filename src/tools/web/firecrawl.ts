@@ -65,7 +65,10 @@ export class FirecrawlBackend implements WebSearchBackend {
       if (payload.success === false) {
         throw new WebSearchError(`Firecrawl error: ${payload.error ?? 'unknown'}`, this.name);
       }
-      return mapFirecrawlResults(payload, opts.limit);
+      // Trim scraped markdown to the passages most relevant to the search query (semantic), and
+      // record how often that beat the positional fallback — surfaced in the dashboard.
+      const { recordExtract } = await import('./extract-metrics.js');
+      return mapFirecrawlResults(payload, opts.limit, { query, onExtract: (mode) => { void recordExtract(mode); } });
     } catch (e: any) {
       if (e instanceof WebSearchError) throw e;
       if (e?.name === 'AbortError') throw new WebSearchError('Request aborted (timeout or cancellation)', this.name, e);

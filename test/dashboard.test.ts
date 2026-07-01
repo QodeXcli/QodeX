@@ -27,6 +27,7 @@ const data: DashboardData = {
   maintainTrend: [0, 0, 1, 0, 2, 1, 0, 3],
   maintainProjection: { cleanupsPerMonth: 6, minutesPerMonth: 30 },
   maintainForecast: { weeklyAvg: 1.5, slope: 0.4, direction: 'rising', nextWeek: 3, weeks: 8 },
+  extractMetrics: { semantic: 7, headTail: 3, truncated: 10, semanticRate: 0.7 },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -87,6 +88,8 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('Trend forecast');              // OLS forecast surfaced
     expect(live).toContain('rising ↑');                    // direction rendered
     expect(live).toContain('next week ≈ 3');               // prediction rendered
+    expect(live).toContain('Web extract — semantic vs positional'); // extract hit-rate panel
+    expect(live).toContain('70%');                         // semantic hit-rate rendered
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it
