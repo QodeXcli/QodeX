@@ -741,6 +741,73 @@ program
     process.exit(0);
   });
 
+// Gather maintain runs from the local schedule store (shared by export). Returns MaintainRun[].
+async function gatherMaintainRuns(): Promise<import('./cli/maintain-stats.js').MaintainRun[]> {
+  const { getScheduleStore } = await import('./schedule/store.js');
+  const { parseMaintainScope } = await import('./schedule/recipes.js');
+  const store = getScheduleStore();
+  const runs: import('./cli/maintain-stats.js').MaintainRun[] = [];
+  for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+    const scope = parseMaintainScope(s.prompt).scope;
+    for (const r of store.recentRuns(s.id, 500)) {
+      let status = r.status ?? 'running'; let files = 0;
+      if (r.receipt) { try { const rc = JSON.parse(r.receipt); status = rc.status ?? status; files = (rc.filesChanged ?? []).length; } catch { /* ignore */ } }
+      runs.push({ scope, status, filesChanged: files, when: '', at: r.started_at });
+    }
+  }
+  return runs;
+}
+
+program
+  .command('maintain-export')
+  .description('Export the maintain history to a portable JSON snapshot (archive, share, or move machines)')
+  .option('-o, --out <file>', 'write to this file instead of stdout')
+  .action(async (opts: { out?: string }) => {
+    const { serializeMaintainHistory } = await import('./cli/maintain-history.js');
+    const runs = await gatherMaintainRuns();
+    const json = serializeMaintainHistory(runs, new Date().toISOString());
+    if (opts.out) {
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(opts.out, json);
+      console.log(`\n📦 Exported ${runs.length} maintain run(s) → ${opts.out}\n`);
+    } else {
+      console.log(json);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('maintain-import <file>')
+  .description('Report on a maintain-history snapshot; --merge combines it with local history')
+  .option('--merge', 'merge the snapshot with local history and report the combined analytics')
+  .action(async (file: string, opts: { merge?: boolean }) => {
+    const { promises: fs } = await import('fs');
+    const { deserializeMaintainHistory, mergeRuns } = await import('./cli/maintain-history.js');
+    const { buildMaintainStats, forecastTrend } = await import('./cli/maintain-stats.js');
+    let parsed;
+    try { parsed = deserializeMaintainHistory(await fs.readFile(file, 'utf-8')); }
+    catch (e: any) { console.error(`\n✗ Could not read snapshot: ${e?.message ?? e}\n`); process.exit(1); }
+    let runs = parsed!.runs;
+    let label = `snapshot (${runs.length} run(s)${parsed!.exportedAt ? `, exported ${parsed!.exportedAt.slice(0, 10)}` : ''})`;
+    if (opts.merge) {
+      const local = await gatherMaintainRuns();
+      const before = runs.length;
+      runs = mergeRuns(local, runs);
+      label = `merged: ${local.length} local + ${before} imported → ${runs.length} unique`;
+    }
+    const now = Date.now();
+    const stats = buildMaintainStats(runs);
+    const fc = forecastTrend(runs, now);
+    const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
+    console.log(`\n📥 Maintain history — ${label}\n`);
+    if (stats.totalRuns === 0) { console.log('  No runs in the snapshot.\n'); process.exit(0); }
+    console.log(`  Totals:    ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
+    console.log(`  Forecast:  ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek}`);
+    console.log(`  By scope:  ${stats.byScope.map(s => `${s.scope} ${s.opened}/${s.runs}`).join(' · ') || '—'}`);
+    console.log(opts.merge ? '\n  (report only — local history is unchanged)\n' : '');
+    process.exit(0);
+  });
+
 program
   .command('whoami')
   .description('Show what QodeX has learned about you — stated preferences + the focus of recent tasks')
