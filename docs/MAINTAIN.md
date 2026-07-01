@@ -36,6 +36,7 @@ All scopes live in `src/schedule/recipes.ts` as `*_SELECTION` constants.
 | `unused-params` (v4)  | Silence unused params by **prefixing `_`**          | Never *removes* a param (arity change); excludes destructured props |
 | `lint-fix` (v5)       | Apply the linter's **autofixable** rules only       | No behavior-changing fixers; bounded to a focus area, never `--fix` the whole repo |
 | `dep-bump` (v6)       | Bump ONE dependency a patch/minor and prove tests pass | Requires a real test suite; never a major version |
+| `consolidate-dupes` (v7) | Merge ONE exact-duplicate helper pair, repointing callers | Bodies must be *exactly* equivalent (near-dupes out); every caller resolved via the code graph or it blocks — a missed caller breaks the build |
 
 The guiding rule: **every scope must be able to PROVE its change is safe — or `block`.** A scope
 that can't prove safety in a given case must choose `blocked` with the reason, not guess.

@@ -71,8 +71,8 @@ function verifiedPrPrompt(goal: string): string {
 }
 
 /** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
-export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params' | 'lint-fix' | 'dep-bump';
-export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump'] as const;
+export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params' | 'lint-fix' | 'dep-bump' | 'consolidate-dupes';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes'] as const;
 
 /** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
  *  Forms: "" (→ dead-code) · "unused-imports src/" · "lint-fix --dry-run" · "dep-bump" · "src/utils". */
@@ -81,7 +81,7 @@ export function parseMaintainScope(prompt: string): { scope: MaintainScope; focu
   const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
   rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
   let scope: MaintainScope = 'dead-code';
-  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|lint[-_]?fix|lint|dep[-_]?bump|deps?|dependenc(?:y|ies)|dead[-_]?code)\b/i.exec(rest);
+  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|lint[-_]?fix|lint|dep[-_]?bump|deps?|dependenc(?:y|ies)|consolidate[-_]?dupes?|consolidate|duplicates?|dupes?|dedupe|dead[-_]?code)\b/i.exec(rest);
   if (m) {
     const k = m[1]!;
     scope = /imports/i.test(k) ? 'unused-imports'
@@ -89,6 +89,7 @@ export function parseMaintainScope(prompt: string): { scope: MaintainScope; focu
       : /params/i.test(k) ? 'unused-params'
       : /lint/i.test(k) ? 'lint-fix'
       : /dep/i.test(k) ? 'dep-bump'
+      : /consolidate|duplicate|dupe|dedupe/i.test(k) ? 'consolidate-dupes'
       : 'dead-code';
     rest = rest.slice(m[0].length).trim();
   }
@@ -182,6 +183,26 @@ const DEP_BUMP_SELECTION = [
   'e. The single version bump IS your GOAL — touch no other dependency.',
 ];
 
+const CONSOLIDATE_DUPES_SELECTION = [
+  'SCOPE (v7 — CONSOLIDATE ONE PAIR OF DUPLICATE HELPERS): find TWO functions whose bodies are',
+  'EXACTLY equivalent and remove ONE by pointing its callers at the other. This is the code-graph',
+  'scope — a plain agent cannot prove two functions are equivalent, nor find every caller, so it',
+  'CANNOT do this safely. You can. Be extremely conservative: a missed caller breaks the build.',
+  '',
+  'SELECTION — prove exact-duplicate AND prove every caller, or block:',
+  'a. Use the code graph to find an EXACT-duplicate pair: normalized bodies identical (ignore only',
+  '   whitespace/comments) AND identical parameter list and return shape. If you are not CERTAIN they',
+  '   are behaviorally identical, BLOCK. Near-duplicates / "similar" functions are OUT of scope.',
+  'b. Both must be self-contained helpers — no differing captured closure variables, no distinct',
+  '   module-level side effects, no reliance on differing imports. If either captures different outer',
+  '   scope, BLOCK. Pick the canonical one to KEEP (prefer the exported / more central / better-named).',
+  'c. With `find_references` / `analyze_impact`, enumerate EVERY caller of the one to remove. If ANY',
+  '   reference is dynamic/string-based, re-exported, or you cannot resolve them all, BLOCK.',
+  'd. Repoint each caller to the canonical function (add an import only if needed), then delete the',
+  '   duplicate. Change ONLY what the repoint requires — no renames, no reordering, no behavior tweaks.',
+  'e. This single consolidation IS your GOAL. Verification (tests + types) MUST pass or it does not ship.',
+];
+
 /**
  * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
  * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
@@ -195,6 +216,7 @@ function maintainPrompt(prompt: string): string {
     : scope === 'unused-params' ? UNUSED_PARAMS_SELECTION
     : scope === 'lint-fix' ? LINT_FIX_SELECTION
     : scope === 'dep-bump' ? DEP_BUMP_SELECTION
+    : scope === 'consolidate-dupes' ? CONSOLIDATE_DUPES_SELECTION
     : DEAD_CODE_SELECTION;
   const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
   const dryRunBlock = dryRun ? [

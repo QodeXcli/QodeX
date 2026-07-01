@@ -120,7 +120,20 @@ describe('recipes — Autonomous Verified PR', () => {
     expect(p).toMatch(/REQUIRE a real test command/i);       // unverifiable without tests → block
     expect(p).toMatch(/run the FULL test suite/i);
     expect(p).toMatch(/touch no other dependency/i);
-    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump']);
+  });
+
+  it('maintain scope=consolidate-dupes: exact-duplicate pair only, prove every caller, or block', () => {
+    expect(parseMaintainScope('consolidate-dupes src/')).toEqual({ scope: 'consolidate-dupes', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('dupes --dry-run')).toEqual({ scope: 'consolidate-dupes', focus: '', dryRun: true });
+    expect(parseMaintainScope('dedupe')).toEqual({ scope: 'consolidate-dupes', focus: '', dryRun: false });
+    expect(parseMaintainScope('duplicate util')).toEqual({ scope: 'consolidate-dupes', focus: 'util', dryRun: false });
+    const p = buildRecipePrompt('maintain', 'consolidate-dupes');
+    expect(p).toContain('CONSOLIDATE ONE PAIR OF DUPLICATE HELPERS');
+    expect(p).toMatch(/EXACT-duplicate pair/);
+    expect(p).toMatch(/Near-duplicates .* are OUT of scope/i);   // only exact equivalence
+    expect(p).toMatch(/enumerate EVERY caller/i);                 // a missed caller breaks the build
+    expect(p).toContain('```qodex-receipt');
+    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes']);
   });
 });
 

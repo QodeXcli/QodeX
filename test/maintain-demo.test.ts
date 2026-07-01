@@ -12,7 +12,7 @@ describe('buildMaintainDemoHtml', () => {
 
   it('shows the nightly loop steps and all six scopes', () => {
     for (const step of ['Code-graph analysis', 'Verify (tests + types)', 'Open PR', 'Trust receipt']) expect(html).toContain(step);
-    for (const scope of ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump']) expect(html).toContain(scope);
+    for (const scope of ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes']) expect(html).toContain(scope);
   });
 
   it('shows a trust receipt and the honesty claim (measured, not fabricated)', () => {
