@@ -4,6 +4,7 @@
  * Only a TYPE import here (erased at runtime).
  */
 import type { WebSearchResult } from './types.js';
+import { selectRelevantPassages, stripBase64Images, type ExtractMode } from './extract-select.js';
 
 /** Max chars kept from a scraped markdown body, so one rich result can't flood context. */
 const MARKDOWN_CAP = 1500;
@@ -18,19 +19,38 @@ interface FirecrawlItem {
 }
 
 /**
+ * Cap a scraped markdown body to a budget using the SAME semantic selection as web_fetch: with a
+ * query, return the passages most relevant to it (not just the top); without one, a head+tail
+ * window. Returns the chosen mode so the caller can record the semantic-vs-positional hit rate. PURE.
+ */
+export function capMarkdown(md: string, query: string | undefined, cap: number): { snippet: string; mode: ExtractMode } {
+  const sel = selectRelevantPassages(stripBase64Images(md), { query, budget: cap });
+  return { snippet: sel.content, mode: sel.mode };
+}
+
+/**
  * Map a Firecrawl /search payload to our uniform result shape. When markdown is present
- * (content mode) we prefer it (capped) so the model gets real page content inline;
- * otherwise we fall back to the description snippet.
+ * (content mode) we prefer it — trimmed to the passages most relevant to `query` if given
+ * (semantic), else a head+tail window — so the model gets real page content inline. `onExtract`
+ * (optional) is called with each capped result's mode so the caller can record metrics.
  */
 export function mapFirecrawlResults(
   payload: { success?: boolean; data?: FirecrawlItem[]; error?: string } | null | undefined,
   limit: number,
+  opts?: { query?: string; onExtract?: (mode: ExtractMode) => void },
 ): WebSearchResult[] {
   const items = payload?.data ?? [];
   return items.slice(0, limit).map(r => {
     const md = (r.markdown ?? '').trim();
     const desc = (r.description ?? '').trim();
-    const snippet = md ? md.slice(0, MARKDOWN_CAP) : desc.slice(0, DESCRIPTION_CAP);
+    let snippet: string;
+    if (md) {
+      const capped = capMarkdown(md, opts?.query, MARKDOWN_CAP);
+      snippet = capped.snippet;
+      opts?.onExtract?.(capped.mode);
+    } else {
+      snippet = desc.slice(0, DESCRIPTION_CAP);
+    }
     return { title: r.title ?? '(no title)', url: r.url ?? '', snippet };
   }).filter(r => r.url);
 }
