@@ -38,6 +38,14 @@ All scopes live in `src/schedule/recipes.ts` as `*_SELECTION` constants.
 | `dep-bump` (v6)       | Bump ONE dependency a patch/minor and prove tests pass | Requires a real test suite; never a major version |
 | `consolidate-dupes` (v7) | Merge ONE exact-duplicate helper pair, repointing callers | Bodies must be *exactly* equivalent (near-dupes out); every caller resolved via the code graph or it blocks — a missed caller breaks the build |
 
+**Beyond exact duplicates:** the `find_similar_helpers` tool (`src/codegraph/helper-extract.ts`)
+detects *near*-duplicate helpers — copy-pasted-then-tweaked functions (same structure, a different
+constant or name) that `consolidate-dupes` can't catch. It normalizes bodies (strip comments,
+abstract literals + the function's own name), ranks functions with **TF-IDF-weighted** structural
+cosine (so ubiquitous punctuation/keywords don't make everything look alike), and clusters
+**seed-based** (no single-linkage chaining). Read-only — it surfaces clusters ranked by lines
+saved for a human to extract, since merging near-dupes changes call sites.
+
 The guiding rule: **every scope must be able to PROVE its change is safe — or `block`.** A scope
 that can't prove safety in a given case must choose `blocked` with the reason, not guess.
 

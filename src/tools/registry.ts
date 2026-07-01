@@ -38,6 +38,7 @@ import {
 import { ProjectOverviewTool } from './codegraph/project-overview.js';
 import { AnalyzeImpactTool } from './codegraph/analyze-impact.js';
 import { FindDeadCodeTool } from './codegraph/find-dead-code.js';
+import { FindSimilarHelpersTool } from './codegraph/find-similar-helpers.js';
 import { SafeRenameTool, SafeDeleteFileTool } from './codegraph/safe-refactor.js';
 import { ReviewMyChangesTool } from './safety/review-changes.js';
 import { SmartDiffTool } from './codegraph/smart-diff.js';
@@ -225,6 +226,7 @@ export class ToolRegistry {
       new AnalyzeImpactTool(),
       // v1.11 — quality + refactor-safety tools
       new FindDeadCodeTool(),
+      new FindSimilarHelpersTool(),
       new SafeRenameTool(),
       new SafeDeleteFileTool(),
       // v1.12 — self-critique
