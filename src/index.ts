@@ -709,7 +709,7 @@ program
   .action(async () => {
     const { getScheduleStore } = await import('./schedule/store.js');
     const { parseMaintainScope, MAINTAIN_SCOPES } = await import('./schedule/recipes.js');
-    const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly } = await import('./cli/maintain-stats.js');
+    const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly, forecastTrend } = await import('./cli/maintain-stats.js');
     const store = getScheduleStore();
     const runs: import('./cli/maintain-stats.js').MaintainRun[] = [];
     for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
@@ -731,6 +731,9 @@ program
     console.log(`  All time:   ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
     console.log(`  This week:  ${wk.opened} PR(s) · ${wk.filesCleaned} files · ${wk.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(wk.openedDelta)} vs last week`);
     console.log(`  8-wk trend: ${spark}  (opened/week)`);
+    const fc = forecastTrend(runs, now);
+    const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
+    console.log(`  Forecast:   ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek} cleanup(s)`);
     console.log(`  Projected:  ~${proj.cleanupsPerMonth} cleanups/mo · ~${proj.minutesPerMonth} min/mo at the current rate`);
     console.log(`  By scope:   ${stats.byScope.map(s => `${s.scope} ${s.opened}/${s.runs}`).join(' · ') || '—'}`);
     if (next) console.log(`  Suggested:  qodex schedule add --recipe maintain --prompt "${next.scope}"   (${next.why})`);

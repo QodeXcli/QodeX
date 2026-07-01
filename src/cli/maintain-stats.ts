@@ -101,6 +101,34 @@ export function projectMonthly(runs: MaintainRun[], nowMs: number): { cleanupsPe
   return { cleanupsPerMonth: recent, minutesPerMonth: recent * 5 };
 }
 
+export interface MaintainForecast {
+  weeklyAvg: number;                               // mean opened/week over the window
+  slope: number;                                   // OLS slope — Δ cleanups per week (rounded to 0.01)
+  direction: 'rising' | 'falling' | 'steady';      // is the loop accelerating, cooling, or level?
+  nextWeek: number;                                // predicted opened NEXT week (≥0, from the fitted line)
+  weeks: number;                                   // window length used
+}
+
+/**
+ * Fit an ordinary-least-squares trendline to the weekly opened-cleanups series and predict next
+ * week — a stronger, honest signal than a naive "last-28-days" count: it says whether the
+ * self-improvement loop is speeding up, cooling off, or holding steady, and where it's headed. PURE.
+ */
+export function forecastTrend(runs: MaintainRun[], nowMs: number, weeks = 8): MaintainForecast {
+  const ys = trendByWeek(runs, nowMs, weeks);      // oldest→newest, length = weeks
+  const n = ys.length;
+  const weeklyAvg = n ? ys.reduce((a, b) => a + b, 0) / n : 0;
+  // OLS over x = 0..n-1.
+  const meanX = (n - 1) / 2;
+  let num = 0, den = 0;
+  for (let x = 0; x < n; x++) { num += (x - meanX) * (ys[x]! - weeklyAvg); den += (x - meanX) ** 2; }
+  const slope = den ? num / den : 0;
+  const intercept = weeklyAvg - slope * meanX;
+  const nextWeek = Math.max(0, Math.round(intercept + slope * n));
+  const direction = slope > 0.15 ? 'rising' : slope < -0.15 ? 'falling' : 'steady';
+  return { weeklyAvg: Math.round(weeklyAvg * 100) / 100, slope: Math.round(slope * 100) / 100, direction, nextWeek, weeks: n };
+}
+
 /** Week-over-week self-improvement report from run timestamps. PURE (pass `nowMs`). */
 export function weeklyReport(runs: MaintainRun[], nowMs: number): MaintainWeekly {
   const DAY = 86_400_000;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildMaintainStats, suggestNextScopes, recommendNextScope, weeklyReport, trendByWeek, projectMonthly } from '../src/cli/maintain-stats.ts';
+import { buildMaintainStats, suggestNextScopes, recommendNextScope, weeklyReport, trendByWeek, projectMonthly, forecastTrend } from '../src/cli/maintain-stats.ts';
 
 const R = (scope: string, status: string, filesChanged = 0, when = '1h ago', at?: string) => ({ scope, status, filesChanged, when, at });
 
@@ -92,5 +92,40 @@ describe('trendByWeek / projectMonthly', () => {
     const p = projectMonthly(runs, now);
     expect(p.cleanupsPerMonth).toBe(3);          // 3 opened within 28d
     expect(p.minutesPerMonth).toBe(15);
+  });
+});
+
+describe('forecastTrend', () => {
+  const now = Date.parse('2026-07-01T00:00:00Z');
+  const iso = (weeksAgo: number) => new Date(now - (weeksAgo * 7 + 1) * 86_400_000).toISOString();
+  // Build an accelerating series: 1 opened 3 weeks ago, 2 two weeks ago, 3 last week, 4 this week.
+  const rising = [
+    ...Array.from({ length: 1 }, () => R('dead-code', 'opened', 1, '', iso(3))),
+    ...Array.from({ length: 2 }, () => R('dead-code', 'opened', 1, '', iso(2))),
+    ...Array.from({ length: 3 }, () => R('dead-code', 'opened', 1, '', iso(1))),
+    ...Array.from({ length: 4 }, () => R('dead-code', 'opened', 1, '', iso(0))),
+  ];
+  it('detects a rising loop and predicts next week from the fitted line', () => {
+    const f = forecastTrend(rising, now, 8);
+    expect(f.direction).toBe('rising');
+    expect(f.slope).toBeGreaterThan(0);
+    expect(f.nextWeek).toBeGreaterThanOrEqual(4);   // extrapolated beyond this week's 4
+    expect(f.weeks).toBe(8);
+  });
+  it('a flat/empty history is steady with no false prediction', () => {
+    const f = forecastTrend([], now, 8);
+    expect(f.direction).toBe('steady');
+    expect(f.slope).toBe(0);
+    expect(f.nextWeek).toBe(0);
+    expect(f.weeklyAvg).toBe(0);
+  });
+  it('a cooling series (busy early, quiet lately) is reported as falling', () => {
+    const cooling = [
+      ...Array.from({ length: 5 }, () => R('dead-code', 'opened', 1, '', iso(6))),   // old, high
+      ...Array.from({ length: 1 }, () => R('dead-code', 'opened', 1, '', iso(5))),
+    ];
+    const f = forecastTrend(cooling, now, 8);
+    expect(f.direction).toBe('falling');
+    expect(f.slope).toBeLessThan(0);
   });
 });

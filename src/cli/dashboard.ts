@@ -31,6 +31,7 @@ export interface DashboardData {
   maintainNext?: { scope: string; why: string };
   maintainTrend?: number[];
   maintainProjection?: { cleanupsPerMonth: number; minutesPerMonth: number };
+  maintainForecast?: import('./maintain-stats.js').MaintainForecast;
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -102,6 +103,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     ${d.maintainWeekly ? `<div class="ctl"><span>This week</span><span class="dim">${d.maintainWeekly.opened} PR(s) · ${d.maintainWeekly.filesCleaned} files · ${d.maintainWeekly.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(d.maintainWeekly.openedDelta)} vs last week</span></div>` : ''}
     ${d.maintainTrend ? `<div class="ctl"><span>8-week trend</span><span class="mono ok">${(() => { const t = d.maintainTrend!; const max = Math.max(1, ...t); const b = '▁▂▃▄▅▆▇█'; return t.map(n => b[Math.min(7, Math.round((n / max) * 7))]).join(''); })()}</span></div>` : ''}
     ${d.maintainProjection ? `<div class="ctl"><span>Projected</span><span class="dim">~${d.maintainProjection.cleanupsPerMonth} cleanups/mo · ~${d.maintainProjection.minutesPerMonth} min/mo</span></div>` : ''}
+    ${d.maintainForecast ? `<div class="ctl"><span>Trend forecast</span><span class="dim">${d.maintainForecast.direction === 'rising' ? '<b class="ok">rising ↑</b>' : d.maintainForecast.direction === 'falling' ? '<b class="warn">cooling ↓</b>' : 'steady →'} · avg ~${d.maintainForecast.weeklyAvg}/wk · next week ≈ ${d.maintainForecast.nextWeek}</span></div>` : ''}
     ${d.maintainNext ? `<div class="ctl" style="border:0"><span>Suggested next</span><b class="ok">${esc(d.maintainNext.scope)}</b> <span class="dim">— ${esc(d.maintainNext.why)}</span>${live ? ` <button onclick="act('schedule.add',{name:'maintain-${esc(d.maintainNext.scope)}',cron:'0 4 * * *',prompt:'${esc(d.maintainNext.scope)}',recipe:'maintain'})">Schedule it</button>` : ''}</div>` : '<div class="ctl" style="border:0"><span class="dim">All scopes exercised.</span></div>'}
   ` : '<p class="dim" style="margin:0">No maintain runs yet — schedule one, or use “Run maintain now (preview)” above to see what it would clean.</p>'}</div>`;
 
@@ -343,7 +345,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     try {
       const { getScheduleStore } = await import('../schedule/store.js');
       const { parseMaintainScope, MAINTAIN_SCOPES } = await import('../schedule/recipes.js');
-      const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly } = await import('./maintain-stats.js');
+      const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly, forecastTrend } = await import('./maintain-stats.js');
       const store = getScheduleStore();
       const mruns: import('./maintain-stats.js').MaintainRun[] = [];
       for (const s of store.list().filter(s => s.recipe === 'maintain')) {
@@ -356,7 +358,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
       }
       const stats = buildMaintainStats(mruns);
       const now = Date.now();
-      return { stats, weekly: weeklyReport(mruns, now), next: recommendNextScope(mruns, stats, MAINTAIN_SCOPES), trend: trendByWeek(mruns, now), projection: projectMonthly(mruns, now) };
+      return { stats, weekly: weeklyReport(mruns, now), next: recommendNextScope(mruns, stats, MAINTAIN_SCOPES), trend: trendByWeek(mruns, now), projection: projectMonthly(mruns, now), forecast: forecastTrend(mruns, now) };
     } catch { return undefined; }
   })();
   const maintainStats = maintain?.stats;
@@ -386,7 +388,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
     providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel,
     maintainStats, maintainWeekly: maintain?.weekly, maintainNext: maintain?.next ?? undefined,
-    maintainTrend: maintain?.trend, maintainProjection: maintain?.projection,
+    maintainTrend: maintain?.trend, maintainProjection: maintain?.projection, maintainForecast: maintain?.forecast,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,
