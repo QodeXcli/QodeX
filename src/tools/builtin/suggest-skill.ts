@@ -8,12 +8,13 @@ import { Tool, ToolContext, ToolResult } from '../base.js';
 
 const Args = z.object({
   task: z.string().describe('What you just did / the task — used to name the candidate skill and judge reusability.'),
+  draft: z.boolean().optional().describe('When the shape says the task is a reusable pattern, DRAFT a quarantined candidate skill (default true). Set false to only get the recommendation without writing anything.'),
 });
 
 export class SuggestSkillTool extends Tool<z.infer<typeof Args>> {
   name = 'suggest_skill';
-  description = 'After completing a task, judge whether it is a REUSABLE pattern worth saving as a skill — using the code graph to read the SHAPE of the change (focused + cohesive in one module = repeatable). Returns a recommendation + a proposed name. Read-only; suggests, does not capture (use `qodex skill candidates`/`curate` to act).';
-  isReadOnly = true;
+  description = 'After completing a task, judge whether it is a REUSABLE pattern worth saving as a skill — using the code graph to read the SHAPE of the change (focused + cohesive in one module = repeatable). When it clearly is, proactively DRAFTS a quarantined candidate skill (provenance:machine, status:candidate) so you only review + promote, never write from scratch. The code-graph-informed judgment a generic agent can\'t give.';
+  isReadOnly = false;
   isDestructive = false;
   argsSchema = Args;
 
@@ -29,7 +30,7 @@ export class SuggestSkillTool extends Tool<z.infer<typeof Args>> {
       } catch { return []; }
     })();
 
-    const { suggestSkillFromSession, commonArea } = await import('../../skills/learning/skill-suggest.js');
+    const { suggestSkillFromSession, draftCandidateSkill, commonArea } = await import('../../skills/learning/skill-suggest.js');
     const area = commonArea(changedFiles);
 
     // Cohesion = how concentrated the change is in one module (a code-organization signal), with a
@@ -48,10 +49,30 @@ export class SuggestSkillTool extends Tool<z.infer<typeof Args>> {
       }
     } catch { /* graph optional */ }
 
-    const s = suggestSkillFromSession({ prompt: args.task, changedFiles, cohesion, touchedSymbols });
+    const input = { prompt: args.task, changedFiles, cohesion, touchedSymbols };
+    const s = suggestSkillFromSession(input);
+
+    // Proactive: when the shape clearly says "reusable pattern", draft the candidate now (quarantined)
+    // so the user only reviews + promotes. Skipped if draft:false, or if an identically-named candidate
+    // already exists (don't spam duplicates).
+    let drafted: string | null = null;
+    if (s.worth && args.draft !== false) {
+      try {
+        const { listCandidates, writeCandidate } = await import('../../skills/learning/candidate-store.js');
+        const existing = await listCandidates().catch(() => []);
+        if (!existing.some(c => c.name === s.proposedName)) {
+          const c = draftCandidateSkill(input, s, new Date().toISOString());
+          await writeCandidate(c);
+          drafted = c.name;
+        }
+      } catch { /* drafting is best-effort — the recommendation still stands */ }
+    }
+
     const head = s.worth
-      ? `💡 Worth saving as a skill: "${s.proposedName}"\n   ${s.reason}\n   → review with \`qodex skill candidates\`, then \`qodex skill curate\`.`
+      ? (drafted
+        ? `💡 Drafted a candidate skill: "${drafted}" (quarantined)\n   ${s.reason}\n   → review with \`qodex skill candidates\`, promote with \`qodex skill curate\`.`
+        : `💡 Worth saving as a skill: "${s.proposedName}"\n   ${s.reason}\n   → review with \`qodex skill candidates\`, then \`qodex skill curate\`.`)
       : `No skill suggested. ${s.reason}`;
-    return { content: head, metadata: { worth: s.worth, score: s.score, proposedName: s.proposedName, area: s.area, changedFiles: changedFiles.length } };
+    return { content: head, metadata: { worth: s.worth, score: s.score, proposedName: s.proposedName, area: s.area, changedFiles: changedFiles.length, drafted: !!drafted } };
   }
 }

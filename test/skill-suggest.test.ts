@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { suggestSkillFromSession, commonArea, proposeSkillName } from '../src/skills/learning/skill-suggest.ts';
+import { suggestSkillFromSession, draftCandidateSkill, commonArea, proposeSkillName } from '../src/skills/learning/skill-suggest.ts';
 
 describe('commonArea / proposeSkillName', () => {
   it('finds the dominant 2-level area', () => {
@@ -43,5 +43,32 @@ describe('suggestSkillFromSession — code-graph-shaped judgment', () => {
     expect(suggestSkillFromSession({ prompt: 'misc tweaks here', changedFiles: ['src/a/x.ts', 'src/a/y.ts'], cohesion: 0.9 }).worth).toBe(true);
     // multiFile(0.4) only — scattered + no verb → 0.4 < 0.6 → not worth
     expect(suggestSkillFromSession({ prompt: 'misc tweaks here', changedFiles: ['src/a/x.ts', 'src/b/y.ts'], cohesion: 0.3 }).worth).toBe(false);
+  });
+});
+
+describe('draftCandidateSkill', () => {
+  const input = { prompt: 'add rate limiting to the auth routes', changedFiles: ['src/auth/limiter.ts', 'src/auth/routes.ts'], cohesion: 0.9, touchedSymbols: ['rateLimit', 'authRouter'] };
+  const s = suggestSkillFromSession(input);
+  const c = draftCandidateSkill(input, s, '2026-07-01T00:00:00Z');
+
+  it('is quarantined by construction (provenance:machine, status:candidate)', () => {
+    expect(c.skillMd).toMatch(/provenance: machine/);
+    expect(c.skillMd).toMatch(/status: candidate/);
+    expect(c.name).toMatch(/^[a-z][a-z0-9-]*$/);              // valid slug
+    expect(c.name).toBe(s.proposedName);
+  });
+
+  it('encodes the code-graph shape: area, cohesion, touched symbols, files', () => {
+    expect(c.skillMd).toContain('src/auth');                  // area
+    expect(c.skillMd).toContain('cohesion 0.90');
+    expect(c.skillMd).toMatch(/`rateLimit`/);                 // touched symbol
+    expect(c.skillMd).toContain('- src/auth/routes.ts');      // file reference
+    expect(c.skillMd).toContain('## When to use');
+    expect(c.skillMd).toContain('## The pattern (from the code graph)');
+  });
+
+  it('carries the verb into the description', () => {
+    expect(c.description.toLowerCase()).toContain('add');
+    expect(c.description.length).toBeLessThanOrEqual(120);
   });
 });

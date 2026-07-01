@@ -54,6 +54,63 @@ export function proposeSkillName(prompt: string): string {
   return words.join('-') || 'captured-skill';
 }
 
+/**
+ * Draft a CANDIDATE skill from the code-graph shape of a session — a "pattern playbook" oriented
+ * around WHERE the change lived and which symbols it touched, not a raw trajectory dump. Quarantined
+ * by construction (provenance: machine, status: candidate) so it can't load or overwrite a human
+ * skill until an independent judge promotes it. PURE — string in, string out.
+ *
+ * This is the proactive half of suggest_skill: when the shape says "reusable pattern", we don't just
+ * nudge — we draft the candidate so the user only has to review + promote, never write from scratch.
+ */
+export function draftCandidateSkill(
+  input: SkillSuggestionInput,
+  suggestion: SkillSuggestion,
+  nowIso: string,
+): { name: string; description: string; skillMd: string } {
+  const name = /^[a-z][a-z0-9-]*$/.test(suggestion.proposedName) ? suggestion.proposedName : 'captured-skill';
+  const area = suggestion.area || commonArea(input.changedFiles) || 'the codebase';
+  const verb = taskVerb(input.prompt) ?? 'change';
+  const description = `How to ${verb} in ${area} — ${input.changedFiles.length}-file pattern`.slice(0, 120);
+  const symbols = (input.touchedSymbols ?? []).slice(0, 6);
+  const files = input.changedFiles.slice(0, 20);
+  const skillMd = `---
+name: ${name}
+description: ${description}
+provenance: machine
+status: candidate
+confidence: ${suggestion.score}
+captured-at: ${nowIso}
+---
+
+# ${name}
+
+> Auto-drafted from the SHAPE of a task (code graph: a focused, cohesive ${input.changedFiles.length}-file
+> change in \`${area}\`). **Candidate** — quarantined, not active until an independent judge promotes it.
+> Review and edit freely; a human edit protects it from being overwritten by a later capture.
+
+## When to use
+${description}. Reach for this when a task looks like the one below — ${suggestion.reason}
+
+## The pattern (from the code graph)
+- **Area:** \`${area}\` (cohesion ${input.cohesion.toFixed(2)} — the change concentrated here)
+- **Key symbols touched:** ${symbols.length ? symbols.map(s => `\`${s}\``).join(', ') : '(none recorded)'}
+- **Shape:** a ${verb} spanning ${input.changedFiles.length} related file(s) — a repeatable unit, not a one-off.
+
+## Original request (the trigger)
+${input.prompt.trim()}
+
+## Steps (fill in from what worked)
+1. Locate the entry point in \`${area}\` (${symbols[0] ? `e.g. \`${symbols[0]}\`` : 'the main symbol'}).
+2. Apply the ${verb} across the related files below, keeping the change cohesive to this area.
+3. Verify (tests + type/lint checkers) before considering it done.
+
+## Files this pattern touched (reference)
+${files.length ? files.map(f => `- ${f}`).join('\n') : '- (none recorded)'}
+`;
+  return { name, description, skillMd };
+}
+
 export function suggestSkillFromSession(input: SkillSuggestionInput): SkillSuggestion {
   const area = commonArea(input.changedFiles);
   const n = input.changedFiles.length;
