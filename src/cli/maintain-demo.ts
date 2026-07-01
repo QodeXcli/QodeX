@@ -113,6 +113,48 @@ ${DEFAULT_RECEIPT}</pre>
 </body></html>`;
 }
 
+/** Render the same "Maintain in action" story as shareable Markdown (README / blog / PR). PURE. */
+export function buildMaintainDemoMarkdown(): string {
+  const steps = STEPS.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const scopeRows = SCOPES.map(s => `| \`${s.name}\` | ${s.blurb} | ${s.verdict === 'opened' ? 'opens a PR' : 'safe-block'} |`).join('\n');
+  const receiptEg = SCOPES[1]!.receipt;
+  return `# QodeX — a codebase that improves itself
+
+Every night, QodeX uses its **code graph** to find one safe improvement, **verifies** it, and
+leaves you a **pull request you can trust** — or a receipt explaining why it safely did nothing.
+Autonomy you can audit, not a confident lie.
+
+## The nightly loop
+
+${steps}
+
+## Scopes — each conservative + provable
+
+| Scope | What it does | Verdict |
+|-------|--------------|---------|
+${scopeRows}
+
+## What lands in your inbox — a trust receipt
+
+\`\`\`
+✅ QodeX schedule: nightly-tidy   ·   maintain · unused-imports
+🧾 Receipt
+${receiptEg}
+\`\`\`
+
+The **filesChanged** and **verification** are measured by QodeX from a real git diff + the
+checkers it ran — the model can't fabricate a green receipt. When a scope can't prove safety
+(e.g. \`unused-locals\` finds only a side-effect initializer) it ships nothing and tells you why.
+
+## Why a code-graph-less agent can't copy this
+
+It can't prove an item is unused, can't verify before shipping, and can't produce a receipt of
+what actually ran. That verify-or-block gate — running while no one is watching — is the moat.
+
+> Get started: \`qodex schedule add --recipe maintain --prompt "unused-imports" --deliver telegram:<id>\`
+`;
+}
+
 export async function runMaintainDemo(): Promise<string> {
   const { QODEX_HOME } = await import('../config/defaults.js');
   const { ensureQodexHome } = await import('../config/loader.js');

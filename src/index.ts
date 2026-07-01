@@ -696,7 +696,16 @@ providerCmd
 program
   .command('maintain-demo')
   .description('Open a self-contained "Maintain in action" demo page (the self-improvement loop, visually)')
-  .action(async () => {
+  .option('--markdown', 'emit a shareable Markdown writeup instead of opening the interactive page')
+  .option('-o, --out <file>', 'with --markdown, write to this file instead of stdout')
+  .action(async (opts: { markdown?: boolean; out?: string }) => {
+    if (opts.markdown) {
+      const { buildMaintainDemoMarkdown } = await import('./cli/maintain-demo.js');
+      const md = buildMaintainDemoMarkdown();
+      if (opts.out) { const { promises: fs } = await import('fs'); await fs.writeFile(opts.out, md); console.log(`\n📝 Maintain writeup → ${opts.out}\n`); }
+      else console.log(md);
+      process.exit(0);
+    }
     const { runMaintainDemo } = await import('./cli/maintain-demo.js');
     const out = await runMaintainDemo();
     console.log(`\n🎬 Maintain demo → ${out}\n   Opened in your browser.\n`);
