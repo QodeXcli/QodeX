@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { buildRecipePrompt, MAINTAIN_SCOPES, parseMaintainScope } from '../src/schedule/recipes.ts';
 import { parseReceipt } from '../src/schedule/receipt.ts';
 import {
-  buildMaintainStats, weeklyReport, trendByWeek, projectMonthly, recommendNextScope,
+  buildMaintainStats, weeklyReport, trendByWeek, projectMonthly, recommendNextScope, forecastTrend,
   type MaintainRun,
 } from '../src/cli/maintain-stats.ts';
 import { buildDashboardHtml, type DashboardData } from '../src/cli/dashboard.ts';
+import { serializeMaintainHistory, deserializeMaintainHistory, mergeRuns } from '../src/cli/maintain-history.ts';
 
 /**
  * End-to-end through the self-improvement loop WITHOUT a model: the agent is "told" a recipe
@@ -99,5 +100,38 @@ describe('maintain self-improvement loop (end-to-end)', () => {
     expect(rc).toBeNull();                                    // nothing to record → simply no run
     const stats = buildMaintainStats([]);
     expect(stats.totalRuns).toBe(0);
+  });
+
+  it('the new code-graph scope flows through the whole loop like any other', () => {
+    // consolidate-dupes is told the same protocol and its receipt rolls up identically.
+    const prompt = buildRecipePrompt('maintain', 'consolidate-dupes');
+    expect(prompt).toMatch(/PROTOCOL — Autonomous Verified PR/);
+    const rc = parseReceipt(RECEIPT({ status: 'opened', prUrl: 'https://h/pr/9', filesChanged: ['src/a.ts', 'src/b.ts'] }))!;
+    const run: MaintainRun = { scope: 'consolidate-dupes', status: rc.status, filesChanged: rc.filesChanged!.length, when: daysAgo(1), at: daysAgo(1) };
+    const stats = buildMaintainStats([run]);
+    expect(stats.byScope[0]!.scope).toBe('consolidate-dupes');
+    expect(stats.filesCleaned).toBe(2);
+  });
+
+  it('export → import → merge preserves the analytics (portable history round-trip)', () => {
+    const runs: MaintainRun[] = [
+      { scope: 'unused-imports', status: 'opened', filesChanged: 2, when: '', at: daysAgo(1) },
+      { scope: 'dead-code', status: 'opened', filesChanged: 1, when: '', at: daysAgo(9) },
+      { scope: 'unused-locals', status: 'blocked', filesChanged: 0, when: '', at: daysAgo(3) },
+    ];
+    const before = buildMaintainStats(runs);
+
+    // Serialize on "machine A", read back on "machine B" — stats identical.
+    const snapshot = serializeMaintainHistory(runs, new Date(NOW).toISOString());
+    const imported = deserializeMaintainHistory(snapshot).runs;
+    expect(buildMaintainStats(imported)).toEqual(before);
+
+    // Re-importing the same snapshot alongside local history doesn't double-count.
+    const merged = mergeRuns(runs, imported);
+    expect(merged).toHaveLength(runs.length);
+    expect(buildMaintainStats(merged).opened).toBe(before.opened);
+
+    // And the forecast is computable over the restored history.
+    expect(forecastTrend(imported, NOW).weeks).toBe(8);
   });
 });
