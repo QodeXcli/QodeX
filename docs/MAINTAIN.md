@@ -96,7 +96,30 @@ button (which itself runs a read-only `tsc` detection, no model needed — see
 | Recipe + scopes + scope parsing | `src/schedule/recipes.ts` |
 | Receipt-driven analytics (rates, trends, projection, next-scope) | `src/cli/maintain-stats.ts` |
 | Read-only "preview what it would clean" | `src/cli/maintain-preview.ts` |
+| Portable history export/import | `src/cli/maintain-history.ts` |
+| Signed audit log | `src/cli/maintain-audit.ts` |
 | Dashboard Maintain panel | `src/cli/dashboard.ts` (+ `dashboard-control.ts` for `maintain.preview`) |
 | CLI report | `qodex maintain-report` (`src/index.ts`) |
 | Live demo page | `qodex maintain-demo` (`src/cli/maintain-demo.ts`) |
 | Tests | `test/schedule-recipes-delivery.test.ts`, `test/maintain-stats.test.ts`, `test/maintain-preview.test.ts` |
+
+## Signed audit log (enterprise-ready auditability)
+
+Because every run carries a trust receipt, the sequence of runs can be turned into a
+**tamper-evident hash chain** — a mini transparency log. Each entry commits to the previous one's
+hash, so altering, reordering, inserting, or dropping any past entry breaks every downstream hash.
+That is detectable **offline, with no secret at all**.
+
+```
+qodex maintain-audit -o audit.json            # export the hash chain (unsigned)
+qodex maintain-audit --sign -o audit.json     # + HMAC-SHA256 over the chain head (authenticity)
+qodex maintain-audit-verify audit.json        # verify chain integrity (+ signature if a key is set)
+```
+
+- **Integrity** needs no key — `verifyAuditChain` recomputes the chain and reports the first broken
+  index. **Authenticity** is the optional HMAC signature over the chain head.
+- The signing key comes from the **`QODEX_AUDIT_KEY` environment variable** and is **never stored**
+  (consistent with the project rule: secrets live in env, not config). The exported log records only
+  a non-secret `keyId` (a short hash prefix) so a verifier knows *which* key signed it.
+- All of `src/cli/maintain-audit.ts` is PURE (deterministic hashing), so the chain build, tamper
+  detection, and signature checks are fully unit-tested (`test/maintain-audit.test.ts`).
