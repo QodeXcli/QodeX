@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildMaintainDemoHtml } from '../src/cli/maintain-demo.ts';
+import { buildMaintainDemoHtml, buildMaintainDemoMarkdown } from '../src/cli/maintain-demo.ts';
 
 describe('buildMaintainDemoHtml', () => {
   const html = buildMaintainDemoHtml();
@@ -32,5 +32,25 @@ describe('buildMaintainDemoHtml', () => {
   it('teaches the verify-or-block gate with a real safe-block example', () => {
     expect(html).toContain('safe-block');                      // the unused-locals verdict tag
     expect(html).toMatch(/blocked[\s\S]*side-effect initializer/); // ships nothing, says why
+  });
+});
+
+describe('buildMaintainDemoMarkdown', () => {
+  const md = buildMaintainDemoMarkdown();
+
+  it('is a shareable writeup: heading, numbered loop, a scope table, and a receipt block', () => {
+    expect(md.startsWith('# QodeX')).toBe(true);
+    expect(md).toContain('## The nightly loop');
+    expect(md).toMatch(/1\. Code-graph analysis/);              // numbered steps
+    expect(md).toContain('| Scope | What it does | Verdict |'); // markdown table header
+    for (const scope of ['dead-code', 'unused-imports', 'consolidate-dupes']) expect(md).toContain(`\`${scope}\``);
+    expect(md).toContain('🧾 Receipt');                         // the trust receipt example
+    expect(md).toMatch(/can't fabricate a green receipt/);
+  });
+
+  it('is plain Markdown — no HTML tags or CDN links', () => {
+    expect(md).not.toContain('<div');
+    expect(md).not.toContain('<script');
+    expect(md).not.toContain('http://');
   });
 });
