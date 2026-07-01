@@ -817,6 +817,78 @@ program
     process.exit(0);
   });
 
+// Gather AUDITABLE runs — richer than analytics runs: PR url + verification, straight from receipts.
+async function gatherAuditableRuns(): Promise<import('./cli/maintain-audit.js').AuditableRun[]> {
+  const { getScheduleStore } = await import('./schedule/store.js');
+  const { parseMaintainScope } = await import('./schedule/recipes.js');
+  const store = getScheduleStore();
+  const runs: import('./cli/maintain-audit.js').AuditableRun[] = [];
+  for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+    const scope = parseMaintainScope(s.prompt).scope;
+    for (const r of store.recentRuns(s.id, 500)) {
+      let status = r.status ?? 'running', files = 0, prUrl: string | undefined, verification: { command: string; passed: boolean }[] | undefined;
+      if (r.receipt) {
+        try {
+          const rc = JSON.parse(r.receipt);
+          status = rc.status ?? status;
+          files = (rc.filesChanged ?? []).length;
+          prUrl = rc.prUrl || undefined;
+          verification = Array.isArray(rc.verification) ? rc.verification.map((v: any) => ({ command: String(v.command ?? ''), passed: !!v.passed })) : undefined;
+        } catch { /* ignore */ }
+      }
+      runs.push({ at: r.started_at, scope, status, filesChanged: files, prUrl, verification });
+    }
+  }
+  return runs;
+}
+
+program
+  .command('maintain-audit')
+  .description('Export a tamper-evident audit log of maintain runs (a hash chain); --sign adds an HMAC signature')
+  .option('-o, --out <file>', 'write the audit log to this file instead of stdout')
+  .option('--sign', 'sign the chain head with HMAC-SHA256 using the QODEX_AUDIT_KEY env var')
+  .action(async (opts: { out?: string; sign?: boolean }) => {
+    const { buildSignedAuditLog, serializeAuditLog } = await import('./cli/maintain-audit.js');
+    const runs = await gatherAuditableRuns();
+    let key: string | undefined;
+    if (opts.sign) {
+      key = process.env.QODEX_AUDIT_KEY;
+      if (!key) { console.error('\n✗ --sign needs a key: set QODEX_AUDIT_KEY in your environment (it is never stored).\n'); process.exit(1); }
+    }
+    const log = buildSignedAuditLog(runs, { exportedAt: new Date().toISOString(), key });
+    const json = serializeAuditLog(log);
+    if (opts.out) {
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(opts.out, json);
+      console.log(`\n🔏 Audit log → ${opts.out}\n   ${log.count} entry(ies) · head ${log.head.slice(0, 16)}…${log.signature ? ` · signed (key ${log.keyId})` : ' · unsigned'}\n`);
+    } else {
+      console.log(json);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('maintain-audit-verify <file>')
+  .description('Verify a maintain audit log offline: chain integrity + (with QODEX_AUDIT_KEY) the signature')
+  .action(async (file: string) => {
+    const { promises: fs } = await import('fs');
+    const { verifyAuditLog } = await import('./cli/maintain-audit.js');
+    let log: any;
+    try { log = JSON.parse(await fs.readFile(file, 'utf-8')); }
+    catch (e: any) { console.error(`\n✗ Could not read audit log: ${e?.message ?? e}\n`); process.exit(1); }
+    const key = process.env.QODEX_AUDIT_KEY;
+    const v = verifyAuditLog(log, key);
+    console.log(`\n🔎 Audit verification — ${file}\n`);
+    console.log(`  entries:    ${v.count}`);
+    console.log(`  chain:      ${v.chainValid ? '✓ intact (no entry altered/reordered/dropped)' : `✗ BROKEN at #${v.brokenAt} — ${v.reason}`}`);
+    console.log(`  head:       ${v.headMatches ? '✓ matches the chain' : '✗ stored head ≠ recomputed head'}`);
+    if (!v.signaturePresent) console.log('  signature:  — none (integrity only; add --sign on export for authenticity)');
+    else if (v.signatureValid === undefined) console.log('  signature:  present, but no QODEX_AUDIT_KEY set to check it');
+    else console.log(`  signature:  ${v.signatureValid ? '✓ valid (authentic)' : '✗ INVALID (wrong key or forged)'}`);
+    console.log(`\n  ${v.ok ? '✅ PASS — this log is trustworthy.' : '❌ FAIL — do not trust this log.'}\n`);
+    process.exit(v.ok ? 0 : 1);
+  });
+
 program
   .command('whoami')
   .description('Show what QodeX has learned about you — stated preferences + the focus of recent tasks')
