@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rankApproaches, formatApproaches, type ApproachSource } from '../src/context/approach-recall.ts';
+import { rankApproaches, formatApproaches, stem, type ApproachSource } from '../src/context/approach-recall.ts';
 
 const SOURCES: ApproachSource[] = [
   { kind: 'episode', text: 'add cursor pagination to the users endpoint — limit+cursor', when: '2d ago', files: ['src/users.ts'], detail: 'limit+cursor' },
@@ -46,6 +46,27 @@ describe('rankApproaches', () => {
     const diverse = rankApproaches(q, sources, { topK: 2, minScore: 0.05, diversity: 0.5 });
     expect(diverse[0]!.text).toMatch(/unused imports/);          // top pick unchanged
     expect(diverse.some(m => /refresh-token/.test(m.text))).toBe(true);
+  });
+
+  it('semantic stemming matches paginate↔pagination and authenticate↔authentication', () => {
+    const sources: ApproachSource[] = [
+      { kind: 'episode', text: 'added pagination to the results view', when: 'a' },
+      { kind: 'episode', text: 'set up authentication middleware', when: 'b' },
+    ];
+    // "paginate" (verb) recalls the "pagination" (noun) episode — different surface forms, same root.
+    const m1 = rankApproaches('how do I paginate a long list?', sources, { minScore: 0.1, topK: 1 });
+    expect(m1[0]!.text).toMatch(/pagination/);
+    // "authenticate" recalls the "authentication" episode.
+    const m2 = rankApproaches('please authenticate access', sources, { minScore: 0.1, topK: 1 });
+    expect(m2[0]!.text).toMatch(/authentication/);
+  });
+
+  it('exposes stem() — collapses common suffixes, guards short words', () => {
+    expect(stem('pagination')).toBe(stem('paginate'));
+    expect(stem('authentication')).toBe(stem('authenticate'));
+    expect(stem('backups')).toBe('backup');
+    expect(stem('code')).toBe('code');          // ≤4 chars untouched
+    expect(stem('categories')).toBe('category');
   });
 
   it('on near-equal relevance, the more RECENT approach surfaces first', () => {
