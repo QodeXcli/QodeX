@@ -29,14 +29,20 @@
  */
 
 import { z } from 'zod';
+import { createHash } from 'crypto';
+import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
 import { proxyFetch } from '../../utils/proxy-fetch.js';
+import { selectRelevantPassages, stripBase64Images } from './extract-select.js';
 
 const WebFetchArgs = z.object({
   url: z.string().min(1).describe('Full URL with scheme. e.g. "https://example.com/page".'),
+  query: z.string().optional().describe(
+    'What you are looking for on this page. When set, a page over the char budget returns the passages MOST RELEVANT to this query (semantic extraction), not just the top of the page — so a mid-document answer comes back in one call. Omit for a plain head+tail window.'
+  ),
   max_chars: z.number().int().min(500).max(200_000).optional().describe(
-    'Truncate output. Default 25000. Long pages summarized at start; full content available with higher limit.'
+    'Char budget. Default 25000. Larger pages are trimmed to the most relevant passages (if `query` is set) or a head+tail window; the full clean text is stored to disk and the footer says how to read the rest.'
   ),
   format: z.enum(['text', 'html', 'markdown']).optional().describe(
     "Output format. 'text' (default) = stripped readable text, 'html' = raw HTML, 'markdown' = best-effort MD."
@@ -142,9 +148,26 @@ function decodeEntities(s: string): string {
     .replace(/&#39;/g, "'");
 }
 
+/** Store the full clean text so an omitted middle is recoverable via read_file. Best-effort. */
+async function storeFullText(url: string, text: string): Promise<string | null> {
+  try {
+    const { QODEX_HOME } = await import('../../config/defaults.js');
+    const { promises: fs } = await import('fs');
+    const dir = path.join(QODEX_HOME, 'cache', 'web');
+    await fs.mkdir(dir, { recursive: true });
+    const slug = (() => {
+      try { return new URL(url).hostname.replace(/[^a-z0-9.]+/gi, '-').slice(0, 40); } catch { return 'page'; }
+    })();
+    const hash = createHash('sha1').update(url).digest('hex').slice(0, 10);
+    const file = path.join(dir, `${slug}-${hash}.md`);
+    await fs.writeFile(file, text);
+    return file;
+  } catch { return null; }
+}
+
 export class WebFetchTool extends Tool<z.infer<typeof WebFetchArgs>> {
   name = 'web_fetch';
-  description = 'Fetch a single URL and return its content. Use when you have a URL and want to read its content. Defaults to stripped text; pass format="html" for raw, format="markdown" for structured. Read-only. For JS-heavy sites use browser_navigate instead.';
+  description = 'Fetch a single URL and return its content. Use when you have a URL and want to read its content. Pass `query` (what you are looking for) so a long page returns the MOST RELEVANT passages — not just its top — in one call; the full text is stored to disk and the footer says how to read the rest. Defaults to stripped text; format="html" for raw, format="markdown" for structured. Read-only. For JS-heavy sites use browser_navigate instead.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = WebFetchArgs;
@@ -203,22 +226,40 @@ export class WebFetchTool extends Tool<z.infer<typeof WebFetchArgs>> {
       if (format === 'html' || !contentType.includes('html')) {
         output = body;
       } else if (format === 'markdown') {
-        output = htmlToMarkdown(body);
+        output = stripBase64Images(htmlToMarkdown(body));   // drop base64 token-bombs; keep http image links
       } else {
         output = htmlToText(body);
       }
 
       const truncated = output.length > maxChars;
-      const finalContent = truncated ? output.slice(0, maxChars) + `\n\n…[truncated, ${output.length - maxChars} more chars]` : output;
+      let finalContent = output;
+      let mode: string | undefined;
+      let storedPath: string | null = null;
+
+      if (truncated) {
+        // Store the full clean text so nothing is lost, then return the most relevant slice.
+        storedPath = await storeFullText(response.url, output);
+        const sel = selectRelevantPassages(output, { query: args.query, budget: maxChars });
+        mode = sel.mode;
+        const recovery = storedPath
+          ? `Full clean text (${output.length} chars) stored at:\n${storedPath}\nRead the omitted parts with: read_file path="${storedPath}" offset=<line> limit=<n>`
+          : `Full page is ${output.length} chars; re-fetch with a higher max_chars${args.query ? '' : ' or a `query` to target the relevant passages'} to see more.`;
+        const modeNote = sel.mode === 'semantic'
+          ? `Returned the ${output.length > sel.keptChars ? 'passages most relevant to' : 'content for'} your query "${args.query}" (semantic extraction), in document order.`
+          : `Returned a head+tail window (no query given — pass \`query\` to get the passages most relevant to what you need).`;
+        finalContent = `${sel.content}\n\n———\n${modeNote}\n${recovery}`;
+      }
 
       return {
-        content: `URL: ${response.url}\nStatus: ${response.status}\nContent-Type: ${contentType}\nFormat: ${format}\nLength: ${output.length} chars\n\n${finalContent}`,
+        content: `URL: ${response.url}\nStatus: ${response.status}\nContent-Type: ${contentType}\nFormat: ${format}\nLength: ${output.length} chars${mode ? ` · extract: ${mode}` : ''}\n\n${finalContent}`,
         metadata: {
           finalUrl: response.url,
           status: response.status,
           contentType,
           fullLength: output.length,
           truncated,
+          extractMode: mode,
+          storedPath: storedPath ?? undefined,
         },
       };
     } catch (e: any) {
