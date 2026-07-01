@@ -20,6 +20,8 @@ const SCOPES: ScopeDemo[] = [
     receipt: 'status: ✅ opened\nPR: https://github.com/you/app/pull/327\nverified: ✓ eslint · ✓ npm test\nfiles: src/ui/Button.tsx, src/ui/Card.tsx' },
   { name: 'dep-bump', blurb: 'one patch/minor bump, shipped only if the full suite passes', verdict: 'opened',
     receipt: 'status: ✅ opened\nPR: https://github.com/you/app/pull/331\nverified: ✓ npm test (full suite)\nfiles: package.json  (zod 3.22.4 → 3.23.8)' },
+  { name: 'consolidate-dupes', blurb: 'merge ONE exact-duplicate helper pair — code-graph proves every caller', verdict: 'opened',
+    receipt: 'status: ✅ opened\nPR: https://github.com/you/app/pull/338\nverified: ✓ npm test · ✓ tsc\nfiles: src/format.ts (removed dup toKebab → src/util/case.ts), src/routes/api.ts' },
 ];
 
 const STEPS = ['Code-graph analysis', 'Prove safe (or block)', 'Sandbox branch', 'Verify (tests + types)', 'Open PR', 'Trust receipt'];
