@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeBody, codeTokens, findSimilarHelpers, formatHelperClusters, type FunctionUnit } from '../src/codegraph/helper-extract.ts';
+import { normalizeBody, codeTokens, findSimilarHelpers, formatHelperClusters, proposeParameterizedHelper, formatParamProposal, type FunctionUnit } from '../src/codegraph/helper-extract.ts';
 
 // Two helpers copy-pasted then tweaked: different name, different constant — NEAR, not exact.
 const fmtUSD = `function formatUSD(n) {
@@ -91,11 +91,85 @@ describe('findSimilarHelpers', () => {
     expect(findSimilarHelpers(distinct, { minTokens: 8, minSim: 0.88 })).toHaveLength(0);
   });
 
+  it('drops a member NESTED inside another member (inner helper vs its parent is not a dupe)', () => {
+    // Real case from axios: buildPath is defined INSIDE formDataToJSON — they share most tokens.
+    const parent = { name: 'outer', file: 'x.ts', startLine: 10, endLine: 60, body: fmtUSD.replace('formatUSD', 'outer') };
+    const child = { name: 'inner', file: 'x.ts', startLine: 15, endLine: 40, body: fmtUSD.replace('formatUSD', 'inner') };
+    expect(findSimilarHelpers([parent, child], { minTokens: 10 })).toHaveLength(0);   // cluster collapses to 1 → dropped
+    // …but a genuine same-file, NON-overlapping pair still clusters.
+    const sibling = { name: 'sib', file: 'x.ts', startLine: 70, endLine: 90, body: fmtUSD.replace('formatUSD', 'sib') };
+    expect(findSimilarHelpers([parent, sibling], { minTokens: 10 })).toHaveLength(1);
+  });
+
   it('formats a readable report with the extract-with-review caveat', () => {
     const report = formatHelperClusters(findSimilarHelpers(units, { minTokens: 10 }));
     expect(report).toMatch(/near-duplicate helper cluster/);
     expect(report).toMatch(/lines saved/);
     expect(report).toMatch(/Detection only/);
     expect(formatHelperClusters([])).toMatch(/No near-duplicate/);
+  });
+});
+
+describe('proposeParameterizedHelper (v2 — parameterize the near-dupes)', () => {
+  // The real zod shape: same body, differing only in kind ("min"/"max") and inclusive (false/true).
+  const check = (name: string, kind: string, inclusive: string) => ({
+    name, file: 'types.ts', startLine: 1, endLine: 8,
+    body: `${name}(message) {\n  return this._addCheck({\n    kind: ${kind},\n    value: 0,\n    inclusive: ${inclusive},\n    message: toString(message),\n  });\n}`,
+  });
+  const members = [check('positive', '"min"', 'false'), check('negative', '"max"', 'false'), check('nonnegative', '"min"', 'true')];
+
+  it('turns each varying token position into a parameter, named from its context', () => {
+    const pr = proposeParameterizedHelper(members, 'addRangeCheck');
+    expect(pr.ok).toBe(true);
+    expect(pr.params.map(p => p.name).sort()).toEqual(['inclusive', 'kind']);   // named from `kind:` / `inclusive:`
+    const kind = pr.params.find(p => p.name === 'kind')!;
+    expect(kind.values).toEqual(['"min"', '"max"', '"min"']);
+    expect(pr.sketch).toContain('kind: kind');                                  // varying token → param in the sketch
+    expect(pr.sketch).toContain('inclusive: inclusive');
+    expect(pr.sketch).toContain('addRangeCheck(message)');                      // own name neutralized to helper name
+    expect(pr.calls[1]).toEqual({ member: 'negative', args: ['"max"', 'false'] });
+  });
+
+  it('co-varying positions collapse into ONE parameter', () => {
+    const two = [
+      { name: 'a', file: 'f.ts', startLine: 1, endLine: 3, body: 'a() { log("x"); send("x"); }' },
+      { name: 'b', file: 'f.ts', startLine: 5, endLine: 7, body: 'b() { log("y"); send("y"); }' },
+    ];
+    const pr = proposeParameterizedHelper(two);
+    expect(pr.ok).toBe(true);
+    expect(pr.params).toHaveLength(1);                    // "x"/"y" varies in two places, same vector → one param
+    expect(pr.calls[0]!.args).toEqual(['"x"']);
+  });
+
+  it('declines honestly when structures differ or too many parts vary', () => {
+    const divergent = [
+      { name: 'a', file: 'f.ts', startLine: 1, endLine: 3, body: 'a() { return 1; }' },
+      { name: 'b', file: 'f.ts', startLine: 5, endLine: 9, body: 'b() { for (const x of xs) go(x); return 2; }' },
+    ];
+    expect(proposeParameterizedHelper(divergent).ok).toBe(false);
+    expect(proposeParameterizedHelper(divergent).reason).toMatch(/token counts differ/);
+    const identical = [
+      { name: 'a', file: 'f.ts', startLine: 1, endLine: 3, body: 'a() { return 1; }' },
+      { name: 'b', file: 'g.ts', startLine: 1, endLine: 3, body: 'b() { return 1; }' },
+    ];
+    expect(proposeParameterizedHelper(identical).reason).toMatch(/consolidate-dupes/);
+  });
+
+  it('mixed structural variants: parameterizes the LARGEST aligned subset and reports the rest as dropped', () => {
+    // The real zod shape: a Number family plus a BigInt variant whose body has extra tokens.
+    const bigint = { name: 'positiveBig', file: 'types.ts', startLine: 20, endLine: 27,
+      body: 'positiveBig(message) {\n  return this._addCheck({\n    kind: "min",\n    value: BigInt(0),\n    inclusive: false,\n    message: toString(message),\n  });\n}' };
+    const pr = proposeParameterizedHelper([...members, bigint], 'addRangeCheck');
+    expect(pr.ok).toBe(true);
+    expect(pr.calls.map(c => c.member)).toEqual(['positive', 'negative', 'nonnegative']);
+    expect(pr.dropped).toEqual(['positiveBig']);
+    expect(formatParamProposal(pr)).toContain('not covered — different structure: positiveBig');
+  });
+
+  it('formats a reviewable block with the call mapping', () => {
+    const out = formatParamProposal(proposeParameterizedHelper(members, 'addRangeCheck'));
+    expect(out).toContain('addRangeCheck(kind, inclusive)');
+    expect(out).toContain('negative(…) → addRangeCheck("max", false)');
+    expect(out).toContain('```');
   });
 });

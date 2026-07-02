@@ -46,6 +46,40 @@ The #64 row is the one to internalize: **blocked runs are the product working**,
 A 3am "improvement" that changes behavior is worse than no improvement, so maintain proves
 safety or declines — and the receipt records which one happened.
 
+## External case studies — three popular OSS repos
+
+We pointed the read-only detection (`find_similar_helpers`, zero setup — no install, no config)
+at fresh clones of three widely-used projects (2026-07-02, shallow clones at the commits shown).
+These are actual tool outputs, reproducible with the commands below:
+
+```bash
+git clone --depth 1 https://github.com/colinhacks/zod && cd zod
+qodex   # → find_similar_helpers path="packages/zod/src"
+```
+
+| Repo (commit) | Scanned | Found |
+|---|---|---|
+| **zod** `912f0f5` (`packages/zod/src`) | 116 files, 1,103 functions | **38 near-dupe clusters, ~671 collapsible lines.** Headline: a **7-copy family** — `positive`/`negative`/`nonpositive`/`nonnegative` across ZodNumber+ZodBigInt (~94% similar), each differing only in `kind:`/`inclusive:` |
+| **hono** `b20d422` (`src`) | 186 files, 255 functions | 2 clusters: `importPublicKey`/`importPrivateKey` (~95%, ~26 lines) and a duplicated `getQueryString` in the aws-lambda handler (~92%, ~21 lines) |
+| **axios** `e435384` (`lib`) | 66 files, 152 functions | 1 cluster: `setFormDataHeaders` **byte-near-identical** in `helpers/resolveConfig.js` and `adapters/http.js` (verified by eye: the only difference is a `\|\| {}` guard) — a textbook `consolidate-dupes` candidate |
+
+And because detection now includes the **parameterize proposal** (v2), the zod family comes back
+not as "these look similar" but as the concrete consolidation:
+
+```
+Proposed shared helper `extractedHelper(kind, inclusive)` — the bodies differ ONLY in these 2 spot(s):
+  positive(…)    → extractedHelper("min", false)
+  nonpositive(…) → extractedHelper("max", true)
+  nonnegative(…) → extractedHelper("min", true)
+  (not covered — different structure: the ZodNumber variants, whose value is 0 vs BigInt(0))
+```
+
+Two honest caveats. First, these are *detection* results — read-only, nothing was changed in any
+repo. Second, duplication in mature libraries is sometimes deliberate (readability, hot-path
+inlining, API symmetry): the tool's job is to surface the opportunity with proof; whether to take
+it stays a maintainer's call. That division of labor — *mechanical evidence, human judgment* — is
+the same verify-or-block philosophy the rest of maintain runs on.
+
 ## Recommended rollout ladder
 
 Adopt one rung at a time; each rung is strictly riskier than the previous. Stay on a rung until
