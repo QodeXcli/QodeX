@@ -157,6 +157,38 @@ export interface AuditVerifyResult {
 }
 
 /**
+ * The auditor-facing one-pager: verification status up top (chain / head / signature), then the
+ * full entry chain as a readable table — what ran, when, the outcome, what it touched, and the PR.
+ * Feed the blocks to pdf-lite's buildPdf. PURE (pass the verdict computed by verifyAuditLog).
+ */
+export function buildAuditPdfBlocks(log: SignedAuditLog, verdict: AuditVerifyResult): import('./pdf-lite.js').PdfBlock[] {
+  const kv = (k: string, v: string): import('./pdf-lite.js').PdfBlock => ({ text: `${k}:  ${v}`, size: 10, indent: 10 });
+  const sigLine = !verdict.signaturePresent ? 'unsigned (integrity only)'
+    : verdict.signatureValid === undefined ? `signed (keyId ${log.keyId ?? '?'}) — no key supplied to verify`
+    : verdict.signatureValid ? `VALID — HMAC-SHA256, keyId ${log.keyId ?? '?'} (authentic)` : 'INVALID — wrong key or forged';
+  const blocks: import('./pdf-lite.js').PdfBlock[] = [
+    { text: 'Maintain Audit Log', size: 18, bold: true },
+    { text: `Exported ${log.exportedAt} - ${log.count} run(s) - tamper-evident hash chain (each entry commits to the previous; altering, reordering, or dropping any entry breaks every downstream hash).`, size: 9, spaceBefore: 4 },
+    { text: 'Verification', size: 13, bold: true, spaceBefore: 12 },
+    kv('Chain integrity', verdict.chainValid ? 'INTACT — no entry altered, reordered, or dropped' : `BROKEN at #${verdict.brokenAt} — ${verdict.reason}`),
+    kv('Head', `${verdict.headMatches ? 'matches the chain' : 'MISMATCH'}  (${log.head.slice(0, 24)}...)`),
+    kv('Signature', sigLine),
+    kv('Overall', verdict.ok ? 'PASS — this log is trustworthy' : 'FAIL — do not trust this log'),
+    { text: 'Run chain (oldest first)', size: 13, bold: true, spaceBefore: 12 },
+  ];
+  if (!log.entries.length) blocks.push({ text: 'no runs recorded', size: 10, indent: 10 });
+  for (const e of log.entries) {
+    const outcome = e.status === 'opened' ? '[OK] opened' : e.status === 'blocked' ? '[BLOCKED]' : e.status;
+    const checks = e.verification.length ? ` - checks: ${e.verification.map(v => `${v.passed ? 'v' : 'x'} ${v.command}`).join(', ')}` : '';
+    const files = e.filesChanged ? ` - ${e.filesChanged} file(s)` : '';
+    blocks.push({ text: `#${e.seq}  ${e.at.slice(0, 10)}  ${e.scope}  ${outcome}${files}${checks}`, size: 9, mono: true, indent: 10 });
+    if (e.prUrl) blocks.push({ text: `     PR: ${e.prUrl}`, size: 8, mono: true, indent: 10 });
+  }
+  blocks.push({ text: 'Verify this log offline anytime: qodex maintain-audit-verify <file>  (exit 1 on tamper - CI-friendly).', size: 8, spaceBefore: 12 });
+  return blocks;
+}
+
+/**
  * Full audit verification of a parsed log: chain integrity, that the stored head matches the chain,
  * and (when a key is available) the HMAC signature. PURE. `ok` = everything checkable passed.
  */

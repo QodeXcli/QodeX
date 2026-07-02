@@ -109,6 +109,10 @@ export function buildPdf(blocks: PdfBlock[]): string {
   objects.push(`4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n`);
   objects.push(`5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n`);
   pages.forEach((lines, i) => {
+    // Page-number footer on multi-page documents (a one-pager stays clean).
+    if (pages.length > 1) {
+      lines.push({ kind: 'text', x: PAGE_W / 2 - 24, y: MARGIN - 24, size: 8, font: 'F1', text: `Page ${i + 1} of ${pages.length}` });
+    }
     const pageNum = firstPageObj + i * 2;
     const contentNum = pageNum + 1;
     objects.push(

@@ -906,11 +906,12 @@ async function gatherAuditableRuns(): Promise<import('./cli/maintain-audit.js').
 
 program
   .command('maintain-audit')
-  .description('Export a tamper-evident audit log of maintain runs (a hash chain); --sign adds an HMAC signature')
-  .option('-o, --out <file>', 'write the audit log to this file instead of stdout')
+  .description('Export a tamper-evident audit log of maintain runs (a hash chain); --sign adds an HMAC signature; --pdf renders the auditor one-pager')
+  .option('-o, --out <file>', 'write to this file (PDF default: ~/.qodex/maintain-audit.pdf)')
   .option('--sign', 'sign the chain head with HMAC-SHA256 using the QODEX_AUDIT_KEY env var')
-  .action(async (opts: { out?: string; sign?: boolean }) => {
-    const { buildSignedAuditLog, serializeAuditLog } = await import('./cli/maintain-audit.js');
+  .option('--pdf', 'render an auditor-facing PDF (verification status + the full run chain) instead of JSON')
+  .action(async (opts: { out?: string; sign?: boolean; pdf?: boolean }) => {
+    const { buildSignedAuditLog, serializeAuditLog, verifyAuditLog, buildAuditPdfBlocks } = await import('./cli/maintain-audit.js');
     const runs = await gatherAuditableRuns();
     let key: string | undefined;
     if (opts.sign) {
@@ -918,6 +919,18 @@ program
       if (!key) { console.error('\n✗ --sign needs a key: set QODEX_AUDIT_KEY in your environment (it is never stored).\n'); process.exit(1); }
     }
     const log = buildSignedAuditLog(runs, { exportedAt: new Date().toISOString(), key });
+    if (opts.pdf) {
+      const verdict = verifyAuditLog(log, key);   // self-check the freshly-built chain → status block
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const path = await import('path');
+      const { promises: fs } = await import('fs');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-audit.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildAuditPdfBlocks(log, verdict)), 'latin1'));
+      console.log(`\n📄 Audit one-pager → ${out}\n   ${log.count} entry(ies)${log.signature ? ` · 🔏 signed (key ${log.keyId})` : ' · unsigned'}\n`);
+      process.exit(0);
+    }
     const json = serializeAuditLog(log);
     if (opts.out) {
       const { promises: fs } = await import('fs');
