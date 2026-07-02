@@ -14,7 +14,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { extractSymbols } from '../../codegraph/extractor.js';
-import { findSimilarHelpers, formatHelperClusters, type FunctionUnit } from '../../codegraph/helper-extract.js';
+import { findSimilarHelpers, formatHelperClusters, proposeParameterizedHelper, formatParamProposal, type FunctionUnit } from '../../codegraph/helper-extract.js';
 
 const Args = z.object({
   path: z.string().optional().describe('Restrict the scan to this subdirectory (relative to cwd). Default: whole project.'),
@@ -78,9 +78,24 @@ export class FindSimilarHelpersTool extends Tool<z.infer<typeof Args>> {
     const clusters = findSimilarHelpers(units, { minSim: args.min_similarity })
       .filter(c => args.include_exact || !c.exact);
 
+    // v2: for the top clusters, try a mechanical PARAMETERIZE proposal — the concrete shared
+    // helper + the exact call each original becomes. Declines (with the reason) when bodies
+    // don't align, so a proposal only appears when the consolidation is genuinely mechanical.
+    const proposals: string[] = [];
+    for (const c of clusters.slice(0, 2)) {
+      const bodies = c.members
+        .map(m => units.find(u => u.name === m.name && u.file === m.file && u.startLine === m.startLine))
+        .filter((u): u is FunctionUnit => !!u)
+        .slice(0, 6);
+      if (bodies.length < 2) continue;
+      const pr = proposeParameterizedHelper(bodies, c.suggestedName);
+      if (pr.ok) proposals.push(`For cluster \`${c.suggestedName}\`:\n${formatParamProposal(pr)}`);
+    }
+    const proposalBlock = proposals.length ? `\n\n${proposals.join('\n\n')}` : '';
+
     const header = `Scanned ${scanned} file(s), ${units.length} function(s).`;
     return {
-      content: `${header}\n\n${formatHelperClusters(clusters)}`,
+      content: `${header}\n\n${formatHelperClusters(clusters)}${proposalBlock}`,
       metadata: {
         filesScanned: scanned,
         functions: units.length,

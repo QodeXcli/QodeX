@@ -140,7 +140,19 @@ export function findSimilarHelpers(
   }
 
   const clusters: HelperCluster[] = [];
-  for (const { members: idxs } of seeded) {
+  for (const { members: rawIdxs } of seeded) {
+    // Drop members NESTED inside another member (same file, contained line range): a inner helper
+    // shares most of its parent's tokens, so parent+child cluster together — but "extract the child
+    // from its parent" is not a duplicate-consolidation opportunity. Keep the outermost.
+    const idxs = rawIdxs.filter(i => {
+      const a = prepared[i]!.u;
+      return !rawIdxs.some(j => {
+        if (j === i) return false;
+        const b = prepared[j]!.u;
+        return a.file === b.file && b.startLine <= a.startLine && a.endLine <= b.endLine
+          && (b.endLine - b.startLine) > (a.endLine - a.startLine);
+      });
+    });
     if (idxs.length < 2) continue;
     let sum = 0, cnt = 0;
     for (let a = 0; a < idxs.length; a++) {
@@ -164,6 +176,111 @@ export function findSimilarHelpers(
     });
   }
   return clusters.sort((a, b) => b.estLinesSaved - a.estLinesSaved || b.avgSimilarity - a.avgSimilarity);
+}
+
+// ————————————————————————————— v2: parameterized-consolidation proposal —————————————————————————————
+
+export interface ParamProposal {
+  ok: boolean;
+  reason?: string;
+  helperName: string;
+  /** One entry per parameter the shared helper needs; values are per-member (same order as input). */
+  params: { name: string; values: string[] }[];
+  /** The reference member's body with the varying tokens replaced by the parameter names. */
+  sketch: string;
+  /** How each original function maps to a call of the shared helper. */
+  calls: { member: string; args: string[] }[];
+  /** Members left out because their body doesn't align with the majority (e.g. a BigInt variant). */
+  dropped?: string[];
+}
+
+interface RawTok { text: string; start: number }
+
+/** Code tokens WITH literals kept and source offsets (for substitution in the sketch). PURE. */
+function rawTokens(body: string): RawTok[] {
+  const re = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\d+(?:\.\d+)?|[A-Za-z_$][\w$]*|[^\sA-Za-z0-9_$]/g;
+  const out: RawTok[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body))) out.push({ text: m[0], start: m.index });
+  return out;
+}
+
+/**
+ * Given a cluster of near-duplicate functions, propose ONE parameterized helper: align the bodies
+ * token-by-token, turn each varying position into a parameter (positions that always vary together
+ * collapse into one), and emit the reference body with those tokens substituted — plus the exact
+ * call each original becomes. Mechanical and conservative: if the bodies don't align structurally
+ * (different token counts) or vary in too many places (>4 params), it declines with the reason
+ * rather than proposing something wrong. PURE.
+ */
+export function proposeParameterizedHelper(members: FunctionUnit[], helperName = 'extractedHelper'): ParamProposal {
+  const decline = (reason: string): ParamProposal => ({ ok: false, reason, helperName, params: [], sketch: '', calls: [] });
+  if (members.length < 2) return decline('need at least two functions');
+
+  // Neutralize each function's own name so it never reads as a varying token.
+  let bodies = members.map(m => m.body.replace(new RegExp(`\\b${m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), helperName));
+  let toks = bodies.map(b => rawTokens(b));
+  let dropped: string[] | undefined;
+  if (toks.some(t => t.length !== toks[0]!.length)) {
+    // Mixed structural variants in one cluster (e.g. a Number family + a BigInt family): keep the
+    // LARGEST same-token-count subset and report the rest as dropped, instead of declining outright.
+    const byCount = new Map<number, number[]>();
+    toks.forEach((t, i) => { const k = t.length; if (!byCount.has(k)) byCount.set(k, []); byCount.get(k)!.push(i); });
+    const best = [...byCount.values()].sort((a, b) => b.length - a.length)[0]!;
+    if (best.length < 2) return decline('bodies do not align structurally (token counts differ) — too divergent to parameterize mechanically');
+    dropped = members.filter((_, i) => !best.includes(i)).map(m => m.name);
+    members = best.map(i => members[i]!);
+    bodies = best.map(i => bodies[i]!);
+    toks = best.map(i => toks[i]!);
+  }
+
+  // Positions where members disagree, grouped by their value-vector (co-varying positions = one param).
+  const n = toks[0]!.length;
+  const groups = new Map<string, number[]>();
+  for (let p = 0; p < n; p++) {
+    const values = toks.map(t => t[p]!.text);
+    if (values.every(v => v === values[0])) continue;
+    const key = JSON.stringify(values);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(p);
+  }
+  if (groups.size === 0) return decline('bodies are identical — use consolidate-dupes, no parameter needed');
+  if (groups.size > 4) return decline(`${groups.size} independently-varying parts — too many to parameterize cleanly`);
+
+  // Name each parameter from context when possible (`kind: "min"` → param `kind`), else p1/p2….
+  const used = new Set<string>();
+  const params: { name: string; values: string[]; positions: number[] }[] = [];
+  for (const [key, positions] of groups) {
+    const first = positions[0]!;
+    const ref = toks[0]!;
+    let name = ref[first - 1]?.text === ':' && /^[A-Za-z_$][\w$]*$/.test(ref[first - 2]?.text ?? '') ? ref[first - 2]!.text : `p${params.length + 1}`;
+    while (used.has(name)) name = `${name}_`;
+    used.add(name);
+    params.push({ name, values: JSON.parse(key), positions });
+  }
+
+  // Sketch: reference body with each varying token replaced by its parameter name (right-to-left).
+  let sketch = bodies[0]!;
+  const subs = params.flatMap(p => p.positions.map(pos => ({ pos, name: p.name })))
+    .sort((a, b) => toks[0]![b.pos]!.start - toks[0]![a.pos]!.start);
+  for (const s of subs) {
+    const t = toks[0]![s.pos]!;
+    sketch = sketch.slice(0, t.start) + s.name + sketch.slice(t.start + t.text.length);
+  }
+  const calls = members.map((m, i) => ({ member: m.name, args: params.map(p => p.values[i]!) }));
+  return { ok: true, helperName, params: params.map(({ name, values }) => ({ name, values })), sketch, calls, dropped };
+}
+
+/** Render a proposal as a compact, reviewable block. PURE. */
+export function formatParamProposal(pr: ParamProposal): string {
+  if (!pr.ok) return `No mechanical parameterization: ${pr.reason}`;
+  const lines = [
+    `Proposed shared helper \`${pr.helperName}(${pr.params.map(p => p.name).join(', ')})\` — the bodies differ ONLY in these ${pr.params.length} spot(s):`,
+  ];
+  for (const c of pr.calls) lines.push(`  ${c.member}(…) → ${pr.helperName}(${c.args.join(', ')})`);
+  if (pr.dropped?.length) lines.push(`  (not covered — different structure: ${pr.dropped.join(', ')})`);
+  lines.push('', '```', pr.sketch.split('\n').slice(0, 16).join('\n'), '```');
+  return lines.join('\n');
 }
 
 /** A concise, agent-readable report of extraction opportunities. PURE. */
