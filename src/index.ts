@@ -727,8 +727,11 @@ program
 
 program
   .command('maintain-report')
-  .description('Self-Improvement Report — the maintain recipe\'s cleanups, files cleaned, and time saved')
-  .action(async () => {
+  .description('Self-Improvement Report — real receipt-backed numbers; --markdown for PRs, --pdf for a shareable one-pager')
+  .option('--markdown', 'emit the report as Markdown (paste into a PR / issue / team chat)')
+  .option('--pdf', 'write the report as a one-page PDF (real bar chart for the 8-week trend)')
+  .option('-o, --out <file>', 'with --markdown/--pdf, write to this file (PDF default: ~/.qodex/maintain-report.pdf)')
+  .action(async (opts: { markdown?: boolean; pdf?: boolean; out?: string }) => {
     const { getScheduleStore } = await import('./schedule/store.js');
     const { parseMaintainScope, MAINTAIN_SCOPES } = await import('./schedule/recipes.js');
     const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly, forecastTrend } = await import('./cli/maintain-stats.js');
@@ -747,13 +750,40 @@ program
     const wk = weeklyReport(runs, now);
     const next = recommendNextScope(runs, stats, MAINTAIN_SCOPES);
     const proj = projectMonthly(runs, now);
-    const spark = (() => { const t = trendByWeek(runs, now); const max = Math.max(1, ...t); const b = '▁▂▃▄▅▆▇█'; return t.map(n => b[Math.min(7, Math.round((n / max) * 7))]).join(''); })();
+    const fc = forecastTrend(runs, now);
+    const trend = trendByWeek(runs, now);
+
+    // Export paths: the SAME data through the PURE exporters — report can't disagree across formats.
+    if (opts.markdown || opts.pdf) {
+      const { buildMaintainReportMarkdown, buildMaintainReportPdfBlocks } = await import('./cli/maintain-report-export.js');
+      const data = {
+        generatedAt: new Date(now).toISOString().slice(0, 10),
+        project: process.cwd().split(/[\\/]/).filter(Boolean).pop(),
+        stats, weekly: wk, trend, forecast: fc, projection: proj, next,
+      };
+      if (opts.markdown) {
+        const md = buildMaintainReportMarkdown(data);
+        if (opts.out) { const { promises: fs } = await import('fs'); await fs.writeFile(opts.out, md); console.log(`\n📝 Report → ${opts.out}\n`); }
+        else console.log(md);
+        process.exit(0);
+      }
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const path = await import('path');
+      const { promises: fs } = await import('fs');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-report.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildMaintainReportPdfBlocks(data)), 'latin1'));
+      console.log(`\n📄 Report → ${out}\n`);
+      process.exit(0);
+    }
+
+    const spark = (() => { const t = trend; const max = Math.max(1, ...t); const b = '▁▂▃▄▅▆▇█'; return t.map(n => b[Math.min(7, Math.round((n / max) * 7))]).join(''); })();
     console.log('\n🔧 QodeX Self-Improvement Report\n');
     if (stats.totalRuns === 0) { console.log('  No maintain runs yet. `qodex schedule add --recipe maintain --prompt "unused-imports"`.\n'); process.exit(0); }
     console.log(`  All time:   ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
     console.log(`  This week:  ${wk.opened} PR(s) · ${wk.filesCleaned} files · ${wk.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(wk.openedDelta)} vs last week`);
     console.log(`  8-wk trend: ${spark}  (opened/week)`);
-    const fc = forecastTrend(runs, now);
     const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
     console.log(`  Forecast:   ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek} cleanup(s)`);
     console.log(`  Projected:  ~${proj.cleanupsPerMonth} cleanups/mo · ~${proj.minutesPerMonth} min/mo at the current rate`);

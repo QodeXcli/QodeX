@@ -168,5 +168,7 @@ sitting in one place, verified, with a receipt.)
 **What does it cost?** Detection scopes are mostly toolchain work (fast, cheap even on a local
 model). Each run makes one small change, so review time stays near zero.
 
-**How do I show this to my team?** `qodex maintain-demo` (interactive page) ·
-`--markdown` (README-ready writeup) · `--pdf` (one-page PDF for the meeting).
+**How do I show this to my team?** The *story*: `qodex maintain-demo` (interactive page) ·
+`--markdown` (README-ready writeup) · `--pdf` (one-page PDF for the meeting). The *numbers*:
+`qodex maintain-report --markdown` (paste the live receipt-backed report into a PR or standup
+thread) · `--pdf` (one-pager with the 8-week trend as a real bar chart).
