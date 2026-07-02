@@ -71,8 +71,8 @@ function verifiedPrPrompt(goal: string): string {
 }
 
 /** The self-improving `maintain` recipe has SCOPES — each a conservative, provable cleanup. */
-export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params' | 'lint-fix' | 'dep-bump' | 'consolidate-dupes';
-export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes'] as const;
+export type MaintainScope = 'dead-code' | 'unused-imports' | 'unused-locals' | 'unused-params' | 'lint-fix' | 'dep-bump' | 'consolidate-dupes' | 'extract-helper';
+export const MAINTAIN_SCOPES: readonly MaintainScope[] = ['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes', 'extract-helper'] as const;
 
 /** Parse a maintain prompt into its scope + optional path focus + dry-run flag. PURE.
  *  Forms: "" (→ dead-code) · "unused-imports src/" · "lint-fix --dry-run" · "dep-bump" · "src/utils". */
@@ -81,7 +81,7 @@ export function parseMaintainScope(prompt: string): { scope: MaintainScope; focu
   const dryRun = /(^|\s)(--dry-run|dry-run)(\s|$)/i.test(rest);
   rest = rest.replace(/(^|\s)(--dry-run|dry-run)(\s|$)/ig, ' ').trim();
   let scope: MaintainScope = 'dead-code';
-  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|lint[-_]?fix|lint|dep[-_]?bump|deps?|dependenc(?:y|ies)|consolidate[-_]?dupes?|consolidate|duplicates?|dupes?|dedupe|dead[-_]?code)\b/i.exec(rest);
+  const m = /^(unused[-_]?imports|imports|unused[-_]?locals|locals|unused[-_]?params|params|lint[-_]?fix|lint|dep[-_]?bump|deps?|dependenc(?:y|ies)|consolidate[-_]?dupes?|consolidate|duplicates?|dupes?|dedupe|extract[-_]?helpers?|parameteri[sz]e|helpers?|dead[-_]?code)\b/i.exec(rest);
   if (m) {
     const k = m[1]!;
     scope = /imports/i.test(k) ? 'unused-imports'
@@ -90,6 +90,7 @@ export function parseMaintainScope(prompt: string): { scope: MaintainScope; focu
       : /lint/i.test(k) ? 'lint-fix'
       : /dep/i.test(k) ? 'dep-bump'
       : /consolidate|duplicate|dupe|dedupe/i.test(k) ? 'consolidate-dupes'
+      : /extract|parameteri|helper/i.test(k) ? 'extract-helper'
       : 'dead-code';
     rest = rest.slice(m[0].length).trim();
   }
@@ -203,6 +204,26 @@ const CONSOLIDATE_DUPES_SELECTION = [
   'e. This single consolidation IS your GOAL. Verification (tests + types) MUST pass or it does not ship.',
 ];
 
+const EXTRACT_HELPER_SELECTION = [
+  'SCOPE (v8 — SAFE HELPER EXTRACTION, parameterized): collapse ONE cluster of near-duplicate',
+  'functions into a shared parameterized helper — WITHOUT touching a single call site. The',
+  'originals become thin delegating wrappers, so every signature, export, and caller stays',
+  'byte-for-byte compatible. This is the zero-caller-risk form of deduplication.',
+  '',
+  'SELECTION — mechanical proposal or block:',
+  'a. Run `find_similar_helpers`. Pick ONE cluster that comes back WITH a parameterize proposal',
+  '   (the tool emits one only when the bodies align token-for-token and ≤4 spots vary). No',
+  '   proposal on any cluster → BLOCK: manual judgment is required and 3am is not the time.',
+  'b. Skip clusters touching test files, generated code, or members the proposal lists as',
+  '   `dropped` (structurally different) — the cluster must be fully covered by the proposal.',
+  'c. Create the shared helper (private to the module or a sibling shared file — do NOT create a',
+  '   new public export unless the cluster spans files that already share an import path).',
+  'd. Rewrite EACH original function as a one-line wrapper delegating to the helper with its',
+  '   argument mapping from the proposal. NEVER remove, rename, or re-sign the originals; NEVER',
+  '   edit a call site. If a wrapper cannot be a pure delegation, BLOCK.',
+  'e. The helper + wrappers ARE your GOAL. Verification (tests + types) MUST pass or nothing ships.',
+];
+
 /**
  * `maintain` — the self-improving codebase recipe. Each scope is the SAFEST improvement of its
  * kind, proven (code-graph / toolchain) and shipped through the verified-PR protocol. Conservative
@@ -217,6 +238,7 @@ function maintainPrompt(prompt: string): string {
     : scope === 'lint-fix' ? LINT_FIX_SELECTION
     : scope === 'dep-bump' ? DEP_BUMP_SELECTION
     : scope === 'consolidate-dupes' ? CONSOLIDATE_DUPES_SELECTION
+    : scope === 'extract-helper' ? EXTRACT_HELPER_SELECTION
     : DEAD_CODE_SELECTION;
   const focusLine = focus ? `Focus area (optional hint): ${focus}.` : '';
   const dryRunBlock = dryRun ? [

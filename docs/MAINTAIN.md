@@ -40,6 +40,7 @@ All scopes live in `src/schedule/recipes.ts` as `*_SELECTION` constants.
 | `lint-fix` (v5)       | Apply the linter's **autofixable** rules only       | No behavior-changing fixers; bounded to a focus area, never `--fix` the whole repo |
 | `dep-bump` (v6)       | Bump ONE dependency a patch/minor and prove tests pass | Requires a real test suite; never a major version |
 | `consolidate-dupes` (v7) | Merge ONE exact-duplicate helper pair, repointing callers | Bodies must be *exactly* equivalent (near-dupes out); every caller resolved via the code graph or it blocks — a missed caller breaks the build |
+| `extract-helper` (v8) | Collapse ONE near-duplicate cluster into a parameterized shared helper; originals become thin delegating wrappers | Only clusters with a *mechanical* parameterize proposal (`find_similar_helpers`); **zero call-site edits** — signatures/exports unchanged; a wrapper that can't be pure delegation blocks |
 
 **Beyond exact duplicates:** the `find_similar_helpers` tool (`src/codegraph/helper-extract.ts`)
 detects *near*-duplicate helpers — copy-pasted-then-tweaked functions (same structure, a different
