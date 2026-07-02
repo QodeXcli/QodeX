@@ -33,6 +33,7 @@ export interface DashboardData {
   maintainProjection?: { cleanupsPerMonth: number; minutesPerMonth: number };
   maintainForecast?: import('./maintain-stats.js').MaintainForecast;
   extractMetrics?: import('../tools/web/extract-metrics.js').ExtractCounts;
+  roleModels?: { subagent?: string; vision?: string; mainHasVision: boolean };
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
 }
 
@@ -120,6 +121,12 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   const healthBadges = d.health.map(h => `<span class="badge ${h.ok ? 'ok' : 'warn'}">${h.ok ? '✓' : '!'} ${esc(h.label)}: ${esc(h.detail)}</span>`).join('');
   const healthPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px"><h2 style="margin:0">Health</h2>${live ? `<button onclick="if(confirm('Pull + rebuild QodeX now?'))act('app.update',{})">⟳ Update QodeX</button>` : ''}</div><div class="badges">${healthBadges}</div></div>`;
   const logsPanel = d.logs.length ? `<div class="panel"><h2>Recent log</h2><pre class="logs">${d.logs.map(esc).join('\n')}</pre></div>` : '';
+  // Recall explorer — ask "how did we do X before?" right here: best match + how other attempts
+  // differed (the same visual diff recall_approach returns), rendered in-place without a reload.
+  const recallPanel = live ? `<div class="panel"><h2>Recall — how did we do it before?</h2>
+    <div class="ctl" style="border:0"><input id="recall-q" placeholder="e.g. how did we add auth?" style="flex:1" onkeydown="if(event.key==='Enter')recallRun()"><button onclick="recallRun()">Recall</button></div>
+    <pre id="recall-out" class="logs" style="display:none"></pre>
+  </div>` : '';
   // Web-extract quality: how often an oversized page was trimmed SEMANTICALLY (query-aware) vs a
   // positional head+tail window. A high semantic rate = agents pass a query and get the relevant part.
   const em = d.extractMetrics;
@@ -138,11 +145,18 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     um.preferences.length ? `<ul>${um.preferences.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : '<p class="dim">No stated preferences yet — tell me with “Remember” above.</p>'
   }${um.recentThemes.length ? `<p class="dim">Recent focus: ${um.recentThemes.map(esc).join(' · ')}</p>` : ''}${um.favoriteAreas.length ? `<p class="dim">Works mostly in: ${um.favoriteAreas.map(esc).join(', ')}</p>` : ''}</div>`;
 
-  // Model switcher (live: a dropdown of known models; read-only: just the current one).
-  const modelCtl = live && d.models.length
-    ? `<select onchange="act('model.set',{model:this.value})">${d.models.map(m => `<option${m === d.model ? ' selected' : ''}>${esc(m)}</option>`).join('')}</select>`
-    : `<span class="mono">${esc(d.model)}</span>`;
-  const modelPanel = `<div class="panel"><div class="ctl"><span>Default model</span>${modelCtl}</div></div>`;
+  // Model switcher — per ROLE (main / subagent / vision) plus a one-model-for-everything setter.
+  // When the main model has vision, say so: a separate vision model is optional, not required.
+  const rm = d.roleModels;
+  const modelSelect = (role: string, current: string | undefined, extraFirst?: string) => live && d.models.length
+    ? `<select onchange="act('model.set',{model:this.value,role:'${role}'})">${extraFirst ? `<option value="" selected disabled>${esc(extraFirst)}</option>` : ''}${d.models.map(m => `<option${!extraFirst && m === current ? ' selected' : ''}>${esc(m)}</option>`).join('')}</select>`
+    : `<span class="mono">${esc(current ?? '—')}</span>`;
+  const modelPanel = `<div class="panel"><h2>Models — per role</h2>
+    <div class="ctl"><span>Main (default)${rm?.mainHasVision ? ' <b class="ok">👁 has vision</b>' : ''}</span>${modelSelect('main', d.model)}</div>
+    <div class="ctl"><span>Sub-agent</span>${modelSelect('subagent', rm?.subagent ?? d.model)}</div>
+    <div class="ctl"><span>Vision${rm?.mainHasVision ? ' <span class="dim">(optional — main already sees images)</span>' : ''}</span>${modelSelect('vision', rm?.vision ?? (rm?.mainHasVision ? d.model : undefined))}</div>
+    ${live && d.models.length ? `<div class="ctl" style="border:0"><span>One model for everything</span>${modelSelect('all', undefined, 'pick a model…')}</div>` : ''}
+  </div>`;
 
   // Quarantined skill candidates — promote (independent-judge-passed) or reject from here.
   const candRows = d.candidates.length ? d.candidates.map(c => `<li><b>${esc(c.name)}</b>${c.confidence != null ? ` <span class="dim">conf ${c.confidence}</span>` : ''} — <span class="dim">${esc(c.description)}</span>${live ? ` <button onclick="act('skill.promote',{name:'${esc(c.name)}'})">Promote</button> <button class="danger" onclick="act('skill.reject',{name:'${esc(c.name)}'})">Reject</button>` : ''}</li>`).join('') : '<li class="dim">No candidates in quarantine.</li>';
@@ -236,6 +250,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   ${umPanel}
   <div class="panel"><h2>Skills</h2><ul>${skillList}</ul></div>
   ${candidatePanel}
+  ${recallPanel}
   ${extractPanel}
   ${logsPanel}
   <p class="dim" style="text-align:center">Generated by <b>qodex dashboard</b> — all data is local, under ~/.qodex/.</p>
@@ -256,6 +271,17 @@ ${live ? `
       if(j.ok) setTimeout(()=>location.reload(), 700);
     }catch(e){ toast(String(e), false); }
   }
+  async function recallRun(){
+    const q = document.getElementById('recall-q').value.trim();
+    if(!q) return;
+    const out = document.getElementById('recall-out');
+    out.style.display = 'block'; out.textContent = 'Searching your history…';
+    try{
+      const r = await fetch('/api/action?k='+encodeURIComponent(TOKEN),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'recall.query',params:{query:q}})});
+      const j = await r.json();
+      out.textContent = j.message || (j.ok ? '(no result)' : 'Failed');
+    }catch(e){ out.textContent = String(e); }
+  }
 ` : ''}
 </script></body></html>`;
 }
@@ -270,6 +296,16 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
   const project = (() => { try { return store.getProject(cwd)?.name || path.basename(cwd); } catch { return path.basename(cwd); } })();
   const defModel = config?.defaults?.model ?? '(unset)';
   const defProvider = config?.defaults?.provider;
+  const roleModels = await (async () => {
+    try {
+      const { looksVisionCapable } = await import('../setup/model-detector.js');
+      return {
+        subagent: config?.roles?.subagent?.model as string | undefined,
+        vision: config?.roles?.vision?.model as string | undefined,
+        mainHasVision: typeof defModel === 'string' && looksVisionCapable(defModel),
+      };
+    } catch { return { subagent: undefined, vision: undefined, mainHasVision: false }; }
+  })();
 
   // Providers: built-ins present in config + user customs.
   const providers: DashboardData['providers'] = [];
@@ -406,7 +442,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel,
     maintainStats, maintainWeekly: maintain?.weekly, maintainNext: maintain?.next ?? undefined,
     maintainTrend: maintain?.trend, maintainProjection: maintain?.projection, maintainForecast: maintain?.forecast,
-    extractMetrics,
+    extractMetrics, roleModels,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,

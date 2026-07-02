@@ -28,6 +28,7 @@ const data: DashboardData = {
   maintainProjection: { cleanupsPerMonth: 6, minutesPerMonth: 30 },
   maintainForecast: { weeklyAvg: 1.5, slope: 0.4, direction: 'rising', nextWeek: 3, weeks: 8 },
   extractMetrics: { semantic: 7, headTail: 3, truncated: 10, semanticRate: 0.7 },
+  roleModels: { subagent: 'qwen3-coder', vision: undefined, mainHasVision: true },
   totals: { sessions: 1, tokens: 42000, cost: 0.12, facts: 1, episodes: 1, skills: 1 },
 };
 
@@ -90,6 +91,14 @@ describe('qodex dashboard (pure render)', () => {
     expect(live).toContain('next week ≈ 3');               // prediction rendered
     expect(live).toContain('Web extract — semantic vs positional'); // extract hit-rate panel
     expect(live).toContain('70%');                         // semantic hit-rate rendered
+    expect(live).toContain('Models — per role');           // role-aware model panel
+    expect(live).toContain("role:'subagent'");             // per-role setters wired
+    expect(live).toContain("role:'vision'");
+    expect(live).toContain("role:'all'");                  // one-model-for-everything
+    expect(live).toContain('👁 has vision');                // main model vision badge
+    expect(live).toContain('optional — main already sees images'); // vision role marked optional
+    expect(live).toContain('Recall — how did we do it before?');   // recall explorer panel
+    expect(live).toContain("action:'recall.query'");        // in-place recall fetch (no reload)
   });
 
   // Exercises the REAL gather chain (config + store + skills, read-only) for an empty cwd — proves it

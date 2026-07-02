@@ -782,16 +782,22 @@ async function gatherMaintainRuns(): Promise<import('./cli/maintain-stats.js').M
 
 program
   .command('maintain-export')
-  .description('Export the maintain history to a portable JSON snapshot (archive, share, or move machines)')
+  .description('Export the maintain history to a portable JSON snapshot; --sign adds an HMAC-signed audit head')
   .option('-o, --out <file>', 'write to this file instead of stdout')
-  .action(async (opts: { out?: string }) => {
+  .option('--sign', 'sign the snapshot with HMAC-SHA256 using the QODEX_AUDIT_KEY env var (never stored)')
+  .action(async (opts: { out?: string; sign?: boolean }) => {
     const { serializeMaintainHistory } = await import('./cli/maintain-history.js');
+    let key: string | undefined;
+    if (opts.sign) {
+      key = process.env.QODEX_AUDIT_KEY;
+      if (!key) { console.error('\n✗ --sign needs a key: set QODEX_AUDIT_KEY in your environment (it is never stored).\n'); process.exit(1); }
+    }
     const runs = await gatherMaintainRuns();
-    const json = serializeMaintainHistory(runs, new Date().toISOString());
+    const json = serializeMaintainHistory(runs, new Date().toISOString(), { key });
     if (opts.out) {
       const { promises: fs } = await import('fs');
       await fs.writeFile(opts.out, json);
-      console.log(`\n📦 Exported ${runs.length} maintain run(s) → ${opts.out}\n`);
+      console.log(`\n📦 Exported ${runs.length} maintain run(s) → ${opts.out}${key ? '  🔏 signed' : ''}\n`);
     } else {
       console.log(json);
     }
@@ -804,12 +810,19 @@ program
   .option('--merge', 'merge the snapshot with local history and report the combined analytics')
   .action(async (file: string, opts: { merge?: boolean }) => {
     const { promises: fs } = await import('fs');
-    const { deserializeMaintainHistory, mergeRuns } = await import('./cli/maintain-history.js');
+    const { deserializeMaintainHistory, mergeRuns, verifyHistoryAudit } = await import('./cli/maintain-history.js');
     const { buildMaintainStats, forecastTrend } = await import('./cli/maintain-stats.js');
     let parsed;
     try { parsed = deserializeMaintainHistory(await fs.readFile(file, 'utf-8')); }
     catch (e: any) { console.error(`\n✗ Could not read snapshot: ${e?.message ?? e}\n`); process.exit(1); }
     let runs = parsed!.runs;
+    // Tamper check BEFORE merging: verify the snapshot's audit head (and signature, if a key is set).
+    const audit = verifyHistoryAudit(runs, parsed!.audit, process.env.QODEX_AUDIT_KEY);
+    if (audit.present && !audit.ok) {
+      const why = audit.headMatches === false ? 'runs do not match the audit head (snapshot was altered)' : 'signature is INVALID (wrong key or forged)';
+      console.error(`\n❌ Snapshot failed its audit check: ${why}. Refusing to report on it.\n`);
+      process.exit(1);
+    }
     let label = `snapshot (${runs.length} run(s)${parsed!.exportedAt ? `, exported ${parsed!.exportedAt.slice(0, 10)}` : ''})`;
     if (opts.merge) {
       const local = await gatherMaintainRuns();
@@ -822,6 +835,12 @@ program
     const fc = forecastTrend(runs, now);
     const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
     console.log(`\n📥 Maintain history — ${label}\n`);
+    if (audit.present) {
+      const sig = !audit.signaturePresent ? 'unsigned'
+        : audit.signatureValid === undefined ? 'signed (set QODEX_AUDIT_KEY to verify)'
+        : audit.signatureValid ? '🔏 signature valid (authentic)' : 'signature INVALID';
+      console.log(`  Audit:     ✓ integrity intact · ${sig}`);
+    }
     if (stats.totalRuns === 0) { console.log('  No runs in the snapshot.\n'); process.exit(0); }
     console.log(`  Totals:    ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
     console.log(`  Forecast:  ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek}`);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { serializeMaintainHistory, deserializeMaintainHistory, mergeRuns, MAINTAIN_HISTORY_VERSION } from '../src/cli/maintain-history.ts';
+import { serializeMaintainHistory, deserializeMaintainHistory, mergeRuns, verifyHistoryAudit, historyHead, MAINTAIN_HISTORY_VERSION } from '../src/cli/maintain-history.ts';
 import type { MaintainRun } from '../src/cli/maintain-stats.ts';
 
 const RUNS: MaintainRun[] = [
@@ -32,6 +32,30 @@ describe('maintain history export/import', () => {
   it('throws a clear error on non-JSON or a file with no runs', () => {
     expect(() => deserializeMaintainHistory('not json{')).toThrow(/valid JSON/);
     expect(() => deserializeMaintainHistory('{"foo":1}')).toThrow(/no maintain runs/);
+  });
+
+  it('signed snapshot: audit block verifies end-to-end; wrong key and tampering are caught', () => {
+    const KEY = 'audit-key';
+    const parsed = deserializeMaintainHistory(serializeMaintainHistory(RUNS, '2026-07-02T00:00:00Z', { key: KEY }));
+    expect(parsed.audit!.algo).toBe('sha256-chain+hmac-sha256');
+    expect(parsed.audit!.keyId).toHaveLength(12);
+
+    // Right key → fully ok.
+    expect(verifyHistoryAudit(parsed.runs, parsed.audit, KEY)).toMatchObject({ present: true, headMatches: true, signatureValid: true, ok: true });
+    // Wrong key → signature invalid → not ok.
+    expect(verifyHistoryAudit(parsed.runs, parsed.audit, 'wrong').ok).toBe(false);
+    // Tampered runs (forge filesChanged) → head mismatch → not ok, even with the right key.
+    const forged = parsed.runs.map((r, i) => i === 0 ? { ...r, filesChanged: 99 } : r);
+    expect(verifyHistoryAudit(forged, parsed.audit, KEY)).toMatchObject({ headMatches: false, ok: false });
+  });
+
+  it('unsigned snapshot still carries an integrity head; legacy (no audit) stays ok', () => {
+    const parsed = deserializeMaintainHistory(serializeMaintainHistory(RUNS, 'x'));
+    expect(parsed.audit!.algo).toBe('sha256-chain');
+    expect(parsed.audit!.signature).toBeUndefined();
+    expect(verifyHistoryAudit(parsed.runs, parsed.audit)).toMatchObject({ present: true, headMatches: true, ok: true });
+    expect(verifyHistoryAudit(RUNS, undefined)).toEqual({ present: false, ok: true });   // legacy file
+    expect(historyHead(RUNS)).toBe(parsed.audit!.head);                                  // deterministic
   });
 
   it('mergeRuns dedups identical runs and sorts newest-first', () => {

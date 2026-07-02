@@ -85,10 +85,40 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         return { ok: true, message: `Set ${params.key} = ${v.coerced}. Takes effect on the next run.` };
       }
       case 'model.set': {
+        // role: main (default) | subagent | vision | all — "all" points every role at one model,
+        // which is all you need when that model has vision (no separate vision model required).
         const model = String(params?.model ?? '').trim();
+        const role = String(params?.role ?? 'main').trim();
         if (!model) return { ok: false, message: 'Pick a model.' };
-        await writeConfigKnob('defaults.model', model);
-        return { ok: true, message: `Default model → ${model}. Takes effect on the next run.` };
+        if (!['main', 'subagent', 'vision', 'all'].includes(role)) return { ok: false, message: `Unknown role "${role}".` };
+        const { inferProvider } = await import('../llm/role-resolver.js');
+        const { looksVisionCapable } = await import('../setup/model-detector.js');
+        const provider = inferProvider(model);
+        const seesImages = looksVisionCapable(model);
+        if (role === 'main' || role === 'all') await writeConfigKnob('defaults.model', model);
+        if (role === 'subagent' || role === 'all') { await writeConfigKnob('roles.subagent.model', model); await writeConfigKnob('roles.subagent.provider', provider); }
+        if (role === 'vision' || role === 'all') { await writeConfigKnob('roles.vision.model', model); await writeConfigKnob('roles.vision.provider', provider); }
+        const visionNote = role === 'vision' && !seesImages
+          ? ' ⚠️ this model does not look vision-capable — screenshots may fail.'
+          : seesImages && role !== 'subagent' ? ' 👁 has vision — no separate vision model needed.' : '';
+        const label = role === 'all' ? 'ALL roles (main + subagent + vision)' : role === 'main' ? 'Default model' : `${role} model`;
+        return { ok: true, message: `${label} → ${model}.${visionNote} Takes effect on the next run.` };
+      }
+      case 'recall.query': {
+        const q = String(params?.query ?? '').trim();
+        if (!q) return { ok: false, message: 'Type what to recall.' };
+        const { rankApproaches } = await import('../context/approach-recall.js');
+        const { renderApproachDiffs } = await import('../context/approach-diff.js');
+        const { getSessionStore } = await import('../session/store.js');
+        const store = getSessionStore();
+        const worklog = (() => { try { return store.getWorklog(cwd, 100).map((w: any) => ({ kind: 'worklog' as const, text: w.entry, when: String(w.created_at ?? '').slice(0, 10), at: w.created_at, detail: w.kind })); } catch { return []; } })();
+        const episodes = await (async () => {
+          try { const { readEpisodes } = await import('../context/episodic-memory.js'); return (await readEpisodes(cwd)).map((e: any) => ({ kind: 'episode' as const, text: `${e.prompt} ${e.summary}`, when: String(e.ts ?? '').slice(0, 10), at: e.ts, files: e.filesChanged, detail: e.summary })); }
+          catch { return []; }
+        })();
+        const facts = (() => { try { return store.getFactsForCwd(cwd, 200).map((f: string) => ({ kind: 'fact' as const, text: f, when: '', detail: 'fact' })); } catch { return []; } })();
+        const matches = rankApproaches(q, [...episodes, ...worklog, ...facts], { topK: 4, nowMs: Date.now(), diversity: 0.35 });
+        return { ok: true, message: renderApproachDiffs(q, matches) };
       }
       case 'memory.add': {
         const fact = String(params?.fact ?? '').trim();
