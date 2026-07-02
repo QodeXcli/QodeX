@@ -22,14 +22,14 @@ function relTime(iso: string): string {
 
 export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
   name = 'recall_approach';
-  description = 'Search YOUR OWN history on this project — solved tasks (episodic memory), the project worklog, AND learned facts — for how a similar thing was done before. Use when the user asks "how did we do X before", or before re-solving a recurring task, to reuse the proven approach (and see which files it touched). Read-only.';
+  description = 'Search YOUR OWN history on this project — solved tasks (episodic memory), the project worklog, AND learned facts — for how a similar thing was done before. Returns a VISUAL comparison: the best-matching approach in full, a diff of how other attempts differed from it (what each added/lacked, which extra files), and the stable core common to all. Use when the user asks "how did we do X before", or before re-solving a recurring task. Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = Args;
 
   async execute(args: z.infer<typeof Args>, ctx: ToolContext): Promise<ToolResult> {
     const cwd = ctx.cwd ?? process.cwd();
-    const { rankApproaches, formatApproaches } = await import('../../context/approach-recall.js');
+    const { rankApproaches } = await import('../../context/approach-recall.js');
     const { getSessionStore } = await import('../../session/store.js');
     const store = getSessionStore();
 
@@ -50,6 +50,16 @@ export class RecallApproachTool extends Tool<z.infer<typeof Args>> {
     })();
 
     const matches = rankApproaches(args.query, [...episodes, ...worklog, ...facts], { topK: args.limit ?? 5, nowMs: Date.now(), diversity: 0.35 });
-    return { content: formatApproaches(args.query, matches), metadata: { matches: matches.length, episodes: episodes.length, worklog: worklog.length } };
+
+    // Visual comparison for the top approaches (best match + how the others differed + stable
+    // core); anything past the visualized window is listed compactly so nothing is hidden.
+    const { renderApproachDiffs } = await import('../../context/approach-diff.js');
+    const VIZ_K = 4;
+    let content = renderApproachDiffs(args.query, matches, { topK: VIZ_K });
+    if (matches.length > VIZ_K) {
+      const rest = matches.slice(VIZ_K).map(m => `- [${m.when} · ${Math.round(m.score * 100)}%] ${m.text.replace(/\s+/g, ' ').trim().slice(0, 100)}`);
+      content += `\n\nAlso similar:\n${rest.join('\n')}`;
+    }
+    return { content, metadata: { matches: matches.length, episodes: episodes.length, worklog: worklog.length } };
   }
 }
