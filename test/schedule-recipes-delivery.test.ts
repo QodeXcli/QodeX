@@ -133,7 +133,20 @@ describe('recipes — Autonomous Verified PR', () => {
     expect(p).toMatch(/Near-duplicates .* are OUT of scope/i);   // only exact equivalence
     expect(p).toMatch(/enumerate EVERY caller/i);                 // a missed caller breaks the build
     expect(p).toContain('```qodex-receipt');
-    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes']);
+  });
+
+  it('maintain scope=extract-helper: mechanical proposal only, delegating wrappers, zero call-site edits', () => {
+    expect(parseMaintainScope('extract-helper src/')).toEqual({ scope: 'extract-helper', focus: 'src/', dryRun: false });
+    expect(parseMaintainScope('parameterize --dry-run')).toEqual({ scope: 'extract-helper', focus: '', dryRun: true });
+    expect(parseMaintainScope('helpers')).toEqual({ scope: 'extract-helper', focus: '', dryRun: false });
+    const p = buildRecipePrompt('maintain', 'extract-helper');
+    expect(p).toContain('SAFE HELPER EXTRACTION');
+    expect(p).toMatch(/WITHOUT touching a single call site/i);
+    expect(p).toMatch(/thin delegating wrappers/i);
+    expect(p).toMatch(/No[\s\S]*proposal on any cluster → BLOCK/i);   // mechanical-or-block gate
+    expect(p).toMatch(/NEVER remove, rename, or re-sign/i);
+    expect(p).toContain('```qodex-receipt');
+    expect(MAINTAIN_SCOPES).toEqual(['dead-code', 'unused-imports', 'unused-locals', 'unused-params', 'lint-fix', 'dep-bump', 'consolidate-dupes', 'extract-helper']);
   });
 });
 
