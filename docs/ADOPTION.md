@@ -74,11 +74,18 @@ Proposed shared helper `extractedHelper(kind, inclusive)` — the bodies differ 
   (not covered — different structure: the ZodNumber variants, whose value is 0 vs BigInt(0))
 ```
 
-Two honest caveats. First, these are *detection* results — read-only, nothing was changed in any
-repo. Second, duplication in mature libraries is sometimes deliberate (readability, hot-path
-inlining, API symmetry): the tool's job is to surface the opportunity with proof; whether to take
-it stays a maintainer's call. That division of labor — *mechanical evidence, human judgment* — is
-the same verify-or-block philosophy the rest of maintain runs on.
+**And one of them became a real upstream PR:** the axios finding was reviewed by hand, refactored
+into `lib/helpers/setFormDataHeaders.js` (keeping the more defensive of the two variants), verified
+against axios's own suite (lint clean; all 89 form-data tests passing), and submitted —
+**[axios/axios#11062](https://github.com/axios/axios/pull/11062)**.
+
+Just as telling is what we *didn't* submit. The two hono clusters looked like duplicates but turned
+out behaviorally distinct on inspection — `importPublicKey`/`importPrivateKey` differ in real
+crypto branching, and the two `getQueryString`s deliberately differ in URL-encoding (there's a
+comment explaining why). The zod family is arguably deliberate API symmetry. Detection said
+"similar"; judgment said "leave them." That division of labor — *mechanical evidence, human
+judgment* — is the same verify-or-block philosophy the rest of maintain runs on, and it's why the
+tool reports rather than auto-refactors.
 
 ## Recommended rollout ladder
 
