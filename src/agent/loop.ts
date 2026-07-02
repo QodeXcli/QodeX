@@ -750,6 +750,9 @@ export class AgentLoop {
                 filesChanged: changedFiles,
                 toolsUsed: [...this.sessionToolNames],
                 toolCalls: this.totalToolCalls,
+                // This branch IS the objective-success path (sandbox compiled + merged, verify +
+                // completion gates passed) — recall can boost these over unverified history.
+                verified: true,
               });
             } catch (e: any) {
               logger.debug('Episode record skipped', { err: e?.message });

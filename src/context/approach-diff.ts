@@ -80,7 +80,9 @@ function head(text: string, max = 160): string {
 }
 
 function tag(m: ApproachMatch): string {
-  return m.kind === 'episode' ? '🎯 task' : m.kind === 'fact' ? '🧠 fact' : `📝 ${m.detail ?? 'worklog'}`;
+  const base = m.kind === 'episode' ? '🎯 task' : m.kind === 'fact' ? '🧠 fact' : m.kind === 'receipt' ? '🧾 receipt' : `📝 ${m.detail ?? 'worklog'}`;
+  // Ground-truth outcome, when known: ✓ = gates/receipt proved it worked; ⛔ = it was blocked.
+  return m.verified === true ? `${base} ✓` : m.verified === false ? `${base} ⛔` : base;
 }
 
 function fileLinks(files: string[] | undefined, refFiles?: Set<string>): string {
@@ -90,8 +92,31 @@ function fileLinks(files: string[] | undefined, refFiles?: Set<string>): string 
 }
 
 /**
+ * A compact chronological timeline of the matched approaches — oldest → newest, so the EVOLUTION
+ * of how this problem was attacked reads at a glance. Entries without a parseable timestamp are
+ * skipped; capped at `k` (default 5, per the "last 5 approaches with dates" spec). PURE.
+ */
+export function renderTimeline(matches: ApproachMatch[], k = 5): string[] {
+  const dated = matches
+    .map(m => ({ m, t: m.at ? Date.parse(m.at) : NaN }))
+    .filter(x => Number.isFinite(x.t))
+    .sort((a, b) => a.t - b.t)
+    .slice(-k);
+  if (dated.length < 2) return [];
+  const lines = ['', `Timeline (oldest → newest):`];
+  dated.forEach(({ m }, i) => {
+    const date = m.at!.slice(0, 10);
+    const glyph = i === dated.length - 1 ? '●' : '○';
+    const mark = m.verified === true ? ' ✓' : m.verified === false ? ' ⛔' : '';
+    lines.push(`  ${glyph} ${date}${mark}  ${head(m.text, 76)}`);
+  });
+  return lines;
+}
+
+/**
  * Render top-K matches as a visual comparison: the best approach in full, then each alternative
- * diffed against it, then the common core across all. PURE. Falls back to a plain list note when
+ * diffed against it, then the common core across all — and a chronological timeline so the
+ * evolution of the approach reads at a glance. PURE. Falls back to a plain list note when
  * there's only one match (nothing to diff).
  */
 export function renderApproachDiffs(query: string, matches: ApproachMatch[], opts: { topK?: number } = {}): string {
@@ -125,5 +150,6 @@ export function renderApproachDiffs(query: string, matches: ApproachMatch[], opt
     const core = commonCore(top.map(m => m.text));
     if (core.length >= 2) lines.push('', `Stable core across all ${top.length}: ${core.join(', ')} — this is how you consistently approach it here.`);
   }
+  lines.push(...renderTimeline(top));
   return lines.join('\n');
 }

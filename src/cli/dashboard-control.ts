@@ -113,11 +113,30 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         const store = getSessionStore();
         const worklog = (() => { try { return store.getWorklog(cwd, 100).map((w: any) => ({ kind: 'worklog' as const, text: w.entry, when: String(w.created_at ?? '').slice(0, 10), at: w.created_at, detail: w.kind })); } catch { return []; } })();
         const episodes = await (async () => {
-          try { const { readEpisodes } = await import('../context/episodic-memory.js'); return (await readEpisodes(cwd)).map((e: any) => ({ kind: 'episode' as const, text: `${e.prompt} ${e.summary}`, when: String(e.ts ?? '').slice(0, 10), at: e.ts, files: e.filesChanged, detail: e.summary })); }
+          try { const { readEpisodes } = await import('../context/episodic-memory.js'); return (await readEpisodes(cwd)).map((e: any) => ({ kind: 'episode' as const, text: `${e.prompt} ${e.summary}`, when: String(e.ts ?? '').slice(0, 10), at: e.ts, files: e.filesChanged, detail: e.summary, verified: e.verified })); }
           catch { return []; }
         })();
         const facts = (() => { try { return store.getFactsForCwd(cwd, 200).map((f: string) => ({ kind: 'fact' as const, text: f, when: '', detail: 'fact' })); } catch { return []; } })();
-        const matches = rankApproaches(q, [...episodes, ...worklog, ...facts], { topK: 4, nowMs: Date.now(), diversity: 0.35 });
+        const receipts = await (async () => {
+          try {
+            const { getScheduleStore } = await import('../schedule/store.js');
+            const { parseMaintainScope } = await import('../schedule/recipes.js');
+            const sched = getScheduleStore();
+            const out: any[] = [];
+            for (const s of sched.list().filter((s: any) => s.recipe === 'maintain' && s.cwd === cwd)) {
+              const scope = parseMaintainScope(s.prompt).scope;
+              for (const r of sched.recentRuns(s.id, 50)) {
+                if (!r.receipt) continue;
+                try {
+                  const rc = JSON.parse(r.receipt);
+                  out.push({ kind: 'receipt' as const, at: r.started_at, when: String(r.started_at ?? '').slice(0, 10), text: `maintain ${scope}: ${rc.summary || rc.reason || rc.status}`, files: Array.isArray(rc.filesChanged) ? rc.filesChanged : [], detail: scope, verified: rc.status === 'opened' ? true : rc.status === 'blocked' || rc.status === 'failed' ? false : undefined });
+                } catch { /* skip */ }
+              }
+            }
+            return out;
+          } catch { return []; }
+        })();
+        const matches = rankApproaches(q, [...episodes, ...worklog, ...facts, ...receipts], { topK: 4, nowMs: Date.now(), diversity: 0.35 });
         return { ok: true, message: renderApproachDiffs(q, matches) };
       }
       case 'memory.add': {

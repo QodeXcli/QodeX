@@ -34,7 +34,7 @@ export function semanticTokens(text: string): string[] {
 }
 
 export interface ApproachSource {
-  kind: 'episode' | 'worklog' | 'fact';
+  kind: 'episode' | 'worklog' | 'fact' | 'receipt';
   /** The searchable text (prompt + summary, or the worklog entry). */
   text: string;
   when: string;
@@ -44,6 +44,9 @@ export interface ApproachSource {
   files?: string[];
   /** A short human label (the summary, or the worklog kind). */
   detail?: string;
+  /** Objectively-verified outcome: true = gates/receipt proved it worked; false = it was blocked
+   *  or failed; undefined = unknown (old episodes, facts). Drives the success-weighted ranking. */
+  verified?: boolean;
 }
 
 export interface ApproachMatch extends ApproachSource { score: number }
@@ -56,6 +59,13 @@ function recencyBoost(at: string | undefined, nowMs: number | undefined): number
   if (!Number.isFinite(t)) return 0;
   const ageDays = (nowMs - t) / 86_400_000;
   return Math.max(0, 0.06 * (1 - ageDays / 180));
+}
+
+/** Success weighting from ground truth: an approach that PROVABLY worked (gates passed / receipt
+ *  status opened) should edge out an equally-relevant unverified one; one that was blocked/failed
+ *  should rank a notch below. Unknown (old episodes, facts) is neutral. PURE. */
+function verifiedBoost(verified: boolean | undefined): number {
+  return verified === true ? 0.08 : verified === false ? -0.04 : 0;
 }
 
 /**
@@ -81,7 +91,7 @@ export function rankApproaches(
   for (const s of sources) {
     const tf = termFreq(semanticTokens(s.text));
     const score = cosineSim(qv, tf);
-    if (score >= minScore) scored.push({ m: { ...s, score }, eff: score + recencyBoost(s.at, opts.nowMs), tf });
+    if (score >= minScore) scored.push({ m: { ...s, score }, eff: score + recencyBoost(s.at, opts.nowMs) + verifiedBoost(s.verified), tf });
   }
   scored.sort((a, b) => b.eff - a.eff);
   if (lambda === 0 || scored.length <= 1) return scored.slice(0, topK).map(x => x.m);
@@ -109,7 +119,7 @@ export function formatApproaches(query: string, matches: ApproachMatch[]): strin
   if (matches.length === 0) return `No past work on this project resembles "${query}".`;
   const lines = [`How you approached similar work before — "${query}":`, ''];
   for (const m of matches) {
-    const tag = m.kind === 'episode' ? '🎯 task' : m.kind === 'fact' ? '🧠 fact' : `📝 ${m.detail ?? 'worklog'}`;
+    const tag = m.kind === 'episode' ? '🎯 task' : m.kind === 'fact' ? '🧠 fact' : m.kind === 'receipt' ? '🧾 receipt' : `📝 ${m.detail ?? 'worklog'}`;
     const head = m.text.replace(/\s+/g, ' ').trim().slice(0, 140);
     const files = m.files?.length ? `  (touched: ${m.files.slice(0, 4).join(', ')})` : '';
     lines.push(`- [${tag} · ${m.when}] ${head}${files}`);
