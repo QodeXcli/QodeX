@@ -74,6 +74,34 @@ Proposed shared helper `extractedHelper(kind, inclusive)` — the bodies differ 
   (not covered — different structure: the ZodNumber variants, whose value is 0 vs BigInt(0))
 ```
 
+### Live `extract-helper` (v8) dry-run on QodeX itself — a block worth reading
+
+We ran the v8 scope's selection live against this repo (1,686 functions → 25 near-dupe clusters)
+and the verdict was:
+
+```
+VERIFIED-PR: blocked — dry-run: 0 candidate(s)
+```
+
+Zero qualifying clusters — and hand-inspection confirmed **every decline was correct**:
+
+- `dedupeStr` vs `dedupe` (99% similar) — *behaviorally different*: one filters out empty
+  strings, the other keeps them. Merging them mechanically would change behavior.
+- the two `isPrivateOrLocal` copies (100% similar) — one merges two `if`s the other keeps
+  separate; structurally divergent even though equivalent, so mechanical parameterization
+  can't prove itself.
+- the famous 4-copy `walkSource` family — genuinely divergent (different result shapes and
+  filters); it needs human-judgment consolidation, not a 3am mechanical pass.
+- the 5-copy path-helpers cluster — actually *two* families (1-arg and 2-arg) mixed; v8's
+  full-coverage rule refuses to half-consolidate a cluster.
+
+The dry-run also caught a real calibration bug — 100%-similar pairs were being declined just
+because their *comments* tokenized differently — which is now fixed (comments are stripped
+before alignment). That's the loop working end to end: run live → read the receipt → refine the
+guardrail → the remaining blocks are all *correct* blocks. On a codebase with textbook
+copy-paste-then-tweak-a-literal families (like zod's `positive`/`negative` above), v8 fires;
+on a codebase without them, it proves that fact instead of forcing a refactor.
+
 **And one of them became a real upstream PR:** the axios finding was reviewed by hand, refactored
 into `lib/helpers/setFormDataHeaders.js` (keeping the more defensive of the two variants), verified
 against axios's own suite (lint clean; all 89 form-data tests passing), and submitted —
