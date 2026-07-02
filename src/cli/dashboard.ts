@@ -416,9 +416,17 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     catch { return { running: false }; }
   })();
   const { computeHealth, tailLines } = await import('./dashboard-observability.js');
+  const webKeys = await (async () => {
+    try {
+      const { webKeyStatus, WEB_SERVICE_KEYS } = await import('../setup/key-guidance.js');
+      const s = webKeyStatus(process.env as Record<string, string | undefined>);
+      const first = s.missing[0];
+      return { set: s.set.length, total: WEB_SERVICE_KEYS.length, suggest: first ? { service: first.service, env: first.env, url: first.url } : undefined };
+    } catch { return undefined; }
+  })();
   const health = computeHealth({
     providers, schedulesEnabled: schedules.filter(s => s.enabled).length, botRunning: bot.running,
-    modelSet: !!defModel && defModel !== '(unset)', lastRunStatus: runs[0]?.status,
+    modelSet: !!defModel && defModel !== '(unset)', lastRunStatus: runs[0]?.status, webKeys,
   });
   const logs = await (async () => {
     try { const { QODEX_LOG_FILE } = await import('../config/defaults.js'); return tailLines(await fs.readFile(QODEX_LOG_FILE, 'utf-8'), 40); }

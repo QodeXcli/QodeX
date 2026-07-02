@@ -18,6 +18,9 @@ export function computeHealth(input: {
   botRunning: boolean;
   modelSet: boolean;
   lastRunStatus?: string;
+  /** Content-grade web-search keys (Firecrawl/Tavily/Brave): how many are set, and the first
+   *  missing one to suggest. Omitted → no badge (old callers unaffected). */
+  webKeys?: { set: number; total: number; suggest?: { service: string; env: string; url: string } };
 }): HealthItem[] {
   const cloud = input.providers.filter(p => p.keyEnv);
   const ready = cloud.filter(p => p.keySet).length;
@@ -28,6 +31,16 @@ export function computeHealth(input: {
     detail: cloud.length === 0 ? 'all local' : `${ready}/${cloud.length} cloud keys set`,
   });
   items.push({ label: 'Default model', ok: input.modelSet, detail: input.modelSet ? 'configured' : 'unset — run `qodex setup`' });
+  if (input.webKeys) {
+    const w = input.webKeys;
+    items.push({
+      label: 'Web search',
+      ok: w.set > 0,
+      detail: w.set > 0
+        ? `${w.set}/${w.total} content-grade backend(s) keyed`
+        : `keyless fallback only — ${w.suggest ? `get a free ${w.suggest.service} key at ${w.suggest.url} (${w.suggest.env})` : 'set a search API key'}`,
+    });
+  }
   items.push({ label: 'Scheduler', ok: true, detail: `${input.schedulesEnabled} task(s) enabled` });
   items.push({ label: 'Bot', ok: true, detail: input.botRunning ? 'running' : 'stopped' });
   if (input.lastRunStatus) {

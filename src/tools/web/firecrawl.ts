@@ -31,8 +31,9 @@ export class FirecrawlBackend implements WebSearchBackend {
     const apiKey = process.env.FIRECRAWL_API_KEY;
     if (!apiKey) {
       throw new WebSearchError(
-        'Firecrawl backend selected but FIRECRAWL_API_KEY is not set in the environment. ' +
-        'Export FIRECRAWL_API_KEY=fc-... or switch to another backend in your config.',
+        'Firecrawl backend selected but FIRECRAWL_API_KEY is not set. ' +
+        'Get a free key at https://www.firecrawl.dev — then paste it in chat (the agent saves it via save_api_key and retries), ' +
+        'or add FIRECRAWL_API_KEY=fc-... to ~/.qodex/.env.',
         this.name,
       );
     }
