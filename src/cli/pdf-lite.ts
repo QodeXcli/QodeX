@@ -20,6 +20,10 @@ export interface PdfBlock {
   indent?: number;
   /** Extra space above the block, in points. */
   spaceBefore?: number;
+  /** Render a mini bar chart (values normalized to the max) instead of text — real vector
+   *  rectangles, since sparkline glyphs (▁▂▃…) aren't in the Latin-1 base fonts. `text` is
+   *  used as the row label to the left of the bars. */
+  bars?: number[];
 }
 
 const PAGE_W = 595;   // A4 portrait, points
@@ -68,20 +72,29 @@ function wrap(text: string, size: number, mono: boolean, widthPts: number): stri
  * with `Buffer.from(pdf, 'latin1')`. PURE + deterministic (no clock, no randomness).
  */
 export function buildPdf(blocks: PdfBlock[]): string {
-  // 1. Lay blocks out into pages of positioned lines.
-  interface Line { x: number; y: number; size: number; font: 'F1' | 'F2' | 'F3'; text: string }
-  const pages: Line[][] = [[]];
+  // 1. Lay blocks out into pages of positioned elements (text lines + bar-chart rows).
+  interface Line { kind: 'text'; x: number; y: number; size: number; font: 'F1' | 'F2' | 'F3'; text: string }
+  interface BarsRow { kind: 'bars'; x: number; y: number; values: number[]; label: string; size: number }
+  type El = Line | BarsRow;
+  const BAR_H = 36; const BAR_W = 14; const BAR_GAP = 4;
+  const pages: El[][] = [[]];
   let y = PAGE_H - MARGIN;
   for (const b of blocks) {
     const size = b.size ?? 11;
-    const gap = Math.round(size * 1.45);
     const x = MARGIN + (b.indent ?? 0);
     y -= b.spaceBefore ?? 0;
+    if (b.bars) {
+      if (y < MARGIN + BAR_H + size) { pages.push([]); y = PAGE_H - MARGIN; }
+      y -= BAR_H + Math.round(size * 0.6);
+      pages[pages.length - 1]!.push({ kind: 'bars', x, y, values: b.bars, label: pdfSanitize(b.text), size });
+      continue;
+    }
+    const gap = Math.round(size * 1.45);
     const font = b.mono ? 'F3' : b.bold ? 'F2' : 'F1';
     for (const lineText of wrap(pdfSanitize(b.text), size, !!b.mono, PAGE_W - x - MARGIN)) {
       if (y < MARGIN + size) { pages.push([]); y = PAGE_H - MARGIN; }
       y -= gap;
-      pages[pages.length - 1]!.push({ x, y, size, font, text: lineText });
+      pages[pages.length - 1]!.push({ kind: 'text', x, y, size, font, text: lineText });
     }
   }
 
@@ -103,7 +116,18 @@ export function buildPdf(blocks: PdfBlock[]): string {
       `/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents ${contentNum} 0 R >>\nendobj\n`,
     );
     const stream = lines
-      .map(l => `BT /${l.font} ${l.size} Tf 1 0 0 1 ${l.x} ${l.y} Tm (${pdfEscape(l.text)}) Tj ET`)
+      .map(l => {
+        if (l.kind === 'text') return `BT /${l.font} ${l.size} Tf 1 0 0 1 ${l.x} ${l.y} Tm (${pdfEscape(l.text)}) Tj ET`;
+        // Bar row: label text, then normalized filled rects (q/Q so the gray fill never leaks into text).
+        const max = Math.max(1, ...l.values);
+        const label = l.label ? `BT /F1 ${l.size} Tf 1 0 0 1 ${l.x} ${l.y + 2} Tm (${pdfEscape(l.label)}) Tj ET\n` : '';
+        const bx0 = l.x + (l.label ? Math.min(150, l.label.length * l.size * 0.55 + 12) : 0);
+        const rects = l.values.map((v, i) => {
+          const h = Math.max(1, Math.round((v / max) * BAR_H));
+          return `${bx0 + i * (BAR_W + BAR_GAP)} ${l.y} ${BAR_W} ${h} re f`;
+        }).join(' ');
+        return `${label}q 0.45 g ${rects} Q`;
+      })
       .join('\n');
     objects.push(`${contentNum} 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`);
   });
