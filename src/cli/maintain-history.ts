@@ -7,8 +7,16 @@
  * All PURE (string/array in, string/array out) so the round-trip + merge are unit-tested.
  */
 import type { MaintainRun } from './maintain-stats.js';
+import { buildAuditChain, chainHead, signChainHead, verifyChainSignature, keyIdFor, type AuditableRun } from './maintain-audit.js';
 
 export const MAINTAIN_HISTORY_VERSION = 1;
+
+export interface HistoryAudit {
+  algo: 'sha256-chain' | 'sha256-chain+hmac-sha256';
+  head: string;
+  keyId?: string;
+  signature?: string;
+}
 
 export interface MaintainHistoryFile {
   kind: 'qodex-maintain-history';
@@ -16,19 +24,57 @@ export interface MaintainHistoryFile {
   exportedAt: string;
   count: number;
   runs: MaintainRun[];
+  /** Tamper-evidence for the snapshot itself: the audit-chain head over `runs` (+ optional HMAC). */
+  audit?: HistoryAudit;
 }
 
-/** Serialize maintain runs into a portable snapshot. PURE (pass `nowIso`). */
-export function serializeMaintainHistory(runs: MaintainRun[], nowIso: string): string {
+const toAuditable = (r: MaintainRun): AuditableRun =>
+  ({ at: r.at ?? '', scope: r.scope, status: r.status, filesChanged: r.filesChanged });
+
+/** The audit-chain head over a run list (order-independent — the chain sorts chronologically). PURE. */
+export function historyHead(runs: MaintainRun[]): string {
+  return chainHead(buildAuditChain(runs.map(toAuditable)));
+}
+
+/**
+ * Serialize maintain runs into a portable snapshot. PURE (pass `nowIso`). With `opts.key`, the
+ * snapshot carries an `audit` block: the hash-chain head over the runs plus an HMAC signature — so
+ * the receiver can prove the history wasn't altered in transit and WHO exported it. Without a key
+ * it still carries the unsigned head (integrity check, no authenticity).
+ */
+export function serializeMaintainHistory(runs: MaintainRun[], nowIso: string, opts: { key?: string } = {}): string {
   const clean = runs.map(normalizeRun);
+  const head = historyHead(clean);
+  const audit: HistoryAudit = opts.key
+    ? { algo: 'sha256-chain+hmac-sha256', head, keyId: keyIdFor(opts.key), signature: signChainHead(head, opts.key) }
+    : { algo: 'sha256-chain', head };
   const file: MaintainHistoryFile = {
     kind: 'qodex-maintain-history',
     version: MAINTAIN_HISTORY_VERSION,
     exportedAt: nowIso,
     count: clean.length,
     runs: clean,
+    audit,
   };
   return JSON.stringify(file, null, 2);
+}
+
+export interface HistoryAuditVerdict {
+  present: boolean;
+  headMatches?: boolean;
+  signaturePresent?: boolean;
+  signatureValid?: boolean;      // undefined when unsigned or no key supplied
+  ok: boolean;                   // everything checkable passed (an unsigned-but-intact snapshot is ok)
+}
+
+/** Verify a snapshot's audit block against its own runs. PURE. */
+export function verifyHistoryAudit(runs: MaintainRun[], audit: HistoryAudit | undefined, key?: string): HistoryAuditVerdict {
+  if (!audit) return { present: false, ok: true };            // legacy snapshot — nothing to check
+  const headMatches = historyHead(runs.map(normalizeRun)) === audit.head;
+  const signaturePresent = !!audit.signature;
+  let signatureValid: boolean | undefined;
+  if (signaturePresent && key) signatureValid = verifyChainSignature(audit.head, audit.signature!, key);
+  return { present: true, headMatches, signaturePresent, signatureValid, ok: headMatches && (!signaturePresent || signatureValid !== false) };
 }
 
 /**
@@ -36,13 +82,14 @@ export function serializeMaintainHistory(runs: MaintainRun[], nowIso: string): s
  * shape or a bare runs array; throws only when the input is not usable JSON or has no runs field.
  * PURE.
  */
-export function deserializeMaintainHistory(text: string): { runs: MaintainRun[]; exportedAt?: string; version?: number } {
+export function deserializeMaintainHistory(text: string): { runs: MaintainRun[]; exportedAt?: string; version?: number; audit?: HistoryAudit } {
   let obj: any;
   try { obj = JSON.parse(text); } catch { throw new Error('not valid JSON'); }
   const rawRuns = Array.isArray(obj) ? obj : obj?.runs;
   if (!Array.isArray(rawRuns)) throw new Error('no maintain runs found in the file');
   const runs = rawRuns.filter(isRunLike).map(normalizeRun);
-  return { runs, exportedAt: typeof obj?.exportedAt === 'string' ? obj.exportedAt : undefined, version: typeof obj?.version === 'number' ? obj.version : undefined };
+  const audit = obj?.audit && typeof obj.audit === 'object' && typeof obj.audit.head === 'string' ? obj.audit as HistoryAudit : undefined;
+  return { runs, exportedAt: typeof obj?.exportedAt === 'string' ? obj.exportedAt : undefined, version: typeof obj?.version === 'number' ? obj.version : undefined, audit };
 }
 
 /** A stable identity for a run, so re-importing the same snapshot doesn't double-count. */
