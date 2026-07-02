@@ -196,6 +196,26 @@ export interface ParamProposal {
 
 interface RawTok { text: string; start: number }
 
+/** Remove comments (but NOT string contents) so comment-only differences don't block alignment. PURE. */
+function stripComments(body: string): string {
+  // Walk once, honoring string/template literals so a "//" inside a string survives.
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i]!;
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch; out += ch; i++;
+      while (i < body.length && body[i] !== quote) { if (body[i] === '\\') { out += body[i]! + (body[i + 1] ?? ''); i += 2; continue; } out += body[i]!; i++; }
+      out += body[i] ?? ''; i++;
+      continue;
+    }
+    if (ch === '/' && body[i + 1] === '/') { while (i < body.length && body[i] !== '\n') i++; continue; }
+    if (ch === '/' && body[i + 1] === '*') { i += 2; while (i < body.length && !(body[i] === '*' && body[i + 1] === '/')) i++; i += 2; continue; }
+    out += ch; i++;
+  }
+  return out;
+}
+
 /** Code tokens WITH literals kept and source offsets (for substitution in the sketch). PURE. */
 function rawTokens(body: string): RawTok[] {
   const re = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\d+(?:\.\d+)?|[A-Za-z_$][\w$]*|[^\sA-Za-z0-9_$]/g;
@@ -217,8 +237,10 @@ export function proposeParameterizedHelper(members: FunctionUnit[], helperName =
   const decline = (reason: string): ParamProposal => ({ ok: false, reason, helperName, params: [], sketch: '', calls: [] });
   if (members.length < 2) return decline('need at least two functions');
 
-  // Neutralize each function's own name so it never reads as a varying token.
-  let bodies = members.map(m => m.body.replace(new RegExp(`\\b${m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), helperName));
+  // Neutralize each function's own name, and strip comments BEFORE aligning: two bodies that
+  // differ only in comments are the same code (dogfooding caught 100%-similar pairs declining
+  // as "structurally divergent" purely because their comments tokenized differently).
+  let bodies = members.map(m => stripComments(m.body).replace(new RegExp(`\\b${m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), helperName));
   let toks = bodies.map(b => rawTokens(b));
   let dropped: string[] | undefined;
   if (toks.some(t => t.length !== toks[0]!.length)) {

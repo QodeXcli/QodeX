@@ -155,6 +155,27 @@ describe('proposeParameterizedHelper (v2 — parameterize the near-dupes)', () =
     expect(proposeParameterizedHelper(identical).reason).toMatch(/consolidate-dupes/);
   });
 
+  it('comment-only differences do NOT block alignment (live dry-run regression)', () => {
+    // Dogfooding v8 on QodeX: 100%-similar pairs declined as "structurally divergent" only
+    // because their comments tokenized differently. Comments are semantically irrelevant.
+    const commented = [
+      { name: 'a', file: 'f.ts', startLine: 1, endLine: 4, body: 'a(x) {\n  // clamp to the range\n  return Math.min(x, 10);\n}' },
+      { name: 'b', file: 'g.ts', startLine: 1, endLine: 4, body: 'b(x) {\n  /* different words here */\n  return Math.min(x, 20);\n}' },
+    ];
+    const pr = proposeParameterizedHelper(commented);
+    expect(pr.ok).toBe(true);                       // aligns despite different comments
+    expect(pr.params).toHaveLength(1);              // only the 10/20 literal varies
+    expect(pr.params[0]!.values).toEqual(['10', '20']);
+    // …and a // inside a STRING literal is not treated as a comment.
+    const url = [
+      { name: 'u1', file: 'f.ts', startLine: 1, endLine: 3, body: 'u1() { return fetch("https://a.example/x"); }' },
+      { name: 'u2', file: 'g.ts', startLine: 1, endLine: 3, body: 'u2() { return fetch("https://b.example/x"); }' },
+    ];
+    const pu = proposeParameterizedHelper(url);
+    expect(pu.ok).toBe(true);
+    expect(pu.params[0]!.values).toEqual(['"https://a.example/x"', '"https://b.example/x"']);
+  });
+
   it('mixed structural variants: parameterizes the LARGEST aligned subset and reports the rest as dropped', () => {
     // The real zod shape: a Number family plus a BigInt variant whose body has extra tokens.
     const bigint = { name: 'positiveBig', file: 'types.ts', startLine: 20, endLine: 27,
