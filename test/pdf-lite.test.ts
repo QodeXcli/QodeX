@@ -47,11 +47,17 @@ describe('buildPdf', () => {
     expect(pdf.slice(startxref, startxref + 4)).toBe('xref');
   });
 
-  it('paginates long content onto multiple pages', () => {
+  it('paginates long content onto multiple pages, with page-number footers', () => {
     const long = buildPdf(Array.from({ length: 120 }, (_, i) => ({ text: `line ${i}` })));
     const pageCount = (long.match(/\/Type \/Page\b(?!s)/g) ?? []).length;
     expect(pageCount).toBeGreaterThan(1);
     expect(long).toContain(`/Count ${pageCount}`);
+    expect(long).toContain(`(Page 1 of ${pageCount}) Tj`);   // footer on every page…
+    expect(long).toContain(`(Page ${pageCount} of ${pageCount}) Tj`);
+  });
+
+  it('a single-page document has NO page-number footer', () => {
+    expect(buildPdf([{ text: 'short' }])).not.toContain('(Page 1 of 1)');
   });
 
   it('stays pure Latin-1 (writable with Buffer latin1) even with emoji input', () => {

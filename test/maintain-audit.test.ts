@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildAuditChain, verifyAuditChain, chainHead, buildSignedAuditLog, serializeAuditLog,
-  verifyAuditLog, signChainHead, verifyChainSignature, keyIdFor, AUDIT_GENESIS,
+  verifyAuditLog, signChainHead, verifyChainSignature, keyIdFor, buildAuditPdfBlocks, AUDIT_GENESIS,
   type AuditableRun,
 } from '../src/cli/maintain-audit.ts';
+import { buildPdf } from '../src/cli/pdf-lite.ts';
 
 const RUNS: AuditableRun[] = [
   { at: '2026-06-20T00:00:00Z', scope: 'dead-code', status: 'opened', filesChanged: 1, prUrl: 'https://h/pr/1', verification: [{ command: 'npm test', passed: true }] },
@@ -106,5 +107,33 @@ describe('maintain audit — HMAC signature (authenticity)', () => {
     const v = verifyAuditLog(log);
     expect(v.ok).toBe(true);                               // chain + head OK, no signature required
     expect(v.signaturePresent).toBe(false);
+  });
+});
+
+describe('maintain audit — auditor PDF one-pager', () => {
+  const KEY = 'audit-key';
+  const log = buildSignedAuditLog(RUNS, { exportedAt: '2026-07-01T00:00:00Z', key: KEY });
+
+  it('renders verification status + the full run chain into a valid PDF', () => {
+    const pdf = buildPdf(buildAuditPdfBlocks(log, verifyAuditLog(log, KEY)));
+    expect(pdf.startsWith('%PDF-1.4\n')).toBe(true);
+    expect(pdf).toContain('(Maintain Audit Log) Tj');
+    expect(pdf).toContain('INTACT');                       // chain status
+    expect(pdf).toContain('VALID');                        // signature status
+    expect(pdf).toContain('PASS');                         // overall verdict
+    expect(pdf).toContain('dead-code');                    // entries present
+    expect(pdf).toContain('unused-locals');
+    expect(pdf).toContain('[BLOCKED]');                    // blocked run visible
+    expect(pdf).toContain('https://h/pr/1');               // PR link carried
+    expect(pdf).toContain('v npm test');                   // verification checks (sanitized ✓ → v)
+  });
+
+  it('a failed verdict renders FAIL, and unsigned logs say so', () => {
+    const forged = { ...log, entries: log.entries.map((e, i) => i === 0 ? { ...e, filesChanged: 42 } : e) };
+    const bad = buildPdf(buildAuditPdfBlocks(forged, verifyAuditLog(forged, KEY)));
+    expect(bad).toContain('FAIL - do not trust');
+    const unsigned = buildSignedAuditLog(RUNS, { exportedAt: 'x' });
+    const updf = buildPdf(buildAuditPdfBlocks(unsigned, verifyAuditLog(unsigned)));
+    expect(updf).toContain('unsigned');
   });
 });
