@@ -155,6 +155,25 @@ what actually ran. That verify-or-block gate — running while no one is watchin
 `;
 }
 
+/** The same "Maintain in action" story as PDF blocks (for pdf-lite) — one source of truth. PURE. */
+export function buildMaintainDemoPdfBlocks(): import('./pdf-lite.js').PdfBlock[] {
+  const blocks: import('./pdf-lite.js').PdfBlock[] = [
+    { text: 'QodeX — a codebase that improves itself', size: 20, bold: true },
+    { text: 'Every night, QodeX uses its code graph to find one safe improvement, verifies it, and leaves you a pull request you can trust — or a receipt explaining why it safely did nothing. Autonomy you can audit, not a confident lie.', size: 11, spaceBefore: 6 },
+    { text: 'The nightly loop', size: 14, bold: true, spaceBefore: 14 },
+    ...STEPS.map((s, i) => ({ text: `${i + 1}. ${s}`, size: 11, indent: 10 })),
+    { text: 'Scopes — each conservative + provable', size: 14, bold: true, spaceBefore: 14 },
+    ...SCOPES.map(s => ({ text: `${s.name} — ${s.blurb}  [${s.verdict === 'opened' ? 'opens a PR' : 'safe-block'}]`, size: 10, indent: 10 })),
+    { text: 'What lands in your inbox — a trust receipt', size: 14, bold: true, spaceBefore: 14 },
+    { text: `✅ QodeX schedule: nightly-tidy · maintain · unused-imports\n🧾 Receipt\n${SCOPES[1]!.receipt}`, size: 9, mono: true, indent: 10 },
+    { text: 'The filesChanged and verification are measured by QodeX from a real git diff + the checkers it ran — the model can\'t fabricate a green receipt. When a scope can\'t prove safety, it ships nothing and tells you why.', size: 10, spaceBefore: 8 },
+    { text: 'Why a code-graph-less agent can\'t copy this', size: 14, bold: true, spaceBefore: 14 },
+    { text: 'It can\'t prove an item is unused, can\'t verify before shipping, and can\'t produce a receipt of what actually ran. That verify-or-block gate — running while no one is watching — is the moat.', size: 11 },
+    { text: 'Get started:  qodex schedule add --recipe maintain --prompt "unused-imports" --deliver telegram:<id>', size: 9, mono: true, spaceBefore: 14 },
+  ];
+  return blocks;
+}
+
 export async function runMaintainDemo(): Promise<string> {
   const { QODEX_HOME } = await import('../config/defaults.js');
   const { ensureQodexHome } = await import('../config/loader.js');

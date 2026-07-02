@@ -697,13 +697,26 @@ program
   .command('maintain-demo')
   .description('Open a self-contained "Maintain in action" demo page (the self-improvement loop, visually)')
   .option('--markdown', 'emit a shareable Markdown writeup instead of opening the interactive page')
-  .option('-o, --out <file>', 'with --markdown, write to this file instead of stdout')
-  .action(async (opts: { markdown?: boolean; out?: string }) => {
+  .option('--pdf', 'write a shareable one-page PDF instead of opening the interactive page')
+  .option('-o, --out <file>', 'with --markdown/--pdf, write to this file (PDF default: ~/.qodex/maintain-demo.pdf)')
+  .action(async (opts: { markdown?: boolean; pdf?: boolean; out?: string }) => {
     if (opts.markdown) {
       const { buildMaintainDemoMarkdown } = await import('./cli/maintain-demo.js');
       const md = buildMaintainDemoMarkdown();
       if (opts.out) { const { promises: fs } = await import('fs'); await fs.writeFile(opts.out, md); console.log(`\n📝 Maintain writeup → ${opts.out}\n`); }
       else console.log(md);
+      process.exit(0);
+    }
+    if (opts.pdf) {
+      const { buildMaintainDemoPdfBlocks } = await import('./cli/maintain-demo.js');
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-demo.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildMaintainDemoPdfBlocks()), 'latin1'));
+      console.log(`\n📄 Maintain one-pager → ${out}\n`);
       process.exit(0);
     }
     const { runMaintainDemo } = await import('./cli/maintain-demo.js');

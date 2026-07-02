@@ -558,6 +558,8 @@ qodex schedule receipt <id>     # the full receipt of the latest run
 
 So "the agent did X overnight" stops being a claim and becomes a **checkable record** — the half a cron-wrapped chatbot structurally can't produce, because it never verified in the first place.
 
+**Adopting maintain on your repo?** [docs/ADOPTION.md](docs/ADOPTION.md) has the 10-minute setup, a rollout ladder from `--dry-run` to `dep-bump`, and **real merged results** from running it on this very repository ([#62](https://github.com/QodeXcli/QodeX/pull/62): 6 unused imports removed · [#64](https://github.com/QodeXcli/QodeX/pull/64): 4 consts removed, 6 safely blocked by the side-effect gate). Show your team with `qodex maintain-demo` (interactive) / `--markdown` / `--pdf`.
+
 ## Architecture notes
 
 - **One agent loop** with per-task budget caps (tokens / cost / wall-clock / iterations), a consecutive-failure circuit breaker, and auto-recovery.

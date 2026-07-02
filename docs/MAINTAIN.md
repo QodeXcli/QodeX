@@ -5,6 +5,9 @@ without ever quietly shipping a risky change. It is the headline expression of Q
 *deterministic guardrails around the model*. This doc explains how it works and how to add a new
 **scope** — read it before touching `src/schedule/recipes.ts`.
 
+> Adopting it on your project (setup, rollout ladder, real results)? Start with
+> **[ADOPTION.md](ADOPTION.md)** — this doc is for contributors extending the recipe.
+
 ## What it is
 
 A scheduled `maintain` run is a normal headless agent run whose prompt has been wrapped in an
