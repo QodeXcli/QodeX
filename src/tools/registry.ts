@@ -95,6 +95,7 @@ import { DiagnosticsTool } from './diagnostics/diagnostics-tool.js';
 import { RememberTool, RecallTool, ForgetTool } from './builtin/memory.js';
 import { RecallApproachTool } from './builtin/recall-approach.js';
 import { SuggestSkillTool } from './builtin/suggest-skill.js';
+import { SaveApiKeyTool } from './builtin/save-api-key.js';
 import { AddProviderTool } from './builtin/add-provider.js';
 // v1.40 — infrastructure tool groups
 import { NetworkOptimizeTool } from './network/network-optimize.js';
@@ -289,6 +290,7 @@ export class ToolRegistry {
       new RecallTool(),
       new RecallApproachTool(),
       new SuggestSkillTool(),
+      new SaveApiKeyTool(),
       new ForgetTool(),
       new AddProviderTool(),
       new ProjectLogTool(),

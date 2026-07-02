@@ -33,7 +33,8 @@ export class BraveBackend implements WebSearchBackend {
     if (!apiKey) {
       throw new WebSearchError(
         'Brave backend selected but BRAVE_SEARCH_API_KEY is not set. ' +
-        'Get a key at https://api.search.brave.com (free tier 2000 q/month).',
+        'Get a free key at https://api-dashboard.search.brave.com — then paste it in chat (the agent saves it via save_api_key and retries), ' +
+        'or add BRAVE_SEARCH_API_KEY=... to ~/.qodex/.env.',
         this.name,
       );
     }
