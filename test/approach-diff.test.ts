@@ -91,6 +91,43 @@ describe('renderApproachDiffs', () => {
     expect(renderApproachDiffs('xyz', [])).toMatch(/No past work/);
   });
 
+  it('shows ground-truth outcome marks and a receipt tag', () => {
+    const out = renderApproachDiffs('auth', [
+      { kind: 'episode', text: 'add auth login middleware', when: '2d ago', score: 0.9, verified: true },
+      { kind: 'receipt', text: 'maintain unused-imports: auth files cleaned', when: '3d ago', score: 0.5, verified: false },
+    ]);
+    expect(out).toContain('🎯 task ✓');           // verified episode
+    expect(out).toContain('🧾 receipt ⛔');        // blocked maintain run
+  });
+
+  it('renders a chronological timeline (oldest → newest, capped, dated-only, outcome marks)', () => {
+    const T = (text: string, at: string, verified?: boolean): ApproachMatch =>
+      ({ kind: 'episode', text, when: at.slice(0, 10), at, score: 0.5, verified });
+    const matches = [
+      T('third attempt with refresh tokens', '2026-06-20T10:00:00Z', true),
+      T('first attempt basic auth', '2026-03-01T10:00:00Z'),
+      T('second attempt jwt middleware', '2026-05-10T10:00:00Z', false),
+      { kind: 'fact' as const, text: 'undated fact', when: '', score: 0.4 },   // no date → skipped
+    ];
+    const out = renderApproachDiffs('auth', matches);
+    expect(out).toContain('Timeline (oldest → newest):');
+    const tl = out.slice(out.indexOf('Timeline'));
+    expect(tl.indexOf('2026-03-01')).toBeLessThan(tl.indexOf('2026-05-10'));
+    expect(tl.indexOf('2026-05-10')).toBeLessThan(tl.indexOf('2026-06-20'));
+    expect(tl).toContain('2026-06-20 ✓');
+    expect(tl).toContain('2026-05-10 ⛔');
+    expect(tl).not.toContain('undated fact');
+    expect(tl).toContain('● 2026-06-20');          // newest gets the filled glyph
+  });
+
+  it('timeline is omitted when fewer than 2 matches carry a date', () => {
+    const out = renderApproachDiffs('auth', [
+      { kind: 'episode', text: 'one dated', when: '2d', at: '2026-06-20T00:00:00Z', score: 0.9 },
+      { kind: 'fact', text: 'undated', when: '', score: 0.5 },
+    ]);
+    expect(out).not.toContain('Timeline');
+  });
+
   it('identical vocabulary → "same approach" note instead of empty ± lines', () => {
     const out = renderApproachDiffs('auth', [
       M('episode', 'add auth login', 0.9),

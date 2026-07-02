@@ -30,6 +30,9 @@ export interface Episode {
   /** Tool calls it took to finish — a cleanliness signal (fewer = tidier path). Optional
    *  so episodes recorded before this field still load. */
   toolCalls?: number;
+  /** True when the episode was recorded on the objectively-verified path (sandbox compiled,
+   *  verify + completion gates passed, squash-merged). Absent on older episodes → unknown. */
+  verified?: boolean;
 }
 
 export interface EpisodeMatch extends Episode { score: number }

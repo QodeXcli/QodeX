@@ -69,6 +69,17 @@ describe('rankApproaches', () => {
     expect(stem('categories')).toBe('category');
   });
 
+  it('receipt-aware ranking: a VERIFIED approach beats an equally-relevant unverified one; blocked sinks', () => {
+    const three: ApproachSource[] = [
+      { kind: 'episode', text: 'add login auth flow', when: 'unknown' },                          // no signal
+      { kind: 'episode', text: 'add login auth flow', when: 'proven', verified: true },           // gates passed
+      { kind: 'receipt', text: 'add login auth flow', when: 'blocked', verified: false },         // guardrail declined
+    ];
+    const m = rankApproaches('add login auth flow', three, { minScore: 0.1 });
+    expect(m.map(x => x.when)).toEqual(['proven', 'unknown', 'blocked']);   // ✓ > unknown > ⛔
+    expect(m[0]!.score).toBeGreaterThan(0.9);                               // displayed score stays honest relevance
+  });
+
   it('on near-equal relevance, the more RECENT approach surfaces first', () => {
     const now = Date.parse('2026-07-01T00:00:00Z');
     const iso = (d: number) => new Date(now - d * 86_400_000).toISOString();
