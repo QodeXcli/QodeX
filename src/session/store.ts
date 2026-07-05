@@ -200,6 +200,19 @@ export class SessionStore {
     return id;
   }
 
+  /**
+   * Create a session row with a caller-chosen id if it doesn't exist yet (idempotent).
+   * Used for sub-agent sessions, whose ids are derived from the parent's
+   * (`<parent>/sub-<ts>`, `<parent>/fanout-<n>`, …): messages.session_id has a FK to
+   * sessions.id, so the row MUST exist before the sub-agent's first recordTurn —
+   * otherwise every child write dies with "FOREIGN KEY constraint failed".
+   */
+  ensureSession(id: string, cwd: string, model: string): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, ?)`,
+    ).run(id, cwd, model, null);
+  }
+
   recordTurn(
     sessionId: string,
     messages: Message[],

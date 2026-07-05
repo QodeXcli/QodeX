@@ -307,6 +307,13 @@ export class AgentLoop {
         sessionId: opts.sessionId,
       });
 
+      // The child session id is fabricated by the dispatcher (`<parent>/sub-<ts>`,
+      // `<parent>/fanout-<n>`, …) and has no row in `sessions` yet — but
+      // messages.session_id carries a FK to sessions.id, so the sub-agent's FIRST
+      // recordTurn would fail with "FOREIGN KEY constraint failed", killing every
+      // delegation instantly. Create the parent row up front (idempotent).
+      getSessionStore().ensureSession(opts.sessionId, this.cwd, modelUsed);
+
       // Role-specific tool restriction (allow-list). Built-in policy:
       //   - vision role: only vision_analyze + read-only browser/file/web tools
       //   - subagent role: everything except `task` (no recursion) — handled by mode=subagent
