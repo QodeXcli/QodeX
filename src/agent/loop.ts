@@ -2076,6 +2076,7 @@ export class AgentLoop {
         const results = await Promise.all(
           readOnlyCalls.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
         );
+        budget.noteProgress();
         for (let i = 0; i < readOnlyCalls.length; i++) {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
@@ -2109,6 +2110,7 @@ export class AgentLoop {
           // Single → execute as before
           const tc = batch[0]!;
           const r = await this.executeToolCall(tc, txn, sessionId, options);
+          budget.noteProgress();
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           noteResult(tc.function.name, r);
@@ -2127,6 +2129,7 @@ export class AgentLoop {
           const results = await Promise.all(
             batch.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
           );
+          budget.noteProgress();
           for (let i = 0; i < batch.length; i++) {
             const tc = batch[i]!;
             const r = results[i]!;

@@ -44,6 +44,13 @@ export class BudgetTracker {
     this.iterations++;
   }
 
+  /** Record non-model progress (a completed TOOL call). A 5-minute shell command is work,
+   *  not a stall — without this, the wall ceiling read long tool runs as 'stalled' and
+   *  killed the task right after the tool returned (live: 808s/600s, stalled 300s). */
+  noteProgress(): void {
+    this.lastProgressAt = Date.now();
+  }
+
   checkpoint(): void {
     const wallMs = Date.now() - this.startTime;
     // A value of 0 (or negative) on any limit means "no limit" — useful for local
