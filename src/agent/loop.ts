@@ -40,6 +40,7 @@ import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, e
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
+import { applySpillGuard } from './tool-spill.js';
 import { efficiencyDefaults, resolveSetting } from './efficiency-profile.js';
 import { gatherInfraSignals, deriveAutoDisabledTools, ratchetAutoDisabled } from './tool-profile.js';
 import { decideThinking, applyThinkingDecision, countTrailingToolErrors, modelSupportsSoftSwitch } from './thinking-control.js';
@@ -2436,10 +2437,44 @@ export class AgentLoop {
         }
       }
 
-      const result = await Promise.race([
+      let result = await Promise.race([
         this.registry.execute(tc.function.name, args, ctx),
         timeoutPromise,
       ]);
+
+      // ─── Universal spill guard (THE choke point for oversized results) ───
+      // Every tool result passes through here before it can become message
+      // content, so one check covers http_request, web_fetch, shell, grep,
+      // browser_*, MCP tools — everything. Oversized content is written in
+      // full to ~/.qodex/tool-spill/<sessionId>/ and replaced by
+      // head + "[N chars spilled — full output: <path>]" + tail, so the model
+      // keeps status lines and tail errors AND knows how to read the rest
+      // (read_file with offset/limit). isError and metadata pass through
+      // untouched. Runs BEFORE the read-only cache store so a cache hit can
+      // never resurrect the full-size copy. Best-effort: a failed spill must
+      // never eat the result.
+      const spillMax = this.config.tools?.maxResultChars ?? 16_000;
+      if (spillMax > 0 && typeof result.content === 'string' && result.content.length > spillMax) {
+        try {
+          const spill = await applySpillGuard(tc.function.name, sessionId, result.content, {
+            maxResultChars: spillMax,
+          });
+          if (spill.spilled) {
+            logger.info('Tool result spilled to disk', {
+              tool: tc.function.name,
+              chars: result.content.length,
+              spillPath: spill.spillPath,
+            });
+            uiEvents.push({
+              type: 'progress',
+              message: `💾 Large ${tc.function.name} output (${result.content.length.toLocaleString()} chars) spilled to disk — context keeps head+tail+path`,
+            } as any);
+            result = { ...result, content: spill.content };
+          }
+        } catch (e: any) {
+          logger.warn('Spill guard failed (result kept in full, non-fatal)', { err: e?.message });
+        }
+      }
 
       // Store successful read-only results in cache
       if (this.toolCache && tool && tool.isReadOnly && !result.isError && typeof result.content === 'string') {

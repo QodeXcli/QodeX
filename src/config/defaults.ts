@@ -217,6 +217,20 @@ export interface QodexConfig {
     showCost: boolean;
   };
   /**
+   * Cross-cutting tool-result policies (applied at the registry/loop boundary,
+   * not per-tool). Optional for back-compat; defaults applied at load.
+   */
+  tools?: {
+    /**
+     * Universal spill guard: any tool result whose content exceeds this many
+     * chars is written IN FULL to ~/.qodex/tool-spill/<sessionId>/ and enters
+     * the model context as head + "[N chars spilled — full output: <path>]" +
+     * tail instead. Covers every tool (http_request, web_fetch, shell, grep…)
+     * at one choke point. 0 disables. Default 16000 (~4k tokens).
+     */
+    maxResultChars?: number;
+  };
+  /**
    * Telegram/Discord bot front-end (`qodex bot`). Tokens are NOT here — they're secrets read
    * from ~/.qodex/.env (TELEGRAM_BOT_TOKEN / DISCORD_TOKEN). Only the (non-secret) allowlists
    * live in config. `allowedUsers` is DENY-by-default: an empty list lets nobody in; the
@@ -694,6 +708,12 @@ export const DEFAULT_CONFIG: QodexConfig = {
     showThinking: true,
     showTokenCount: true,
     showCost: true,
+  },
+  tools: {
+    // Spill guard threshold. A 278KB http_request page used to enter the context
+    // whole (~70k tokens) and only get aged 2 turns later; now anything past this
+    // cap lives on disk and the context gets head+tail+path. 0 = disabled.
+    maxResultChars: 16_000,
   },
   bot: {
     telegram: { enabled: false, allowedUsers: [] },
