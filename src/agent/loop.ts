@@ -123,6 +123,10 @@ export class AgentLoop {
    *  ADDS to this — never drops — so the tools block stays a byte-stable cache prefix
    *  across turns (a sliding per-turn set would flip and invalidate the prompt cache). */
   private sessionToolNames = new Set<string>();
+  /** Where the active model is actually served from ('ollama'/'lmstudio'/'anthropic'/…) and
+   *  its LIVE context window — set each iteration, forwarded on budget_update for the UI. */
+  private lastModelSource = '';
+  private lastEffectiveCtxWindow = 0;
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
   private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
   // Ground-truth verification ledger: every checker QodeX actually ran this run + its result.
@@ -1410,15 +1414,24 @@ export class AgentLoop {
         } catch { this.liveCtxWindows = null; }
       }
       let effectiveCtxWindow = route.modelInfo.contextWindow;
+      // Where the model is actually served from, for the status bar. Provider name is the
+      // base truth (ollama/anthropic/openai/custom name); a hit in LM Studio's native model
+      // registry upgrades it to 'lmstudio' — the OpenAI-compat facade otherwise hides that.
+      let modelSource = route.provider.name;
       if (this.liveCtxWindows) {
         const id = route.model;
         const live = this.liveCtxWindows[id]
           ?? this.liveCtxWindows[Object.keys(this.liveCtxWindows).find(k => k.includes(id) || id.includes(k)) ?? ''];
-        if (typeof live === 'number' && live > 0 && live !== effectiveCtxWindow) {
-          logger.info('Context window synced from LM Studio', { model: id, config: effectiveCtxWindow, live });
-          effectiveCtxWindow = live;
+        if (typeof live === 'number' && live > 0) {
+          modelSource = 'lmstudio';
+          if (live !== effectiveCtxWindow) {
+            logger.info('Context window synced from LM Studio', { model: id, config: effectiveCtxWindow, live });
+            effectiveCtxWindow = live;
+          }
         }
       }
+      this.lastModelSource = modelSource;
+      this.lastEffectiveCtxWindow = effectiveCtxWindow;
       const contextBudget = Math.floor(effectiveCtxWindow * 0.75);
       const estTokens = this.estimateTokens(agedRaw);
       // ─── Hooks: PreCompact ───────────────────────────────────────────────────
@@ -1608,7 +1621,11 @@ export class AgentLoop {
           ...budget.getUsage(),
           lastInputTokens: lastUsage.input, lastOutputTokens: lastUsage.output, lastCostUsd: cost,
           lastCacheRead: cacheRead, lastCacheCreation: (lastUsage as any).cacheCreation ?? 0, cacheHitRate,
-          contextWindow: route.modelInfo.contextWindow,
+          // The LIVE-synced window (LM Studio native API when available), not the static
+          // table value — plus where the model is actually served from and whether it bills.
+          contextWindow: this.lastEffectiveCtxWindow || route.modelInfo.contextWindow,
+          providerName: this.lastModelSource || route.provider.name,
+          providerIsLocal: (route.provider as any).isLocal === true || this.lastModelSource === 'lmstudio',
         },
       };
 

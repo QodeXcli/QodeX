@@ -130,7 +130,7 @@ export function App(props: AppProps): React.ReactElement {
   // finishes (or immediately when motion is disabled / not a TTY).
   const [booted, setBooted] = useState(false);
   const [explicitModel, setExplicitModel] = useState<string | undefined>(props.explicitModel);
-  const [budgetStatus, setBudgetStatus] = useState({ tokens: 0, costUsd: 0, contextTokens: 0, contextWindow: 0 });
+  const [budgetStatus, setBudgetStatus] = useState({ tokens: 0, costUsd: 0, contextTokens: 0, contextWindow: 0, providerName: '', providerIsLocal: true });
   // Live throughput + elapsed readout for the status bar. taskStartedAt marks when
   // the current task began (busy → true); nowTick is bumped by an interval while
   // busy so the readout refreshes; lastElapsedMs freezes the finished task's total
@@ -528,6 +528,8 @@ export function App(props: AppProps): React.ReactElement {
               costUsd: event.data.costUsd,
               contextTokens: event.data.lastInputTokens ?? 0,
               contextWindow: event.data.contextWindow ?? 0,
+              providerName: event.data.providerName ?? '',
+              providerIsLocal: event.data.providerIsLocal !== false,
             });
             break;
           case 'final':
@@ -732,6 +734,8 @@ export function App(props: AppProps): React.ReactElement {
             costUsd={budgetStatus.costUsd}
             contextTokens={budgetStatus.contextTokens}
             contextWindow={budgetStatus.contextWindow}
+            providerName={budgetStatus.providerName}
+            providerIsLocal={budgetStatus.providerIsLocal}
             elapsedMs={busy && taskStartedAt ? Math.max(0, nowTick - taskStartedAt) : lastElapsedMs}
             busy={busy}
           />
@@ -792,12 +796,18 @@ function StatusBar(props: {
   costUsd: number;
   contextTokens: number;
   contextWindow: number;
+  providerName?: string;
+  providerIsLocal?: boolean;
   elapsedMs: number;
   busy: boolean;
 }): React.ReactElement {
-  const { width, model, mode, tokens, costUsd, contextTokens, contextWindow, elapsedMs, busy } = props;
+  const { width, model, mode, tokens, costUsd, contextTokens, contextWindow, providerName, providerIsLocal, elapsedMs, busy } = props;
   const tok = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
-  const credit = costUsd > 0 ? `$${costUsd.toFixed(4)}` : 'local · free';
+  // WHERE the model runs, stated — not guessed from cost: 'ollama·local', 'lmstudio·local',
+  // 'anthropic·api'… A billing API at $0.0000 still shows ·api so cloud is never mistaken
+  // for free-local; the dollar figure appears the moment real cost accrues.
+  const source = providerName ? `${providerName}·${providerIsLocal ? 'local' : 'api'}` : '';
+  const credit = costUsd > 0 ? `$${costUsd.toFixed(4)}` : providerIsLocal === false ? 'api · $0.0000' : 'local · free';
   // Throughput (token-consumption rate) + elapsed time. Average over the task —
   // total tokens / elapsed — which is exactly "how fast tokens are being spent".
   const secs = elapsedMs / 1000;
@@ -814,6 +824,12 @@ function StatusBar(props: {
     <Box width={width} paddingX={1} justifyContent="space-between">
       <Box>
         <Text dimColor>{model}</Text>
+        {source !== '' && (
+          <>
+            <Text dimColor>  ·  </Text>
+            <Text color={providerIsLocal ? 'cyan' : 'magenta'} dimColor={!busy}>{source}</Text>
+          </>
+        )}
         <Text dimColor>  ·  </Text>
         <Text color={mode === 'plan' ? 'yellow' : 'green'}>{mode}</Text>
         {ctxMeter !== '' && (
