@@ -241,9 +241,21 @@ export class OpenAIProvider extends Provider {
         }
 
         if (chunk.usage) {
+          // OpenAI's prompt_tokens INCLUDES server-cached tokens (prompt caching is
+          // automatic on a byte-stable prefix, billed at a discount and reported in
+          // prompt_tokens_details.cached_tokens). Splitting them out keeps usage
+          // semantics aligned with the Anthropic provider — `input` is FRESH tokens
+          // only, `cacheRead` the cached remainder. Without the split, every turn
+          // re-counted the whole context at 1× and long sessions looked like they
+          // burned a 200k budget in minutes.
+          const cached = (chunk.usage as any).prompt_tokens_details?.cached_tokens ?? 0;
           yield {
             type: 'usage',
-            usage: { input: chunk.usage.prompt_tokens, output: chunk.usage.completion_tokens },
+            usage: {
+              input: Math.max(0, chunk.usage.prompt_tokens - cached),
+              output: chunk.usage.completion_tokens,
+              cacheRead: cached,
+            },
           };
         }
       }

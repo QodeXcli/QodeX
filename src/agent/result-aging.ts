@@ -65,8 +65,8 @@ export interface AgingResult {
 }
 
 export function ageToolResults(messages: Message[], opts: AgingOptions = {}): AgingResult {
-  const minAgeTurns = opts.minAgeTurns ?? 3;
-  const maxChars = opts.maxChars ?? 8_000;
+  const minAgeTurns = opts.minAgeTurns ?? 2;
+  const maxChars = opts.maxChars ?? 5_000;
   const keepHead = opts.keepHead ?? 1_500;
   const keepTail = opts.keepTail ?? 2_500;
 
