@@ -245,6 +245,11 @@ export async function dispatchAction(name: string, params: any, cwd: string): Pr
         const eg = p.sample.slice(0, 3).map(c => c.name).join(', ');
         return { ok: true, message: `🔍 ${p.count} unused symbol(s) maintain could clean (e.g. ${eg}). Schedule \`unused-imports\` / \`unused-locals\`.` };
       }
+      case 'app.checkUpdate': {
+        const { checkForUpdate } = await import('./self-update.js');
+        const s = await checkForUpdate();               // networked fetch, on demand
+        return { ok: s.ok, message: s.message };
+      }
       case 'app.update': {
         const { selfUpdate } = await import('./self-update.js');
         const r = await selfUpdate();

@@ -1003,7 +1003,14 @@ program
 program
   .command('update')
   .description('Self-update the QodeX git checkout (git pull → npm install → npm run build)')
-  .action(async () => {
+  .option('--check', 'Only check whether a newer version is available; don\'t apply it')
+  .action(async (opts: { check?: boolean }) => {
+    if (opts.check) {
+      const { checkForUpdate } = await import('./cli/self-update.js');
+      const s = await checkForUpdate();
+      console.log(`\n${s.updateAvailable ? '⬆' : s.ok ? '✓' : '✗'} ${s.message}\n`);
+      process.exit(s.ok ? 0 : 1);
+    }
     const { selfUpdate } = await import('./cli/self-update.js');
     console.log('\n🔄 Updating QodeX…');
     const r = await selfUpdate(line => console.log('  ' + line));

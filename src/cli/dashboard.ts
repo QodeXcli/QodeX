@@ -35,6 +35,8 @@ export interface DashboardData {
   extractMetrics?: import('../tools/web/extract-metrics.js').ExtractCounts;
   roleModels?: { subagent?: string; vision?: string; mainHasVision: boolean };
   totals: { sessions: number; tokens: number; cost: number; facts: number; episodes: number; skills: number };
+  /** Version + whether the git checkout is behind its remote (populated best-effort). */
+  update?: { version?: string; updateAvailable: boolean; behind: number; message: string; ok: boolean };
 }
 
 const esc = (s: string) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
@@ -119,7 +121,20 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
 
   // Observability: health badges + a tail of the local log.
   const healthBadges = d.health.map(h => `<span class="badge ${h.ok ? 'ok' : 'warn'}">${h.ok ? '✓' : '!'} ${esc(h.label)}: ${esc(h.detail)}</span>`).join('');
-  const healthPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px"><h2 style="margin:0">Health</h2>${live ? `<button onclick="if(confirm('Pull + rebuild QodeX now?'))act('app.update',{})">⟳ Update QodeX</button>` : ''}</div><div class="badges">${healthBadges}</div></div>`;
+  // Version + update status: current version, an "update available" badge when the local
+  // check knows we're behind, a "Check for updates" button (networked), and the update button.
+  const up = d.update;
+  const verLabel = up?.version ? `v${esc(up.version)}` : 'version unknown';
+  const updateBadge = up?.updateAvailable
+    ? `<span class="badge warn" title="${esc(up.message)}">⬆ update available — ${up.behind} behind</span>`
+    : up?.ok ? `<span class="badge ok">✓ up to date</span>` : '';
+  const updateCtl = live
+    ? `<button onclick="act('app.checkUpdate',{})">🔎 Check for updates</button>`
+      + `<button class="${up?.updateAvailable ? '' : 'dim'}" onclick="if(confirm('Pull + rebuild QodeX now? Restart afterwards to load it.'))act('app.update',{})">⟳ Update QodeX</button>`
+    : '';
+  const healthPanel = `<div class="panel"><div class="ctl" style="border:0;padding:0 0 12px">`
+    + `<h2 style="margin:0">Health · <span class="dim" style="font-weight:400">QodeX ${verLabel}</span> ${updateBadge}</h2>`
+    + `<div>${updateCtl}</div></div><div class="badges">${healthBadges}</div></div>`;
   const logsPanel = d.logs.length ? `<div class="panel"><h2>Recent log</h2><pre class="logs">${d.logs.map(esc).join('\n')}</pre></div>` : '';
   // Recall explorer — ask "how did we do X before?" right here: best match + how other attempts
   // differed (the same visual diff recall_approach returns), rendered in-place without a reload.
@@ -444,13 +459,22 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     try { const { readExtractMetrics } = await import('../tools/web/extract-metrics.js'); return await readExtractMetrics(); }
     catch { return undefined; }
   })();
+  // Version + update status — LOCAL only (no network) so the render stays instant; the
+  // "Check for updates" button runs the networked fetch on demand.
+  const update = await (async () => {
+    try {
+      const { checkForUpdate } = await import('./self-update.js');
+      const s = await checkForUpdate({ fetchRemote: false });
+      return { version: s.version, updateAvailable: s.updateAvailable, behind: s.behind, message: s.message, ok: s.ok };
+    } catch { return undefined; }
+  })();
 
   return {
     project, model: defModel, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
     providers, sessions, facts, episodes, skills, controls, schedules, models, candidates, runs, bot, health, logs, userModel,
     maintainStats, maintainWeekly: maintain?.weekly, maintainNext: maintain?.next ?? undefined,
     maintainTrend: maintain?.trend, maintainProjection: maintain?.projection, maintainForecast: maintain?.forecast,
-    extractMetrics, roleModels,
+    extractMetrics, roleModels, update,
     totals: {
       sessions: sessions.length, tokens: sessions.reduce((a, s) => a + s.tokens, 0),
       cost: sessions.reduce((a, s) => a + s.cost, 0), facts: facts.length, episodes: episodes.length, skills: skills.length,
