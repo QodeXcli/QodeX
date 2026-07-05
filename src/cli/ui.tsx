@@ -138,12 +138,18 @@ export function App(props: AppProps): React.ReactElement {
   const [taskStartedAt, setTaskStartedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [lastElapsedMs, setLastElapsedMs] = useState<number>(0);
+  // The ticker goes QUIET while a permission prompt is open: each tick re-renders the
+  // whole dynamic frame, and with a tall diff+confirmation on screen that 4Hz re-paint
+  // reads as violent scroll-jumping. A ref (not an effect dep) keeps the timer and the
+  // task's start time intact — the readout just freezes until the prompt resolves.
+  const pendingPromptRef = useRef<unknown>(null);
+  pendingPromptRef.current = pendingPrompt;
   useEffect(() => {
     if (!busy) return;
     const start = Date.now();
     setTaskStartedAt(start);
     setNowTick(start);
-    const iv = setInterval(() => setNowTick(Date.now()), 250);
+    const iv = setInterval(() => { if (!pendingPromptRef.current) setNowTick(Date.now()); }, 250);
     return () => {
       clearInterval(iv);
       setLastElapsedMs(Date.now() - start);
@@ -649,7 +655,9 @@ export function App(props: AppProps): React.ReactElement {
         <StreamingView text={tailForViewport(streamingText, rows, cols)} />
       )}
 
-      {activeTools.map(t => (
+      {/* Tool activity hides while a permission prompt is up — the prompt IS the activity,
+          and every extra dynamic line enlarges the frame Ink re-paints. */}
+      {!pendingPrompt && activeTools.map(t => (
         <ToolActivityLine key={t.id} name={t.name} partialArgs={t.partialArgs} motion={motion} />
       ))}
 
