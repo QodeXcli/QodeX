@@ -1158,6 +1158,15 @@ export class AgentLoop {
       } catch { /* best-effort — never block the task on baseline capture */ }
     }
 
+    // Token-budget accounting is NOVEL-tokens-only. An agentic turn makes one API call per
+    // tool round, and every call re-sends the whole conversation — so counting each call's
+    // full input against the budget grows QUADRATICALLY with tool rounds (live: a 21k-context
+    // task on a local model "spent" 216k/200k within two minutes and died). The high-water
+    // mark counts every context token ONCE: consume = output + max(0, seenNow - seenBefore).
+    // Dollar cost stays full-usage per call below — bills are bills; the token budget is a
+    // runaway guard, not an invoice.
+    let promptHighWater = 0;
+
     while (true) {
       try {
         budget.incrementIteration();
@@ -1580,13 +1589,18 @@ export class AgentLoop {
         return;
       }
 
-      // Track budget
+      // Track budget — novel tokens only (see promptHighWater above): the re-sent
+      // conversation prefix is counted the FIRST time it enters the context, not on
+      // every subsequent tool round. Works for every provider, including local ones
+      // that report no cache fields at all.
       const cost = computeCost(lastUsage, route.modelInfo);
-      budget.consume({ tokens: lastUsage.input + lastUsage.output, costUsd: cost });
-      // Cache hit-rate: cached reads ÷ total input the model saw (fresh + cached). Lets the
-      // status line PROVE the hierarchical cache is working (and how much it's saving).
       const cacheRead = (lastUsage as any).cacheRead ?? 0;
       const totalInputSeen = lastUsage.input + cacheRead;
+      const freshInput = Math.max(0, totalInputSeen - promptHighWater);
+      promptHighWater = Math.max(promptHighWater, totalInputSeen);
+      budget.consume({ tokens: freshInput + lastUsage.output, costUsd: cost });
+      // Cache hit-rate: cached reads ÷ total input the model saw (fresh + cached). Lets the
+      // status line PROVE the hierarchical cache is working (and how much it's saving).
       const cacheHitRate = totalInputSeen > 0 ? cacheRead / totalInputSeen : 0;
       yield {
         type: 'budget_update',
