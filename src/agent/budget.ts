@@ -14,6 +14,9 @@ export class BudgetTracker {
   private costUsd = 0;
   private iterations = 0;
   private iterationWarned = false;
+  /** Bumped on every consume() (= a completed model call). Slow ≠ runaway: the wall-time
+   *  ceiling only fires when the task is ALSO stalled, judged against this timestamp. */
+  private lastProgressAt = Date.now();
 
   constructor(
     private maxTokens: number,
@@ -34,6 +37,7 @@ export class BudgetTracker {
   consume(usage: { tokens?: number; costUsd?: number }): void {
     this.tokens += usage.tokens ?? 0;
     this.costUsd += usage.costUsd ?? 0;
+    this.lastProgressAt = Date.now();
   }
 
   incrementIteration(): void {
@@ -52,7 +56,17 @@ export class BudgetTracker {
       throw new BudgetExceededError(`Cost budget exceeded: $${this.costUsd.toFixed(4)}/$${this.maxCostUsd}`, 'cost');
     }
     if (this.maxWallSeconds > 0 && wallMs > this.maxWallSeconds * 1000) {
-      throw new BudgetExceededError(`Time budget exceeded: ${(wallMs / 1000).toFixed(0)}s/${this.maxWallSeconds}s`, 'time');
+      // Slow ≠ runaway. checkpoint() runs right AFTER a completed model call, so in the
+      // old form this ceiling could ONLY ever kill a task that was actively working
+      // (live: "Time budget exceeded: 608s/600s" mid-edit on a local model) — a hung
+      // task never reaches a checkpoint at all. The ceiling now fires only when the
+      // task is ALSO stalled (no completed call in the last 2 minutes); true runaways
+      // stay bounded by the iteration and token caps.
+      const idleMs = Date.now() - this.lastProgressAt;
+      if (idleMs > 120_000) {
+        throw new BudgetExceededError(
+          `Time budget exceeded: ${(wallMs / 1000).toFixed(0)}s/${this.maxWallSeconds}s (stalled ${(idleMs / 1000).toFixed(0)}s)`, 'time');
+      }
     }
     if (this.maxIterations > 0 && this.iterations > this.maxIterations) {
       throw new BudgetExceededError(`Iteration budget exceeded: ${this.iterations}/${this.maxIterations}`, 'iterations');

@@ -623,7 +623,10 @@ export const DEFAULT_CONFIG: QodexConfig = {
     dailyLimitUsd: 10.0,
     perTaskLimitUsd: 1.0,
     perTaskMaxTokens: 200_000,
-    perTaskMaxWallSeconds: 600,
+    // Ceiling, not pace-setter: since the stall-aware checkpoint (budget.ts) it only fires
+    // when the task ALSO stopped progressing. 600s was calibrated for cloud latency; a local
+    // model legitimately spends that on a handful of long generations.
+    perTaskMaxWallSeconds: 3600,
     toolTimeoutSeconds: 300,
   },
   security: {
