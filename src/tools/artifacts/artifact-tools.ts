@@ -13,6 +13,8 @@
  */
 import { z } from 'zod';
 import * as path from 'path';
+import * as os from 'os';
+import { promises as fs } from 'fs';
 import { Tool, ToolContext, ToolResult } from '../base.js';
 import {
   createArtifact, updateArtifact, listArtifacts, getArtifact, rollbackArtifact,
@@ -20,6 +22,7 @@ import {
 } from '../../artifacts/store.js';
 import { buildPreviewHtml, PREVIEW_FILE, previewServerName, previewPort, livePort, liveServerName } from '../../artifacts/preview.js';
 import { buildReviewPrompt, buildReviewReport, formatReviewReport } from '../../artifacts/review.js';
+import { captureArtifact, type CaptureDeps } from '../../artifacts/review-capture.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import * as processRegistry from '../browser/process-registry.js';
 import { startLive, stopLive, stopAllLive, listLive } from '../../artifacts/live-registry.js';
@@ -229,27 +232,95 @@ export class ArtifactPreviewTool extends Tool<z.infer<typeof PreviewArgs>> {
 const ReviewArgs = z.object({
   id: z.string().optional().describe('The artifact id to review.'),
   name: z.string().optional().describe('Alias for id — some models pass the artifact title here; id takes precedence.'),
-  screenshot_path: z.string().min(1).describe('Path to a screenshot of the rendered preview (from browser_screenshot). Required — the review judges what actually rendered.'),
+  screenshot_path: z.string().optional().describe('OPTIONAL. Path to an existing screenshot (from browser_screenshot). If omitted, artifact_review builds the preview, opens it in the browser, and screenshots it ITSELF — you do not need to run artifact_preview / browser_* first.'),
   intent: z.string().optional().describe('What the artifact is supposed to look like / do, so the review can judge against it.'),
-  console_errors: z.array(z.string()).optional().describe('Console error strings from browser_console, if any.'),
-  page_errors: z.array(z.string()).optional().describe('Uncaught page error strings from browser_console, if any.'),
+  console_errors: z.array(z.string()).optional().describe('Console error strings from browser_console, if any. Auto-captured when artifact_review takes its own screenshot.'),
+  page_errors: z.array(z.string()).optional().describe('Uncaught page error strings from browser_console, if any. Auto-captured when artifact_review takes its own screenshot.'),
   version: z.number().int().positive().optional().describe('Artifact version under review (defaults to current).'),
 });
 
+/** Build the real (browser + static-server backed) capture dependencies. Kept as a factory
+ *  so tests can inject a fake capturer and exercise the tool without Playwright/python3. */
+function realCaptureDeps(ctx: ToolContext): CaptureDeps {
+  return {
+    writeFile: (p, c) => ctx.transaction.write(p, c),
+    screenshotDir: path.join(os.tmpdir(), 'qodex-screenshots'),
+    serve: async ({ name, port, dir }) => {
+      await processRegistry.start({
+        name,
+        command: `python3 -m http.server ${port} --bind 127.0.0.1 --directory ${JSON.stringify(dir)}`,
+        cwd: dir,
+        replace: true,
+      });
+      // Give the static server a beat to bind before we navigate to it.
+      await new Promise(r => setTimeout(r, 400));
+    },
+    navigateAndShoot: async ({ url, screenshotPath }) => {
+      // Lazily pull in the browser session — its import chain touches Playwright, which is an
+      // OPTIONAL dep, so importing it up-front would penalise every non-review run.
+      const { getSession, clearBuffers } = await import('../browser/session.js');
+      const s = await getSession();
+      clearBuffers(s);
+      try {
+        await s.page.goto(url, { waitUntil: 'networkidle', timeout: 15_000 });
+      } catch {
+        // A slow CDN (react/vue harness) can trip networkidle; fall back to domcontentloaded so
+        // we still screenshot whatever rendered rather than failing the whole review.
+        try { await s.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15_000 }); } catch { /* screenshot best-effort below */ }
+      }
+      // Let CDN-driven harnesses (React/Babel, Vue SFC) mount before we shoot.
+      await new Promise(r => setTimeout(r, 800));
+      await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
+      await s.page.screenshot({ path: screenshotPath, fullPage: false });
+      const consoleErrors = s.consoleBuffer.filter((m: any) => m.type === 'error').map((m: any) => m.text);
+      const pageErrors = s.errorBuffer.map((e: any) => e.message);
+      return { consoleErrors, pageErrors };
+    },
+  };
+}
+
 export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
   name = 'artifact_review';
-  description = 'Visually review a rendered artifact (Layer 3 of the artifact loop): sends a screenshot of the live preview to a vision model, folds in any page/console errors, and returns a structured verdict (LOOKS_GOOD / NEEDS_WORK / BROKEN) with concrete issues. Use after artifact_preview + browser_navigate + browser_screenshot. If the verdict is not LOOKS_GOOD, fix with artifact_update and review again. Degrades gracefully when no vision backend is configured (falls back to runtime errors only).';
+  description = 'Visually review a rendered artifact (Layer 3 of the artifact loop): screenshots the live preview, sends it to a vision model, folds in any page/console errors, and returns a structured verdict (LOOKS_GOOD / NEEDS_WORK / BROKEN) with concrete issues. SELF-SUFFICIENT: call it with just the artifact id and it builds the preview, opens it in a headless browser, and screenshots it for you — no need to run artifact_preview / browser_navigate / browser_screenshot first (pass screenshot_path only if you already have one). If the verdict is not LOOKS_GOOD, fix with artifact_update and review again. Degrades gracefully with a clear next step when Playwright or a vision backend is missing (falls back to runtime errors only).';
   argsSchema = ReviewArgs;
   isReadOnly = true;
   isDestructive = false;
 
+  /** Injectable capturer — the real one drives the browser; tests supply a fake. */
+  captureFn: typeof captureArtifact = captureArtifact;
+  /** Injectable deps factory (browser/server) — overridden in tests. */
+  captureDeps: (ctx: ToolContext) => CaptureDeps = realCaptureDeps;
+  /** Injectable vision call — default reuses vision_analyze (all backend selection + the
+   *  graceful "[VISION_NOT_CONFIGURED]" handling live there). Tests supply a fake so the
+   *  orchestration is exercised without a real vision backend. */
+  visionFn: (opts: { imagePath: string; prompt: string; ctx: ToolContext }) => Promise<ToolResult> =
+    ({ imagePath, prompt, ctx }) => new VisionAnalyzeTool().execute({ image_path: imagePath, prompt } as any, ctx);
+
   async execute(args: z.infer<typeof ReviewArgs>, ctx: ToolContext): Promise<ToolResult> {
-    // Resolve the artifact (also validates the id + version and gives us type/title for the prompt).
-    let manifest, version;
+    // Resolve the artifact (also validates the id + version and gives us type/title/content).
+    let manifest, version, content, absFile;
     try {
-      ({ manifest, version } = await getArtifact(ctx.cwd, resolveArtifactId(args), args.version));
+      ({ manifest, version, content, absFile } = await getArtifact(ctx.cwd, resolveArtifactId(args), args.version));
     } catch (e: any) {
       return { content: e?.message ?? String(e), isError: true };
+    }
+
+    // Decide how we get a screenshot: use the one the caller handed us, or capture our own.
+    let screenshotPath = args.screenshot_path;
+    let consoleErrors = args.console_errors ?? [];
+    let pageErrors = args.page_errors ?? [];
+    let captureNote = '';
+    if (!screenshotPath) {
+      ctx.emit({ type: 'progress', message: `Rendering "${manifest.id}" v${version} to review it…` });
+      const cap = await this.captureFn(
+        { id: manifest.id, type: manifest.type, content, versionDir: path.dirname(absFile) },
+        this.captureDeps(ctx),
+      );
+      screenshotPath = cap.screenshotPath;
+      // Merge caller-supplied errors with what the page actually reported.
+      consoleErrors = [...consoleErrors, ...cap.consoleErrors];
+      pageErrors = [...pageErrors, ...cap.pageErrors];
+      captureNote = cap.note;
     }
 
     // Ask a vision model to critique the screenshot. We reuse the vision_analyze tool so all
@@ -257,40 +328,46 @@ export class ArtifactReviewTool extends Tool<z.infer<typeof ReviewArgs>> {
     const prompt = buildReviewPrompt({ type: manifest.type, title: manifest.title, intent: args.intent });
     let visionAnswer = '';
     let sawScreenshot = false;
-    try {
-      const vision = new VisionAnalyzeTool();
-      const res = await vision.execute({ image_path: args.screenshot_path, prompt } as any, ctx);
-      const text = typeof res.content === 'string' ? res.content : '';
-      if (res.isError || text.startsWith('[VISION_NOT_CONFIGURED]')) {
-        // Vision unavailable — we can still report runtime errors, just not a visual verdict.
+    if (screenshotPath) {
+      try {
+        const res = await this.visionFn({ imagePath: screenshotPath, prompt, ctx });
+        const text = typeof res.content === 'string' ? res.content : '';
+        if (res.isError || text.startsWith('[VISION_NOT_CONFIGURED]')) {
+          // Vision unavailable — we can still report runtime errors, just not a visual verdict.
+          visionAnswer = '';
+          sawScreenshot = false;
+        } else {
+          // vision_analyze prefixes every answer with `[via <backend>, <n>KB]\n\n`. That pushes the
+          // verdict token (LOOKS_GOOD/…) off the first line, so classifyVisionAnswer — which keys off
+          // the LEADING token — would misread a clean render as `unverified` and the loop would never
+          // confirm success. Strip the banner so the model's actual verdict is what gets classified.
+          visionAnswer = text.replace(/^\[via [^\]]*\]\s*/, '');
+          sawScreenshot = true;
+        }
+      } catch {
         visionAnswer = '';
         sawScreenshot = false;
-      } else {
-        visionAnswer = text;
-        sawScreenshot = true;
       }
-    } catch {
-      visionAnswer = '';
-      sawScreenshot = false;
     }
 
-    const report = buildReviewReport({
-      visionAnswer,
-      consoleErrors: args.console_errors ?? [],
-      pageErrors: args.page_errors ?? [],
-      sawScreenshot,
-    });
+    const report = buildReviewReport({ visionAnswer, consoleErrors, pageErrors, sawScreenshot });
 
     const out = formatReviewReport(manifest.id, version, report);
-    const extra = !sawScreenshot && (args.console_errors?.length || args.page_errors?.length || 0) === 0
-      ? '\n(No vision backend configured and no runtime errors captured — set QODEX_OLLAMA_VISION_MODEL / ANTHROPIC_API_KEY / OPENAI_API_KEY for a visual verdict.)'
-      : '';
+    const notes: string[] = [];
+    if (captureNote) notes.push(captureNote);
+    if (!sawScreenshot && consoleErrors.length === 0 && pageErrors.length === 0 && screenshotPath) {
+      notes.push(
+        'No vision backend configured — captured the render but could not get a visual verdict. ' +
+        'Set QODEX_OLLAMA_VISION_MODEL / ANTHROPIC_API_KEY / OPENAI_API_KEY for one.',
+      );
+    }
+    const extra = notes.length ? '\n' + notes.map(n => `(${n})`).join('\n') : '';
 
     return {
       content: out + extra,
       // `issues` + `screenshotPath` are echoed so a front-end (the bot card) can render the verdict,
       // the concrete problems, and the rendered screenshot from this single tool result.
-      metadata: { artifactId: manifest.id, version, verdict: report.verdict, issues: report.issues, issueCount: report.issues.length, sawScreenshot, screenshotPath: args.screenshot_path, title: manifest.title, type: manifest.type },
+      metadata: { artifactId: manifest.id, version, verdict: report.verdict, issues: report.issues, issueCount: report.issues.length, sawScreenshot, screenshotPath, title: manifest.title, type: manifest.type },
     };
   }
 }
