@@ -68,6 +68,13 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
     }).join('');
     return `<div class="panel"><h2>${esc(g)}</h2>${rows}</div>`;
   }).join('');
+  // These knobs are read from config ONCE when a qodex session starts (config is not hot-
+  // reloaded mid-session). A toggle here writes the config file immediately, but a session
+  // that's already running keeps its old value until it restarts — the #1 "I turned it on
+  // but nothing changed" confusion. Say so, prominently, right above the toggles.
+  const controlNote = (live && d.controls.length)
+    ? `<p class="dim" style="margin:-4px 0 14px">⚠ These apply on the <b>next <code>qodex</code> start</b> — restart any running session to pick up a change.</p>`
+    : '';
 
   const scheduleRows = d.schedules.length ? d.schedules.map(s => `<tr>
     <td>${s.enabled ? '🟢' : '⚪'} <b>${esc(s.name)}</b>${s.recipe ? ` <span class="mono dim">${esc(s.recipe)}</span>` : ''}</td>
@@ -251,6 +258,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   <div class="panel"><h2>Tokens per recent session</h2><canvas id="chart" height="90"></canvas></div>
   ${live ? '' : '<p class="dim" style="margin:-6px 0 14px">Read-only snapshot. Run <b>qodex dashboard</b> (server mode) for live controls.</p>'}
   ${modelPanel}
+  ${controlNote}
   <div class="two">${controlPanel}</div>
   ${schedulePanel}
   ${maintainPanel}
@@ -362,9 +370,22 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
 
   // Controllable settings: current value of each whitelisted knob (for the toggles/selects).
   const { CONFIG_KNOBS, getDeep } = await import('./dashboard-control.js');
+  // The tick/selection shown when a knob is UNSET in config must be the value the RUNTIME
+  // actually uses — otherwise the dashboard misreports (e.g. sub-agents ran 'sequential' by
+  // default but showed 'off', reading as "not working"). Keep these in sync with the fallbacks
+  // in loop.ts / role-resolver.ts / memory-select.ts.
+  const RUNTIME_DEFAULT: Record<string, boolean | string> = {
+    'providers.anthropic.useCaching': true,   // router: useCaching !== false
+    'context.efficient': false,               // loop: efficient === true
+    'memory.mode': 'full',                    // resolveMemoryMode(undefined) → full
+    'subagents.mode': 'sequential',           // loop/role-resolver: mode ?? 'sequential'
+    'learning.enabled': false,
+    'learning.episodicMemory.enabled': false,
+    'learning.failureLessons.enabled': false,
+  };
   const controls = CONFIG_KNOBS.map(k => {
     const cur = getDeep(config, k.path);
-    const dflt = k.path === 'providers.anthropic.useCaching' ? true : (k.type === 'enum' ? (k.values?.[0] ?? '') : false);
+    const dflt = RUNTIME_DEFAULT[k.path] ?? (k.type === 'enum' ? (k.values?.[0] ?? '') : false);
     const current = cur === undefined ? dflt : cur;
     return { path: k.path, label: k.label, group: k.group, type: k.type, values: k.values, current: String(current) };
   });
