@@ -1430,7 +1430,7 @@ export class AgentLoop {
       // Only warn about a truly toolless dispatch — text-tool mode and the deliberate
       // force-summarize turn both send zero native tools on purpose.
       if (tools.length === 0 && !textToolMode && !wasForceTextOnly) {
-        logger.warn('No tools available to the model for this turn — write_file, edit_file, bash, etc. will not be reachable. Check mode/allowedTools settings.');
+        logger.warn('No tools available to the model for this turn — write_file, edit_text, bash, etc. will not be reachable. Check mode/allowedTools settings.');
       }
 
       // Token-savings layer: replace duplicate tool results with back-pointers BEFORE
@@ -1818,7 +1818,7 @@ export class AgentLoop {
             role: 'user',
             content:
               '[SYSTEM CORRECTION] You just told the user you cannot create/modify files. ' +
-              'That is FALSE. You have the `write_file`, `edit_file`, `multi_edit`, and `bash` tools available RIGHT NOW. ' +
+              'That is FALSE. You have the `write_file`, `edit_text`, `multi_edit`, and `bash` tools available RIGHT NOW. ' +
               'Re-read the user\'s previous request and actually DO the work by calling `write_file`. ' +
               'Do not apologize, do not narrate this correction — just call the tool now. ' +
               'After it runs, summarize what you created in 1-2 sentences.',
