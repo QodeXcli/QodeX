@@ -26,7 +26,7 @@ export type EditDecision =
   | { kind: 'reject' }                     // hard stop
   | { kind: 'revise' };                    // soft: model should try a different edit
 
-const APPROVE_OPTIONS = ['accept', 'edit', 'continue', 'reject'];
+export const APPROVE_OPTIONS = ['accept', 'always', 'edit', 'continue', 'reject'];
 
 /** Map a raw answer to a decision branch. PURE (the editor side-effect lives in
  *  confirmEdit). Tolerant of full words or first letters from the Confirmation UI. */
@@ -72,6 +72,15 @@ export async function confirmEdit(
 
   const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
   const branch = interpretApprovalAnswer(answer);
+
+  // "always" = stop nagging me about edits/writes THIS session. The operation here is a
+  // FILE PATH (no spaces), so the pattern scope would only ever match this one file — the
+  // wrong grain entirely. The user means "let you edit files", so we remember at TOOL scope
+  // (every invocation of write_file/edit_text/… this session). Was previously a silent no-op:
+  // 'always' collapsed to 'accept' and nothing was persisted, so every file re-prompted.
+  if ((answer || '').trim().toLowerCase() === 'always' && ctx.permissions && opts.permReq) {
+    ctx.permissions.rememberDecision(opts.permReq, 'allow', 'tool');
+  }
 
   if (branch === 'reject') return { kind: 'reject' };
   if (branch === 'revise') return { kind: 'revise' };

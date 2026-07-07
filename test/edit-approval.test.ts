@@ -2,7 +2,7 @@
  * Tests for src/tools/filesystem/edit-approval.ts (answer interpretation).
  * Run: node --experimental-strip-types test/edit-approval.test.ts
  */
-import { interpretApprovalAnswer, reviseResult } from '../src/tools/filesystem/edit-approval.ts';
+import { interpretApprovalAnswer, reviseResult, APPROVE_OPTIONS } from '../src/tools/filesystem/edit-approval.ts';
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -39,6 +39,10 @@ const r = reviseResult('wp-content/plugins/x/handler.php');
 check('reviseResult isError', r.isError === true);
 check('reviseResult names the file', r.content.includes('handler.php'));
 check('reviseResult tells model NOT to repeat', r.content.includes('Do NOT re-apply'));
+
+console.log('— "always" is an offered option (was missing → edits could never be remembered) —');
+check('APPROVE_OPTIONS includes "always"', APPROVE_OPTIONS.includes('always'));
+check('"always" still maps to accept branch', interpretApprovalAnswer('always') === 'accept');
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
