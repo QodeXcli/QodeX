@@ -190,20 +190,10 @@ export class AgentLoop {
     this.permissions = opts.permissions;
     this.config = opts.config;
     this.cwd = opts.cwd;
-    // Allow config to tune auto-compaction without touching code.
-    const compactCfg = (opts.config as any).compaction;
-    // Efficiency profile: when context.efficient is true, compact earlier — unless the
-    // user pinned an explicit threshold (explicit always wins).
-    const effOn = (opts.config as any)?.context?.efficient === true;
-    if (effOn) this.autoCompactThreshold = efficiencyDefaults(true).compactThreshold;
-    if (compactCfg) {
-      if (typeof compactCfg.enabled === 'boolean') this.autoCompactEnabled = compactCfg.enabled;
-      if (typeof compactCfg.threshold === 'number') this.autoCompactThreshold = compactCfg.threshold;
-      if (typeof compactCfg.contextWindow === 'number') {
-        this.defaultContextWindow = compactCfg.contextWindow;
-        this.contextWindowExplicit = true;
-      }
-    }
+    // Auto-compaction + efficiency tuning are DERIVED from config. Factored into a method so a
+    // mid-session config hot-reload (refreshMutableConfig, run at each run() start) re-derives
+    // them too — a dashboard toggle to `context.efficient` then takes effect on the next task.
+    this.applyConfigDerived();
     // Snapshot service: only instantiated when the user has explicitly enabled it in config.
     // Constructor is cheap — no I/O — but we still keep this conditional so non-users
     // aren't carrying unused state.
@@ -912,11 +902,56 @@ export class AgentLoop {
     }
   }
 
+  /** Re-derive auto-compaction + efficiency state from the current this.config. Idempotent:
+   *  resets the two efficiency-affected fields to their base before applying, so a hot-reload
+   *  can REVERT a toggle (e.g. context.efficient turned back off) as well as apply one. */
+  private applyConfigDerived(): void {
+    this.autoCompactEnabled = true;
+    this.autoCompactThreshold = 0.75;
+    const cfg = this.config as any;
+    const compactCfg = cfg.compaction;
+    if (cfg?.context?.efficient === true) this.autoCompactThreshold = efficiencyDefaults(true).compactThreshold;
+    if (compactCfg) {
+      if (typeof compactCfg.enabled === 'boolean') this.autoCompactEnabled = compactCfg.enabled;
+      if (typeof compactCfg.threshold === 'number') this.autoCompactThreshold = compactCfg.threshold;
+      if (typeof compactCfg.contextWindow === 'number') {
+        this.defaultContextWindow = compactCfg.contextWindow;
+        this.contextWindowExplicit = true;
+      }
+    }
+  }
+
+  /** Hot-reload the user-toggleable knobs from disk at the START of a run. The dashboard writes
+   *  ~/.qodex/config.yaml in a SEPARATE process; without this, a running session kept its
+   *  startup config until restart (the "I toggled it but nothing changed" bug). We overlay ONLY
+   *  the whitelisted dashboard knobs onto this.config — CLI/session overrides and everything
+   *  else are preserved — then re-derive. Best-effort: a bad/locked file never blocks the run. */
+  private async refreshMutableConfig(): Promise<void> {
+    try {
+      const { loadConfig } = await import('../config/loader.js');
+      const { CONFIG_KNOBS, getDeep, setDeep } = await import('../cli/dashboard-control.js');
+      const fresh = await loadConfig(this.cwd);
+      const changed: string[] = [];
+      for (const k of CONFIG_KNOBS) {
+        const next = getDeep(fresh as any, k.path);
+        if (next === undefined) continue;                       // absent in file → leave current
+        if (getDeep(this.config as any, k.path) !== next) { setDeep(this.config as any, k.path, next); changed.push(k.path); }
+      }
+      if (changed.length) {
+        this.applyConfigDerived();
+        logger.info('Config hot-reloaded for this run', { knobs: changed });
+      }
+    } catch (e: any) {
+      logger.debug('Config hot-reload skipped', { err: e?.message });
+    }
+  }
+
   async *run(
     messages: Message[],
     sessionId: string,
     options: AgentOptions,
   ): AsyncGenerator<AgentEvent> {
+    await this.refreshMutableConfig();   // pick up dashboard toggles written since the last run
     const mode = options.mode ?? { mode: 'normal' };
 
     // ── Tool diet (perf): config `tools.disabled` + AUTO PROFILE ──

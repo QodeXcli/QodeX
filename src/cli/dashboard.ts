@@ -73,7 +73,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   // that's already running keeps its old value until it restarts — the #1 "I turned it on
   // but nothing changed" confusion. Say so, prominently, right above the toggles.
   const controlNote = (live && d.controls.length)
-    ? `<p class="dim" style="margin:-4px 0 14px">⚠ These apply on the <b>next <code>qodex</code> start</b> — restart any running session to pick up a change.</p>`
+    ? `<p class="dim" style="margin:-4px 0 14px">Changes are written to <code>~/.qodex/config.yaml</code> and picked up on your <b>next message/task</b> — a running QodeX session hot-reloads these knobs at the start of each run (no restart needed).</p>`
     : '';
 
   const scheduleRows = d.schedules.length ? d.schedules.map(s => `<tr>
