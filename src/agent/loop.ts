@@ -346,8 +346,18 @@ export class AgentLoop {
       for await (const event of this.run(initialMessages, opts.sessionId, {
         mode: { mode: 'subagent', allowedTools },
         signal: opts.signal,
+        // run() reads `maxIterationsOverride` (not `maxIterations`) to cap the child's
+        // budget — passing the wrong key silently left every sub-agent on the parent's
+        // full iteration budget. Pass BOTH so the cap actually applies.
+        maxIterationsOverride: opts.maxIterations,
         maxIterations: opts.maxIterations,
         modelOverride: { provider: resolved.provider, model: resolved.model },
+        // A sub-agent runs unattended: it has no interactive user to answer a
+        // permission prompt. Without an askUser, any tool that prompts would call
+        // `ctx.askUser` === undefined and crash the whole delegation. Supply a
+        // conservative auto-decline so a gated tool degrades to a tool-level refusal
+        // (which the child can adapt to) instead of killing the run.
+        askUser: async () => 'no',
       } as any)) {
         if (event.type === 'tool_call_start') toolCallsRun += 1;
         if (event.type === 'final') {
@@ -355,7 +365,13 @@ export class AgentLoop {
         }
         if (event.type === 'error') {
           ok = false;
-          errMsg = (event.data as any)?.error ?? 'unknown';
+          // ROOT CAUSE of "delegation returns nothing useful on failure": the loop
+          // emits error events as `{ data: { message } }` (see every `type: 'error'`
+          // yield in run()), but this consumer read `data.error` — which is ALWAYS
+          // undefined — so the parent got "[SUBAGENT_FAILED] … Error: unknown" with the
+          // real reason (stream error, budget-exceeded, cancellation) discarded. Read
+          // `message` first; keep `error` as a fallback for any future shape.
+          errMsg = (event.data as any)?.message ?? (event.data as any)?.error ?? 'unknown';
         }
       }
     } catch (e: any) {
