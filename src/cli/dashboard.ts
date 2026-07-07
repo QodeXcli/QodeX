@@ -372,12 +372,22 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     try { const { getScheduleStore } = await import('../schedule/store.js'); return getScheduleStore().list().map(s => ({ id: s.id, name: s.name, cron: s.cron, enabled: !!s.enabled, recipe: s.recipe })); }
     catch { return []; }
   })();
-  // Known models (for the model switcher) = every model the configured providers expose + the current default.
+  // Known models (for the model switcher) = the current default + every model the configured
+  // providers list in config + every model the LOCAL backends are actually serving RIGHT NOW.
+  // The config often lists only a handful (or none — "auto-discover"), so without the live
+  // probe the switcher showed just those few; now Ollama/LM Studio's full installed set appears.
+  const liveLocal = await (async () => {
+    try {
+      const { detectAllLocalModels } = await import('../setup/model-detector.js');
+      return (await detectAllLocalModels()).map(m => m.id).filter(Boolean);
+    } catch { return []; }
+  })();
   const models = (() => {
     const set = new Set<string>();
     if (defModel && defModel !== '(unset)') set.add(defModel);
     for (const p of providers) for (const m of p.models) set.add(m);
-    return [...set];
+    for (const id of liveLocal) set.add(id);
+    return [...set].sort((a, b) => a.localeCompare(b));
   })();
   const candidates = await (async () => {
     try { const { listCandidates } = await import('../skills/learning/candidate-store.js'); return (await listCandidates()).map(c => ({ name: c.name, description: (c.description ?? '').slice(0, 90), confidence: c.confidence })); }
