@@ -132,7 +132,9 @@ export interface ToolExecutionMode {
  * shrinks per-iteration prompt size. Pure — unit-testable without the registry.
  */
 const NEVER_BLOCK = new Set([
-  'shell', 'read_file', 'write_file', 'edit_file', 'ls', 'glob', 'grep',
+  // NB: the real edit tool is `edit_text` (there is no `edit_file`). Protecting the phantom
+  // name left the actual editor gate-able by tool-profiling — a latent "can't edit" bug.
+  'shell', 'read_file', 'write_file', 'edit_text', 'edit_symbol', 'multi_edit', 'ls', 'glob', 'grep',
 ]);
 export function expandToolPatterns(patterns: string[], allNames: string[]): string[] {
   const out = new Set<string>();
@@ -173,6 +175,15 @@ export class ToolRegistry {
     terminal: 'shell',
     shell_command: 'shell',
     cmd: 'shell',
+    // Edit/write aliases — models trained on Claude Code / Cursor / str_replace reach for
+    // these names; without the alias `edit_file` (etc.) hit "unknown tool" and burned a turn.
+    edit_file: 'edit_text',
+    edit: 'edit_text',
+    str_replace: 'edit_text',
+    str_replace_editor: 'edit_text',
+    str_replace_based_edit_tool: 'edit_text',
+    create_file: 'write_file',
+    view_file: 'read_file',
   };
 
   /** Resolve an incoming tool name to a registered one, applying aliases. */
@@ -366,7 +377,7 @@ export class ToolRegistry {
     // The COMMON list is intentionally short and stable — adding tools here breaks
     // cached prefixes for users, so keep changes deliberate.
     const COMMON_PRIORITY = [
-      'shell', 'read_file', 'write_file', 'edit_file', 'multi_edit', 'edit_symbol',
+      'shell', 'read_file', 'write_file', 'edit_text', 'multi_edit', 'edit_symbol',
       'ls', 'glob', 'grep', 'todo_write', 'todo_read',
     ];
     const priorityIndex = new Map(COMMON_PRIORITY.map((name, i) => [name, i]));
