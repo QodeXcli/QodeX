@@ -298,6 +298,49 @@ npx playwright install chromium
 
 > Then run `qodex setup` to detect your local models and write `~/.qodex/config.yaml`.
 
+## Updating to a newer version
+
+**The easy way — one line (works no matter how you first installed):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+The installer is **idempotent**: it pulls the latest `main`, rebuilds, and re-links `qodex`/`qx`. Re-running it **replaces your old version in place** — you don't need to uninstall anything first. At the end it checks that the `qodex` your shell runs is actually the fresh build, and if an older copy is still winning on your `PATH` it prints the exact one-line fix.
+
+**From inside QodeX** (once you're on a build new enough to have it):
+
+```bash
+qodex update --check      # is a newer version available?
+qodex update              # git pull → npm install → npm run build (then restart qodex)
+```
+
+**If you cloned manually into a folder** (e.g. `~/Downloads/qodex`) and want that folder updated:
+
+```bash
+cd ~/Downloads/qodex          # your existing clone
+git pull                       # get the latest code
+npm install && npm run build   # rebuild (dist/ is not committed — this step is required)
+npm link                       # make sure `qodex` points here
+```
+
+**Coming from an old copy and just want a clean switch?** Delete the old clone and use the one-liner — it installs to `~/.qodex-src` and takes over the `qodex` command:
+
+```bash
+rm -rf ~/Downloads/qodex       # or wherever your old copy lives (safe: it's just source)
+npm uninstall -g @qodex/cli 2>/dev/null; hash -r   # drop any stale global link
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+**Verify which build is active** any time:
+
+```bash
+command -v qodex     # where the command resolves
+qodex --version      # the version now running
+```
+
+> After updating, **restart QodeX** (and any running session) so the new `dist/` is loaded — the running process keeps the old build until it exits.
+
 ## Quick start
 
 ```bash

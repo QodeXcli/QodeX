@@ -128,17 +128,53 @@ link_cli() {
   fi
 }
 
+# ── verify the NEW build is the one that actually runs ──────────────────────────
+# The #1 update failure: a user installed an OLD copy elsewhere (a manual `git clone`
+# in ~/Downloads, an old `npm link`), and after re-installing, the shell's `qodex`
+# STILL resolves to that stale copy because it sits earlier on PATH. We detect that
+# here and tell the user exactly how to make the new build win — no silent mismatch.
+verify_active() {
+  [ "${QODEX_NO_LINK:-0}" = "1" ] && return 0
+  [ "$DRY_RUN" = "1" ] && return 0
+  hash -r 2>/dev/null || true                       # forget the shell's cached path
+  have qodex || { warn "'qodex' isn't on PATH yet — open a NEW terminal (or 'source ~/.profile'), then run: qodex"; return 0; }
+
+  # Resolve where the active `qodex` really points (follow symlinks).
+  local active canonical
+  active="$(command -v qodex)"
+  canonical="$SRC_DIR/bin/qodex.mjs"
+  local resolved; resolved="$( { readlink -f "$active" 2>/dev/null || realpath "$active" 2>/dev/null || echo "$active"; } )"
+
+  if [ "$resolved" = "$canonical" ] || echo "$resolved" | grep -q "$SRC_DIR"; then
+    ok "active 'qodex' → this build ($SRC_DIR)"
+  else
+    warn "A DIFFERENT, older 'qodex' is winning on your PATH:"
+    warn "    $active  →  $resolved"
+    warn "  Fix it so the fresh build runs (pick one):"
+    warn "    • remove the stale one:   rm -f '$active'   (then re-run this installer)"
+    warn "    • or force-relink now:    ln -sf '$canonical' '$active'"
+    warn "  Verify with:  qodex --version   and   command -v qodex"
+  fi
+}
+
 main() {
   bold "QodeX installer"
   local os; os="$(detect_os)"
   [ "$os" = "unknown" ] && warn "Unrecognized OS ($(uname -s)) — continuing, but you may need to install Node manually."
   info "platform: $os   ·   source: $SRC_DIR   ·   branch: $BRANCH$([ "$DRY_RUN" = 1 ] && echo '   ·   DRY RUN')"
+
+  # Heads-up if an existing qodex is about to be superseded — so the user isn't surprised.
+  if have qodex; then
+    local prev; prev="$(command -v qodex)"
+    info "existing install detected at: $prev  (this run updates/replaces it)"
+  fi
   echo
 
   ensure_prereqs
   fetch_source
   build
   link_cli
+  verify_active
 
   echo
   bold "Done."
