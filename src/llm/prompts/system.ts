@@ -445,19 +445,9 @@ A "skill" is an installable playbook (any installed ones are listed under "Avail
     sections.push(STRICT_MODE_SYSTEM_ADDENDUM);
   }
 
-  // Task-class addendum — focused reasoning patterns based on what the user
-  // appears to be asking for. Cheap to inject; meaningful boost to output quality.
-  if (ctx.mode === 'normal' && ctx.taskClass && ctx.taskClass !== 'general') {
-    const addendum = systemAddendumFor(ctx.taskClass);
-    if (addendum) sections.push(addendum);
-  }
-
-  // Stack-specialist expertise (what an expert in THIS technology knows) — orthogonal to
-  // task class. A "feature" turn on a Next.js app gets both the feature loop AND the
-  // Next.js cheat-sheet. Built by the caller via stack-profiles.buildStackAddendum().
-  if (ctx.mode === 'normal' && ctx.stackAddendum && ctx.stackAddendum.trim()) {
-    sections.push(ctx.stackAddendum.trim());
-  }
+  // NB: the PROMPT-DEPENDENT addenda (task-class + stack) are pushed LAST, after the Directory
+  // Tree — see the note at the end. They change with each user message, so keeping them at the
+  // very tail means a change invalidates only the tail, not the stable prefix + tree cache.
 
   // Thinking-blocks guidance — encourages reasoning models (Qwen3, DeepSeek) to
   // use <thinking> tags for internal reasoning before producing the final
@@ -482,13 +472,26 @@ I'll check the current middleware setup first.
 Skip the thinking block for trivial requests ("what's the date", "list files").`);
   }
 
-  // Directory Tree LAST — see the perf note above. Volatile content goes at the end
-  // so the long, stable instruction prefix above stays cache-friendly across turns.
+  // Directory Tree — stable across turns (changes only when files change), so it goes above the
+  // per-message addenda below to stay cache-friendly.
   if (ctx.directoryTree) {
     sections.push(`# Directory Tree
 \`\`\`
 ${ctx.directoryTree}
 \`\`\``);
+  }
+
+  // PROMPT-DEPENDENT addenda LAST — the MOST volatile content (recomputed from each user
+  // message via classifyForPrompt/detectStacks). Placing them at the very tail means a
+  // task-class/stack change invalidates ONLY this tail, leaving the long stable instruction
+  // prefix AND the Directory Tree cached (they previously sat before the tree and re-billed it
+  // on every classifier flip). Tail placement is also better for the model (recency).
+  if (ctx.mode === 'normal' && ctx.taskClass && ctx.taskClass !== 'general') {
+    const addendum = systemAddendumFor(ctx.taskClass);
+    if (addendum) sections.push(addendum);
+  }
+  if (ctx.mode === 'normal' && ctx.stackAddendum && ctx.stackAddendum.trim()) {
+    sections.push(ctx.stackAddendum.trim());
   }
 
   return sections.filter(s => s.trim()).join('\n\n');

@@ -1433,31 +1433,40 @@ export class AgentLoop {
         logger.warn('No tools available to the model for this turn — write_file, edit_text, bash, etc. will not be reachable. Check mode/allowedTools settings.');
       }
 
-      // Token-savings layer: replace duplicate tool results with back-pointers BEFORE
-      // pruning runs. This keeps the model focused (no repeated wall-of-text) and means
-      // pruning may not need to kick in at all on long sessions with redundant reads.
-      // See src/agent/dedup.ts for the exact semantics.
-      const { messages: dedupedRaw, replaced: dedupReplaced, bytesSaved: dedupBytes } = dedupHistory(allMessagesRaw);
-      if (dedupReplaced > 0) {
-        logger.info(`Dedup compacted ${dedupReplaced} tool result(s)`, { bytesSaved: dedupBytes });
-      }
-
-      // Aging layer: shrink LARGE, OLD, unique results (shell logs, grep walls,
-      // browser snapshots) that dedup/read-cache don't cover. Default ON; disable
-      // via context.resultAging:false. See src/agent/result-aging.ts.
-      let agedRaw = dedupedRaw;
+      // Aging layer FIRST — it truncates the MIDDLE of large, OLD (≥minAgeTurns) tool results
+      // (a safe, unambiguous shrink), so we PERSIST it back into the working set. Previously the
+      // shrink was ephemeral: thrown away and re-derived from an ever-growing FULL-size history
+      // every turn — a confirmed O(turns) token multiplier. Aging preserves array length, so a
+      // slice re-split realigns messages/newMessages. Originals stay in the session store for
+      // /undo; the model-facing copy shrinks permanently. (Mirrors compactFileReads' persist
+      // above; idempotent — an already-aged stub is < maxChars so it never re-ages.)
+      let workingRaw = allMessagesRaw;
       if ((this.config as any)?.context?.resultAging !== false) {
         const agingCfg = (this.config as any)?.context ?? {};
         const effDefaults = efficiencyDefaults(agingCfg.efficient === true);
-        const ar = ageToolResults(dedupedRaw, {
+        const ar = ageToolResults(allMessagesRaw, {
           minAgeTurns: resolveSetting(agingCfg.resultAgingMinTurns, effDefaults.agingMinTurns),
           maxChars: resolveSetting(agingCfg.resultAgingMaxChars, effDefaults.agingMaxChars),
         });
         if (ar.aged > 0) {
           logger.info(`Aged ${ar.aged} large old tool result(s)`, { bytesSaved: ar.bytesSaved });
-          agedRaw = ar.messages;
+          workingRaw = ar.messages;
+          if (workingRaw.length === allMessagesRaw.length) {   // aging preserves length → safe re-split
+            const split = messages.length;
+            messages = workingRaw.slice(0, split);
+            newMessages = workingRaw.slice(split);
+          }
         }
       }
+
+      // Dedup layer — replaces duplicate tool results with back-pointers. Kept EPHEMERAL (not
+      // persisted): its pointers reference OTHER messages, so a permanent rewrite could dangle
+      // after later prune/compaction. Runs on the aged copy for the outbound payload only.
+      const { messages: dedupedRaw, replaced: dedupReplaced, bytesSaved: dedupBytes } = dedupHistory(workingRaw);
+      if (dedupReplaced > 0) {
+        logger.info(`Dedup compacted ${dedupReplaced} tool result(s)`, { bytesSaved: dedupBytes });
+      }
+      const agedRaw = dedupedRaw;
 
       // Prune context to fit the chosen model's window. Reserve 20% for output + tools schema.
       // ── Live context sync ── the config's contextWindow goes stale the moment the
