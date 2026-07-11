@@ -20,7 +20,7 @@ export interface DashboardData {
   controls: { path: string; label: string; group: string; type: 'bool' | 'enum'; values?: string[]; current: string }[];
   schedules: { id: string; name: string; cron: string; enabled: boolean; recipe?: string }[];
   models: string[];
-  candidates: { name: string; description: string; confidence?: number }[];
+  candidates: { name: string; description: string; confidence?: number; steps?: number; evidence?: number }[];
   runs: { schedule: string; recipe?: string; when: string; status: string; receipt?: { status: string; prUrl?: string; verification?: { command: string; passed: boolean }[] } }[];
   bot: { running: boolean; pid?: number };
   health: { label: string; ok: boolean; detail: string }[];
@@ -181,7 +181,7 @@ export function buildDashboardHtml(d: DashboardData, opts: { token?: string } = 
   </div>`;
 
   // Quarantined skill candidates — promote (independent-judge-passed) or reject from here.
-  const candRows = d.candidates.length ? d.candidates.map(c => `<li><b>${esc(c.name)}</b>${c.confidence != null ? ` <span class="dim">conf ${c.confidence}</span>` : ''} — <span class="dim">${esc(c.description)}</span>${live ? ` <button onclick="act('skill.promote',{name:'${esc(c.name)}'})">Promote</button> <button class="danger" onclick="act('skill.reject',{name:'${esc(c.name)}'})">Reject</button>` : ''}</li>`).join('') : '<li class="dim">No candidates in quarantine.</li>';
+  const candRows = d.candidates.length ? d.candidates.map(c => `<li><b>${esc(c.name)}</b>${c.confidence != null ? ` <span class="dim">conf ${c.confidence}</span>` : ''}${c.steps != null ? ` <span class="dim">· ${c.steps}-step draft${c.evidence != null ? ` · ${c.evidence} evidence` : ''}</span>` : ''} — <span class="dim">${esc(c.description)}</span>${live ? ` <button onclick="act('skill.promote',{name:'${esc(c.name)}'})">Promote</button> <button class="danger" onclick="act('skill.reject',{name:'${esc(c.name)}'})">Reject</button>` : ''}</li>`).join('') : '<li class="dim">No candidates in quarantine.</li>';
   const candidatePanel = `<div class="panel"><h2>Skill candidates (quarantine)</h2><ul>${candRows}</ul></div>`;
   const providerRows = d.providers.map(p => `<tr>
     <td>${p.isDefault ? '⭐ ' : ''}<b>${esc(p.name)}</b></td>
@@ -411,7 +411,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
     return [...set].sort((a, b) => a.localeCompare(b));
   })();
   const candidates = await (async () => {
-    try { const { listCandidates } = await import('../skills/learning/candidate-store.js'); return (await listCandidates()).map(c => ({ name: c.name, description: (c.description ?? '').slice(0, 90), confidence: c.confidence })); }
+    try { const { listCandidates } = await import('../skills/learning/candidate-store.js'); return (await listCandidates()).map(c => ({ name: c.name, description: (c.description ?? '').slice(0, 90), confidence: c.confidence, steps: c.steps, evidence: c.evidence })); }
     catch { return []; }
   })();
   // Run history + trust receipts: the most recent runs across all schedules.

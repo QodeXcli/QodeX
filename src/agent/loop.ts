@@ -131,6 +131,10 @@ export class AgentLoop {
   private lastModelSource = '';
   private lastEffectiveCtxWindow = 0;
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
+  /** ORDERED tool names as executed (unlike sessionToolNames, which is a distinct set) —
+   *  feeds skill distillation's step outline. Capped so a marathon session stays bounded. */
+  private sessionToolSequence: string[] = [];
+  private static readonly TOOL_SEQUENCE_CAP = 2000;
   private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
   // Ground-truth verification ledger: every checker QodeX actually ran this run + its result.
   // Feeds the trust receipt — uncounterfeitable because the WORKER measured it, not the model.
@@ -803,9 +807,19 @@ export class AgentLoop {
               const { scoreConfidence } = await import('../skills/learning/confidence.js');
               const { recordLearningEvent } = await import('../skills/learning/ledger.js');
               const confidence = scoreConfidence(signal).score;
-              const candidate = buildCandidateSkill(
+              // Flywheel phase 1: prefer the richer distilled DRAFT (trigger + collapsed
+              // step outline + evidence) over the minimal capture. distillDraft is pure and
+              // returns null for sessions too thin to outline — then the minimal capture
+              // runs exactly as before. Either way the result is quarantined, not promoted.
+              const { distillDraft } = await import('../skills/learning/distill.js');
+              const nowIso = new Date().toISOString();
+              const draft = distillDraft(
+                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolSequence: [...this.sessionToolSequence], filesChanged: changedFiles },
+                { nowIso, confidence },
+              );
+              const candidate = draft ?? buildCandidateSkill(
                 { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
-                { nowIso: new Date().toISOString(), confidence },
+                { nowIso, confidence },
               );
               await writeCandidate(candidate);
               capturedThisRun = true;
@@ -821,7 +835,8 @@ export class AgentLoop {
                   if (!fit.noSignal) fitSuffix = ` · codebase-fit ${Math.round(fit.score * 100)}%`;
                 }
               } catch { /* code graph optional */ }
-              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100${fitSuffix}) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+              const draftSuffix = draft ? ` · ${draft.steps.length}-step draft` : '';
+              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100${fitSuffix}${draftSuffix}) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
 
               // Auto-Evaluation (opt-in): immediately replay the captured skill in a clean
               // worktree and record whether it produces verified code. Costs a model call +
@@ -2169,6 +2184,9 @@ export class AgentLoop {
 
       // Execute tools — read-only in parallel, mutating sequentially
       this.totalToolCalls += toolCalls.length; // task-complexity signal for skill capture
+      for (const tc of toolCalls) {
+        if (this.sessionToolSequence.length < AgentLoop.TOOL_SEQUENCE_CAP) this.sessionToolSequence.push(tc.function.name);
+      }
       const txn = await journal.begin(sessionId);
       const toolMessages: Message[] = [];
 

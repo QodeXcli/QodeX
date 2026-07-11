@@ -122,7 +122,8 @@ export function buildSkillCommand(): Command {
       console.log(`${cands.length} candidate(s) awaiting review:\n`);
       for (const c of cands) {
         const conf = typeof c.confidence === 'number' ? `  [confidence ${c.confidence}/100]` : '';
-        console.log(`  ◇ ${c.name}${conf}${c.capturedAt ? `  (captured ${c.capturedAt})` : ''}`);
+        const draft = typeof c.steps === 'number' ? `  [${c.steps}-step draft${typeof c.evidence === 'number' ? `, ${c.evidence} evidence` : ''}]` : '';
+        console.log(`  ◇ ${c.name}${conf}${draft}${c.capturedAt ? `  (captured ${c.capturedAt})` : ''}`);
         console.log(`      ${c.description}`);
       }
       console.log('\nPromote:  qodex skill promote <name>   ·   Reject:  qodex skill reject <name>   ·   Auto-judge:  qodex skill curate');

@@ -26,6 +26,9 @@ export interface CandidateInfo {
   dir: string;
   capturedAt?: string;
   confidence?: number;
+  /** Distilled DRAFTS (flywheel phase 1) also carry a step-outline + evidence count. */
+  steps?: number;
+  evidence?: number;
 }
 
 /** Write (or replace) a candidate. Candidates are always machine-owned, so replacing a
@@ -55,7 +58,9 @@ export async function listCandidates(): Promise<CandidateInfo[]> {
       const desc = raw.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? '';
       const at = raw.match(/^captured-at:\s*(.+)$/m)?.[1]?.trim();
       const conf = raw.match(/^confidence:\s*(\d+)/m)?.[1];
-      out.push({ name: ent.name, description: desc, dir, capturedAt: at, confidence: conf ? Number(conf) : undefined });
+      const steps = raw.match(/^steps:\s*(\d+)/m)?.[1];
+      const evidence = raw.match(/^evidence:\s*(\d+)/m)?.[1];
+      out.push({ name: ent.name, description: desc, dir, capturedAt: at, confidence: conf ? Number(conf) : undefined, steps: steps ? Number(steps) : undefined, evidence: evidence ? Number(evidence) : undefined });
     } catch { /* skip unreadable */ }
   }
   return out;
