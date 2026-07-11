@@ -413,4 +413,31 @@ describe('headless smoke — real runHeadless with a fake provider', () => {
     expect(fs.readFileSync(target, 'utf-8')).toBe('MUTATED'); // kept
     expect(printed).toContain('GREEN');
   });
+
+  it('pre-loop early return (resume-not-found) never arms the write-scope root', async () => {
+    // Regression: the scope root used to be set on ENTRY to runHeadless, but the
+    // clearing finally wraps only the agent loop — the resume-not-found `return 1`
+    // (and the slash-command short-circuit) leaked the module-global past the run,
+    // scope-gating unrelated later writes for in-process callers. Now it's armed
+    // right before the loop, after every pre-loop early return.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const code = await runHeadless({
+        cwd: os.tmpdir(),
+        config: baseConfig(),
+        router: fakeRouter(fakeProvider()) as any,
+        registry: emptyRegistry() as any,
+        permissions: {} as any,
+        prompt: 'say hi',
+        json: false,
+        resumeSessionId: 'no-such-session-id',
+        contract: contractFromFlags({ scope: 'src' })!,
+      });
+      expect(code).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+    // Asserted BEFORE afterEach's cleanup — this was non-null before the fix.
+    expect(getWriteScopeRoot()).toBeNull();
+  });
 });

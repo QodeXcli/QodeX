@@ -13,6 +13,10 @@
  *   - rollback-on-fail: budget-exceeded/stall, an agent error, or a failed verify rolls
  *     back every journaled write of the session, then a RUN REPORT is printed.
  *     Exit code 0 only on verdict GREEN.
+ *     NOTE: rollback is SESSION-scoped, not run-scoped — under -r/--resume a failed
+ *     contract run also reverts still-committed writes from earlier (pre-contract)
+ *     turns of that session. Documented in the --rollback-on-fail help; a per-run
+ *     journal watermark is a follow-up.
  *
  * This module holds the PURE logic (flag parsing, scope check, verify runner, verdict,
  * report building) so it's unit-testable; the thin wiring lives in cli/modes/headless.ts

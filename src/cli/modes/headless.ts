@@ -39,10 +39,10 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   const startedAt = Date.now();
   const store = getSessionStore();
 
-  // ── Autonomy contract: apply budgets + write scope BEFORE the loop is built ──
+  // ── Autonomy contract: apply budgets BEFORE the loop is built ──
   // Budgets ride the existing BudgetTracker (fromConfig reads config.budget), so a
-  // shallow clone with overridden limits is the whole wiring. The scope root is a
-  // module-global consulted by Transaction.write()/delete(); cleared in the finally.
+  // shallow clone with overridden limits is the whole wiring. (The write-scope gate
+  // is armed further down, right before agent.run() — see the comment there.)
   let config = opts.config;
   if (opts.contract) {
     const c = opts.contract;
@@ -57,7 +57,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
         },
       };
     }
-    if (c.scopePrefix) setWriteScopeRoot(resolveScopeRoot(opts.cwd, c.scopePrefix));
   }
 
   // Resolve a leading custom slash command into its template + one-shot overrides.
@@ -166,6 +165,17 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     const no = options.find(o => o.toLowerCase().startsWith('n'));
     return no ?? options[0]!;
   };
+
+  // ── Autonomy contract: arm the write-scope gate ──
+  // The scope root is a module-global consulted by Transaction.write()/delete() during
+  // agent.run() below; the finally clears it. Armed HERE — after the pre-loop early
+  // returns (slash-command short-circuit, resume-not-found) and buildInitialMessages,
+  // none of which do journaled writes — so those paths can never leak it past this run
+  // (they used to: set on entry, cleared only by the loop's finally). A pre-loop throw
+  // also skips enforcement, which is fine: no journaled writes can exist yet.
+  if (opts.contract?.scopePrefix) {
+    setWriteScopeRoot(resolveScopeRoot(opts.cwd, opts.contract.scopePrefix));
+  }
 
   try {
     for await (const event of agent.run(initialMessages, sessionId, {

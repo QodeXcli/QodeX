@@ -177,7 +177,7 @@ program
   .option('--max-wall <sec>', 'Stall-aware wall-clock ceiling in seconds (slow ≠ runaway; fires only when also stalled)')
   .option('--scope <path-prefix>', 'Deny agent edits outside this path prefix (pre-write gate on journaled writes)')
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
-  .option('--rollback-on-fail', 'Roll back all session writes when the run fails (default ON when --verify or a budget is set)')
+  .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
@@ -476,7 +476,14 @@ mcpCmd
   .description('Run QodeX AS an MCP server (stdio) — expose its tools to editors like Cursor/Zed/VS Code')
   .option('--tools <names>', 'Comma-separated registry tools to expose (explicit allowlist)')
   .option('--scope <scope>', "Exposure scope: 'safe' (read-only, default), 'all', or omit to use config")
-  .action(async (opts: { tools?: string; scope?: string }) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // optsWithGlobals(): the root command also defines --scope (the autonomy-contract
+    // path-prefix), and commander's default (non-positional) parsing lets the PARENT
+    // swallow `--scope safe|all` even when written after the subcommand — local opts
+    // arrive empty and exposure silently falls back to config. Under config expose
+    // 'all', a user asking for --scope safe would get write-capable tools. Same gotcha
+    // as --model/--json; see `provider add`.
+    const opts = cmd.optsWithGlobals() as { tools?: string; scope?: string };
     // IMPORTANT: stdout is the protocol channel — no console.log here, ever.
     const { config, registry } = await bootstrap();
     const { QodexMcpServer } = await import('./mcp/server/server.js');

@@ -8,13 +8,18 @@
  * dropped). Affected: `offload --model`, `provider add --model`, `schedule add --model`,
  * `tokens --json`, `schedule tick --json`. Fixed via cmd.optsWithGlobals() in each action.
  *
+ * The autonomy-contract root `--scope <path-prefix>` later re-introduced the same class
+ * of bug against `mcp serve --scope <safe|all>` — security-relevant, because a swallowed
+ * `--scope safe` silently falls back to config exposure (write-capable tools could leak
+ * under config expose 'all'). The serve test below speaks real MCP over stdio.
+ *
  * These tests spawn the REAL CLI (src/index.ts via tsx) with HOME pointed at a temp dir,
  * so they exercise the actual commander wiring end-to-end. Each spawn is ~15s on a slow
  * machine, hence the generous timeouts and only two representative subcommands (one
  * --model, one --json) — the other three share the identical mechanism and fix.
  */
 import { describe, it, expect, afterAll } from 'vitest';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -77,5 +82,56 @@ describe('CLI global-option collision (flags after a subcommand)', () => {
     const parsed = JSON.parse(lastLine);
     expect(parsed).toHaveProperty('ranIds');
     expect(parsed).toHaveProperty('acquired');
+  }, 120_000);
+
+  it('mcp serve --scope all exposes write tools (not swallowed by root --scope)', async () => {
+    const home = makeTempHome();
+    // Fresh cwd so bootstrap's project-local .qodex/ lands in a temp dir, not the repo.
+    const cwd = makeTempHome();
+    const child = spawn(process.execPath, [TSX, ENTRY, 'mcp', 'serve', '--scope', 'all'], {
+      env: { ...process.env, HOME: home, QODEX_SKIP_SETUP: '1' },
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    try {
+      // The pipe buffers this until the server attaches its stdin reader.
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
+      const reply = await new Promise<any>((resolve, reject) => {
+        let out = '';
+        let err = '';
+        const timer = setTimeout(
+          () => reject(new Error(`no tools/list reply; stderr tail: ${err.slice(-500)}`)),
+          110_000,
+        );
+        child.stderr.on('data', (d) => { err += String(d); });
+        child.stdout.on('data', (d) => {
+          out += String(d);
+          for (const line of out.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.id === 1) { clearTimeout(timer); resolve(msg); return; }
+            } catch { /* partial line — keep buffering */ }
+          }
+        });
+        child.on('error', (e) => { clearTimeout(timer); reject(e); });
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`server exited early (code ${code}); stderr tail: ${err.slice(-500)}`));
+        });
+      });
+      const names = (reply.result.tools as Array<{ name: string }>).map(t => t.name);
+      // Default config exposure is 'safe' (read-only). Before the fix the root
+      // --scope <path-prefix> swallowed the value, serve's opts arrived empty, and the
+      // server fell back to 'safe' — so write-capable tools were MISSING despite
+      // --scope all. (Mirror-image of the security failure: --scope safe under config
+      // expose 'all' exposed write tools. Same flag, same delivery path.)
+      expect(names).toContain('write_file');
+      expect(names).toContain('shell');
+      expect(names).toContain('read_file'); // sanity: list isn't degenerate
+    } finally {
+      child.removeAllListeners('exit');
+      child.kill();
+    }
   }, 120_000);
 });
