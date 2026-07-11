@@ -26,6 +26,7 @@ import { buildSystemPrompt, detectModelFamily } from '../llm/prompts/system.js';
 import { findCustomProviderPromptConfig } from '../llm/providers/custom-config.js';
 import { filterSchemasByRelevance } from './tool-relevance.js';
 import { evaluateCompletion } from './completion-gate.js';
+import { runVisualGate, type VisualGateDecision, type VisualReviewFn, type VisualReviewOutcome } from './visual-gate.js';
 import { buildSkillsSystemBlock, suggestSkillForPrompt, getSkill, listSkills } from '../skills/registry.js';
 import { suggestUninstalledSkill } from '../skills/skill-sources.js';
 import { getBuiltinRolePrompt } from '../llm/prompts/role-prompts.js';
@@ -167,6 +168,11 @@ export class AgentLoop {
   private planGateSatisfied = false;  // has the model produced a plan signal this run?
   private planGateFired = false;      // have we already nudged once this run? (one-shot, never locks)
   private completionGateFired = false; // completion-claim gate fires at most once per run
+  /** Visual gate state (reset per run): has the single corrective retry been spent? */
+  private visualGateRetried = false;
+  /** Injectable Layer-3 reviewer for the completion-time visual gate — tests mock this;
+   *  when null the loop runs the real `artifact_review` tool (browser + vision). */
+  visualReviewFn: VisualReviewFn | null = null;
   /** Auto-compact older turns when context exceeds the threshold of the model's window. Enabled by default. */
   private autoCompactEnabled = true;
   /** Fraction of the context window above which auto-compaction triggers. */
@@ -1032,6 +1038,7 @@ export class AgentLoop {
       this.planGateSatisfied = false;
       this.planGateFired = false;
       this.completionGateFired = false;
+      this.visualGateRetried = false;
     }
     // If sub-agents are disabled in config, surgically block the task tool. This is
     // cleaner than filtering inside the registry: tool stays registered (so /tools
@@ -1993,6 +2000,45 @@ export class AgentLoop {
           }
         }
 
+        // ── Visual gate (completion-time Layer 3) ──
+        // If this session created/updated an artifact, render + review it before
+        // finishing — the agent LOOKS at what it shipped. LOOKS_GOOD passes;
+        // NEEDS_WORK/BROKEN is bounced back exactly ONCE with the concrete issues
+        // (the model fixes via artifact_update, the next finish attempt reviews
+        // again); still failing after that retry passes WITH a warning — bounded by
+        // design. No vision backend / no browser degrades to an "unverified" note,
+        // exactly like artifact_review itself. Off-switch: ui.visualGate: false.
+        if (mode.mode === 'normal' && !options.signal?.aborted) {
+          const reviewFn: VisualReviewFn = this.visualReviewFn
+            ?? ((id) => this.reviewArtifactForVisualGate(id, sessionId, options));
+          let vgDecision: VisualGateDecision;
+          try {
+            vgDecision = await runVisualGate({
+              messages: messages.concat(newMessages),
+              enabled: (this.config as any).ui?.visualGate !== false,
+              retriedAlready: this.visualGateRetried,
+              reviewFn,
+            });
+          } catch (e: any) {
+            // runVisualGate already degrades internally; this is the never-block backstop.
+            logger.warn('Visual gate skipped (error)', { err: e?.message });
+            vgDecision = { action: 'skip' };
+          }
+          if (vgDecision.action === 'retry') {
+            this.visualGateRetried = true;
+            const repairMsg: Message = { role: 'user', content: vgDecision.correction! };
+            newMessages.push(repairMsg);
+            sessionStore.recordTurn(sessionId, [repairMsg], { input: 0, output: 0, costUsd: 0 });
+            yield { type: 'notice', data: { message: `👁 Visual check: "${vgDecision.artifactId}" needs work — sending back to fix (1 retry)` } };
+            logger.info('Visual gate bounced the artifact for one fix round', { artifact: vgDecision.artifactId });
+            continue; // backtrack: let the model artifact_update, then re-review
+          }
+          if (vgDecision.action === 'pass' && vgDecision.verdictLine) {
+            // Stamp the verdict on the final message the user reads.
+            assistantText = assistantText ? `${assistantText}\n\n${vgDecision.verdictLine}` : vgDecision.verdictLine;
+          }
+        }
+
         yield { type: 'final', data: { content: assistantText, usage: budget.getUsage() } };
         return;
       }
@@ -2603,6 +2649,49 @@ export class AgentLoop {
         options.signal.removeEventListener('abort', cascadeAbort);
       }
     }
+  }
+
+  /**
+   * Default Layer-3 reviewer for the completion-time visual gate: run the registered
+   * `artifact_review` tool (self-sufficient — it builds the preview, screenshots it in a
+   * headless browser, asks the vision model) inside its own journal transaction, then
+   * distill the tool's metadata into the gate's outcome shape. Kept as a method so tests
+   * inject `visualReviewFn` instead and never touch a browser. Errors propagate — the
+   * gate itself degrades them to an "unverified" pass.
+   */
+  private async reviewArtifactForVisualGate(
+    artifactId: string,
+    sessionId: string,
+    options: AgentOptions,
+  ): Promise<VisualReviewOutcome> {
+    const txn = await getJournal().begin(sessionId);
+    let res;
+    try {
+      const ctx: ToolContext = {
+        cwd: this.effectiveCwd ?? this.cwd,
+        sessionId,
+        transaction: txn,
+        permissions: this.permissions,
+        askUser: options.askUser,
+        emit: () => { /* gate runs outside a tool turn — progress surfaces via the notice */ },
+        signal: options.signal,
+        currentTurn: this.currentTurn,
+      };
+      res = await this.registry.execute('artifact_review', { id: artifactId }, ctx);
+      await txn.commit(); // the review writes the preview page — journal it like any tool write
+    } catch (e) {
+      try { await txn.rollback(); } catch { /* best-effort */ }
+      throw e;
+    }
+    const md: any = res.metadata ?? {};
+    const verdict =
+      !res.isError && ['looks_good', 'needs_work', 'broken', 'unverified'].includes(md.verdict)
+        ? md.verdict as VisualReviewOutcome['verdict']
+        : 'unverified';
+    return {
+      verdict,
+      issues: Array.isArray(md.issues) ? md.issues.map(String) : [],
+    };
   }
 
   /**

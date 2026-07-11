@@ -34,6 +34,7 @@ const STANDALONE_SCRIPTS = [
   'test/task-addenda.test.ts',
   'test/tool-relevance.test.ts',
   'test/viewport.test.ts',
+  'test/visual-gate.test.ts',
   'test/web-backends.test.ts',
 ];
 
