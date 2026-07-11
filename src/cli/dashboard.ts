@@ -377,6 +377,7 @@ export async function gatherDashboardData(cwd: string): Promise<DashboardData> {
   const RUNTIME_DEFAULT: Record<string, boolean | string> = {
     'providers.anthropic.useCaching': true,   // router: useCaching !== false
     'context.efficient': false,               // loop: efficient === true
+    'offload.enabled': false,                 // offload-policy: enabled === true (opt-in)
     'memory.mode': 'full',                    // resolveMemoryMode(undefined) → full
     'subagents.mode': 'sequential',           // loop/role-resolver: mode ?? 'sequential'
     'learning.enabled': false,

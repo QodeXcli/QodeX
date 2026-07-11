@@ -48,6 +48,7 @@ import { decideThinking, applyThinkingDecision, countTrailingToolErrors, modelSu
 import { detectLmStudioContextWindows } from '../setup/model-detector.js';
 import { SnapshotService } from '../safety/snapshot.js';
 import { resolveRole } from '../llm/role-resolver.js';
+import { routeWithOffload, offloadOverride, toolsetIsReadOnly } from '../llm/offload-policy.js';
 import { getHooksManager, extractFilePathsFromArgs } from '../hooks/manager.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { detectProjectInfo } from '../context/project-info.js';
@@ -130,6 +131,9 @@ export class AgentLoop {
    *  its LIVE context window — set each iteration, forwarded on budget_update for the UI. */
   private lastModelSource = '';
   private lastEffectiveCtxWindow = 0;
+  /** Calls auto-offloaded to the cheap model this session (offload.enabled) — forwarded on
+   *  budget_update so the status bar / dashboard can show the policy actually firing. */
+  private offloadedCalls = 0;
   private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
   /** ORDERED tool names as executed (unlike sessionToolNames, which is a distinct set) —
    *  feeds skill distillation's step outline. Capped so a marathon session stays bounded. */
@@ -300,11 +304,38 @@ export class AgentLoop {
       // Resolve which model this sub-agent should use, applying the precedence rules:
       // explicit (opts.modelOverride) > session override > config.roles.<role> > config.roles.subagent > parent default.
       const resolved = resolveRole(role, this.config, opts.modelOverride);
-      modelUsed = `${resolved.provider}/${resolved.model}`;
+
+      // ── Token-efficiency auto-offload (opt-in, offload.enabled) ──
+      // A scout dispatch is read-only recon whose output only the PARENT consumes — the
+      // safe set for a cheap model. Only lift the model when nothing more specific chose
+      // one (source parent-default): explicit per-call overrides, session overrides and
+      // config roles always win. Follow-up: extend to other read-only roles once the
+      // policy has mileage. Non-scout roles are untouched by design (see offload-policy.ts).
+      let dispatchModel = { provider: resolved.provider, model: resolved.model };
+      if (role === 'scout' && resolved.source === 'parent-default') {
+        // The built-in scout allow-list (below) is read-only; a user-configured
+        // roles.scout.allowedTools must PROVE read-only or the offload is skipped.
+        const cfgScoutTools = ((this.config as any).roles?.[role] as { allowedTools?: string[] } | undefined)?.allowedTools;
+        const target = offloadOverride(
+          { kind: 'scout', taskClass: 'general', mutating: cfgScoutTools ? !toolsetIsReadOnly(cfgScoutTools) : false },
+          this.config,
+        );
+        if (target) {
+          dispatchModel = { provider: target.provider, model: target.model };
+          this.offloadedCalls += 1;
+          logger.info(`Offload: scout dispatch routed to ${target.model}`, {
+            insteadOf: resolved.model,
+            source: target.source,
+            offloadedCalls: this.offloadedCalls,
+          });
+        }
+      }
+
+      modelUsed = `${dispatchModel.provider}/${dispatchModel.model}`;
       logger.info('Sub-agent model resolved', {
         role,
-        provider: resolved.provider,
-        model: resolved.model,
+        provider: dispatchModel.provider,
+        model: dispatchModel.model,
         source: resolved.source,
         sessionId: opts.sessionId,
       });
@@ -352,7 +383,7 @@ export class AgentLoop {
       // CRITICAL: we pass `allowedTools` so the system prompt lists ONLY the tools the
       // sub-agent can actually call. Small/quantized models will hallucinate they don't
       // have web_search if it isn't named in prose — see Sub-Agent persona fix.
-      const initialMessages = await this.buildInitialMessages(prompt, 'subagent', resolved.model, role, allowedTools);
+      const initialMessages = await this.buildInitialMessages(prompt, 'subagent', dispatchModel.model, role, allowedTools);
 
       for await (const event of this.run(initialMessages, opts.sessionId, {
         mode: { mode: 'subagent', allowedTools },
@@ -362,7 +393,7 @@ export class AgentLoop {
         // full iteration budget. Pass BOTH so the cap actually applies.
         maxIterationsOverride: opts.maxIterations,
         maxIterations: opts.maxIterations,
-        modelOverride: { provider: resolved.provider, model: resolved.model },
+        modelOverride: { provider: dispatchModel.provider, model: dispatchModel.model },
         // A sub-agent runs unattended: it has no interactive user to answer a
         // permission prompt. Without an askUser, any tool that prompts would call
         // `ctx.askUser` === undefined and crash the whole delegation. Supply a
@@ -1717,6 +1748,9 @@ export class AgentLoop {
           contextWindow: this.lastEffectiveCtxWindow || route.modelInfo.contextWindow,
           providerName: this.lastModelSource || route.provider.name,
           providerIsLocal: (route.provider as any).isLocal === true || this.lastModelSource === 'lmstudio',
+          // Calls the auto-offload policy sent to the cheap model this session (0 unless
+          // offload.enabled) — lets the status bar / dashboard show the savings happening.
+          offloadedCalls: this.offloadedCalls,
         },
       };
 
@@ -2774,7 +2808,24 @@ export class AgentLoop {
   ): Promise<Message[] | null> {
     const { compactMessages } = await import('../utils/compaction.js');
 
-    const sumRoute = this.router.route('general', this.estimateTokens(combined), {});
+    // ── Token-efficiency auto-offload (opt-in, offload.enabled) ──
+    // Summarization is lossy by design and never user-facing — a cheap model is fine.
+    // routeWithOffload consults the policy and pins roles.offload/roles.subagent when it
+    // fires; otherwise (or when the cheap model isn't live) it's the normal 'general' route.
+    const estTokens = this.estimateTokens(combined);
+    const { route: sumRoute, offloaded } = routeWithOffload(
+      this.router, 'general', estTokens,
+      { kind: 'compaction', taskClass: 'general', estimatedTokens: estTokens, mutating: false },
+      this.config,
+    );
+    if (offloaded) {
+      this.offloadedCalls += 1;
+      logger.info(`Offload: ~${Math.round(estTokens / 1000)}k-token compaction routed to ${offloaded.model}`, {
+        provider: offloaded.provider,
+        source: offloaded.source,
+        offloadedCalls: this.offloadedCalls,
+      });
+    }
 
     const summarize = async (msgs: Message[]): Promise<string> => {
       const stream = sumRoute.provider.complete({

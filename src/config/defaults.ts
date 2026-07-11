@@ -318,12 +318,28 @@ export interface QodexConfig {
    *                    with a vision-tuned system prompt; expects a vision-capable model
    *   - `summarization` — used by /compact (when implemented)
    *   - `planning`   — used in plan mode (when implemented)
+   *   - `offload`    — the CHEAP model for auto-offloaded calls (compaction/summarization,
+   *                    read-only scout dispatches) when `offload.enabled` is on. Falls back
+   *                    to `roles.subagent`; when neither is set, auto-offload is a no-op.
+   *                    e.g. `roles: { offload: { provider: ollama, model: qwen2.5-coder:7b } }`
    *
    * Custom roles are also allowed — callers can pass any role name to `task` and
    * if a config entry exists, that provider/model is used. Otherwise it falls back
    * to `subagent` then to parent.
    */
   roles?: Record<string, RoleConfig | undefined>;
+  /**
+   * Token-efficiency auto-offload — route cheap, non-critical LLM calls (context
+   * compaction/summarization, read-only scout sub-agents) to a smaller model instead of
+   * the main one. OPT-IN: `offload.enabled: true` plus a cheap model via `roles.offload`
+   * (falling back to `roles.subagent`). NEVER applied to plan mode, mutating turns, or the
+   * final user-facing answer — see src/llm/offload-policy.ts for the exact safe set.
+   * Offloaded-call count is surfaced on budget_update as `offloadedCalls`.
+   */
+  offload?: {
+    /** Master switch. Default false (opt-in). */
+    enabled?: boolean;
+  };
   /**
    * Context-assembly settings. The auto-retrieval pre-pass embeds the user's request and
    * injects the most semantically-relevant files into the first turn — so the model

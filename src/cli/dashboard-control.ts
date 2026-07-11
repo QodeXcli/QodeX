@@ -19,6 +19,7 @@ export interface ConfigKnob { path: string; type: 'bool' | 'enum'; values?: stri
 export const CONFIG_KNOBS: ConfigKnob[] = [
   { path: 'providers.anthropic.useCaching', type: 'bool', label: 'Prompt caching (Anthropic)', group: 'Performance' },
   { path: 'context.efficient', type: 'bool', label: 'Efficient mode (sliding token window)', group: 'Performance' },
+  { path: 'offload.enabled', type: 'bool', label: 'Auto-offload cheap calls (compaction/scout)', group: 'Performance' },
   { path: 'memory.mode', type: 'enum', values: ['full', 'lightweight', 'auto'], label: 'Memory injection', group: 'Memory' },
   { path: 'subagents.mode', type: 'enum', values: ['off', 'sequential', 'parallel'], label: 'Sub-agents', group: 'Performance' },
   { path: 'learning.enabled', type: 'bool', label: 'Skill learning', group: 'Learning' },
