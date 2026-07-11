@@ -7,6 +7,7 @@ import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_TXN_DB, QODEX_BLOBS_DIR } from '../config/defaults.js';
 import { logger } from '../utils/logger.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { checkWriteScope } from '../agent/autonomy-contract.js';
 
 export type FileOperation = 'write' | 'delete' | 'create' | 'rename';
 
@@ -70,6 +71,18 @@ export class Transaction {
     this.ensureOpen();
     const abs = path.resolve(filePath);
 
+    // ─── Autonomy-contract scope gate (--scope) ───
+    // When a headless contract run pins a write scope, edits outside it are refused
+    // BEFORE anything touches disk. No-op unless a scope root is registered (see
+    // autonomy-contract.ts). Rollback/undo paths write via fs directly — never gated.
+    {
+      const denial = checkWriteScope(abs);
+      if (denial) {
+        logger.info('Scope gate refused write', { txnId: this.id, path: abs });
+        throw new Error(denial);
+      }
+    }
+
     let beforeContent: string | null = null;
     let beforeHash: string | null = null;
     let isCreate = false;
@@ -126,6 +139,14 @@ export class Transaction {
   async delete(filePath: string): Promise<void> {
     this.ensureOpen();
     const abs = path.resolve(filePath);
+    // Scope gate — same contract as write() above.
+    {
+      const denial = checkWriteScope(abs);
+      if (denial) {
+        logger.info('Scope gate refused delete', { txnId: this.id, path: abs });
+        throw new Error(denial);
+      }
+    }
     const content = await fs.readFile(abs, 'utf-8');
     const hash = hashContent(content);
     await this.journal.storeBlob(hash, content);
@@ -428,6 +449,16 @@ export class TransactionJournal {
     tx();
 
     return { filesRestored, txnsRolled: ids.length };
+  }
+
+  /** Distinct file paths touched by still-committed transactions in a session.
+   *  Used by the autonomy-contract RUN REPORT (headless --verify/--budget runs). */
+  listSessionFiles(sessionId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT path FROM transactions WHERE session_id = ? AND status = 'committed'
+      ORDER BY path
+    `).all(sessionId) as { path: string }[];
+    return rows.map(r => r.path);
   }
 
   listRecentTransactions(sessionId: string, limit = 20): Array<{

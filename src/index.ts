@@ -23,6 +23,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { PermissionEngine } from './security/permissions.js';
 import { App } from './cli/ui.js';
 import { runHeadless } from './cli/modes/headless.js';
+import { contractFromFlags } from './agent/autonomy-contract.js';
 import { getJournal } from './filesystem/transaction.js';
 import { getSessionStore } from './session/store.js';
 import { MCPManager, setMCPManager, getMCPManager } from './mcp/manager.js';
@@ -170,6 +171,13 @@ program
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
   .option('--json', 'When used with --print, emit NDJSON events to stdout')
   .option('-y, --yes', 'Auto-approve all permission prompts (headless mode only)')
+  // ── Guardrailed autonomy contract (headless -p only) ──
+  .option('--budget-tokens <n>', 'Kill the run after N total (novel) tokens; triggers rollback-on-fail')
+  .option('--budget-usd <n>', 'Kill the run after $N spend; triggers rollback-on-fail')
+  .option('--max-wall <sec>', 'Stall-aware wall-clock ceiling in seconds (slow ≠ runaway; fires only when also stalled)')
+  .option('--scope <path-prefix>', 'Deny agent edits outside this path prefix (pre-write gate on journaled writes)')
+  .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
+  .option('--rollback-on-fail', 'Roll back all session writes when the run fails (default ON when --verify or a budget is set)')
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
@@ -254,6 +262,21 @@ program
       resumeSessionId = recent[0]!.id;
     }
 
+    // Guardrailed autonomy contract — headless-only flags fused into one object.
+    // null when none of the flags were given, so plain runs stay on the exact old path.
+    const contract = contractFromFlags({
+      budgetTokens: opts.budgetTokens,
+      budgetUsd: opts.budgetUsd,
+      maxWall: opts.maxWall,
+      scope: opts.scope,
+      verify: opts.verify,
+      rollbackOnFail: opts.rollbackOnFail,
+    });
+    if (contract && !opts.print) {
+      console.error('--budget-tokens/--budget-usd/--max-wall/--scope/--verify/--rollback-on-fail require headless mode (-p/--print).');
+      process.exit(1);
+    }
+
     // Headless mode
     if (opts.print) {
       const code = await runHeadless({
@@ -267,6 +290,7 @@ program
         autoApproveAll: !!opts.yes,
         explicitModel: opts.model,
         resumeSessionId,
+        contract: contract ?? undefined,
       });
       process.exit(code);
     }
