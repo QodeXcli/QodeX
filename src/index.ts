@@ -591,7 +591,13 @@ providerCmd
   .option('--context <n>', 'Context window for the pinned model', (v) => parseInt(v, 10))
   .option('--no-tools', 'Mark the pinned model as NOT supporting tool calls')
   .option('--default', 'Also set this provider+model as the default')
-  .action(async (id: string | undefined, opts: { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean }) => {
+  .action(async (id: string | undefined, _opts: unknown, cmd: Command) => {
+    // optsWithGlobals(): the root command also defines `-m, --model`, and commander's default
+    // (non-positional) parsing lets the PARENT swallow `--model <id>` even when it's written after
+    // the subcommand — the local opts arrive empty and the value lands in program.opts() instead.
+    // Merging globals back in recovers it. Same gotcha for every subcommand flag that shadows a
+    // root global (--model, --json); see `offload`, `tokens`, `schedule add`, `schedule tick`.
+    const opts = cmd.optsWithGlobals() as { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean };
     const { findGateway, buildCustomEntry } = await import('./setup/gateways.js');
     const { addProviderToConfig } = await import('./setup/provider-writer.js');
     const { isInteractiveTTY } = await import('./setup/prompt.js');
@@ -1025,7 +1031,9 @@ program
   .option('--model <id>', 'Ollama model to plan for (default: configured default model)')
   .option('--vram <gb>', 'Override the VRAM budget in GB (skip auto-detect)')
   .option('--apply', 'Write the suggested num_gpu into config (providers.ollama.options.num_gpu)')
-  .action(async (opts: { model?: string; vram?: string; apply?: boolean }) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
+    const opts = cmd.optsWithGlobals() as { model?: string; vram?: string; apply?: boolean };
     const config = await loadConfig(process.cwd());
     const baseUrl = (config as any).providers?.ollama?.baseUrl ?? 'http://localhost:11434';
     const model = opts.model ?? (config as any).defaults?.model;
@@ -1262,7 +1270,9 @@ program
   .command('tokens [sessionId]')
   .description('Show per-turn token consumption breakdown for a session. Pure measurement, no behavior change. Defaults to the most recent session in this directory.')
   .option('-j, --json', 'Output JSON instead of a human-readable table')
-  .action(async (sessionIdArg: string | undefined, opts: { json?: boolean }) => {
+  .action(async (sessionIdArg: string | undefined, _opts: unknown, cmd: Command) => {
+    // Root --json swallows a post-subcommand --json under default parsing (see `provider add`).
+    const opts = cmd.optsWithGlobals() as { json?: boolean };
     const { registry, codeGraph, mcpManager } = await bootstrap();
     const store = getSessionStore();
 
@@ -1384,7 +1394,9 @@ schedule
   .option('--allow <tools>', 'Comma-separated tool allowlist (default: all)')
   .option('--deliver <target>', 'Send the result to chat, e.g. "telegram:<chatId>" or "discord:<channelId>"')
   .option('--recipe <kind>', 'Run a protocol instead of a bare prompt: "verified-pr" (sandbox branch → verify → open PR only if green)')
-  .action(async (opts: any) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
+    const opts: any = cmd.optsWithGlobals();
     const { getScheduleStore } = await import('./schedule/store.js');
     const { isRecipe, RECIPES } = await import('./schedule/recipes.js');
     const { parseDeliveryTarget } = await import('./schedule/delivery.js');
@@ -1481,7 +1493,9 @@ schedule
   .command('tick')
   .description('Run all due schedules now (invoked by launchd/cron every minute)')
   .option('--json', 'Print result as JSON')
-  .action(async (opts: any) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root --json swallows a post-subcommand --json under default parsing (see `provider add`).
+    const opts: any = cmd.optsWithGlobals();
     const { tick } = await import('./schedule/runner.js');
     const result = await tick();
     if (opts.json) console.log(JSON.stringify(result));
