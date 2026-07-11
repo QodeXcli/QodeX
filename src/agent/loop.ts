@@ -58,6 +58,7 @@ import { recoverToolCallsFromText } from '../llm/text-tool-recovery.js';
 import { inspectOutput, buildCorrectionMessage } from './output-guardrail.js';
 import { compactFileReads } from './read-cache.js';
 import { ReadLedger, extractMutationPaths, extractReadPath, isGatedMutationTool, buildGateMessage } from './read-ledger.js';
+import { computeBlastRadius, isCodeFile, IMPACT_EDIT_TOOLS } from './blast-radius.js';
 import { setSyntaxGateEnabled } from '../tools/ast/syntax-check.js';
 import { needsTextToolMode, buildTextToolInstructions, withTextToolProtocol } from '../llm/text-tool-protocol.js';
 import { describeCacheReuse } from '../llm/cache-layout.js';
@@ -2601,6 +2602,45 @@ export class AgentLoop {
             const st = fsSync.statSync(absP);
             if (st.isFile()) this.readLedger.mark(absP, st.mtimeMs);
           } catch { /* file gone or unreadable — nothing to record */ }
+        }
+      }
+
+      // ─── Blast-radius impact note (warn-only) ───
+      // After a successful code edit, ask the code graph what the edit touches and
+      // append a compact [impact] note to the tool result: top-level symbols in the
+      // file, reference/caller counts + files, covering tests — plus a ⚠ line when
+      // caller files were never read this session (cross-checked with the read-ledger).
+      // Advisory only, never blocks; silently skipped when the graph is absent, stale,
+      // or doesn't know the file. Off-switch: discipline.impactNotes: false
+      if (!result.isError && IMPACT_EDIT_TOOLS.has(tc.function.name) &&
+          (this.config as any)?.discipline?.impactNotes !== false) {
+        try {
+          const { getCodeGraphDB } = await import('../codegraph/tools.js');
+          const graph = getCodeGraphDB();
+          if (graph) {
+            const cwd0 = this.effectiveCwd ?? this.cwd;
+            for (const p of extractMutationPaths(tc.function.name, args)) {
+              const absP = path.isAbsolute(p) ? p : path.resolve(cwd0, p);
+              if (!isCodeFile(absP)) continue;
+              const impact = await computeBlastRadius(graph, absP, {
+                cwd: cwd0,
+                wasRead: (fp) => this.readLedger.has(fp),
+                signal: toolAbort.signal,
+              });
+              if (impact.note) {
+                const base = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+                result = { ...result, content: `${base}\n\n${impact.note}` };
+                if (impact.unreadCallerFiles.length > 0) {
+                  uiEvents.push({
+                    type: 'progress',
+                    message: `⚠ Impact: ${impact.unreadCallerFiles.length} caller file(s) of ${path.basename(absP)} not read this session`,
+                  } as any);
+                }
+              }
+            }
+          }
+        } catch (e: any) {
+          logger.debug('Blast-radius impact note skipped', { err: e?.message });
         }
       }
 

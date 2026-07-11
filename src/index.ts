@@ -406,6 +406,57 @@ program
   });
 
 program
+  .command('impact <target>')
+  .description('Blast-radius analysis for a file or symbol: references, caller files, covering tests (from the code graph)')
+  .option('--json', 'Print machine-readable JSON instead of the summary line')
+  .action(async (target: string, _opts: any, cmd: any) => {
+    // optsWithGlobals(): merge local flags with root-level ones so a future global
+    // flag doesn't silently vanish here (same pattern as `mcp serve` / `provider add`).
+    const opts = cmd.optsWithGlobals() as { json?: boolean };
+    const dbPath = path.join(process.cwd(), '.qodex', 'codegraph.db');
+    if (!fsSync.existsSync(dbPath)) {
+      console.error('No code graph found at .qodex/codegraph.db — run `qodex index` first.');
+      process.exit(1);
+    }
+    const db = new CodeGraphDB(dbPath);
+    const { computeBlastRadius } = await import('./agent/blast-radius.js');
+
+    // Resolve the target: an existing file → file mode; otherwise an indexed symbol,
+    // analyzed in the file where it's defined.
+    const asFile = path.isAbsolute(target) ? target : path.resolve(process.cwd(), target);
+    let fileAbs: string;
+    let symbolFilter: string[] | undefined;
+    if (fsSync.existsSync(asFile) && fsSync.statSync(asFile).isFile()) {
+      fileAbs = asFile;
+    } else {
+      const defs = db.findSymbolsByName(target);
+      if (defs.length === 0) {
+        console.error(`"${target}" is neither an existing file nor an indexed symbol. Run \`qodex index\` to refresh the graph.`);
+        process.exit(1);
+      }
+      fileAbs = defs[0]!.file_path;
+      symbolFilter = [target];
+      if (defs.length > 1) {
+        console.log(`(symbol defined in ${defs.length} places — analyzing ${path.relative(process.cwd(), fileAbs)})`);
+      }
+    }
+    const impact = await computeBlastRadius(db, fileAbs, {
+      cwd: process.cwd(),
+      symbolFilter,
+      maxGraphAgeMs: Number.POSITIVE_INFINITY, // standalone: always answer, even from an old graph
+      maxChars: 2000, // terminal gets a roomier cap than the edit-loop note
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(impact, null, 2));
+    } else if (!impact.note) {
+      console.log(`No impact data for ${path.relative(process.cwd(), fileAbs)} — the file has no indexed top-level symbols (run \`qodex index\` to refresh).`);
+    } else {
+      console.log(impact.note);
+    }
+    process.exit(0);
+  });
+
+program
   .command('config')
   .description('Show effective configuration')
   .action(async () => {
