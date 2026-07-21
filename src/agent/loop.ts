@@ -97,6 +97,26 @@ export interface AgentOptions {
   reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
+/**
+ * Synthesize tool-result messages for tool_calls that were NEVER executed — e.g. a
+ * loop detector (read-loop / stuck-loop / error-loop) fired and skipped the batch with
+ * `continue`. The assistant message carrying those tool_calls was already appended to
+ * history, so without a matching tool result for each id the conversation is malformed:
+ * OpenAI-format providers (kimi, DeepSeek, LM Studio, …) reject the next request with
+ * "an assistant message with 'tool_calls' must be followed by tool messages responding
+ * to each 'tool_call_id'". (Anthropic tolerates it, which is why it hid until an
+ * OpenAI-compatible model was used.) Emitting a short skip-marker per id keeps the
+ * assistant→tool invariant intact so the run can continue.
+ */
+function skippedToolResults(toolCalls: ToolCall[], reason: string): Message[] {
+  return toolCalls.map(tc => ({
+    role: 'tool' as const,
+    tool_call_id: tc.id,
+    name: tc.function.name,
+    content: `[skipped] ${reason} — this tool call was not executed; do not wait on its result.`,
+  }));
+}
+
 export class AgentLoop {
   private router: ModelRouter;
   private registry: ToolRegistry;
@@ -2120,6 +2140,13 @@ export class AgentLoop {
           `window (${ctx} tokens), so I keep losing my place and starting over. To finish this, either ` +
           `narrow the task (e.g. “find bugs in src/pages/CartPage.jsx”) or use a model with a larger ` +
           `context window (~/.qodex/config.yaml → providers.*.extraModels[].contextWindow).`;
+        // Answer the pending tool_calls first, so a later /resume of this session isn't
+        // left with orphaned tool_calls (invalid for OpenAI-format providers).
+        if (toolCalls.length > 0) {
+          const skipped = skippedToolResults(toolCalls, 'run stopped: read-loop hard cap');
+          for (const sm of skipped) newMessages.push(sm);
+          sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        }
         const m: Message = { role: 'assistant', content: msg };
         newMessages.push(m);
         sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
@@ -2138,6 +2165,13 @@ export class AgentLoop {
             `compacted and you restarted instead of continuing. STOP calling tools. In your NEXT message, ` +
             `list the bugs/issues you have ALREADY found, in plain text. Tools are disabled for that message.`,
         };
+        // Answer the just-emitted tool_calls before skipping execution, or the assistant's
+        // tool_calls are orphaned and OpenAI-format providers 400 on the next request.
+        if (toolCalls.length > 0) {
+          const skipped = skippedToolResults(toolCalls, 'loop guard: re-read the same file too many times');
+          for (const sm of skipped) newMessages.push(sm);
+          sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        }
         newMessages.push(stopMsg);
         sessionStore.recordTurn(sessionId, [stopMsg], { input: 0, output: 0, costUsd: 0 });
         forceTextOnly = true;
@@ -2162,6 +2196,13 @@ export class AgentLoop {
           role: 'user',
           content: `[SYSTEM] You've called \`${last.name}\` with the same arguments 3+ times in a row. This isn't working.${advice} If you genuinely can't proceed, explain to the user IN ONE SENTENCE what's blocking you and stop. Do not apologize repeatedly. Do not loop.`,
         };
+        // Answer the just-emitted tool_calls before skipping execution, or the assistant's
+        // tool_calls are orphaned and OpenAI-format providers 400 on the next request.
+        if (toolCalls.length > 0) {
+          const skipped = skippedToolResults(toolCalls, 'loop guard: same call repeated 3+ times');
+          for (const sm of skipped) newMessages.push(sm);
+          sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        }
         newMessages.push(stuckMsg);
         sessionStore.recordTurn(sessionId, [stuckMsg], { input: 0, output: 0, costUsd: 0 });
         // CRITICAL: also clear recentCalls so the model gets one clean shot after the advice
@@ -2210,6 +2251,13 @@ export class AgentLoop {
             `[SYSTEM] \`${errLoop.name}\` has returned ${errLoop.code} ${errLoop.count} times with different ` +
             `arguments.${advice} If you genuinely can't proceed, say so in ONE sentence and stop. Do not loop.`,
         };
+        // Answer the just-emitted tool_calls before skipping execution, or the assistant's
+        // tool_calls are orphaned and OpenAI-format providers 400 on the next request.
+        if (toolCalls.length > 0) {
+          const skipped = skippedToolResults(toolCalls, 'loop guard: same error kind repeated');
+          for (const sm of skipped) newMessages.push(sm);
+          sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        }
         newMessages.push(msg);
         sessionStore.recordTurn(sessionId, [msg], { input: 0, output: 0, costUsd: 0 });
         recentErrors.length = 0;

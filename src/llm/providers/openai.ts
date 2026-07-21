@@ -11,6 +11,41 @@ import { logger } from '../../utils/logger.js';
 // for impersonating the OpenAI SDK. A caller-supplied User-Agent still wins.
 const QODEX_USER_AGENT = 'qodex-cli';
 
+/**
+ * Defense-in-depth: the OpenAI wire format requires that EVERY tool_call in an assistant
+ * message is answered by a `role:'tool'` message with the same tool_call_id before the next
+ * non-tool message — otherwise the API rejects the request with a 400 ("tool_call_ids did not
+ * have response messages"). A loop detector or an interrupted turn can leave a tool_call
+ * unanswered in history; the loop.ts fix prevents that at the source, and this is the safety net
+ * so ANY stranding path can never 400 the user. Inserts a synthetic result for each orphan,
+ * right before the message that closes its answer window. Pure.
+ */
+export function answerOrphanToolCalls(messages: Message[]): Message[] {
+  const out: Message[] = [];
+  let pending: { id: string; name: string }[] = [];
+  const flush = () => {
+    for (const p of pending) {
+      out.push({ role: 'tool', tool_call_id: p.id, name: p.name,
+        content: '[skipped] no result was recorded for this tool call — do not wait on it.' } as Message);
+    }
+    pending = [];
+  };
+  for (const m of messages) {
+    if (m.role === 'tool') {
+      pending = pending.filter(p => p.id !== (m as any).tool_call_id);
+      out.push(m);
+      continue;
+    }
+    if (pending.length) flush(); // a non-tool message closes the previous assistant's answer window
+    out.push(m);
+    if (m.role === 'assistant' && (m as any).tool_calls?.length) {
+      pending = (m as any).tool_calls.map((tc: any) => ({ id: tc.id, name: tc.function?.name ?? 'tool' }));
+    }
+  }
+  if (pending.length) flush();
+  return out;
+}
+
 // OpenAI's own models. The DeepSeek models live separately so they're served ONLY
 // by the dedicated DeepSeekProvider — otherwise they'd also surface under the
 // `openai` provider (which shares this base list) and show up twice in --list-models.
@@ -113,7 +148,7 @@ export class OpenAIProvider extends Provider {
   }
 
   private convertMessages(messages: Message[]): OpenAI.Chat.ChatCompletionMessageParam[] {
-    return messages.map(m => {
+    return answerOrphanToolCalls(messages).map(m => {
       if (m.role === 'tool') {
         return {
           role: 'tool',
