@@ -65,6 +65,17 @@ export const KNOWN_GATEWAYS: Record<string, GatewaySpec> = {
     suggestedToolCalls: true,
     note: 'Very fast. Free tier has generous but real rate limits.',
   },
+  atlascloud: {
+    name: 'atlascloud',
+    title: 'Atlas Cloud',
+    baseUrl: 'https://api.atlascloud.ai/v1',
+    apiKeyEnv: 'ATLASCLOUD_API_KEY',
+    keyHint: 'Get a key at https://www.atlascloud.ai/console/api-keys.',
+    suggestedModel: 'qwen/qwen3.5-flash',
+    suggestedContextWindow: 1000000,
+    suggestedToolCalls: true,
+    note: 'OpenAI-compatible LLM endpoint. Atlas Cloud media generation uses a separate API and is not configured by this LLM gateway.',
+  },
   mistral: {
     name: 'mistral',
     title: 'Mistral',
