@@ -208,6 +208,12 @@ export interface QodexConfig {
      * back-compat; defaults applied at load.
      */
     alwaysAsk?: string[];
+    /**
+     * User deny rules that override EVERYTHING — auto-approve, `/auto on`, and `--yes`.
+     * A plain string matches as a substring; `/regex/flags` matches as a regex. Use this to
+     * fence off things no agent run of yours should ever do (e.g. 'git push', '/prod$/').
+     */
+    denyRules?: string[];
     sandboxShell: boolean;
   };
   ui: {

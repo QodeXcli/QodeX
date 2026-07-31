@@ -40,6 +40,13 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
       }
       if (answer === 'always') {
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
+        // "always" now binds to THIS command, and irreversible commands refuse a standing
+        // grant entirely. Say so, or the user believes they answered the question once and
+        // silently gets asked again — which reads as the prompt being broken.
+        const refused = ctx.permissions.grantRefusalReason?.(cmd);
+        if (refused) {
+          ctx.emit({ type: 'shell-stderr', line: `note: ${refused}` });
+        }
       }
     }
 
