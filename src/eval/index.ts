@@ -26,6 +26,19 @@ export type { FlipKind, MetricDelta, RunDiff, RunSide, TaskFlip, TaskMetricDelta
 export { formatDiffReport, formatRunReport } from './report.js';
 export type { ReportOptions } from './report.js';
 
+// Suites. `harness` is layer (a) — free, offline, deterministic; feed it straight to
+// `runSuite`. Suites are BUILT on demand so importing this module stays cheap.
+export { getSuite, listSuites, SUITES } from './suites/index.js';
+export type { SuiteEntry } from './suites/index.js';
+export {
+  createHarnessSuite, harnessSuite, realProbes,
+  CONTRADICTION_PAIRS, DEFAULT_BUDGETS, GATING_SCENARIOS,
+} from './suites/harness.js';
+export type {
+  ContradictionPair, GatingScenario, HarnessBudgets,
+  HarnessProbes, HarnessSuiteOptions, PruneProbe,
+} from './suites/harness.js';
+
 // Legacy JSON-task harness (eval/run.mjs + eval/tasks/*.json) — still in use.
 export { evaluateChecks, formatReport, summarize } from './score.js';
 export type {
