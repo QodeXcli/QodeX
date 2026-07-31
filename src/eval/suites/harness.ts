@@ -251,6 +251,14 @@ export interface ContradictionPair {
   why: string;
 }
 
+/** A stub summary shaped like a real one. Compaction refuses anything too short to carry a
+ *  goal, a path and a constraint (MIN_SUMMARY_CHARS), so a token-sized stub would make the
+ *  compaction stage a silent no-op and these probes would then measure nothing. */
+const STUB_SUMMARY =
+  '[CTX_SUMMARY]\nGoal: the user asked for the refactor described above. ' +
+  'Paths: src/. Decisions: none recorded. Files touched: none. ' +
+  'Open todos: continue the task. Standing constraints: none.';
+
 export const CONTRADICTION_PAIRS: ContradictionPair[] = [
   {
     id: 'identity',
@@ -1001,7 +1009,7 @@ export function createHarnessSuite(opts: HarnessSuiteOptions = {}): EvalSuite {
         stages.push({ name: 'dedup', messages: deduped });
 
         // 4. compaction — model-free: the summarizer is a stub.
-        const compacted = await P.compact(deduped, async () => '[CTX_SUMMARY]\nstub summary for the eval harness');
+        const compacted = await P.compact(deduped, async () => STUB_SUMMARY);
         stages.push({ name: 'compaction', messages: compacted.messages });
 
         // 5. prune — the REAL AgentLoop pruner, squeezed hard enough to drop units.
@@ -1110,7 +1118,7 @@ export function createHarnessSuite(opts: HarnessSuiteOptions = {}): EvalSuite {
         let summarizerSaw = '';
         const compacted = await P.compact(raw, async msgs => {
           summarizerSaw = msgs.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
-          return '[CTX_SUMMARY]\nstub summary for the eval harness';
+          return STUB_SUMMARY;
         });
 
         const problems: string[] = [];
