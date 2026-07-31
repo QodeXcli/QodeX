@@ -56,8 +56,11 @@ export function fillModelDefaults(raw: any, liveEntry?: any): ModelInfo | null {
     id,
     contextWindow: Number.isFinite(raw?.contextWindow) ? raw.contextWindow : cap.contextWindow,
     maxOutput: Number.isFinite(raw?.maxOutput) ? raw.maxOutput : cap.maxOutput,
-    inputCostPerMillion: Number.isFinite(raw?.inputCostPerMillion) ? raw.inputCostPerMillion : 0,
-    outputCostPerMillion: Number.isFinite(raw?.outputCostPerMillion) ? raw.outputCostPerMillion : 0,
+    inputCostPerMillion: Number.isFinite(raw?.inputCostPerMillion) ? raw.inputCostPerMillion : cap.inputCostPerMillion ?? 0,
+    outputCostPerMillion: Number.isFinite(raw?.outputCostPerMillion) ? raw.outputCostPerMillion : cap.outputCostPerMillion ?? 0,
+    // A user-supplied price is authoritative; otherwise carry WHERE the price came from so
+    // spend reports can flag "we don't actually know what this costs" instead of showing $0.
+    pricingSource: Number.isFinite(raw?.inputCostPerMillion) ? 'catalog' : cap.pricingSource,
     supportsToolCalls: raw?.supportsToolCalls !== false,   // default true
     supportsStreaming: raw?.supportsStreaming !== false,   // default true
   };

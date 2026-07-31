@@ -26,13 +26,24 @@ export interface ModelCapability {
   supportsToolCalls?: boolean;
   /** Model can read images. */
   vision?: boolean;
+  /** USD per million tokens. Omitted when we genuinely don't know the price. */
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
+  /** True for models that are free by construction (local weights). */
+  free?: boolean;
 }
 
 export interface ResolvedCapability extends ModelCapability {
-  /** Where the numbers came from — 'live' is authoritative, 'default' means we guessed. */
+  /** Where the WINDOW came from — 'live' is authoritative, 'default' means we guessed. */
   source: 'live' | 'catalog' | 'default';
   /** The catalog pattern that matched, when source === 'catalog'. */
   matched?: string;
+  /**
+   * Where the PRICE came from, tracked separately because it can differ from the window's
+   * source (a gateway often advertises its window but not its price, or vice-versa).
+   * 'unknown' is the honest answer that keeps a bogus $0.00 out of spend reports.
+   */
+  pricingSource: 'live' | 'catalog' | 'free' | 'unknown';
 }
 
 /**
@@ -44,16 +55,16 @@ export interface ResolvedCapability extends ModelCapability {
  */
 const CATALOG: { pattern: string; cap: ModelCapability }[] = [
   // ── Anthropic ──
-  { pattern: 'claude-opus-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true } },
-  { pattern: 'claude-sonnet-4', cap: { contextWindow: 200_000, maxOutput: 64_000, supportsToolCalls: true, vision: true } },
-  { pattern: 'claude-haiku-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true } },
-  { pattern: 'claude-3-5-sonnet', cap: { contextWindow: 200_000, maxOutput: 8_192, supportsToolCalls: true, vision: true } },
-  { pattern: 'claude', cap: { contextWindow: 200_000, maxOutput: 8_192, supportsToolCalls: true, vision: true } },
+  { pattern: 'claude-opus-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 15, outputCostPerMillion: 75 } },
+  { pattern: 'claude-sonnet-4', cap: { contextWindow: 200_000, maxOutput: 64_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 3, outputCostPerMillion: 15 } },
+  { pattern: 'claude-haiku-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 1, outputCostPerMillion: 5 } },
+  { pattern: 'claude-3-5-sonnet', cap: { contextWindow: 200_000, maxOutput: 8_192, supportsToolCalls: true, vision: true , inputCostPerMillion: 3, outputCostPerMillion: 15 } },
+  { pattern: 'claude', cap: { contextWindow: 200_000, maxOutput: 8_192, supportsToolCalls: true, vision: true , inputCostPerMillion: 3, outputCostPerMillion: 15 } },
 
   // ── Moonshot / Kimi — the one that prompted this work. K2 ships a 256k window. ──
-  { pattern: 'kimi-k2', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true } },
-  { pattern: 'kimi', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true } },
-  { pattern: 'moonshot', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true } },
+  { pattern: 'kimi-k2', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true , inputCostPerMillion: 0.6, outputCostPerMillion: 2.5 } },
+  { pattern: 'kimi', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true , inputCostPerMillion: 0.6, outputCostPerMillion: 2.5 } },
+  { pattern: 'moonshot', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true , inputCostPerMillion: 0.6, outputCostPerMillion: 2.5 } },
 
   // ── Qwen — the coder line is long-context; plain qwen3 varies by size. ──
   { pattern: 'qwen3-coder', cap: { contextWindow: 262_144, maxOutput: 16_384, supportsToolCalls: true } },
@@ -63,24 +74,24 @@ const CATALOG: { pattern: string; cap: ModelCapability }[] = [
   { pattern: 'qwen', cap: { contextWindow: 32_768, maxOutput: 8_192, supportsToolCalls: true } },
 
   // ── OpenAI ──
-  { pattern: 'gpt-4.1', cap: { contextWindow: 1_047_576, maxOutput: 32_768, supportsToolCalls: true, vision: true } },
-  { pattern: 'gpt-4o-mini', cap: { contextWindow: 128_000, maxOutput: 16_384, supportsToolCalls: true, vision: true } },
-  { pattern: 'gpt-4o', cap: { contextWindow: 128_000, maxOutput: 16_384, supportsToolCalls: true, vision: true } },
-  { pattern: 'gpt-4-turbo', cap: { contextWindow: 128_000, maxOutput: 4_096, supportsToolCalls: true, vision: true } },
-  { pattern: 'o3-mini', cap: { contextWindow: 200_000, maxOutput: 100_000, supportsToolCalls: true } },
-  { pattern: 'o1', cap: { contextWindow: 200_000, maxOutput: 100_000, supportsToolCalls: true } },
+  { pattern: 'gpt-4.1', cap: { contextWindow: 1_047_576, maxOutput: 32_768, supportsToolCalls: true, vision: true , inputCostPerMillion: 2, outputCostPerMillion: 8 } },
+  { pattern: 'gpt-4o-mini', cap: { contextWindow: 128_000, maxOutput: 16_384, supportsToolCalls: true, vision: true , inputCostPerMillion: 0.15, outputCostPerMillion: 0.6 } },
+  { pattern: 'gpt-4o', cap: { contextWindow: 128_000, maxOutput: 16_384, supportsToolCalls: true, vision: true , inputCostPerMillion: 2.5, outputCostPerMillion: 10 } },
+  { pattern: 'gpt-4-turbo', cap: { contextWindow: 128_000, maxOutput: 4_096, supportsToolCalls: true, vision: true , inputCostPerMillion: 10, outputCostPerMillion: 30 } },
+  { pattern: 'o3-mini', cap: { contextWindow: 200_000, maxOutput: 100_000, supportsToolCalls: true , inputCostPerMillion: 1.1, outputCostPerMillion: 4.4 } },
+  { pattern: 'o1', cap: { contextWindow: 200_000, maxOutput: 100_000, supportsToolCalls: true , inputCostPerMillion: 15, outputCostPerMillion: 60 } },
 
   // ── Google — the 1M+ windows the old flat 128k default hurt most. ──
-  { pattern: 'gemini-2.5-pro', cap: { contextWindow: 1_048_576, maxOutput: 65_536, supportsToolCalls: true, vision: true } },
-  { pattern: 'gemini-2.5-flash', cap: { contextWindow: 1_048_576, maxOutput: 65_536, supportsToolCalls: true, vision: true } },
-  { pattern: 'gemini-1.5-pro', cap: { contextWindow: 2_097_152, maxOutput: 8_192, supportsToolCalls: true, vision: true } },
+  { pattern: 'gemini-2.5-pro', cap: { contextWindow: 1_048_576, maxOutput: 65_536, supportsToolCalls: true, vision: true , inputCostPerMillion: 1.25, outputCostPerMillion: 10 } },
+  { pattern: 'gemini-2.5-flash', cap: { contextWindow: 1_048_576, maxOutput: 65_536, supportsToolCalls: true, vision: true , inputCostPerMillion: 0.3, outputCostPerMillion: 2.5 } },
+  { pattern: 'gemini-1.5-pro', cap: { contextWindow: 2_097_152, maxOutput: 8_192, supportsToolCalls: true, vision: true , inputCostPerMillion: 1.25, outputCostPerMillion: 5 } },
   { pattern: 'gemini', cap: { contextWindow: 1_048_576, maxOutput: 8_192, supportsToolCalls: true, vision: true } },
 
   // ── DeepSeek — v3/r1 are 128k, not the 16k the old guess claimed. ──
-  { pattern: 'deepseek-r1', cap: { contextWindow: 131_072, maxOutput: 32_768, supportsToolCalls: true } },
-  { pattern: 'deepseek-v3', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
+  { pattern: 'deepseek-r1', cap: { contextWindow: 131_072, maxOutput: 32_768, supportsToolCalls: true , inputCostPerMillion: 0.55, outputCostPerMillion: 2.19 } },
+  { pattern: 'deepseek-v3', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true , inputCostPerMillion: 0.27, outputCostPerMillion: 1.1 } },
   { pattern: 'deepseek-coder', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
-  { pattern: 'deepseek', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
+  { pattern: 'deepseek', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true , inputCostPerMillion: 0.27, outputCostPerMillion: 1.1 } },
 
   // ── Other open-weight families commonly served by gateways / locally ──
   { pattern: 'glm-4', cap: { contextWindow: 131_072, maxOutput: 16_384, supportsToolCalls: true } },
@@ -90,15 +101,15 @@ const CATALOG: { pattern: string; cap: ModelCapability }[] = [
   { pattern: 'llama3.2', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
   { pattern: 'llama3.1', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
   { pattern: 'llama', cap: { contextWindow: 8_192, maxOutput: 4_096 } },
-  { pattern: 'mistral-large', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
+  { pattern: 'mistral-large', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true , inputCostPerMillion: 2, outputCostPerMillion: 6 } },
   { pattern: 'mistral', cap: { contextWindow: 32_768, maxOutput: 8_192, supportsToolCalls: true } },
   { pattern: 'devstral', cap: { contextWindow: 131_072, maxOutput: 8_192, supportsToolCalls: true } },
   { pattern: 'codestral', cap: { contextWindow: 262_144, maxOutput: 8_192, supportsToolCalls: true } },
   { pattern: 'gemma3', cap: { contextWindow: 131_072, maxOutput: 8_192, vision: true } },
   { pattern: 'gemma2', cap: { contextWindow: 8_192, maxOutput: 4_096 } },
   { pattern: 'phi-4', cap: { contextWindow: 16_384, maxOutput: 4_096 } },
-  { pattern: 'grok', cap: { contextWindow: 131_072, maxOutput: 16_384, supportsToolCalls: true } },
-  { pattern: 'command-r', cap: { contextWindow: 131_072, maxOutput: 4_096, supportsToolCalls: true } },
+  { pattern: 'grok', cap: { contextWindow: 131_072, maxOutput: 16_384, supportsToolCalls: true , inputCostPerMillion: 3, outputCostPerMillion: 15 } },
+  { pattern: 'command-r', cap: { contextWindow: 131_072, maxOutput: 4_096, supportsToolCalls: true , inputCostPerMillion: 0.15, outputCostPerMillion: 0.6 } },
 ];
 
 /**
@@ -162,6 +173,30 @@ export function liveMaxOutput(entry: any): number | undefined {
 }
 
 /**
+ * Extract advertised PRICING. Gateways quote per-TOKEN (OpenRouter's
+ * `pricing: { prompt: "0.0000006", completion: "0.0000025" }`), while we work in USD per
+ * MILLION tokens — so values are scaled by 1e6.
+ *
+ * A quoted 0 is meaningful (free tiers exist) and is preserved as an explicit 0, distinct
+ * from "not quoted at all", which returns undefined. PURE.
+ */
+export function livePricing(entry: any): { input: number; output: number } | undefined {
+  const p = entry?.pricing ?? entry?.price ?? entry?.cost;
+  if (!p || typeof p !== 'object') return undefined;
+  const num = (v: any): number | undefined => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const inPerToken = num(p.prompt ?? p.input ?? p.input_tokens ?? p.inputCostPerToken);
+  const outPerToken = num(p.completion ?? p.output ?? p.output_tokens ?? p.outputCostPerToken);
+  if (inPerToken === undefined && outPerToken === undefined) return undefined;
+  // Some providers already quote per-million (values ≥ 0.01 per token would be absurd —
+  // $10k per million — so treat those as already-scaled rather than multiplying again).
+  const scale = (v: number) => (v > 0 && v < 0.01 ? v * 1_000_000 : v);
+  return { input: scale(inPerToken ?? 0), output: scale(outPerToken ?? 0) };
+}
+
+/**
  * Resolve a model's capabilities, trusting the provider over our table and our table over a
  * guess. `liveEntry` is the raw object the gateway returned for this model (from /v1/models),
  * when there is one.
@@ -169,12 +204,43 @@ export function liveMaxOutput(entry: any): number | undefined {
  * The returned `source` is the honesty knob: a user can be told "128k (our catalog)" versus
  * "1M (reported by the provider)" instead of a bare number they cannot sanity-check.
  */
-export function resolveCapability(modelId: string, liveEntry?: any): ResolvedCapability {
+export function resolveCapability(
+  modelId: string,
+  liveEntry?: any,
+  opts: { local?: boolean } = {},
+): ResolvedCapability {
   const hit = lookupCatalog(modelId);
   const base = hit?.cap ?? UNKNOWN_MODEL_DEFAULT;
 
   const liveCtx = liveContextWindow(liveEntry);
   const liveOut = liveMaxOutput(liveEntry);
+  const livePrice = livePricing(liveEntry);
+
+  // Price resolution is INDEPENDENT of the window's: a gateway commonly advertises one and
+  // not the other. 'unknown' is deliberate — reporting $0.00 for a model we cannot price
+  // makes spend reports lie and `--budget-usd` silently unenforceable.
+  let inputCostPerMillion: number;
+  let outputCostPerMillion: number;
+  let pricingSource: ResolvedCapability['pricingSource'];
+  if (livePrice) {
+    inputCostPerMillion = livePrice.input;
+    outputCostPerMillion = livePrice.output;
+    pricingSource = 'live';
+  } else if (opts.local || base.free) {
+    inputCostPerMillion = 0;
+    outputCostPerMillion = 0;
+    pricingSource = 'free'; // local weights genuinely cost nothing per token
+  } else if (base.inputCostPerMillion !== undefined) {
+    inputCostPerMillion = base.inputCostPerMillion;
+    outputCostPerMillion = base.outputCostPerMillion ?? 0;
+    pricingSource = 'catalog';
+  } else {
+    inputCostPerMillion = 0;
+    outputCostPerMillion = 0;
+    pricingSource = 'unknown'; // the 0 is a placeholder, NOT a claim that it is free
+  }
+
+  const priced = { inputCostPerMillion, outputCostPerMillion, pricingSource };
 
   if (liveCtx) {
     return {
@@ -186,6 +252,7 @@ export function resolveCapability(modelId: string, liveEntry?: any): ResolvedCap
       vision: base.vision,
       source: 'live',
       matched: hit?.matched,
+      ...priced,
     };
   }
   return {
@@ -193,6 +260,7 @@ export function resolveCapability(modelId: string, liveEntry?: any): ResolvedCap
     ...(liveOut ? { maxOutput: liveOut } : {}),
     source: hit ? 'catalog' : 'default',
     matched: hit?.matched,
+    ...priced,
   };
 }
 

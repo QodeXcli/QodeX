@@ -60,6 +60,21 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
         },
       };
     }
+    // A USD budget on a model we cannot price would never fire: computeCost multiplies by a
+    // placeholder 0, spend stays $0.00 forever, and the run is effectively unbounded. Say so
+    // loudly rather than letting the user believe a cap is protecting them.
+    if (c.budgetUsd !== undefined) {
+      try {
+        const routed = opts.router.route('main' as any, 0, {});
+        if (routed?.modelInfo?.pricingSource === 'unknown') {
+          process.stderr.write(
+            `⚠  --budget-usd cannot be enforced for "${routed.modelInfo.id}": no pricing is known for this model, ` +
+            `so spend always computes as $0.00. Use --budget-tokens or --max-wall instead, or set the price under ` +
+            `providers.custom[].models[].inputCostPerMillion.\n`,
+          );
+        }
+      } catch { /* routing probe is best-effort — never block the run on it */ }
+    }
   }
 
   // Resolve a leading custom slash command into its template + one-shot overrides.

@@ -70,6 +70,9 @@ export class OllamaProvider extends Provider {
         maxOutput: 8192,
         inputCostPerMillion: 0,
         outputCostPerMillion: 0,
+        // Local weights: genuinely free, not merely unpriced. The distinction keeps
+        // `--budget-usd` meaningful (a $0 local run is correct, an unpriced cloud run is not).
+        pricingSource: 'free' as const,
         supportsToolCalls: this.supportsTools(m.name),
         supportsStreaming: true,
       }));

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveCapability, lookupCatalog, liveContextWindow, liveMaxOutput,
-  catalogPatterns, UNKNOWN_MODEL_DEFAULT,
+  catalogPatterns, UNKNOWN_MODEL_DEFAULT, livePricing,
 } from '../src/llm/model-catalog.js';
 import { fillModelDefaults, mapDiscoveredModels } from '../src/llm/providers/custom-config.js';
 
@@ -160,5 +160,63 @@ describe('liveMaxOutput', () => {
     const cap = resolveCapability('kimi-k2', { max_output_tokens: 999 });
     expect(cap.maxOutput).toBe(999);
     expect(cap.source).toBe('catalog'); // window still came from the catalog
+  });
+});
+
+describe('pricing — the "$0.00 for a model that costs money" bug', () => {
+  it('reads OpenRouter-style per-TOKEN pricing and scales it to per-million', () => {
+    const cap = resolveCapability('x', { pricing: { prompt: '0.0000006', completion: '0.0000025' } });
+    expect(cap.inputCostPerMillion).toBeCloseTo(0.6, 6);
+    expect(cap.outputCostPerMillion).toBeCloseTo(2.5, 6);
+    expect(cap.pricingSource).toBe('live');
+  });
+
+  it('does not double-scale a provider that already quotes per-million', () => {
+    const cap = resolveCapability('x', { pricing: { prompt: 3, completion: 15 } });
+    expect(cap.inputCostPerMillion).toBe(3);
+    expect(cap.outputCostPerMillion).toBe(15);
+  });
+
+  it('falls back to catalog pricing for a known model', () => {
+    const cap = resolveCapability('kimi-k2');
+    expect(cap.pricingSource).toBe('catalog');
+    expect(cap.inputCostPerMillion).toBeGreaterThan(0);
+  });
+
+  it('marks an unpriced model UNKNOWN — never a silent $0', () => {
+    const cap = resolveCapability('some-gateway-model-nobody-knows');
+    expect(cap.pricingSource).toBe('unknown');
+    // The 0 is a placeholder; the SOURCE is what callers must check before trusting spend.
+    expect(cap.inputCostPerMillion).toBe(0);
+  });
+
+  it('distinguishes genuinely free (local) from unpriced', () => {
+    const local = resolveCapability('qwen3-coder:30b', undefined, { local: true });
+    expect(local.pricingSource).toBe('free');
+    expect(resolveCapability('qwen3-coder:30b').pricingSource).not.toBe('free');
+  });
+
+  it('preserves an explicitly quoted zero as live (free tiers are real)', () => {
+    const cap = resolveCapability('x', { pricing: { prompt: 0, completion: 0 } });
+    expect(cap.pricingSource).toBe('live');
+    expect(cap.inputCostPerMillion).toBe(0);
+  });
+
+  it('ignores malformed pricing rather than trusting it', () => {
+    expect(livePricing({ pricing: { prompt: 'free' } })).toBeUndefined();
+    expect(livePricing({ pricing: null })).toBeUndefined();
+    expect(livePricing({})).toBeUndefined();
+  });
+
+  it('a discovered model carries its pricing source through fillModelDefaults', () => {
+    const [priced, unpriced] = mapDiscoveredModels({
+      data: [
+        { id: 'a', pricing: { prompt: '0.000003', completion: '0.000015' } },
+        { id: 'totally-unknown-thing' },
+      ],
+    });
+    expect(priced!.inputCostPerMillion).toBeCloseTo(3, 6);
+    expect(priced!.pricingSource).toBe('live');
+    expect(unpriced!.pricingSource).toBe('unknown');
   });
 });
