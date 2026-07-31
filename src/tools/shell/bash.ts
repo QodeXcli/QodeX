@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import crossSpawn from 'cross-spawn';
+import { childEnv } from '../../secrets/sanitize.js';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
 
@@ -77,9 +78,15 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
     return new Promise(resolve => {
       // cross-spawn handles Windows shell quoting and path escaping correctly.
       // shell:true lets us run a raw command string with pipes, redirects, etc.
+      //
+      // The command was chosen by the MODEL, so the child must NOT inherit our provider
+      // credentials — a plain `{ ...process.env }` hands ANTHROPIC_API_KEY and friends to
+      // anything the agent decides to run (`env`, a curl, a compromised dev dependency).
+      // childEnv() strips credential-shaped variables and leaves the rest (PATH, HOME,
+      // LANG, NODE_ENV…) untouched, so ordinary commands are unaffected.
       const proc = crossSpawn(cmd, [], {
         cwd: ctx.cwd,
-        env: { ...process.env, FORCE_COLOR: '0' },
+        env: childEnv({ FORCE_COLOR: '0' }),
         shell: true,
         signal: ctx.signal,
       });
