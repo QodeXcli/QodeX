@@ -1,4 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   runSuite, scoreResults, diffRuns, formatRunReport, formatDiffReport,
   type EvalRun, type EvalSuite, type EvalTask, type TaskOutcome, type TaskResult,
@@ -161,6 +167,50 @@ describe('runSuite — isolation', () => {
     expect(elapsed).toBeLessThan(3000);
   });
 
+  /**
+   * REGRESSION GUARD (the timer must stay ref'd).
+   *
+   * The in-process test above cannot catch the real failure mode: vitest's own event loop
+   * keeps the process alive, so an unref'd timeout timer still fires there. In a bare
+   * `node script` — exactly how CI runs a suite of deterministic, I/O-free tasks — an
+   * unref'd timer is the ONLY pending handle, so Node exits before it fires: runSuite
+   * never settles, no report is printed, and the exit code is 0. A green CI over a run
+   * that never happened is the worst possible failure for this subsystem, so it is
+   * asserted in a real child process.
+   */
+  it('does not let the process exit before a hung task times out (real child process)', async () => {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const dir = mkdtempSync(path.join(tmpdir(), 'qodex-eval-hang-'));
+    const script = path.join(dir, 'hang.mts');
+    writeFileSync(script, [
+      `import { runSuite } from ${JSON.stringify(path.join(root, 'src/eval/index.js'))};`,
+      `process.stdout.write('START\\n');`,
+      // Deliberately NOT top-level await: with an unref'd timer this process exits 0
+      // and silently prints nothing more.
+      `runSuite({ name: 'hang', tasks: [`,
+      `  { id: 'hang', name: 'hangs', category: 'g', kind: 'deterministic', timeoutMs: 300,`,
+      `    run: () => new Promise(() => {}) },`,
+      `  { id: 'next', name: 'next', category: 'g', kind: 'deterministic',`,
+      `    run: async () => ({ status: 'pass' as const }) },`,
+      `] }).then(r => {`,
+      `  process.stdout.write('FINISHED ' + r.results.map(x => x.id + ':' + x.status + ':' + (x.reason ?? '')).join(' | ') + '\\n');`,
+      `});`,
+    ].join('\n'));
+
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'), script],
+      { cwd: root, timeout: 60_000, encoding: 'utf-8' },
+    );
+
+    expect(stdout).toContain('START');
+    // The load-bearing assertion: the run actually finished instead of the process
+    // evaporating at exit code 0.
+    expect(stdout).toContain('FINISHED');
+    expect(stdout).toContain('hang:fail:timed out after 300ms');
+    expect(stdout).toContain('next:pass');
+  }, 90_000);
+
   it('aborts the context signal when the timeout fires', async () => {
     let aborted = false;
     const t: EvalTask = {
@@ -200,6 +250,32 @@ describe('runSuite — isolation', () => {
     const r = await run(suiteOf('cfg', [probe]), { config: { compaction: 'aggressive' } });
     expect(seen).toBe('aggressive');
     expect(r.config).toEqual({ compaction: 'aggressive' });
+  });
+
+  it('isolates config: a task cannot rewrite the arm it (or any later task) is running under', async () => {
+    const saboteur: EvalTask = {
+      id: 'saboteur', name: 'mutates config', category: 'general', kind: 'deterministic',
+      async run(ctx) {
+        (ctx.config as Record<string, unknown>).compaction = 'HACKED';
+        return { status: 'pass' };
+      },
+    };
+    let seenByVictim: unknown = null;
+    const victim: EvalTask = {
+      id: 'victim', name: 'reads config', category: 'general', kind: 'deterministic',
+      async run(ctx) { seenByVictim = ctx.config.compaction; return { status: 'pass' }; },
+    };
+
+    const callerConfig = { compaction: 'aggressive' };
+    const r = await run(suiteOf('cfg-isolation', [saboteur, victim]), { config: callerConfig });
+
+    // the write throws (frozen + ESM strict mode) => the offending task fails loudly
+    expect(r.results[0].status).toBe('fail');
+    expect(r.results[0].reason).toMatch(/threw:/);
+    // ...and nothing downstream is contaminated
+    expect(seenByVictim).toBe('aggressive');
+    expect(r.config).toEqual({ compaction: 'aggressive' });
+    expect(callerConfig).toEqual({ compaction: 'aggressive' });
   });
 
   it('captures ctx.log lines per attempt without affecting the score', async () => {
@@ -260,9 +336,45 @@ describe('runSuite — repetition and variance', () => {
 
   it('reports zero stdev and no flakiness for a single repetition', async () => {
     const r = await run(suiteOf('single', [task('a', 'pass', { metrics: { tokens: 42 } })]));
+    // variance is ALWAYS populated, including at repeat: 1 (samples 1, stdev 0) — the
+    // schema comment used to claim it was empty here.
+    expect(Object.keys(r.results[0].variance)).toEqual(['tokens']);
     expect(r.results[0].variance.tokens.stdev).toBe(0);
     expect(r.results[0].variance.tokens.samples).toBe(1);
+    expect(r.results[0].variance.tokens.mean).toBe(42);
     expect(r.results[0].flaky).toBe(false);
+  });
+
+  it('does NOT credit a pass when other repetitions were unmeasurable', async () => {
+    const partly: EvalTask = {
+      id: 'partly', name: 'passes once, skips twice', category: 'e2e', kind: 'e2e',
+      async run(ctx) {
+        return ctx.repetition === 0
+          ? { status: 'pass' }
+          : { status: 'skip', reason: 'rate limited' };
+      },
+    };
+    const r = await run(suiteOf('mixed-skip', [partly, task('solid', 'pass')]), { repeat: 3 });
+
+    expect(r.results[0].statusCounts).toEqual({ pass: 1, fail: 0, skip: 2 });
+    // 1 pass + 2 skips is NOT a clean pass; it is unmeasurable, so it leaves the score.
+    expect(r.results[0].status).toBe('skip');
+    expect(r.results[0].flaky).toBe(true);
+    // and it says so rather than presenting a bare, unexplained skip
+    expect(r.results[0].reason).toContain('unmeasurable in 2/3 repetition(s)');
+    expect(r.results[0].reason).toContain('rate limited');
+    expect(r.results[0].reason).toContain('1 passed, not counted as a pass');
+    // excluded from BOTH numerator and denominator: it neither flatters nor penalises
+    expect(r.summary.skipped).toBe(1);
+    expect(r.summary.scored).toBe(1);
+    expect(r.summary.score0to100).toBe(100);
+  });
+
+  it('still reports a clean pass when every repetition passed', async () => {
+    const r = await run(suiteOf('clean', [task('a', 'pass')]), { repeat: 3 });
+    expect(r.results[0].statusCounts).toEqual({ pass: 3, fail: 0, skip: 0 });
+    expect(r.results[0].status).toBe('pass');
+    expect(r.summary.score0to100).toBe(100);
   });
 });
 
@@ -275,7 +387,9 @@ describe('diffRuns — the A/B primitive', () => {
     task('keep-pass', 'pass', { category: 'edit', metrics: { tokens: 100, costUsd: 0.02 } }),
     task('regress', 'pass', { category: 'edit', metrics: { tokens: 200 } }),
     task('improve', 'fail', { category: 'tools', reason: 'old harness lost the tool', metrics: { tokens: 300 } }),
-    task('gone', 'pass', { category: 'tools' }),
+    // NOTE: the removed/added tasks carry LARGE metrics on purpose — if the diff ever
+    // folded non-common tasks into the totals, the numbers below would move visibly.
+    task('gone', 'pass', { category: 'tools', metrics: { tokens: 9000, costUsd: 7 } }),
     task('becomes-skip', 'pass', { category: 'ctx' }),
   ]));
 
@@ -284,7 +398,7 @@ describe('diffRuns — the A/B primitive', () => {
     task('regress', 'fail', { category: 'edit', reason: 'new compaction dropped the file', metrics: { tokens: 150 } }),
     task('improve', 'pass', { category: 'tools', metrics: { tokens: 250 } }),
     task('becomes-skip', 'skip', { category: 'ctx', reason: 'gated off in config B' }),
-    task('brand-new', 'pass', { category: 'ctx' }),
+    task('brand-new', 'pass', { category: 'ctx', metrics: { tokens: 5000, costUsd: 3 } }),
   ]));
 
   it('detects regressions, improvements, new and removed tasks', async () => {
@@ -323,14 +437,61 @@ describe('diffRuns — the A/B primitive', () => {
   it('sums metric deltas over tasks common to both runs only', async () => {
     const d = diffRuns(await before(), await after());
     const tokens = d.metricDeltas.find(m => m.metric === 'tokens')!;
-    // common tasks: keep-pass 100->80, regress 200->150, improve 300->250 (gone/brand-new excluded)
+    // common tasks: keep-pass 100->80, regress 200->150, improve 300->250.
+    // `gone` (9000) and `brand-new` (5000) must NOT appear anywhere in these totals —
+    // they carry metrics precisely so that including them would break this assertion.
     expect(tokens.before).toBe(600);
     expect(tokens.after).toBe(480);
     expect(tokens.delta).toBe(-120);
     expect(tokens.pctChange).toBeCloseTo(-20, 6);
 
     const cost = d.metricDeltas.find(m => m.metric === 'costUsd')!;
+    expect(cost.before).toBeCloseTo(0.02, 6); // not 7.02 (gone), not 3.02 (brand-new)
+    expect(cost.after).toBeCloseTo(0.01, 6);
     expect(cost.delta).toBeCloseTo(-0.01, 6);
+    expect(d.byTask.map(t => t.id)).not.toContain('gone');
+    expect(d.byTask.map(t => t.id)).not.toContain('brand-new');
+  });
+
+  it('treats a metric that stopped being reported as unreported, never as a drop to zero', async () => {
+    const b = await run(suiteOf('s', [task('t', 'pass', { metrics: { tokens: 100 } })]));
+    // instrumentation broke in the B arm: the task reports no tokens at all
+    const a = await run(suiteOf('s', [task('t', 'pass')]));
+    const d = diffRuns(b, a);
+
+    const perTask = d.byTask.find(t => t.id === 't')!.deltas.find(m => m.metric === 'tokens')!;
+    expect(perTask.before).toBe(100);
+    expect(perTask.after).toBeNull();      // NOT 0
+    expect(perTask.delta).toBeNull();      // NOT -100
+    expect(perTask.pctChange).toBeNull();  // NOT a phantom -100% "saving"
+    expect(perTask.unreported).toBe('after');
+
+    const total = d.metricDeltas.find(m => m.metric === 'tokens')!;
+    expect(total.before).toBeNull();
+    expect(total.after).toBeNull();
+    expect(total.delta).toBeNull();
+    expect(total.unreportedTasks).toBe(1);
+
+    const text = formatDiffReport(d);
+    expect(text).toContain('| tokens | unreported | unreported | n/a |');
+    expect(text).toContain('reported this in only one run');
+    expect(text).not.toContain('-100.0%');
+  });
+
+  it('excludes a half-reported task from the totals while still summing the rest', async () => {
+    const mk = (bothTokens: number, halfTokens: Record<string, number>) => suiteOf('s', [
+      task('full', 'pass', { metrics: { tokens: bothTokens } }),
+      task('half', 'pass', { metrics: halfTokens }),
+    ]);
+    const b = await run(mk(100, { tokens: 999 }));
+    const a = await run(mk(80, {}));
+    const d = diffRuns(b, a);
+
+    const total = d.metricDeltas.find(m => m.metric === 'tokens')!;
+    expect(total.before).toBe(100); // 999 is NOT summed against a missing counterpart
+    expect(total.after).toBe(80);
+    expect(total.delta).toBe(-20);
+    expect(total.unreportedTasks).toBe(1);
   });
 
   it('reports pctChange as null instead of Infinity when the baseline is zero', async () => {
@@ -426,6 +587,23 @@ describe('reports — deterministic rendering', () => {
     expect(d1.scoreDelta).toBe(0);
     expect(text).toContain('Score 50.0 → 50.0 (0.0)');
     expect(text).toContain('| tokens | 30 | 32 | +2 |');
+  });
+
+  it('never leaves a failing task with a blank Notes cell', async () => {
+    const silent: EvalTask = {
+      id: 'silent', name: 'fails quietly', category: 'edit', kind: 'deterministic',
+      async run() { return { status: 'fail' }; },
+    };
+    const text = formatRunReport(await run(suiteOf('s', [silent])));
+    expect(text).toContain('| silent | fail | edit | deterministic | (no reason given) |');
+  });
+
+  it('never renders a tiny but nonzero metric as 0', async () => {
+    const b = await run(suiteOf('s', [task('t', 'pass', { metrics: { costUsd: 0 } })]));
+    const a = await run(suiteOf('s', [task('t', 'pass', { metrics: { costUsd: 0.000012 } })]));
+    const text = formatDiffReport(diffRuns(b, a));
+    // a fraction-of-a-cent cost is small, not absent — "0" would read as "not measured"
+    expect(text).toContain('| costUsd | 0 | 1.20e-5 | +1.20e-5 |');
   });
 
   it('surfaces a variance table when repetitions disagree on a metric', async () => {

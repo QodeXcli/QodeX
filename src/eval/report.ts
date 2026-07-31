@@ -31,7 +31,15 @@ const DEFAULT_REASON_CHARS = 120;
 function num(n: number): string {
   if (!Number.isFinite(n)) return String(n);
   if (Number.isInteger(n)) return String(n);
+  // A tiny-but-nonzero value (a fraction-of-a-cent cost, say) must never render as "0" —
+  // that reads as "not measured" and understates a real number. Fall back to exponential.
+  if (Math.abs(n) < 1e-4) return n.toExponential(2);
   return n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/** null in a MetricDelta means UNREPORTED, which must never be rendered as 0. */
+function numOrNa(n: number | null): string {
+  return n === null ? 'unreported' : num(n);
 }
 
 function score(n: number): string {
@@ -96,7 +104,11 @@ export function formatRunReport(run: EvalRun, options: ReportOptions = {}): stri
   out.push(`| Task | Status | Category | Kind |${timings ? ' Time |' : ''} Notes |`);
   out.push(`|---|---|---|---|${timings ? '---|' : ''}---|`);
   for (const r of run.results) {
-    const note = r.status === 'pass' && !r.flaky ? '' : cell(r.reason ?? (r.status === 'skip' ? '(no reason given)' : ''), maxReason);
+    // Any non-pass row must carry an explanation. A reasonless `fail` with a blank Notes
+    // cell is indistinguishable from a rendering bug — say that the task gave no reason.
+    const note = r.status === 'pass' && !r.flaky
+      ? ''
+      : cell(r.reason ?? (r.status === 'pass' ? '' : '(no reason given)'), maxReason);
     const time = timings ? ` ${r.durationMs.toFixed(0)}ms |` : '';
     out.push(`| ${cell(r.id)} | ${statusLabel(r)} | ${cell(r.category)} | ${r.kind} |${time} ${note} |`);
   }
@@ -133,10 +145,15 @@ function flipTable(title: string, flips: TaskFlip[], maxReason: number): string[
 
 function metricTable(deltas: MetricDelta[]): string[] {
   if (deltas.length === 0) return [];
-  const out: string[] = ['## Metric deltas', '', '| Metric | Before | After | Delta | Change |', '|---|---|---|---|---|'];
+  const out: string[] = ['## Metric deltas', '', '| Metric | Before | After | Delta | Change | Note |', '|---|---|---|---|---|---|'];
   for (const d of deltas) {
     const change = d.pctChange === null ? 'n/a' : `${d.pctChange > 0 ? '+' : ''}${d.pctChange.toFixed(1)}%`;
-    out.push(`| ${cell(d.metric)} | ${num(d.before)} | ${num(d.after)} | ${signed(d.delta)} | ${change} |`);
+    // A metric that stopped being emitted is a measurement gap, not a saving — say so
+    // rather than letting the reader book it as an improvement.
+    const note = d.unreportedTasks
+      ? `${d.unreportedTasks} task(s) reported this in only one run — excluded, NOT a change`
+      : '';
+    out.push(`| ${cell(d.metric)} | ${numOrNa(d.before)} | ${numOrNa(d.after)} | ${d.delta === null ? 'n/a' : signed(d.delta)} | ${change} | ${note} |`);
   }
   out.push('');
   return out;

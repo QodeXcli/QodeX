@@ -31,11 +31,22 @@ export interface TaskFlip {
 
 export interface MetricDelta {
   metric: string;
-  before: number;
-  after: number;
-  delta: number;
-  /** null when `before` is 0 — a percentage against zero is meaningless, not Infinity. */
+  /**
+   * null means NOT REPORTED by that run — which is not the same as zero. Instrumentation
+   * that silently stops emitting a metric would otherwise render as a 100% reduction, a
+   * phantom "improvement" from a measurement that simply vanished. Same honesty rule as
+   * `skip` on the status side: unmeasured is its own state.
+   */
+  before: number | null;
+  after: number | null;
+  /** null when either side is unreported — a vanished metric is not a change to 0. */
+  delta: number | null;
+  /** null when `before` is 0 or unreported — a percentage against zero is meaningless. */
   pctChange: number | null;
+  /** Per-task entries: which side failed to report this metric. */
+  unreported?: 'before' | 'after';
+  /** Totals only: how many common tasks were excluded because only one side reported. */
+  unreportedTasks?: number;
 }
 
 export interface TaskMetricDelta {
@@ -68,7 +79,11 @@ export interface RunDiff {
   newTasks: string[];
   /** Ids only in `before`. Not counted as regressions — they were removed, not broken. */
   removedTasks: string[];
-  /** Metric totals summed over tasks COMMON to both runs (so adds/removes can't skew it). */
+  /**
+   * Metric totals summed over the tasks COMMON to both runs (so adds/removes can't skew
+   * it) that reported the metric in BOTH runs (so a metric that stopped being emitted
+   * can't masquerade as a reduction). `unreportedTasks` discloses the exclusions.
+   */
   metricDeltas: MetricDelta[];
   /** Per-task metric movement, for the tasks common to both runs. */
   byTask: TaskMetricDelta[];
@@ -110,6 +125,10 @@ export function diffRuns(before: EvalRun, after: EvalRun): RunDiff {
 
   const beforeTotals: Record<string, number> = {};
   const afterTotals: Record<string, number> = {};
+  /** Common tasks that reported the metric on both sides — the only ones summed. */
+  const pairedCounts: Record<string, number> = {};
+  /** Common tasks that reported the metric on exactly one side. Disclosed, never summed. */
+  const unreportedCounts: Record<string, number> = {};
 
   const commonIds = [...a.keys()].filter(id => b.has(id)).sort();
 
@@ -145,10 +164,26 @@ export function diffRuns(before: EvalRun, after: EvalRun): RunDiff {
     ]);
     const deltas: MetricDelta[] = [];
     for (const key of [...keys].sort()) {
-      const bv = key === 'durationMs' && br.metrics[key] === undefined ? br.durationMs : (br.metrics[key] ?? 0);
-      const av = key === 'durationMs' && ar.metrics[key] === undefined ? ar.durationMs : (ar.metrics[key] ?? 0);
+      // `durationMs` is always available from the runner; anything else is `null` —
+      // i.e. UNREPORTED — when the task did not emit it. Never coerce that to 0.
+      const isDuration = key === 'durationMs';
+      const bv = br.metrics[key] ?? (isDuration ? br.durationMs : null);
+      const av = ar.metrics[key] ?? (isDuration ? ar.durationMs : null);
+
+      if (bv === null || av === null) {
+        unreportedCounts[key] = (unreportedCounts[key] ?? 0) + 1;
+        beforeTotals[key] ??= 0;
+        afterTotals[key] ??= 0;
+        deltas.push({
+          metric: key, before: bv, after: av, delta: null, pctChange: null,
+          unreported: bv === null ? 'before' : 'after',
+        });
+        continue;
+      }
+
       beforeTotals[key] = (beforeTotals[key] ?? 0) + bv;
       afterTotals[key] = (afterTotals[key] ?? 0) + av;
+      pairedCounts[key] = (pairedCounts[key] ?? 0) + 1;
       if (bv !== av) deltas.push({ metric: key, before: bv, after: av, delta: av - bv, pctChange: pct(bv, av) });
     }
     if (deltas.length) byTask.push({ id, deltas });
@@ -156,9 +191,18 @@ export function diffRuns(before: EvalRun, after: EvalRun): RunDiff {
 
   const metricDeltas: MetricDelta[] = [];
   for (const key of Object.keys(beforeTotals).sort()) {
+    const unreportedTasks = unreportedCounts[key] ?? 0;
+    if ((pairedCounts[key] ?? 0) === 0) {
+      // Nobody reported it on both sides: there is no comparable total. Say "unknown",
+      // not "0" — the latter would invent a change that was never measured.
+      metricDeltas.push({ metric: key, before: null, after: null, delta: null, pctChange: null, unreportedTasks });
+      continue;
+    }
     const bv = beforeTotals[key];
     const av = afterTotals[key] ?? 0;
-    metricDeltas.push({ metric: key, before: bv, after: av, delta: av - bv, pctChange: pct(bv, av) });
+    const d: MetricDelta = { metric: key, before: bv, after: av, delta: av - bv, pctChange: pct(bv, av) };
+    if (unreportedTasks > 0) d.unreportedTasks = unreportedTasks;
+    metricDeltas.push(d);
   }
 
   const byId = (x: TaskFlip, y: TaskFlip) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);

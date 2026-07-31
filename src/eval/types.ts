@@ -37,6 +37,10 @@ export interface EvalContext {
   /**
    * The knobs being varied. THIS is the A/B primitive at the task level: run the same
    * suite twice with two configs, then `diffRuns` the two `EvalRun`s.
+   *
+   * A FROZEN copy of what the caller passed: it identifies which arm the run belongs to,
+   * so a task must not be able to rewrite it out from under the other tasks. Writing to
+   * it throws.
    */
   config: Readonly<Record<string, unknown>>;
   /** Free-form diagnostic sink. Captured per attempt; never affects scoring. */
@@ -98,9 +102,12 @@ export interface TaskResult {
   kind: TaskKind;
   /**
    * Aggregate across attempts, conservatively:
-   *   any attempt failed  -> 'fail'
-   *   else any passed     -> 'pass'
-   *   else                -> 'skip'
+   *   any attempt failed        -> 'fail'
+   *   else pass and skip mixed  -> 'skip'  (measured once, unmeasurable another time is
+   *                                        NOT a trustworthy pass — it is excluded from
+   *                                        the score entirely, and `reason` says so)
+   *   else any passed           -> 'pass'
+   *   else                      -> 'skip'
    */
   status: TaskStatus;
   reason?: string;
@@ -112,7 +119,10 @@ export interface TaskResult {
   flaky: boolean;
   /** Mean of each metric across attempts that reported it. */
   metrics: Record<string, number>;
-  /** Spread of each metric across attempts. Empty when `repeat` is 1. */
+  /**
+   * Spread of each metric across attempts. Always populated for every reported metric —
+   * with `repeat: 1` the entry is still there, with `samples: 1` and `stdev: 0`.
+   */
   variance: Record<string, MetricStats>;
   /** Mean wall time across attempts. Never included in byte-stable reports. */
   durationMs: number;

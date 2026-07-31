@@ -27,7 +27,11 @@ export interface EvalFilter {
 export interface RunSuiteOptions {
   /** Runs per task. Default 1. Values < 1 are clamped to 1. */
   repeat?: number;
-  /** Default per-task timeout in ms. Default 30_000. `0`/`Infinity` disables it. */
+  /**
+   * Default per-task timeout in ms. Default 30_000. `0`/`Infinity` disables it — and
+   * with it disabled a hung task really does hang the run, so that is an explicit
+   * caller decision, not the default.
+   */
   timeoutMs?: number;
   filter?: EvalFilter;
   /** The configuration under test — echoed into the run so A/B diffs are self-describing. */
@@ -123,8 +127,11 @@ async function runAttempt(
         try { controller.abort(); } catch { /* AbortController is best-effort */ }
         resolve({ status: 'fail', reason: `timed out after ${timeoutMs}ms` });
       }, timeoutMs);
-      // Never let a pending eval timer hold the process open.
-      (timer as unknown as { unref?: () => void }).unref?.();
+      // DO NOT unref() this timer. A deterministic (layer-a) task that hangs has no I/O
+      // of its own keeping the event loop alive, so an unref'd timer would let Node exit
+      // BEFORE the timeout fires: runSuite never settles, no report is printed, and CI
+      // reads the exit code 0 as success. The timer is always cleared in `finally`, so
+      // holding the loop open costs at most `timeoutMs`.
     }));
   }
 
@@ -147,9 +154,22 @@ async function runAttempt(
   return { outcome, durationMs: Math.max(0, now() - start) };
 }
 
-/** Conservative aggregation: one failure among N repetitions makes the task a failure. */
+/**
+ * Conservative aggregation, in priority order:
+ *   1. any attempt failed                 -> 'fail'  (noise is never averaged away)
+ *   2. attempts mix 'pass' and 'skip'     -> 'skip'  (see below)
+ *   3. any attempt passed                 -> 'pass'
+ *   4. otherwise                          -> 'skip'
+ *
+ * Rule 2 is a deliberate decision, not a fallout of the ordering. "It passed once and was
+ * unmeasurable the other two times" is not a trustworthy pass, and crediting it would be
+ * the same sin as scoring a skip as a pass. Reporting it as a skip removes it from BOTH
+ * the numerator and the denominator, so it neither flatters nor penalises the run; the
+ * pass is still fully visible in `statusCounts` and `flaky`.
+ */
 function aggregateStatus(counts: Record<TaskStatus, number>): TaskStatus {
   if (counts.fail > 0) return 'fail';
+  if (counts.pass > 0 && counts.skip > 0) return 'skip';
   if (counts.pass > 0) return 'pass';
   return 'skip';
 }
@@ -158,7 +178,12 @@ export async function runSuite(suite: EvalSuite, options: RunSuiteOptions = {}):
   const now = options.now ?? (() => Date.now());
   const repeat = Math.max(1, Math.floor(options.repeat ?? 1));
   const defaultTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const config = options.config ?? {};
+  // Frozen shallow COPY: `config` is the label that says which A/B arm this run belongs
+  // to. Handing tasks the caller's own object let a task mutate it, contaminating every
+  // later task, the emitted `run.config`, and the caller's variable — a run could end up
+  // self-describing as the wrong arm. Freezing makes the write throw (ESM is strict), so
+  // the offending task fails loudly instead of corrupting the comparison.
+  const config = Object.freeze({ ...(options.config ?? {}) });
 
   const seen = new Set<string>();
   for (const t of suite.tasks) {
@@ -200,6 +225,13 @@ export async function runSuite(suite: EvalSuite, options: RunSuiteOptions = {}):
     // 'fail' result explains the failure rather than quoting a passing repetition.
     const representative = attempts.find(a => a.status === status) ?? attempts[0];
 
+    // A pass/skip mix aggregates to 'skip' (see aggregateStatus). Say so explicitly —
+    // a bare 'skip' would hide that the task did pass at least once.
+    const partlyUnmeasurable = statusCounts.fail === 0 && statusCounts.pass > 0 && statusCounts.skip > 0;
+    const reason = partlyUnmeasurable
+      ? `unmeasurable in ${statusCounts.skip}/${attempts.length} repetition(s)${representative?.reason ? `: ${representative.reason}` : ''} — ${statusCounts.pass} passed, not counted as a pass`
+      : representative?.reason;
+
     const metricSamples: Record<string, number[]> = {};
     for (const a of attempts) {
       for (const [k, v] of Object.entries(a.metrics)) (metricSamples[k] ||= []).push(v);
@@ -219,7 +251,7 @@ export async function runSuite(suite: EvalSuite, options: RunSuiteOptions = {}):
       category: task.category,
       kind: task.kind,
       status,
-      reason: representative?.reason,
+      reason,
       detail: representative?.detail,
       attempts,
       statusCounts,
