@@ -297,6 +297,32 @@ describe('cache tasks fail on a broken harness', () => {
   }, TIMEOUT);
 });
 
+describe('gating-follows-intent fails in BOTH directions', () => {
+  it('fails when a natural phrasing loses the tool it needs', async () => {
+    const real = realProbes();
+    const r = await expectFailsWith('tools.gating-follows-intent', {
+      // Simulate the old behaviour: artifact_* survives only if the word "artifact" is used.
+      gateSchemas: (schemas, signal) =>
+        real.gateSchemas(schemas, signal)
+          .filter(s => !s.function.name.startsWith('artifact_') || /artifact/i.test(signal)),
+    });
+    expect(r.reason).toMatch(/lose the tool they need|artifact_create/);
+  }, TIMEOUT);
+
+  it('ALSO fails when gating stops trimming — passing must not be achievable by giving up', async () => {
+    const r = await expectFailsWith('tools.gating-follows-intent', {
+      gateSchemas: schemas => schemas, // every tool, every turn
+    });
+    expect(r.reason).toMatch(/stopped trimming/);
+  }, TIMEOUT);
+
+  it('passes on the real harness', async () => {
+    const r = await runOne('tools.gating-follows-intent');
+    expect(r.status).toBe('pass');
+    expect(r.metrics.intentCasesKept).toBeGreaterThan(0);
+  }, TIMEOUT);
+});
+
 describe('usage-calibration fails on a description with no exit criterion', () => {
   it('flags a ceremony tool that only says when TO use it', async () => {
     const r = await expectFailsWith('tools.usage-calibration', {

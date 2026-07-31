@@ -21,7 +21,7 @@
             "toolCount": 125,
             "toolTokenBudget": 36000
           },
-          "durationMs": 13,
+          "durationMs": 21,
           "logs": []
         }
       ],
@@ -59,7 +59,7 @@
           "samples": 1
         }
       },
-      "durationMs": 13
+      "durationMs": 21
     },
     {
       "id": "tools.gating-keeps-essentials",
@@ -77,7 +77,7 @@
             "gatedWorstTokens": 14970,
             "gatedTokenBudget": 18000
           },
-          "durationMs": 8,
+          "durationMs": 30,
           "logs": [
             "edit: 48/125 tools, 13745 tok — all required tools present",
             "review-and-commit: 48/125 tools, 13745 tok — all required tools present",
@@ -120,7 +120,7 @@
           "samples": 1
         }
       },
-      "durationMs": 8
+      "durationMs": 30
     },
     {
       "id": "tools.description-ambiguity",
@@ -137,7 +137,7 @@
             "maxSimilarity": 0.4762,
             "ambiguousPairs": 0
           },
-          "durationMs": 18,
+          "durationMs": 39,
           "logs": []
         }
       ],
@@ -167,7 +167,54 @@
           "samples": 1
         }
       },
-      "durationMs": 18
+      "durationMs": 39
+    },
+    {
+      "id": "tools.gating-follows-intent",
+      "name": "Gating keys on task intent, not on tool vocabulary",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "6/6 intent phrasings keep their tool; a bare question keeps 20/125 tools",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "6/6 intent phrasings keep their tool; a bare question keeps 20/125 tools",
+          "metrics": {
+            "intentCasesKept": 6,
+            "questionToolCount": 20
+          },
+          "durationMs": 4,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "intentCasesKept": 6,
+        "questionToolCount": 20
+      },
+      "variance": {
+        "intentCasesKept": {
+          "mean": 6,
+          "min": 6,
+          "max": 6,
+          "stdev": 0,
+          "samples": 1
+        },
+        "questionToolCount": {
+          "mean": 20,
+          "min": 20,
+          "max": 20,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 4
     },
     {
       "id": "tools.usage-calibration",
@@ -184,7 +231,7 @@
             "ceremonyToolsChecked": 3,
             "missingExitCriterion": 0
           },
-          "durationMs": 2,
+          "durationMs": 3,
           "logs": []
         }
       ],
@@ -214,7 +261,7 @@
           "samples": 1
         }
       },
-      "durationMs": 2
+      "durationMs": 3
     },
     {
       "id": "tools.schema-validity",
@@ -231,7 +278,7 @@
             "toolsInspected": 125,
             "schemaProblems": 0
           },
-          "durationMs": 2,
+          "durationMs": 3,
           "logs": []
         }
       ],
@@ -261,7 +308,7 @@
           "samples": 1
         }
       },
-      "durationMs": 2
+      "durationMs": 3
     },
     {
       "id": "prompt.token-budget",
@@ -413,7 +460,7 @@
             "phantomToolRefs": 0,
             "refsUnavailableInMode": 0
           },
-          "durationMs": 3,
+          "durationMs": 7,
           "logs": []
         }
       ],
@@ -443,7 +490,7 @@
           "samples": 1
         }
       },
-      "durationMs": 3
+      "durationMs": 7
     },
     {
       "id": "cache.prefix-byte-stable",
@@ -460,7 +507,7 @@
             "prefixInstabilities": 0,
             "toolSchemaBytes": 74602
           },
-          "durationMs": 3,
+          "durationMs": 4,
           "logs": []
         }
       ],
@@ -490,7 +537,7 @@
           "samples": 1
         }
       },
-      "durationMs": 3
+      "durationMs": 4
     },
     {
       "id": "cache.volatile-sections-last",
@@ -509,7 +556,7 @@
             "sharedPrefixOnTaskClassChange": 17058,
             "sharedPrefixRatio": 0.9134
           },
-          "durationMs": 5,
+          "durationMs": 2,
           "logs": [
             "tree@16994, tree-change shared prefix 17029, addendum-change shared prefix 17058"
           ]
@@ -557,7 +604,7 @@
           "samples": 1
         }
       },
-      "durationMs": 5
+      "durationMs": 2
     },
     {
       "id": "cache.breakpoint-layout",
@@ -631,7 +678,7 @@
             "orphanProblems": 0,
             "turnsCompacted": 4
           },
-          "durationMs": 266,
+          "durationMs": 253,
           "logs": [
             "raw: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
             "spill: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
@@ -679,7 +726,7 @@
           "samples": 1
         }
       },
-      "durationMs": 266
+      "durationMs": 253
     },
     {
       "id": "history.orphan-repair",
@@ -745,7 +792,7 @@
             "turnsCompacted": 3,
             "summarizerInputChars": 29642
           },
-          "durationMs": 1,
+          "durationMs": 4,
           "logs": []
         }
       ],
@@ -791,7 +838,7 @@
           "samples": 1
         }
       },
-      "durationMs": 1
+      "durationMs": 4
     },
     {
       "id": "history.dedup-rewrites-only",
@@ -947,7 +994,7 @@
             "errorLoopProblems": 0,
             "errorLoopCount": 3
           },
-          "durationMs": 0,
+          "durationMs": 1,
           "logs": []
         }
       ],
@@ -977,7 +1024,7 @@
           "samples": 1
         }
       },
-      "durationMs": 0
+      "durationMs": 1
     },
     {
       "id": "recovery.read-loop-ladder",
@@ -994,7 +1041,7 @@
             "ladderProblems": 0,
             "ladderPoints": 7
           },
-          "durationMs": 1,
+          "durationMs": 0,
           "logs": []
         }
       ],
@@ -1024,15 +1071,15 @@
           "samples": 1
         }
       },
-      "durationMs": 1
+      "durationMs": 0
     }
   ],
   "summary": {
-    "total": 18,
-    "passed": 18,
+    "total": 19,
+    "passed": 19,
     "failed": 0,
     "skipped": 0,
-    "scored": 18,
+    "scored": 19,
     "score0to100": 100,
     "flaky": 0,
     "byCategory": {
@@ -1069,11 +1116,11 @@
         "score0to100": 100
       },
       "tool-surface": {
-        "total": 5,
-        "passed": 5,
+        "total": 6,
+        "passed": 6,
         "failed": 0,
         "skipped": 0,
-        "scored": 5,
+        "scored": 6,
         "score0to100": 100
       }
     }

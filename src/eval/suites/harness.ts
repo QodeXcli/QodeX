@@ -572,6 +572,46 @@ export function createHarnessSuite(opts: HarnessSuiteOptions = {}): EvalSuite {
       // todo_write firing on every request including single-line edits; the cause was a
       // description that said "use this to track multi-step work … update frequently" and
       // never said when not to. The negative half is what creates judgement.
+      // The gate was keyed on the TOOL's own vocabulary rather than on task INTENT: it kept
+      // artifact_* only for the literal word "artifact", and browser_* only for "browser".
+      // So "redesign the landing page", "build me a dashboard UI" and "check how the page
+      // looks" — the natural ways to ask — lost those tools on the OPENING turn, exactly when
+      // the model chooses its approach. The ratchet restores them later, but only if the user
+      // happens to say the magic word. Short git asks failed the same way: "commit and open a
+      // PR" was judged a trivial turn and got CORE tools only.
+      det('tools.gating-follows-intent', 'Gating keys on task intent, not on tool vocabulary', 'tool-surface', async () => {
+        const all = P.toolSchemas({ mode: 'normal' });
+        const kept = (task: string, tool: string) =>
+          P.gateSchemas(all, task).some(s => s.function?.name === tool);
+        // Each case is phrased the way a user actually asks — never using the tool's own name.
+        const CASES: { task: string; tool: string }[] = [
+          { task: 'redesign the landing page to look modern', tool: 'artifact_create' },
+          { task: 'build me a dashboard UI', tool: 'artifact_create' },
+          { task: 'make the homepage prettier', tool: 'artifact_create' },
+          { task: 'check how the page looks', tool: 'browser_navigate' },
+          { task: 'does the page look right?', tool: 'browser_navigate' },
+          { task: 'commit and open a PR', tool: 'git_create_pr' },
+        ];
+        const missing = CASES.filter(c => !kept(c.task, c.tool));
+        // The other half of the trade: gating must still TRIM. If a fix to the above simply
+        // stopped gating, this probe would pass while the real benefit was gone.
+        const lean = P.gateSchemas(all, 'who are you?').length;
+        const tooLoose = lean > Math.ceil(all.length * 0.4);
+        const detail =
+          `${CASES.length - missing.length}/${CASES.length} intent phrasings keep their tool; ` +
+          `a bare question keeps ${lean}/${all.length} tools` +
+          (missing.length ? `\nmissing: ${missing.map(m => `${m.tool} for "${m.task}"`).join('; ')}` : '') +
+          (tooLoose ? '\ngating has stopped trimming — a question should not carry the whole toolset' : '');
+        return verdict(
+          missing.length === 0 && !tooLoose,
+          missing.length
+            ? `${missing.length} natural phrasing(s) lose the tool they need: ${missing.slice(0, 2).map(m => m.tool).join(', ')}`
+            : 'gating stopped trimming — a bare question now carries most of the toolset',
+          detail,
+          { intentCasesKept: CASES.length - missing.length, questionToolCount: lean },
+        );
+      }),
+
       det('tools.usage-calibration', 'Ceremony tools say when NOT to use them', 'tool-surface', async () => {
         // Process/ceremony tools, where over-use is visible and annoying — not action tools.
         const CEREMONY = ['todo_write', 'present_plan', 'project_log', 'remember'];
