@@ -98,9 +98,14 @@ export function isPlanningToolCall(name: string, args: any): boolean {
 
 export const PREFLIGHT_MESSAGE =
   '[ARCHITECTURE_GATE] This looks like a build/refactor task and no plan exists yet. ' +
-  'Before the first code change, lay out the plan: the approach, the files/modules you will ' +
-  'create or change, and the key design decisions — either written briefly in your reply, or by ' +
-  'writing a short DESIGN.md / using todo_write. THEN implement. For a genuinely multi-domain ' +
+  // The gate wants a PLAN, not a ceremony artifact. Naming todo_write as an equal option made
+  // it the cheapest way to make the block disappear, so the model learned to fire it at
+  // anything that tripped the gate — a large part of why todo lists showed up on trivial work.
+  // Prose first: for most tasks it is the right size.
+  'Before the first code change, state the plan in your reply: the approach, the files/modules you will ' +
+  'create or change, and the key design decisions. A few honest sentences is usually the right size — ' +
+  'reach for a DESIGN.md or a todo list only when the work genuinely has several distinct stages worth ' +
+  'tracking. THEN implement. For a genuinely multi-domain ' +
   'task (frontend + backend + database), prefer decomposing it with `orchestrate` rather than ' +
   'writing everything linearly. ' +
   '(This fires at most once per task to keep the work architected, not rushed — it will NOT block you again this turn.)';

@@ -566,6 +566,62 @@ export function createHarnessSuite(opts: HarnessSuiteOptions = {}): EvalSuite {
         );
       }),
 
+      // Calibration, not compliance. A tool description that only says WHEN TO USE a tool —
+      // with an unconditional imperative and no exit criterion — produces over-use, because
+      // the model has no basis to decide "not this time". The reported symptom was
+      // todo_write firing on every request including single-line edits; the cause was a
+      // description that said "use this to track multi-step work … update frequently" and
+      // never said when not to. The negative half is what creates judgement.
+      det('tools.usage-calibration', 'Ceremony tools say when NOT to use them', 'tool-surface', async () => {
+        // Process/ceremony tools, where over-use is visible and annoying — not action tools.
+        const CEREMONY = ['todo_write', 'present_plan', 'project_log', 'remember'];
+        // Phrasings that push toward more use with no bound.
+        const UNBOUNDED = [
+          /update (this )?(frequently|often|regularly)/i,
+          /after every (meaningful )?step/i,
+          /\balways use\b/i,
+          /use (this|it) for (all|any|every)\b/i,
+        ];
+        // Phrasings that give the model an exit — a threshold or an explicit exclusion.
+        const HAS_EXIT = [
+          /\bdon'?t use\b/i, /\bdo not use\b/i, /\bskip (this|it)\b/i, /\bavoid\b[^.]*\bwhen\b/i,
+          /\bnot (needed|worth it|for)\b/i, /\bunnecessary\b/i, /\bonly (use|when)\b/i,
+          /\b\d+\+?\s*(or more\s*)?(distinct\s*)?steps?\b/i, /\bsingle[- ](file|step)\b/i,
+          /\btrivial\b/i,
+          // Restraint phrased as a budget rather than a prohibition. `remember` says
+          // "Use SPARINGLY … transient task details should stay in conversation", which is a
+          // genuine exit criterion — an earlier version of this probe missed it and flagged a
+          // description that was already correct. A probe that cries wolf gets ignored, so
+          // detection is widened rather than the wording churned to satisfy the checker.
+          /\bsparingly\b/i, /\bshould stay\b/i, /\brarely\b/i,
+        ];
+        const schemas = P.toolSchemas({ mode: 'normal' });
+        const problems: string[] = [];
+        const checked: string[] = [];
+        for (const name of CEREMONY) {
+          const s = schemas.find(x => x.function?.name === name);
+          if (!s) continue; // not registered in this profile — nothing to judge
+          checked.push(name);
+          const d = s.function.description ?? '';
+          const pushes = UNBOUNDED.some(re => re.test(d));
+          const exits = HAS_EXIT.some(re => re.test(d));
+          if (!exits) {
+            problems.push(
+              `${name}: no "when NOT to use" guidance${pushes ? ' AND an unconditional "use it more" imperative' : ''}`,
+            );
+          }
+        }
+        const detail =
+          `checked ${checked.length} ceremony tool(s): ${checked.join(', ') || '(none registered)'}\n` +
+          (problems.length ? problems.join('\n') : 'all carry an explicit non-use criterion');
+        return verdict(
+          problems.length === 0,
+          `${problems.length} ceremony tool(s) lack a non-use criterion, which reads as "use me always": ${problems.slice(0, 2).join('; ')}`,
+          detail,
+          { ceremonyToolsChecked: checked.length, missingExitCriterion: problems.length },
+        );
+      }),
+
       det('tools.schema-validity', 'Every tool has a description and a usable schema', 'tool-surface', async () => {
         const schemas = P.toolSchemas({ mode: 'normal' });
         const problems: string[] = [];

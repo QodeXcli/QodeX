@@ -11,17 +11,17 @@
       "category": "tool-surface",
       "kind": "deterministic",
       "status": "pass",
-      "detail": "tool definitions (mode=normal): 31840 tokens over 125 tools vs budget 36000 (88.4% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
+      "detail": "tool definitions (mode=normal): 31896 tokens over 125 tools vs budget 36000 (88.6% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
       "attempts": [
         {
           "status": "pass",
-          "detail": "tool definitions (mode=normal): 31840 tokens over 125 tools vs budget 36000 (88.4% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
+          "detail": "tool definitions (mode=normal): 31896 tokens over 125 tools vs budget 36000 (88.6% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
           "metrics": {
-            "toolTokens": 31840,
+            "toolTokens": 31896,
             "toolCount": 125,
             "toolTokenBudget": 36000
           },
-          "durationMs": 20,
+          "durationMs": 13,
           "logs": []
         }
       ],
@@ -34,7 +34,7 @@
       "metrics": {
         "toolCount": 125,
         "toolTokenBudget": 36000,
-        "toolTokens": 31840
+        "toolTokens": 31896
       },
       "variance": {
         "toolCount": {
@@ -52,14 +52,14 @@
           "samples": 1
         },
         "toolTokens": {
-          "mean": 31840,
-          "min": 31840,
-          "max": 31840,
+          "mean": 31896,
+          "min": 31896,
+          "max": 31896,
           "stdev": 0,
           "samples": 1
         }
       },
-      "durationMs": 20
+      "durationMs": 13
     },
     {
       "id": "tools.gating-keeps-essentials",
@@ -67,22 +67,22 @@
       "category": "tool-surface",
       "kind": "deterministic",
       "status": "pass",
-      "detail": "edit: 48/125 tools, 13689 tok — all required tools present\nreview-and-commit: 48/125 tools, 13689 tok — all required tools present\ndocker-debug: 54/125 tools, 14914 tok — all required tools present\nweb-research: 52/125 tools, 14484 tok — all required tools present\nworst gated payload 14914 tokens vs budget 18000",
+      "detail": "edit: 48/125 tools, 13745 tok — all required tools present\nreview-and-commit: 48/125 tools, 13745 tok — all required tools present\ndocker-debug: 54/125 tools, 14970 tok — all required tools present\nweb-research: 52/125 tools, 14540 tok — all required tools present\nworst gated payload 14970 tokens vs budget 18000",
       "attempts": [
         {
           "status": "pass",
-          "detail": "edit: 48/125 tools, 13689 tok — all required tools present\nreview-and-commit: 48/125 tools, 13689 tok — all required tools present\ndocker-debug: 54/125 tools, 14914 tok — all required tools present\nweb-research: 52/125 tools, 14484 tok — all required tools present\nworst gated payload 14914 tokens vs budget 18000",
+          "detail": "edit: 48/125 tools, 13745 tok — all required tools present\nreview-and-commit: 48/125 tools, 13745 tok — all required tools present\ndocker-debug: 54/125 tools, 14970 tok — all required tools present\nweb-research: 52/125 tools, 14540 tok — all required tools present\nworst gated payload 14970 tokens vs budget 18000",
           "metrics": {
             "gatedMissing": 0,
-            "gatedWorstTokens": 14914,
+            "gatedWorstTokens": 14970,
             "gatedTokenBudget": 18000
           },
-          "durationMs": 15,
+          "durationMs": 8,
           "logs": [
-            "edit: 48/125 tools, 13689 tok — all required tools present",
-            "review-and-commit: 48/125 tools, 13689 tok — all required tools present",
-            "docker-debug: 54/125 tools, 14914 tok — all required tools present",
-            "web-research: 52/125 tools, 14484 tok — all required tools present"
+            "edit: 48/125 tools, 13745 tok — all required tools present",
+            "review-and-commit: 48/125 tools, 13745 tok — all required tools present",
+            "docker-debug: 54/125 tools, 14970 tok — all required tools present",
+            "web-research: 52/125 tools, 14540 tok — all required tools present"
           ]
         }
       ],
@@ -95,7 +95,7 @@
       "metrics": {
         "gatedMissing": 0,
         "gatedTokenBudget": 18000,
-        "gatedWorstTokens": 14914
+        "gatedWorstTokens": 14970
       },
       "variance": {
         "gatedMissing": {
@@ -113,14 +113,14 @@
           "samples": 1
         },
         "gatedWorstTokens": {
-          "mean": 14914,
-          "min": 14914,
-          "max": 14914,
+          "mean": 14970,
+          "min": 14970,
+          "max": 14970,
           "stdev": 0,
           "samples": 1
         }
       },
-      "durationMs": 15
+      "durationMs": 8
     },
     {
       "id": "tools.description-ambiguity",
@@ -137,7 +137,7 @@
             "maxSimilarity": 0.4762,
             "ambiguousPairs": 0
           },
-          "durationMs": 108,
+          "durationMs": 18,
           "logs": []
         }
       ],
@@ -167,7 +167,54 @@
           "samples": 1
         }
       },
-      "durationMs": 108
+      "durationMs": 18
+    },
+    {
+      "id": "tools.usage-calibration",
+      "name": "Ceremony tools say when NOT to use them",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "checked 3 ceremony tool(s): todo_write, project_log, remember\nall carry an explicit non-use criterion",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "checked 3 ceremony tool(s): todo_write, project_log, remember\nall carry an explicit non-use criterion",
+          "metrics": {
+            "ceremonyToolsChecked": 3,
+            "missingExitCriterion": 0
+          },
+          "durationMs": 2,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "ceremonyToolsChecked": 3,
+        "missingExitCriterion": 0
+      },
+      "variance": {
+        "ceremonyToolsChecked": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        },
+        "missingExitCriterion": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 2
     },
     {
       "id": "tools.schema-validity",
@@ -184,7 +231,7 @@
             "toolsInspected": 125,
             "schemaProblems": 0
           },
-          "durationMs": 6,
+          "durationMs": 2,
           "logs": []
         }
       ],
@@ -214,7 +261,7 @@
           "samples": 1
         }
       },
-      "durationMs": 6
+      "durationMs": 2
     },
     {
       "id": "prompt.token-budget",
@@ -222,23 +269,23 @@
       "category": "prompt",
       "kind": "deterministic",
       "status": "pass",
-      "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
+      "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 8022 tokens / 24582 chars vs budget 9000 (89.1%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
       "attempts": [
         {
           "status": "pass",
-          "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
+          "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 8022 tokens / 24582 chars vs budget 9000 (89.1%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
           "metrics": {
             "promptTokens_normal_compressed": 5567,
-            "promptTokens_normal_full": 7849,
+            "promptTokens_normal_full": 8022,
             "promptTokens_plan_compressed": 4541,
             "promptTokens_subagent_compressed": 6111,
             "promptBudgetCompressed": 6500,
             "promptBudgetFull": 9000
           },
-          "durationMs": 9,
+          "durationMs": 7,
           "logs": [
             "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)",
-            "normal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)",
+            "normal-full (full): 8022 tokens / 24582 chars vs budget 9000 (89.1%)",
             "plan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)",
             "subagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)"
           ]
@@ -254,7 +301,7 @@
         "promptBudgetCompressed": 6500,
         "promptBudgetFull": 9000,
         "promptTokens_normal_compressed": 5567,
-        "promptTokens_normal_full": 7849,
+        "promptTokens_normal_full": 8022,
         "promptTokens_plan_compressed": 4541,
         "promptTokens_subagent_compressed": 6111
       },
@@ -281,9 +328,9 @@
           "samples": 1
         },
         "promptTokens_normal_full": {
-          "mean": 7849,
-          "min": 7849,
-          "max": 7849,
+          "mean": 8022,
+          "min": 8022,
+          "max": 8022,
           "stdev": 0,
           "samples": 1
         },
@@ -302,7 +349,7 @@
           "samples": 1
         }
       },
-      "durationMs": 9
+      "durationMs": 7
     },
     {
       "id": "prompt.no-contradiction",
@@ -319,7 +366,7 @@
             "contradictionPairs": 7,
             "contradictionsFound": 0
           },
-          "durationMs": 4,
+          "durationMs": 2,
           "logs": []
         }
       ],
@@ -349,7 +396,7 @@
           "samples": 1
         }
       },
-      "durationMs": 4
+      "durationMs": 2
     },
     {
       "id": "prompt.no-phantom-tools",
@@ -366,7 +413,7 @@
             "phantomToolRefs": 0,
             "refsUnavailableInMode": 0
           },
-          "durationMs": 13,
+          "durationMs": 3,
           "logs": []
         }
       ],
@@ -396,7 +443,7 @@
           "samples": 1
         }
       },
-      "durationMs": 13
+      "durationMs": 3
     },
     {
       "id": "cache.prefix-byte-stable",
@@ -411,9 +458,9 @@
           "detail": "4 prompt variants + tool schema list rebuilt twice each; 0 instability(ies)",
           "metrics": {
             "prefixInstabilities": 0,
-            "toolSchemaBytes": 74407
+            "toolSchemaBytes": 74602
           },
-          "durationMs": 9,
+          "durationMs": 3,
           "logs": []
         }
       ],
@@ -425,7 +472,7 @@
       "flaky": false,
       "metrics": {
         "prefixInstabilities": 0,
-        "toolSchemaBytes": 74407
+        "toolSchemaBytes": 74602
       },
       "variance": {
         "prefixInstabilities": {
@@ -436,14 +483,14 @@
           "samples": 1
         },
         "toolSchemaBytes": {
-          "mean": 74407,
-          "min": 74407,
-          "max": 74407,
+          "mean": 74602,
+          "min": 74602,
+          "max": 74602,
           "stdev": 0,
           "samples": 1
         }
       },
-      "durationMs": 9
+      "durationMs": 3
     },
     {
       "id": "cache.volatile-sections-last",
@@ -462,7 +509,7 @@
             "sharedPrefixOnTaskClassChange": 17058,
             "sharedPrefixRatio": 0.9134
           },
-          "durationMs": 2,
+          "durationMs": 5,
           "logs": [
             "tree@16994, tree-change shared prefix 17029, addendum-change shared prefix 17058"
           ]
@@ -510,7 +557,7 @@
           "samples": 1
         }
       },
-      "durationMs": 2
+      "durationMs": 5
     },
     {
       "id": "cache.breakpoint-layout",
@@ -584,7 +631,7 @@
             "orphanProblems": 0,
             "turnsCompacted": 4
           },
-          "durationMs": 222,
+          "durationMs": 266,
           "logs": [
             "raw: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
             "spill: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
@@ -632,7 +679,7 @@
           "samples": 1
         }
       },
-      "durationMs": 222
+      "durationMs": 266
     },
     {
       "id": "history.orphan-repair",
@@ -698,7 +745,7 @@
             "turnsCompacted": 3,
             "summarizerInputChars": 29642
           },
-          "durationMs": 2,
+          "durationMs": 1,
           "logs": []
         }
       ],
@@ -744,7 +791,7 @@
           "samples": 1
         }
       },
-      "durationMs": 2
+      "durationMs": 1
     },
     {
       "id": "history.dedup-rewrites-only",
@@ -837,7 +884,7 @@
             "stuckTrueNegatives": 4,
             "stuckNegativeCases": 4
           },
-          "durationMs": 4,
+          "durationMs": 1,
           "logs": []
         }
       ],
@@ -883,7 +930,7 @@
           "samples": 1
         }
       },
-      "durationMs": 4
+      "durationMs": 1
     },
     {
       "id": "recovery.error-loop-detector",
@@ -900,7 +947,7 @@
             "errorLoopProblems": 0,
             "errorLoopCount": 3
           },
-          "durationMs": 1,
+          "durationMs": 0,
           "logs": []
         }
       ],
@@ -930,7 +977,7 @@
           "samples": 1
         }
       },
-      "durationMs": 1
+      "durationMs": 0
     },
     {
       "id": "recovery.read-loop-ladder",
@@ -947,7 +994,7 @@
             "ladderProblems": 0,
             "ladderPoints": 7
           },
-          "durationMs": 0,
+          "durationMs": 1,
           "logs": []
         }
       ],
@@ -977,15 +1024,15 @@
           "samples": 1
         }
       },
-      "durationMs": 0
+      "durationMs": 1
     }
   ],
   "summary": {
-    "total": 17,
-    "passed": 17,
+    "total": 18,
+    "passed": 18,
     "failed": 0,
     "skipped": 0,
-    "scored": 17,
+    "scored": 18,
     "score0to100": 100,
     "flaky": 0,
     "byCategory": {
@@ -1022,11 +1069,11 @@
         "score0to100": 100
       },
       "tool-surface": {
-        "total": 4,
-        "passed": 4,
+        "total": 5,
+        "passed": 5,
         "failed": 0,
         "skipped": 0,
-        "scored": 4,
+        "scored": 5,
         "score0to100": 100
       }
     }

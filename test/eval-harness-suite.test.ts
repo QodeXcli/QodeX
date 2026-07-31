@@ -297,6 +297,50 @@ describe('cache tasks fail on a broken harness', () => {
   }, TIMEOUT);
 });
 
+describe('usage-calibration fails on a description with no exit criterion', () => {
+  it('flags a ceremony tool that only says when TO use it', async () => {
+    const r = await expectFailsWith('tools.usage-calibration', {
+      toolSchemas: () => [
+        schema('todo_write', 'Update the visible todo list. Use this to track multi-step work. Update frequently — after every meaningful step.'),
+      ],
+    });
+    expect(r.reason).toMatch(/when NOT to use/i);
+    // The unconditional imperative is called out too, since that is what drives over-use.
+    expect(r.detail).toMatch(/unconditional/i);
+  });
+
+  it('passes once the description carries a threshold and an exclusion', async () => {
+    const r = await runOne('tools.usage-calibration', {
+      probes: {
+        toolSchemas: () => [
+          schema('todo_write', 'Track work with 3+ distinct steps. Do NOT use it for a single-file edit or anything you can finish in one pass.'),
+        ],
+      },
+    });
+    expect(r.status).toBe('pass');
+  });
+
+  it('accepts restraint phrased as a budget, not only as a prohibition', async () => {
+    // `remember` says "Use SPARINGLY … should stay in conversation". An earlier version of
+    // this probe missed that and flagged a description that was already correct.
+    const r = await runOne('tools.usage-calibration', {
+      probes: {
+        toolSchemas: () => [
+          schema('remember', 'Persist a fact across sessions. Use SPARINGLY: transient task details should stay in conversation.'),
+        ],
+      },
+    });
+    expect(r.status).toBe('pass');
+  });
+
+  it('ignores non-ceremony tools entirely', async () => {
+    const r = await runOne('tools.usage-calibration', {
+      probes: { toolSchemas: () => [schema('read_file', 'Read a file. Use it to read files.')] },
+    });
+    expect(r.status).toBe('pass'); // read_file is an action tool — over-use is not a concern
+  });
+});
+
 describe('history tasks fail on a broken harness', () => {
   it('tool-call-pairing fails when a layer strands a tool_call (the bd62ab4 bug class)', async () => {
     const r = await expectFailsWith('history.tool-call-pairing', {
