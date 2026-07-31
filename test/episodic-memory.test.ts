@@ -91,3 +91,19 @@ describe('buildEpisodeBlock — concise, bounded', () => {
     expect(block).toContain('src/users.ts');
   });
 });
+
+describe('defaults — episodic memory is on, skill capture is not', () => {
+  it('episodic memory is ENABLED by default', async () => {
+    const { DEFAULT_CONFIG } = await import('../src/config/defaults.js');
+    // It costs no model call — recording is one JSONL line, recall is a lexical match — so
+    // the "I have solved this before" benefit should not require finding a config switch.
+    expect(DEFAULT_CONFIG.learning?.episodicMemory?.enabled).toBe(true);
+  });
+
+  it('skill CAPTURE stays opt-in', async () => {
+    const { DEFAULT_CONFIG } = await import('../src/config/defaults.js');
+    // Capture writes candidate files and spends a judge call — that should be a deliberate
+    // choice, not something that starts happening to a new user's disk.
+    expect(DEFAULT_CONFIG.learning?.enabled).toBe(false);
+  });
+});
