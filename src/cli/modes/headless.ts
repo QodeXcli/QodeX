@@ -33,6 +33,9 @@ export interface HeadlessOptions {
    *  writes are scope-gated, and the run ends with enforcement (verify →
    *  rollback-on-fail → RUN REPORT). */
   contract?: AutonomyContract;
+  /** `--receipt <path>`: write a signed, tamper-evident JSON receipt of the run there.
+   *  Requires a contract (there is nothing to attest without one). */
+  receiptPath?: string;
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
@@ -281,6 +284,83 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       if (!atLineStart) out('\n');
       out(buildRunReport(outcome) + '\n');
     }
+
+    // ── Verifiable run receipt ──
+    // The report above is for a human watching the terminal. The receipt is the same facts
+    // as a signed, tamper-evident artifact a CI job or a reviewer can re-check later.
+    // Written only when --receipt is passed, so the default stdout contract is untouched.
+    if (opts.receiptPath) {
+      try {
+        const { buildReceipt, signReceipt } = await import('../../agent/run-receipt.js');
+        // On a rollback every listed file was restored; otherwise none were.
+        const wasReverted = outcome.reverted;
+        let receipt = buildReceipt({
+          runId: sessionId,
+          startedAt: new Date(startedAt).toISOString(),
+          endedAt: new Date().toISOString(),
+          cwd: opts.cwd,
+          scope: opts.contract.scopePrefix ?? null,
+          granted: {
+            tokens: opts.contract.budgetTokens,
+            costUsd: opts.contract.budgetUsd,
+            wallSec: opts.contract.maxWallSec,
+          },
+          consumed: {
+            tokens: lastUsage.tokens,
+            costUsd: lastUsage.costUsd,
+            wallSec: Math.round(lastUsage.wallTimeMs / 1000),
+            iterations: lastUsage.iterations,
+          },
+          verify: outcome.verify
+            ? {
+                command: outcome.verify.cmd,
+                exitCode: outcome.verify.exitCode,
+                ok: outcome.verify.ok,
+                outputTail: outcome.verify.outputTail,
+              }
+            : null,
+          files: outcome.filesChanged.map(p => ({ path: p, reverted: wasReverted })),
+          // Ordered evidence of what the run did. Verify and rollback are known here;
+          // per-tool and permission entries join as those paths start reporting.
+          actions: [
+            ...(outcome.verify
+              ? [{
+                  kind: 'verify' as const,
+                  name: outcome.verify.cmd,
+                  detail: `exit ${outcome.verify.exitCode ?? 'killed'}`,
+                  ok: outcome.verify.ok,
+                }]
+              : []),
+            ...(outcome.rollback
+              ? [{
+                  kind: 'rollback' as const,
+                  name: 'rollbackSession',
+                  detail: `${outcome.rollback.filesRestored} file(s) restored, ${outcome.rollback.txnsRolled} txn(s)`,
+                  ok: true,
+                }]
+              : []),
+          ],
+          verdict: outcome.verdict,
+          failReasons: outcome.failReasons,
+        });
+        // Signing is what makes a FIELD edit detectable. Without a key the chain still
+        // protects the action log and verification honestly reports UNSIGNED.
+        const auditKey = process.env.QODEX_AUDIT_KEY;
+        if (auditKey) receipt = signReceipt(receipt, auditKey);
+        const fsp = await import('fs/promises');
+        await fsp.writeFile(opts.receiptPath, JSON.stringify(receipt, null, 2) + '\n', 'utf-8');
+        if (opts.json) {
+          process.stdout.write(JSON.stringify({ type: 'run_receipt', path: opts.receiptPath, receipt }) + '\n');
+        } else {
+          out(`\nReceipt: ${opts.receiptPath}${auditKey ? ' (signed)' : ' (UNSIGNED — set QODEX_AUDIT_KEY to sign)'}\n`);
+        }
+      } catch (e: any) {
+        // A receipt failure must never change the run's verdict — report it and move on.
+        logger.warn('Failed to write run receipt', { err: e?.message });
+        if (!opts.json) out(`\nReceipt: FAILED to write (${e?.message})\n`);
+      }
+    }
+
     exitCode = exitCodeFor(outcome.verdict);
   }
 

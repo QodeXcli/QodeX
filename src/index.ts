@@ -178,6 +178,7 @@ program
   .option('--scope <path-prefix>', 'Deny agent edits outside this path prefix (pre-write gate on journaled writes)')
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
+  .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
@@ -276,6 +277,12 @@ program
       console.error('--budget-tokens/--budget-usd/--max-wall/--scope/--verify/--rollback-on-fail require headless mode (-p/--print).');
       process.exit(1);
     }
+    // A receipt attests to a CONTRACT (scope, budgets, verify, verdict). Without one there
+    // is nothing to attest, so say that rather than writing a hollow document.
+    if (opts.receipt && !contract) {
+      console.error('--receipt needs a contract: add at least one of --verify / --budget-tokens / --budget-usd / --max-wall / --scope.');
+      process.exit(1);
+    }
 
     // Headless mode
     if (opts.print) {
@@ -291,6 +298,7 @@ program
         explicitModel: opts.model,
         resumeSessionId,
         contract: contract ?? undefined,
+        receiptPath: opts.receipt,
       });
       process.exit(code);
     }
@@ -454,6 +462,33 @@ program
       console.log(impact.note);
     }
     process.exit(0);
+  });
+
+const receipt = program
+  .command('receipt')
+  .description('Work with run receipts — the tamper-evident record of an unattended run');
+
+receipt
+  .command('verify <file>')
+  .description('Re-check a run receipt: action-chain integrity + signature. Exits non-zero unless it verifies')
+  .option('--json', 'Print the machine-readable verdict')
+  .action(async (file: string, _o: any, cmd: any) => {
+    // optsWithGlobals(): the root command also defines --json, and commander lets the parent
+    // consume a same-named flag written after the subcommand (the c73b9a3 bug).
+    const o = cmd.optsWithGlobals() as { json?: boolean };
+    const { verifyReceipt, formatReceiptVerdict, receiptExitCode } = await import('./agent/run-receipt.js');
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fsSync.readFileSync(file, 'utf-8'));
+    } catch (e: any) {
+      console.error(`Cannot read receipt ${file}: ${e.message}`);
+      process.exit(2);
+    }
+    // No key ⇒ the chain is still checked, but the signature is reported as unverifiable
+    // rather than assumed good. verifyReceipt is explicit about that distinction.
+    const verdict = verifyReceipt(parsed, process.env.QODEX_AUDIT_KEY);
+    console.log(o.json ? JSON.stringify(verdict, null, 2) : formatReceiptVerdict(parsed, verdict));
+    process.exit(receiptExitCode(verdict));
   });
 
 program
