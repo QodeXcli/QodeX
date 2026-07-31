@@ -1,3 +1,4 @@
+import { resolveCapability } from '../model-catalog.js';
 import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } from '../types.js';
 import { ProviderError } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
@@ -77,15 +78,11 @@ export class OllamaProvider extends Provider {
     }
   }
 
+  /** Context window for a local model. Delegates to the shared catalog so a model's real
+   *  window is maintained in ONE place — these per-provider guesses had drifted badly
+   *  (qwen3-coder reported as 32k when it ships 256k, deepseek as 16k when v3 is 128k). */
   private guessContextWindow(model: string): number {
-    const lower = model.toLowerCase();
-    if (lower.includes('qwen2.5-coder') || lower.includes('qwen3-coder')) return 32768;
-    if (lower.includes('qwen')) return 32768;
-    if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('llama3.3')) return 131072;
-    if (lower.includes('mistral')) return 32768;
-    if (lower.includes('gemma2')) return 8192;
-    if (lower.includes('deepseek')) return 16384;
-    return 8192;
+    return resolveCapability(model).contextWindow;
   }
 
   /**

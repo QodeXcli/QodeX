@@ -1,3 +1,4 @@
+import { resolveCapability } from '../model-catalog.js';
 import type { ModelInfo } from '../types.js';
 
 /**
@@ -42,14 +43,19 @@ export interface NormalizedCustomProvider {
   systemPromptOverride?: string;
 }
 
-/** Defaults applied to a model entry when the user omits the numeric/cap fields. */
-export function fillModelDefaults(raw: any): ModelInfo | null {
+/** Defaults applied to a model entry when the user omits the numeric/cap fields.
+ *  `liveEntry` is the raw object a gateway returned for this model, when discovery gave us
+ *  one — a provider that advertises its own window is trusted over anything we infer.
+ *  Without it we fall back to the shared catalog rather than a flat 128k, which used to cap
+ *  1M-context models at a fraction of their real size. */
+export function fillModelDefaults(raw: any, liveEntry?: any): ModelInfo | null {
   const id = typeof raw?.id === 'string' ? raw.id.trim() : '';
   if (!id) return null;
+  const cap = resolveCapability(id, liveEntry);
   return {
     id,
-    contextWindow: Number.isFinite(raw?.contextWindow) ? raw.contextWindow : 128000,
-    maxOutput: Number.isFinite(raw?.maxOutput) ? raw.maxOutput : 8192,
+    contextWindow: Number.isFinite(raw?.contextWindow) ? raw.contextWindow : cap.contextWindow,
+    maxOutput: Number.isFinite(raw?.maxOutput) ? raw.maxOutput : cap.maxOutput,
     inputCostPerMillion: Number.isFinite(raw?.inputCostPerMillion) ? raw.inputCostPerMillion : 0,
     outputCostPerMillion: Number.isFinite(raw?.outputCostPerMillion) ? raw.outputCostPerMillion : 0,
     supportsToolCalls: raw?.supportsToolCalls !== false,   // default true
@@ -177,7 +183,10 @@ export function mapDiscoveredModels(body: any): ModelInfo[] {
   const out: ModelInfo[] = [];
   for (const entry of arr) {
     const id = typeof entry?.id === 'string' ? entry.id : (typeof entry === 'string' ? entry : '');
-    const m = fillModelDefaults({ id });
+    // Pass the WHOLE entry through: gateways advertise their real window as context_length /
+    // max_context_length / context_window, and dropping it here is what silently capped
+    // big-context models at the old flat default.
+    const m = fillModelDefaults({ id }, typeof entry === 'object' ? entry : undefined);
     if (m) out.push(m);
   }
   return out;
