@@ -457,6 +457,76 @@ program
   });
 
 program
+  .command('eval')
+  .description('Measure the agent harness. Default suite is free, offline and deterministic — no model calls')
+  .option('--suite <name>', 'Suite to run (default: harness). Use --list to see them', 'harness')
+  .option('--list', 'List available suites and exit')
+  .option('--repeat <n>', 'Runs per task; reports variance and flags flaky tasks', '1')
+  .option('--filter <sel>', 'Comma-separated task ids or categories to keep')
+  .option('--out <file>', 'Write the run as JSON (feed it to --compare later)')
+  .option('--compare <before> [after]', 'Diff two saved runs; with one file, diff it against a fresh run')
+  .option('--label <name>', 'Label this run (shown in the A/B diff so arms are self-describing)')
+  .option('--json', 'Print machine-readable JSON instead of the report')
+  .action(async (_opts: any, cmd: any) => {
+    // optsWithGlobals(): the root command defines --json (and -m/--model), and commander
+    // lets the parent consume a same-named flag written after the subcommand — the bug
+    // fixed in c73b9a3. Read the merged view so `eval --json` reaches us.
+    const opts = cmd.optsWithGlobals() as {
+      suite?: string; list?: boolean; repeat?: string; filter?: string;
+      out?: string; compare?: string; label?: string; json?: boolean;
+    };
+    const { runSuite, getSuite, listSuites, diffRuns, formatRunReport, formatDiffReport } =
+      await import('./eval/index.js');
+
+    if (opts.list) {
+      for (const s of listSuites()) {
+        console.log(`${s.name.padEnd(10)} ${s.free ? '(free) ' : '(model)'} ${s.description}`);
+      }
+      process.exit(0);
+    }
+
+    // `--compare a.json [b.json]`: with two files, diff them. With one, diff the saved
+    // run against a fresh run of the same suite — the common "did my change help?" loop.
+    const readRun = (p: string) => JSON.parse(fsSync.readFileSync(p, 'utf-8'));
+    if (opts.compare) {
+      const extra = (cmd.args ?? []).filter((a: string) => a.endsWith('.json'));
+      const before = readRun(opts.compare);
+      const after = extra.length
+        ? readRun(extra[0])
+        : await (async () => {
+            const suite = getSuite(before.suite);
+            if (!suite) { console.error(`Unknown suite "${before.suite}" from ${opts.compare}.`); process.exit(2); }
+            return runSuite(suite!, { config: { label: opts.label ?? 'after' } });
+          })();
+      const diff = diffRuns(before, after);
+      console.log(opts.json ? JSON.stringify(diff, null, 2) : formatDiffReport(diff));
+      // Non-zero on a regression so this can gate CI.
+      process.exit(diff.regressions.length > 0 ? 1 : 0);
+    }
+
+    const suite = getSuite(opts.suite ?? 'harness');
+    if (!suite) {
+      console.error(`Unknown suite "${opts.suite}". Run \`qodex eval --list\`.`);
+      process.exit(2);
+    }
+    const sel = (opts.filter ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const ids = suite.tasks.map(t => t.id);
+    const run = await runSuite(suite, {
+      repeat: Math.max(1, Number(opts.repeat ?? 1) || 1),
+      config: { label: opts.label ?? 'run' },
+      filter: sel.length
+        ? { ids: sel.filter(s => ids.includes(s)), categories: sel.filter(s => !ids.includes(s)) }
+        : undefined,
+    });
+    if (opts.out) {
+      fsSync.writeFileSync(opts.out, JSON.stringify(run, null, 2) + '\n', 'utf-8');
+    }
+    console.log(opts.json ? JSON.stringify(run, null, 2) : formatRunReport(run));
+    // Any failure is a non-zero exit: a harness regression should break the build.
+    process.exit(run.summary.failed > 0 ? 1 : 0);
+  });
+
+program
   .command('config')
   .description('Show effective configuration')
   .action(async () => {

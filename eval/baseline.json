@@ -1,0 +1,1034 @@
+{
+  "suite": "harness",
+  "config": {
+    "label": "baseline"
+  },
+  "repeat": 1,
+  "results": [
+    {
+      "id": "tools.definition-budget",
+      "name": "Tool definitions fit the token budget",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "tool definitions (mode=normal): 31840 tokens over 125 tools vs budget 36000 (88.4% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "tool definitions (mode=normal): 31840 tokens over 125 tools vs budget 36000 (88.4% of budget, 255 tokens/tool avg). This payload is re-sent on EVERY iteration.",
+          "metrics": {
+            "toolTokens": 31840,
+            "toolCount": 125,
+            "toolTokenBudget": 36000
+          },
+          "durationMs": 20,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "toolCount": 125,
+        "toolTokenBudget": 36000,
+        "toolTokens": 31840
+      },
+      "variance": {
+        "toolCount": {
+          "mean": 125,
+          "min": 125,
+          "max": 125,
+          "stdev": 0,
+          "samples": 1
+        },
+        "toolTokenBudget": {
+          "mean": 36000,
+          "min": 36000,
+          "max": 36000,
+          "stdev": 0,
+          "samples": 1
+        },
+        "toolTokens": {
+          "mean": 31840,
+          "min": 31840,
+          "max": 31840,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 20
+    },
+    {
+      "id": "tools.gating-keeps-essentials",
+      "name": "Relevance gating keeps what each task needs",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "edit: 48/125 tools, 13689 tok — all required tools present\nreview-and-commit: 48/125 tools, 13689 tok — all required tools present\ndocker-debug: 54/125 tools, 14914 tok — all required tools present\nweb-research: 52/125 tools, 14484 tok — all required tools present\nworst gated payload 14914 tokens vs budget 18000",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "edit: 48/125 tools, 13689 tok — all required tools present\nreview-and-commit: 48/125 tools, 13689 tok — all required tools present\ndocker-debug: 54/125 tools, 14914 tok — all required tools present\nweb-research: 52/125 tools, 14484 tok — all required tools present\nworst gated payload 14914 tokens vs budget 18000",
+          "metrics": {
+            "gatedMissing": 0,
+            "gatedWorstTokens": 14914,
+            "gatedTokenBudget": 18000
+          },
+          "durationMs": 15,
+          "logs": [
+            "edit: 48/125 tools, 13689 tok — all required tools present",
+            "review-and-commit: 48/125 tools, 13689 tok — all required tools present",
+            "docker-debug: 54/125 tools, 14914 tok — all required tools present",
+            "web-research: 52/125 tools, 14484 tok — all required tools present"
+          ]
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "gatedMissing": 0,
+        "gatedTokenBudget": 18000,
+        "gatedWorstTokens": 14914
+      },
+      "variance": {
+        "gatedMissing": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "gatedTokenBudget": {
+          "mean": 18000,
+          "min": 18000,
+          "max": 18000,
+          "stdev": 0,
+          "samples": 1
+        },
+        "gatedWorstTokens": {
+          "mean": 14914,
+          "min": 14914,
+          "max": 14914,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 15
+    },
+    {
+      "id": "tools.description-ambiguity",
+      "name": "No two enabled tools describe themselves alike",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "most similar pair: background_job_log ~ dev_server_log at 0.476 vs max 0.7 (125 tools, 7750 pairs compared)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "most similar pair: background_job_log ~ dev_server_log at 0.476 vs max 0.7 (125 tools, 7750 pairs compared)",
+          "metrics": {
+            "maxSimilarity": 0.4762,
+            "ambiguousPairs": 0
+          },
+          "durationMs": 108,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "ambiguousPairs": 0,
+        "maxSimilarity": 0.4762
+      },
+      "variance": {
+        "ambiguousPairs": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "maxSimilarity": {
+          "mean": 0.4762,
+          "min": 0.4762,
+          "max": 0.4762,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 108
+    },
+    {
+      "id": "tools.schema-validity",
+      "name": "Every tool has a description and a usable schema",
+      "category": "tool-surface",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "125 tools inspected; 0 problem(s)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "125 tools inspected; 0 problem(s)",
+          "metrics": {
+            "toolsInspected": 125,
+            "schemaProblems": 0
+          },
+          "durationMs": 6,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "schemaProblems": 0,
+        "toolsInspected": 125
+      },
+      "variance": {
+        "schemaProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "toolsInspected": {
+          "mean": 125,
+          "min": 125,
+          "max": 125,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 6
+    },
+    {
+      "id": "prompt.token-budget",
+      "name": "Both system-prompt tiers fit their budgets",
+      "category": "prompt",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)\nnormal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)\nplan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)\nsubagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)",
+          "metrics": {
+            "promptTokens_normal_compressed": 5567,
+            "promptTokens_normal_full": 7849,
+            "promptTokens_plan_compressed": 4541,
+            "promptTokens_subagent_compressed": 6111,
+            "promptBudgetCompressed": 6500,
+            "promptBudgetFull": 9000
+          },
+          "durationMs": 9,
+          "logs": [
+            "normal-compressed (compressed): 5567 tokens / 16992 chars vs budget 6500 (85.6%)",
+            "normal-full (full): 7849 tokens / 23995 chars vs budget 9000 (87.2%)",
+            "plan-compressed (compressed): 4541 tokens / 13956 chars vs budget 6500 (69.9%)",
+            "subagent-compressed (compressed): 6111 tokens / 18759 chars vs budget 6500 (94.0%)"
+          ]
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "promptBudgetCompressed": 6500,
+        "promptBudgetFull": 9000,
+        "promptTokens_normal_compressed": 5567,
+        "promptTokens_normal_full": 7849,
+        "promptTokens_plan_compressed": 4541,
+        "promptTokens_subagent_compressed": 6111
+      },
+      "variance": {
+        "promptBudgetCompressed": {
+          "mean": 6500,
+          "min": 6500,
+          "max": 6500,
+          "stdev": 0,
+          "samples": 1
+        },
+        "promptBudgetFull": {
+          "mean": 9000,
+          "min": 9000,
+          "max": 9000,
+          "stdev": 0,
+          "samples": 1
+        },
+        "promptTokens_normal_compressed": {
+          "mean": 5567,
+          "min": 5567,
+          "max": 5567,
+          "stdev": 0,
+          "samples": 1
+        },
+        "promptTokens_normal_full": {
+          "mean": 7849,
+          "min": 7849,
+          "max": 7849,
+          "stdev": 0,
+          "samples": 1
+        },
+        "promptTokens_plan_compressed": {
+          "mean": 4541,
+          "min": 4541,
+          "max": 4541,
+          "stdev": 0,
+          "samples": 1
+        },
+        "promptTokens_subagent_compressed": {
+          "mean": 6111,
+          "min": 6111,
+          "max": 6111,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 9
+    },
+    {
+      "id": "prompt.no-contradiction",
+      "name": "Assembled prompt trips no declared contradiction",
+      "category": "prompt",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "normal-compressed: 7 declared pairs checked\nnormal-full: 7 declared pairs checked\nplan-compressed: 7 declared pairs checked\nsubagent-compressed: 7 declared pairs checked\n7 pairs x 4 variants; 0 contradiction(s)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "normal-compressed: 7 declared pairs checked\nnormal-full: 7 declared pairs checked\nplan-compressed: 7 declared pairs checked\nsubagent-compressed: 7 declared pairs checked\n7 pairs x 4 variants; 0 contradiction(s)",
+          "metrics": {
+            "contradictionPairs": 7,
+            "contradictionsFound": 0
+          },
+          "durationMs": 4,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "contradictionPairs": 7,
+        "contradictionsFound": 0
+      },
+      "variance": {
+        "contradictionPairs": {
+          "mean": 7,
+          "min": 7,
+          "max": 7,
+          "stdev": 0,
+          "samples": 1
+        },
+        "contradictionsFound": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 4
+    },
+    {
+      "id": "prompt.no-phantom-tools",
+      "name": "Prompt names no unregistered tool",
+      "category": "prompt",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "126 registered tools; 0 phantom reference(s)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "126 registered tools; 0 phantom reference(s)",
+          "metrics": {
+            "phantomToolRefs": 0,
+            "refsUnavailableInMode": 0
+          },
+          "durationMs": 13,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "phantomToolRefs": 0,
+        "refsUnavailableInMode": 0
+      },
+      "variance": {
+        "phantomToolRefs": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "refsUnavailableInMode": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 13
+    },
+    {
+      "id": "cache.prefix-byte-stable",
+      "name": "Identical inputs assemble byte-identical prefixes",
+      "category": "cache",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "4 prompt variants + tool schema list rebuilt twice each; 0 instability(ies)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "4 prompt variants + tool schema list rebuilt twice each; 0 instability(ies)",
+          "metrics": {
+            "prefixInstabilities": 0,
+            "toolSchemaBytes": 74407
+          },
+          "durationMs": 9,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "prefixInstabilities": 0,
+        "toolSchemaBytes": 74407
+      },
+      "variance": {
+        "prefixInstabilities": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "toolSchemaBytes": {
+          "mean": 74407,
+          "min": 74407,
+          "max": 74407,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 9
+    },
+    {
+      "id": "cache.volatile-sections-last",
+      "name": "Volatile sections sit after the stable prefix",
+      "category": "cache",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "directory tree section at byte 16994 of 18675; changing ONLY the tree keeps 17029 bytes of shared prefix; changing ONLY the task class keeps 17058 bytes (91.3% of the prompt)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "directory tree section at byte 16994 of 18675; changing ONLY the tree keeps 17029 bytes of shared prefix; changing ONLY the task class keeps 17058 bytes (91.3% of the prompt)",
+          "metrics": {
+            "treeSectionOffset": 16994,
+            "sharedPrefixOnTreeChange": 17029,
+            "sharedPrefixOnTaskClassChange": 17058,
+            "sharedPrefixRatio": 0.9134
+          },
+          "durationMs": 2,
+          "logs": [
+            "tree@16994, tree-change shared prefix 17029, addendum-change shared prefix 17058"
+          ]
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "sharedPrefixOnTaskClassChange": 17058,
+        "sharedPrefixOnTreeChange": 17029,
+        "sharedPrefixRatio": 0.9134,
+        "treeSectionOffset": 16994
+      },
+      "variance": {
+        "sharedPrefixOnTaskClassChange": {
+          "mean": 17058,
+          "min": 17058,
+          "max": 17058,
+          "stdev": 0,
+          "samples": 1
+        },
+        "sharedPrefixOnTreeChange": {
+          "mean": 17029,
+          "min": 17029,
+          "max": 17029,
+          "stdev": 0,
+          "samples": 1
+        },
+        "sharedPrefixRatio": {
+          "mean": 0.9134,
+          "min": 0.9134,
+          "max": 0.9134,
+          "stdev": 0,
+          "samples": 1
+        },
+        "treeSectionOffset": {
+          "mean": 16994,
+          "min": 16994,
+          "max": 16994,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 2
+    },
+    {
+      "id": "cache.breakpoint-layout",
+      "name": "Cache breakpoints follow the declared layout",
+      "category": "cache",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "breakpoints: system=1, tools=1, messages=1, total=3 vs max 4",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "breakpoints: system=1, tools=1, messages=1, total=3 vs max 4",
+          "metrics": {
+            "cacheBreakpoints": 3,
+            "cacheBreakpointBudget": 4,
+            "layoutProblems": 0
+          },
+          "durationMs": 1,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "cacheBreakpointBudget": 4,
+        "cacheBreakpoints": 3,
+        "layoutProblems": 0
+      },
+      "variance": {
+        "cacheBreakpointBudget": {
+          "mean": 4,
+          "min": 4,
+          "max": 4,
+          "stdev": 0,
+          "samples": 1
+        },
+        "cacheBreakpoints": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        },
+        "layoutProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 1
+    },
+    {
+      "id": "history.tool-call-pairing",
+      "name": "No layer orphans a tool_call",
+      "category": "history",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "raw: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nspill: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\naging: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ndedup: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ncompaction: 10 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune-raw: 5 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune-autonomous: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\norphan-repair: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ncompaction folded 4 turn-group(s)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "raw: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nspill: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\naging: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ndedup: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ncompaction: 10 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune-raw: 5 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\nprune-autonomous: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\norphan-repair: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)\ncompaction folded 4 turn-group(s)",
+          "metrics": {
+            "stagesMeasured": 9,
+            "orphanProblems": 0,
+            "turnsCompacted": 4
+          },
+          "durationMs": 222,
+          "logs": [
+            "raw: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "spill: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "aging: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "dedup: 25 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "compaction: 10 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "prune: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "prune-raw: 5 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "prune-autonomous: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)",
+            "orphan-repair: 6 msgs, 0 orphaned tool_call(s), 0 orphaned result(s)"
+          ]
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "orphanProblems": 0,
+        "stagesMeasured": 9,
+        "turnsCompacted": 4
+      },
+      "variance": {
+        "orphanProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        },
+        "stagesMeasured": {
+          "mean": 9,
+          "min": 9,
+          "max": 9,
+          "stdev": 0,
+          "samples": 1
+        },
+        "turnsCompacted": {
+          "mean": 4,
+          "min": 4,
+          "max": 4,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 222
+    },
+    {
+      "id": "history.orphan-repair",
+      "name": "The provider-side orphan repair works both ways",
+      "category": "history",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "broken: 5 msgs, 1 orphan(s) -> repaired 6 msgs, 0 orphan(s); healthy history untouched",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "broken: 5 msgs, 1 orphan(s) -> repaired 6 msgs, 0 orphan(s); healthy history untouched",
+          "metrics": {
+            "repairInserted": 1,
+            "repairProblems": 0
+          },
+          "durationMs": 0,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "repairInserted": 1,
+        "repairProblems": 0
+      },
+      "variance": {
+        "repairInserted": {
+          "mean": 1,
+          "min": 1,
+          "max": 1,
+          "stdev": 0,
+          "samples": 1
+        },
+        "repairProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 0
+    },
+    {
+      "id": "history.compaction-preserves-goal",
+      "name": "Compaction never loses the original goal",
+      "category": "history",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "21 -> 10 messages, 3 turn-group(s) folded; goal text reached the summarizer (29642 chars of transcript); recent tail preserved verbatim: true",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "21 -> 10 messages, 3 turn-group(s) folded; goal text reached the summarizer (29642 chars of transcript); recent tail preserved verbatim: true",
+          "metrics": {
+            "messagesBefore": 21,
+            "messagesAfter": 10,
+            "turnsCompacted": 3,
+            "summarizerInputChars": 29642
+          },
+          "durationMs": 2,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "messagesAfter": 10,
+        "messagesBefore": 21,
+        "summarizerInputChars": 29642,
+        "turnsCompacted": 3
+      },
+      "variance": {
+        "messagesAfter": {
+          "mean": 10,
+          "min": 10,
+          "max": 10,
+          "stdev": 0,
+          "samples": 1
+        },
+        "messagesBefore": {
+          "mean": 21,
+          "min": 21,
+          "max": 21,
+          "stdev": 0,
+          "samples": 1
+        },
+        "summarizerInputChars": {
+          "mean": 29642,
+          "min": 29642,
+          "max": 29642,
+          "stdev": 0,
+          "samples": 1
+        },
+        "turnsCompacted": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 2
+    },
+    {
+      "id": "history.dedup-rewrites-only",
+      "name": "Dedup and aging rewrite content, never structure",
+      "category": "history",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "26 messages, 90373B: dedup replaced 1 result(s) -> 84546B (6.4% saved); aging -> 66308B (26.6% saved)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "26 messages, 90373B: dedup replaced 1 result(s) -> 84546B (6.4% saved); aging -> 66308B (26.6% saved)",
+          "metrics": {
+            "historyBytes": 90373,
+            "dedupBytes": 84546,
+            "agedBytes": 66308,
+            "dedupReplaced": 1,
+            "structureProblems": 0
+          },
+          "durationMs": 1,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "agedBytes": 66308,
+        "dedupBytes": 84546,
+        "dedupReplaced": 1,
+        "historyBytes": 90373,
+        "structureProblems": 0
+      },
+      "variance": {
+        "agedBytes": {
+          "mean": 66308,
+          "min": 66308,
+          "max": 66308,
+          "stdev": 0,
+          "samples": 1
+        },
+        "dedupBytes": {
+          "mean": 84546,
+          "min": 84546,
+          "max": 84546,
+          "stdev": 0,
+          "samples": 1
+        },
+        "dedupReplaced": {
+          "mean": 1,
+          "min": 1,
+          "max": 1,
+          "stdev": 0,
+          "samples": 1
+        },
+        "historyBytes": {
+          "mean": 90373,
+          "min": 90373,
+          "max": 90373,
+          "stdev": 0,
+          "samples": 1
+        },
+        "structureProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 1
+    },
+    {
+      "id": "recovery.stuck-loop-detector",
+      "name": "Stuck-loop detector fires on loops and only on loops",
+      "category": "recovery",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "positives 3/3 detected, negatives 4/4 left alone",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "positives 3/3 detected, negatives 4/4 left alone",
+          "metrics": {
+            "stuckTruePositives": 3,
+            "stuckPositiveCases": 3,
+            "stuckTrueNegatives": 4,
+            "stuckNegativeCases": 4
+          },
+          "durationMs": 4,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "stuckNegativeCases": 4,
+        "stuckPositiveCases": 3,
+        "stuckTrueNegatives": 4,
+        "stuckTruePositives": 3
+      },
+      "variance": {
+        "stuckNegativeCases": {
+          "mean": 4,
+          "min": 4,
+          "max": 4,
+          "stdev": 0,
+          "samples": 1
+        },
+        "stuckPositiveCases": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        },
+        "stuckTrueNegatives": {
+          "mean": 4,
+          "min": 4,
+          "max": 4,
+          "stdev": 0,
+          "samples": 1
+        },
+        "stuckTruePositives": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 4
+    },
+    {
+      "id": "recovery.error-loop-detector",
+      "name": "Error-loop detector fires at threshold, not before",
+      "category": "recovery",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "threshold-3 detection fired on read_file/FILE_NOT_FOUND x3; 3 soft failures + 3 healthy outputs classified; 0 problem(s)",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "threshold-3 detection fired on read_file/FILE_NOT_FOUND x3; 3 soft failures + 3 healthy outputs classified; 0 problem(s)",
+          "metrics": {
+            "errorLoopProblems": 0,
+            "errorLoopCount": 3
+          },
+          "durationMs": 1,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "errorLoopCount": 3,
+        "errorLoopProblems": 0
+      },
+      "variance": {
+        "errorLoopCount": {
+          "mean": 3,
+          "min": 3,
+          "max": 3,
+          "stdev": 0,
+          "samples": 1
+        },
+        "errorLoopProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 1
+    },
+    {
+      "id": "recovery.read-loop-ladder",
+      "name": "Read-loop escalation ladder is monotonic",
+      "category": "recovery",
+      "kind": "deterministic",
+      "status": "pass",
+      "detail": "ladder: 0->none, 1->none, 2->none, 3->summarize, 4->summarize, 5->abort, 9->abort; monotonic over 0..10",
+      "attempts": [
+        {
+          "status": "pass",
+          "detail": "ladder: 0->none, 1->none, 2->none, 3->summarize, 4->summarize, 5->abort, 9->abort; monotonic over 0..10",
+          "metrics": {
+            "ladderProblems": 0,
+            "ladderPoints": 7
+          },
+          "durationMs": 0,
+          "logs": []
+        }
+      ],
+      "statusCounts": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "flaky": false,
+      "metrics": {
+        "ladderPoints": 7,
+        "ladderProblems": 0
+      },
+      "variance": {
+        "ladderPoints": {
+          "mean": 7,
+          "min": 7,
+          "max": 7,
+          "stdev": 0,
+          "samples": 1
+        },
+        "ladderProblems": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "stdev": 0,
+          "samples": 1
+        }
+      },
+      "durationMs": 0
+    }
+  ],
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0,
+    "skipped": 0,
+    "scored": 17,
+    "score0to100": 100,
+    "flaky": 0,
+    "byCategory": {
+      "cache": {
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "scored": 3,
+        "score0to100": 100
+      },
+      "history": {
+        "total": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "scored": 4,
+        "score0to100": 100
+      },
+      "prompt": {
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "scored": 3,
+        "score0to100": 100
+      },
+      "recovery": {
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "scored": 3,
+        "score0to100": 100
+      },
+      "tool-surface": {
+        "total": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "scored": 4,
+        "score0to100": 100
+      }
+    }
+  }
+}
