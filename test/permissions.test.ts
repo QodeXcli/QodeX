@@ -22,13 +22,20 @@ describe('PermissionEngine', () => {
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('ask');
   });
 
-  it('remembers pattern decisions', () => {
+  it('remembers an "always" decision for THAT command only', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     const req = { tool: 'shell', operation: 'docker compose up' };
     expect(engine.evaluate(req)).toBe('ask');
     engine.rememberDecision(req, 'allow', 'pattern');
     expect(engine.evaluate(req)).toBe('allow');
-    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose down' })).toBe('allow');
+    // This line used to expect 'allow', because a grant was built from the command's FIRST
+    // WORD — so approving `docker compose up` also approved `docker compose down`, `git
+    // status` approved `git push --force`, and `rm -rf /tmp/x` approved `rm -rf /`. A grant
+    // now binds to the exact command; a sibling is asked separately, once.
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose down' })).toBe('ask');
+    // Cosmetic variants of the SAME command are still covered — the grant is on the command,
+    // not on its formatting.
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker  compose up' })).toBe('allow');
   });
 
   it('allows read-only tools by default', () => {
