@@ -71,6 +71,13 @@ export interface ModelInfo {
   outputCostPerMillion: number;  // USD
   supportsToolCalls: boolean;
   supportsStreaming: boolean;
+  /**
+   * Where the PRICE came from. The distinction matters: a local model genuinely costs 0, but
+   * an unpriced cloud model costs something we cannot compute — and reporting $0.00 for it
+   * makes `--budget-usd` silently unenforceable. 'unknown' means "the 0 above is a
+   * placeholder, do not trust spend figures". Absent ⇒ 'catalog' (the built-in tables).
+   */
+  pricingSource?: 'live' | 'catalog' | 'free' | 'unknown';
 }
 
 export abstract class Provider {

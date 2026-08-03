@@ -1,5 +1,6 @@
 import type { QodexConfig } from '../config/defaults.js';
 import type { Tool } from '../tools/base.js';
+import { assessCommand, canGrantAlways, matchDenyRule, normalizeCommand } from './command-risk.js';
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
@@ -15,6 +16,11 @@ export class PermissionEngine {
   private alwaysAskPatterns: RegExp[];
   private sessionAllows = new Set<string>();
   private sessionDenies = new Set<string>();
+  /** Exact normalized commands the user granted "always". Replaces the old first-word
+   *  prefix patterns, which over-granted an entire command family. */
+  private commandGrants = new Set<string>();
+  /** User deny rules — checked before everything, including auto-approve/yolo. */
+  private denyRules: string[] = [];
   private alwaysAllowPatterns: RegExp[] = [];
   private sessionToolAllows = new Set<string>();
   private toolReadOnlyCache = new Map<string, boolean>();
@@ -27,6 +33,7 @@ export class PermissionEngine {
     this.allowPatterns = config.security.autoApprove.map(p => new RegExp(p));
     this.denyPatterns = config.security.autoReject.map(p => new RegExp(p));
     this.alwaysAskPatterns = (config.security.alwaysAsk ?? []).map(p => new RegExp(p));
+    this.denyRules = [...(config.security.denyRules ?? [])];
   }
 
   /**
@@ -34,9 +41,24 @@ export class PermissionEngine {
    * Returns 'ask' when policy is undecided.
    */
   evaluate(req: PermissionRequest): PermissionDecision {
-    // Hard deny patterns first — even auto-approve mode can't bypass these.
+    // User deny rules outrank everything, including /auto and yolo — that is the point of
+    // being able to write one.
+    if (this.denyRules.length && matchDenyRule(req.operation, this.denyRules)) return 'deny';
+
+    // Hard deny patterns next — even auto-approve mode can't bypass these.
     for (const p of this.denyPatterns) {
       if (p.test(req.operation)) return 'deny';
+    }
+
+    // Irreversible commands are confirmed EVERY time. No standing grant, no session
+    // auto-approve, no yolo: rollback cannot undo `rm -rf` or a force push, so a blanket
+    // yes must never reach one. Read-only tools are exempt (their operand is a path).
+    const irreversible =
+      !this.isReadOnlyTool(req.tool) && assessCommand(req.operation).tier === 'irreversible';
+    if (irreversible) {
+      const k = `${req.tool}:${req.operation}`;
+      if (this.sessionDenies.has(k)) return 'deny';
+      return 'ask';
     }
 
     // Always-ask patterns next — system-mutating commands (defaults write, sudo,
@@ -51,6 +73,7 @@ export class PermissionEngine {
       const key = `${req.tool}:${req.operation}`;
       if (this.sessionDenies.has(key)) return 'deny';
       if (this.sessionAllows.has(key)) return 'allow';
+      if (this.commandGrants.has(normalizeCommand(req.operation))) return 'allow';
       if (this.alwaysAllowPatterns.some(p => p.test(req.operation))) return 'allow';
       return 'ask';
     }
@@ -68,7 +91,10 @@ export class PermissionEngine {
     if (this.sessionDenies.has(key)) return 'deny';
     if (this.sessionAllows.has(key)) return 'allow';
 
-    // Session-level always-allow patterns
+    // Exact-command grants from a previous "always" answer.
+    if (this.commandGrants.has(normalizeCommand(req.operation))) return 'allow';
+
+    // Legacy pattern grants (kept for any caller still adding them).
     for (const p of this.alwaysAllowPatterns) {
       if (p.test(req.operation)) return 'allow';
     }
@@ -97,12 +123,28 @@ export class PermissionEngine {
       if (decision === 'allow') this.sessionAllows.add(key);
       else this.sessionDenies.add(key);
     } else if (scope === 'pattern' && decision === 'allow') {
-      const prefix = req.operation.split(/\s+/)[0] ?? req.operation;
-      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      this.alwaysAllowPatterns.push(new RegExp(`^${escaped}( |$)`));
+      // A grant binds to the EXACT command, not to its first word. The old behaviour built
+      // `^git( |$)` from `git status`, which then auto-approved `git push --force`; and
+      // `^rm( |$)` from `rm -rf /tmp/x`, which auto-approved `rm -rf /`. That is the one
+      // failure mode rollback cannot undo — the journal covers file writes, not shell
+      // commands — so "always" now means "this command", nothing broader.
+      if (canGrantAlways(req.operation).allowed) {
+        this.commandGrants.add(normalizeCommand(req.operation));
+      }
+      // Irreversible commands deliberately get NO standing grant: they are asked every time.
     } else if (scope === 'tool' && decision === 'allow') {
       this.sessionToolAllows.add(req.tool);
     }
+  }
+
+  /** Why a standing grant was refused, for the UI to explain instead of silently not saving. */
+  grantRefusalReason(operation: string): string | null {
+    return canGrantAlways(operation).reason ?? null;
+  }
+
+  /** User-defined deny rules that override auto-approve and yolo. */
+  setDenyRules(rules: readonly string[]): void {
+    this.denyRules = [...rules];
   }
 
   /**

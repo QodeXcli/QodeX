@@ -33,6 +33,13 @@ import { countTokens, countTokensJson } from './tokenizer.js';
 
 const SUMMARY_PREFIX = '[CTX_SUMMARY]';
 
+/**
+ * Shortest summary we will accept in exchange for deleting real turns. The prompt asks for
+ * 200-500 tokens; anything under ~80 characters cannot carry a goal, a path and a constraint,
+ * so it is a failed summarization rather than a terse one.
+ */
+const MIN_SUMMARY_CHARS = 80;
+
 export interface CompactionResult {
   /** New, shorter message list */
   messages: Message[];
@@ -175,6 +182,27 @@ export async function compactMessages(
     summaryText = await options.summarize(summarizationInput);
   } catch (e: any) {
     logger.warn('Compaction summarization failed; returning original messages', { err: e?.message });
+    return { messages, before, after: before, turnsCompacted: 0 };
+  }
+  // Refuse to trade real history for an empty summary.
+  //
+  // Compaction DELETES the summarized turns. A throw is handled above, but a summarizer can
+  // also succeed and return nothing useful: an aborted stream (the caller's loop does
+  // `if (signal?.aborted) break` and returns ''), a provider sending an empty body, a local
+  // model emitting only whitespace. Without this guard that empty string was wrapped in the
+  // prefix and installed as the summary — silently destroying the user's standing
+  // instructions and the paths they named. The agent cannot detect that loss, and the user
+  // experiences it as the model "forgetting" mid-task.
+  //
+  // Skipping one compaction is cheap: the caller keeps its messages and tries again next
+  // turn. Losing the conversation is not.
+  const summaryBody = summaryText.replace(SUMMARY_PREFIX, '').trim();
+  if (summaryBody.length < MIN_SUMMARY_CHARS) {
+    logger.warn('Compaction produced an unusably short summary; keeping original messages', {
+      summaryChars: summaryBody.length,
+      minRequired: MIN_SUMMARY_CHARS,
+      turnsNotCompacted: turnsCompacted,
+    });
     return { messages, before, after: before, turnsCompacted: 0 };
   }
   if (!summaryText.includes(SUMMARY_PREFIX)) {

@@ -76,6 +76,17 @@ export const KNOWN_GATEWAYS: Record<string, GatewaySpec> = {
     suggestedToolCalls: true,
     note: 'OpenAI-compatible LLM endpoint. Atlas Cloud media generation uses a separate API and is not configured by this LLM gateway.',
   },
+  moonshot: {
+    name: 'moonshot',
+    title: 'Moonshot AI (Kimi)',
+    baseUrl: 'https://api.moonshot.ai/v1',
+    apiKeyEnv: 'MOONSHOT_API_KEY',
+    keyHint: 'Get a key at https://platform.moonshot.ai/console/api-keys.',
+    suggestedModel: 'kimi-k2-0905-preview',
+    suggestedContextWindow: 262144,
+    suggestedToolCalls: true,
+    note: 'Kimi K2 — strong agentic/coding model with a 256k window.',
+  },
   mistral: {
     name: 'mistral',
     title: 'Mistral',

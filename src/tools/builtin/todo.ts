@@ -32,7 +32,14 @@ const WriteSchema = z.object({
 
 export class TodoWriteTool extends Tool<z.infer<typeof WriteSchema>> {
   name = 'todo_write';
-  description = 'Update the visible todo list. Use this to track multi-step work. Set status to "in_progress" for the active item, "completed" when done. Always include ALL todos (this replaces the list). Use ids like "1", "2", etc. Update frequently — after every meaningful step.';
+  // Both halves matter. A description that only says WHEN to use a tool, and ends on an
+  // unconditional "update frequently", gives the model no basis to decide "not this time" —
+  // which is how every request, including one-line edits, ended up with a todo list.
+  description = 'Track work that has 3+ distinct steps you would otherwise lose track of. ' +
+    'Do NOT use it for a single-file edit, a one-command fix, a question, or anything you can finish in one pass — ' +
+    'a todo list for trivial work is noise that costs the user attention and buys nothing. ' +
+    'When you do use it: exactly one item "in_progress" at a time, mark items "completed" as you finish them, ' +
+    'and always send ALL todos (this call replaces the whole list). Use ids like "1", "2".';
   isReadOnly = false;
   isDestructive = false;
   argsSchema = WriteSchema;

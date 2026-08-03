@@ -178,6 +178,7 @@ program
   .option('--scope <path-prefix>', 'Deny agent edits outside this path prefix (pre-write gate on journaled writes)')
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
+  .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
@@ -276,6 +277,12 @@ program
       console.error('--budget-tokens/--budget-usd/--max-wall/--scope/--verify/--rollback-on-fail require headless mode (-p/--print).');
       process.exit(1);
     }
+    // A receipt attests to a CONTRACT (scope, budgets, verify, verdict). Without one there
+    // is nothing to attest, so say that rather than writing a hollow document.
+    if (opts.receipt && !contract) {
+      console.error('--receipt needs a contract: add at least one of --verify / --budget-tokens / --budget-usd / --max-wall / --scope.');
+      process.exit(1);
+    }
 
     // Headless mode
     if (opts.print) {
@@ -291,6 +298,7 @@ program
         explicitModel: opts.model,
         resumeSessionId,
         contract: contract ?? undefined,
+        receiptPath: opts.receipt,
       });
       process.exit(code);
     }
@@ -454,6 +462,103 @@ program
       console.log(impact.note);
     }
     process.exit(0);
+  });
+
+const receipt = program
+  .command('receipt')
+  .description('Work with run receipts — the tamper-evident record of an unattended run');
+
+receipt
+  .command('verify <file>')
+  .description('Re-check a run receipt: action-chain integrity + signature. Exits non-zero unless it verifies')
+  .option('--json', 'Print the machine-readable verdict')
+  .action(async (file: string, _o: any, cmd: any) => {
+    // optsWithGlobals(): the root command also defines --json, and commander lets the parent
+    // consume a same-named flag written after the subcommand (the c73b9a3 bug).
+    const o = cmd.optsWithGlobals() as { json?: boolean };
+    const { verifyReceipt, formatReceiptVerdict, receiptExitCode } = await import('./agent/run-receipt.js');
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fsSync.readFileSync(file, 'utf-8'));
+    } catch (e: any) {
+      console.error(`Cannot read receipt ${file}: ${e.message}`);
+      process.exit(2);
+    }
+    // No key ⇒ the chain is still checked, but the signature is reported as unverifiable
+    // rather than assumed good. verifyReceipt is explicit about that distinction.
+    const verdict = verifyReceipt(parsed, process.env.QODEX_AUDIT_KEY);
+    console.log(o.json ? JSON.stringify(verdict, null, 2) : formatReceiptVerdict(parsed, verdict));
+    process.exit(receiptExitCode(verdict));
+  });
+
+program
+  .command('eval')
+  .description('Measure the agent harness. Default suite is free, offline and deterministic — no model calls')
+  .option('--suite <name>', 'Suite to run (default: harness). Use --list to see them', 'harness')
+  .option('--list', 'List available suites and exit')
+  .option('--repeat <n>', 'Runs per task; reports variance and flags flaky tasks', '1')
+  .option('--filter <sel>', 'Comma-separated task ids or categories to keep')
+  .option('--out <file>', 'Write the run as JSON (feed it to --compare later)')
+  .option('--compare <before> [after]', 'Diff two saved runs; with one file, diff it against a fresh run')
+  .option('--label <name>', 'Label this run (shown in the A/B diff so arms are self-describing)')
+  .option('--json', 'Print machine-readable JSON instead of the report')
+  .action(async (_opts: any, cmd: any) => {
+    // optsWithGlobals(): the root command defines --json (and -m/--model), and commander
+    // lets the parent consume a same-named flag written after the subcommand — the bug
+    // fixed in c73b9a3. Read the merged view so `eval --json` reaches us.
+    const opts = cmd.optsWithGlobals() as {
+      suite?: string; list?: boolean; repeat?: string; filter?: string;
+      out?: string; compare?: string; label?: string; json?: boolean;
+    };
+    const { runSuite, getSuite, listSuites, diffRuns, formatRunReport, formatDiffReport } =
+      await import('./eval/index.js');
+
+    if (opts.list) {
+      for (const s of listSuites()) {
+        console.log(`${s.name.padEnd(10)} ${s.free ? '(free) ' : '(model)'} ${s.description}`);
+      }
+      process.exit(0);
+    }
+
+    // `--compare a.json [b.json]`: with two files, diff them. With one, diff the saved
+    // run against a fresh run of the same suite — the common "did my change help?" loop.
+    const readRun = (p: string) => JSON.parse(fsSync.readFileSync(p, 'utf-8'));
+    if (opts.compare) {
+      const extra = (cmd.args ?? []).filter((a: string) => a.endsWith('.json'));
+      const before = readRun(opts.compare);
+      const after = extra.length
+        ? readRun(extra[0])
+        : await (async () => {
+            const suite = getSuite(before.suite);
+            if (!suite) { console.error(`Unknown suite "${before.suite}" from ${opts.compare}.`); process.exit(2); }
+            return runSuite(suite!, { config: { label: opts.label ?? 'after' } });
+          })();
+      const diff = diffRuns(before, after);
+      console.log(opts.json ? JSON.stringify(diff, null, 2) : formatDiffReport(diff));
+      // Non-zero on a regression so this can gate CI.
+      process.exit(diff.regressions.length > 0 ? 1 : 0);
+    }
+
+    const suite = getSuite(opts.suite ?? 'harness');
+    if (!suite) {
+      console.error(`Unknown suite "${opts.suite}". Run \`qodex eval --list\`.`);
+      process.exit(2);
+    }
+    const sel = (opts.filter ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const ids = suite.tasks.map(t => t.id);
+    const run = await runSuite(suite, {
+      repeat: Math.max(1, Number(opts.repeat ?? 1) || 1),
+      config: { label: opts.label ?? 'run' },
+      filter: sel.length
+        ? { ids: sel.filter(s => ids.includes(s)), categories: sel.filter(s => !ids.includes(s)) }
+        : undefined,
+    });
+    if (opts.out) {
+      fsSync.writeFileSync(opts.out, JSON.stringify(run, null, 2) + '\n', 'utf-8');
+    }
+    console.log(opts.json ? JSON.stringify(run, null, 2) : formatRunReport(run));
+    // Any failure is a non-zero exit: a harness regression should break the build.
+    process.exit(run.summary.failed > 0 ? 1 : 0);
   });
 
 program
