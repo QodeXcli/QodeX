@@ -530,9 +530,9 @@ Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 QodeX will: read `Header.tsx` → add the button (shown as an approvable diff) → `dev_server_start npm run dev` → `browser_navigate` localhost → click the button → check the console for errors → screenshot → `vision_analyze` to confirm it looks right → run the type-checker on the touched file → stop the server and report. One agent loop, with the guardrails above running throughout.
 
-## Telegram / Discord / Slack bot
+## Telegram / Discord / Slack / WhatsApp / Signal
 
-Drive the same agent from chat — stream tasks to QodeX from your phone:
+Drive the same agent from chat — stream tasks to QodeX from your phone. New platforms are **thin Transports** on the same gateway (and the same Operator Hub lanes). They are not a second agent, and they do not scrape unofficial clients.
 
 ```bash
 # 1. put the token(s) in ~/.qodex/.env (secrets never go in config)
@@ -540,18 +540,32 @@ echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
 #   Slack uses Socket Mode (no public URL needed) and TWO tokens:
 #   echo 'SLACK_APP_TOKEN=xapp-...' >> ~/.qodex/.env
 #   echo 'SLACK_BOT_TOKEN=xoxb-...' >> ~/.qodex/.env
+#   WhatsApp Cloud API (official Graph + webhook — not WhatsApp Web):
+#   echo 'WHATSAPP_TOKEN=...' >> ~/.qodex/.env
+#   echo 'WHATSAPP_PHONE_NUMBER_ID=...' >> ~/.qodex/.env
+#   echo 'WHATSAPP_VERIFY_TOKEN=pick-a-string' >> ~/.qodex/.env
+#   Signal via your own signal-cli daemon (no unofficial phone clone):
+#   echo 'SIGNAL_ACCOUNT=+15551234567' >> ~/.qodex/.env
+#   # signal-cli -a +15551234567 daemon --tcp 127.0.0.1:7583
 
 # 2. enable the platform + allowlist your user id (deny-by-default) in config
 #    bot:
 #      telegram: { enabled: true, allowedUsers: ["<your-telegram-id>"] }
 #      discord:  { enabled: true, allowedUsers: ["<your-discord-id>"] }   # needs: npm i discord.js
 #      slack:    { enabled: true, allowedUsers: ["<your-slack-user-id>"] } # needs: npm i @slack/socket-mode @slack/web-api
+#      whatsapp: { enabled: true, allowedUsers: ["15551234567"] }          # digits, no +
+#      signal:   { enabled: true, allowedUsers: ["+15551234567"] }
 
 # 3. run it from the project directory you want it to work in
-qodex bot                 # all enabled platforms · --telegram / --discord / --slack to pick one
+#    Prefer --profile cloud + runtime.backend: docker so a sofa-command cannot rm ~
+qodex bot                 # all enabled platforms
+qodex bot --whatsapp
+qodex bot --signal
 ```
 
-One transport-agnostic gateway does all the work; the platform adapters are thin — **Telegram** needs zero installs, **Discord** and **Slack** are optional lazy-loaded deps. Adding a platform is one adapter implementing the same `Transport` seam, so behaviour never drifts between them.
+WhatsApp Cloud API needs a **public HTTPS webhook** (Cloudflare Tunnel / `qodex tunnel`) pointed at `http://127.0.0.1:8787` (`WHATSAPP_WEBHOOK_PORT`). Signal talks to **your** `signal-cli` over JSON-RPC — we never log in as you on a third-party server.
+
+One transport-agnostic gateway does all the work; the platform adapters are thin — **Telegram** and **WhatsApp Cloud** need zero extra npm packages, **Discord** / **Slack** are optional lazy-loaded deps, **Signal** needs a local `signal-cli` daemon. Adding a platform is one adapter implementing the same `Transport` seam, so behaviour never drifts between them.
 
 **Talk to it — voice memos.** Send a Telegram voice message and QodeX transcribes it and runs it as your turn (it echoes `🎙️ "…"` so you can see what it heard). Local-first, like web-search and vision: point `QODEX_TRANSCRIBE_CMD` at any local STT (whisper.cpp, faster-whisper, a script — `{file}` is the audio path, STDOUT is the transcript) for a fully-offline path, or set `OPENAI_API_KEY` for the cloud fallback. Neither configured ⇒ a friendly "just type" note, never a crash. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately).
 
@@ -569,7 +583,7 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 | `/episodes` | past tasks solved here, from episodic memory |
 | `/impact <symbol>` · `/rename <old> <new>` | code-graph shortcuts — blast-radius of a symbol · AST-safe rename (with approval) |
 
-Adding a command is **one entry** — Telegram, Discord, and Slack all gain the command, its menu item, and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash.
+Adding a command is **one entry** — Telegram, Discord, Slack, WhatsApp, and Signal all gain the command and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash. WhatsApp reply-buttons (max 3) and Signal numbered replies both resolve through the same hub `answer(id)`.
 
 **Living Artifacts in chat — with an AI vision review.** Ask for a dashboard, a landing page, or a chart from your phone and QodeX doesn't dump code at you — it builds a **versioned artifact**, renders it, and (for web types) runs a **vision self-review** that actually *looks* at the result and verdicts it **LOOKS_GOOD / NEEDS_WORK / BROKEN**, listing concrete issues. You get back a compact **card**:
 

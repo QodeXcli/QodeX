@@ -624,11 +624,13 @@ profileCmd
 
 program
   .command('bot')
-  .description('Run the Telegram/Discord/Slack bot front-end (drives the agent from chat)')
+  .description('Run the chat front-end (Telegram / Discord / Slack / WhatsApp Cloud / Signal)')
   .option('--telegram', 'start only Telegram')
   .option('--discord', 'start only Discord')
   .option('--slack', 'start only Slack')
-  .action(async (opts: { telegram?: boolean; discord?: boolean; slack?: boolean }) => {
+  .option('--whatsapp', 'start only WhatsApp Cloud API')
+  .option('--signal', 'start only signal-cli')
+  .action(async (opts: { telegram?: boolean; discord?: boolean; slack?: boolean; whatsapp?: boolean; signal?: boolean }) => {
     const { config, router, registry, permissions } = await bootstrap();
     const { startBots } = await import('./bot/start.js');
     await startBots({ config, router, registry, permissions, cwd: process.cwd() }, opts);

@@ -263,6 +263,10 @@ export interface QodexConfig {
     /** Slack via Socket Mode. Tokens (SLACK_APP_TOKEN + SLACK_BOT_TOKEN) live in ~/.qodex/.env;
      *  needs `npm i @slack/socket-mode @slack/web-api`. allowedUsers holds Slack user ids. */
     slack?: { enabled?: boolean; allowedUsers?: string[] };
+    /** Official WhatsApp Cloud API (webhook + Graph). Tokens in ~/.qodex/.env. */
+    whatsapp?: { enabled?: boolean; allowedUsers?: string[] };
+    /** signal-cli daemon (JSON-RPC or REST). Account in SIGNAL_ACCOUNT. */
+    signal?: { enabled?: boolean; allowedUsers?: string[] };
   };
   mcp: {
     servers: Record<string, {
@@ -789,6 +793,8 @@ export const DEFAULT_CONFIG: QodexConfig = {
     telegram: { enabled: false, allowedUsers: [] },
     discord: { enabled: false, allowedUsers: [] },
     slack: { enabled: false, allowedUsers: [] },
+    whatsapp: { enabled: false, allowedUsers: [] },
+    signal: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

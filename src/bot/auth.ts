@@ -13,6 +13,8 @@ export interface AllowConfig {
   telegram?: { allowedUsers?: string[] };
   discord?: { allowedUsers?: string[] };
   slack?: { allowedUsers?: string[] };
+  whatsapp?: { allowedUsers?: string[] };
+  signal?: { allowedUsers?: string[] };
 }
 
 export function isAuthorized(platform: Platform, userId: string, allow: AllowConfig): boolean {

@@ -23,7 +23,14 @@ export interface StartBotsDeps {
   permissions: PermissionEngine;
   cwd?: string;
 }
-export interface StartBotsOptions { telegram?: boolean; discord?: boolean; slack?: boolean }
+export type BotPlatformFlag = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal';
+export interface StartBotsOptions {
+  telegram?: boolean;
+  discord?: boolean;
+  slack?: boolean;
+  whatsapp?: boolean;
+  signal?: boolean;
+}
 
 export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<void> {
   const cwd = deps.cwd ?? process.cwd();
@@ -32,9 +39,11 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
     telegram: { allowedUsers: botCfg.telegram?.allowedUsers ?? [] },
     discord: { allowedUsers: botCfg.discord?.allowedUsers ?? [] },
     slack: { allowedUsers: botCfg.slack?.allowedUsers ?? [] },
+    whatsapp: { allowedUsers: botCfg.whatsapp?.allowedUsers ?? [] },
+    signal: { allowedUsers: botCfg.signal?.allowedUsers ?? [] },
   };
-  // No platform flag ⇒ start every platform that's enabled in config.
-  const want = (p: 'telegram' | 'discord' | 'slack') => (!opts.telegram && !opts.discord && !opts.slack) || !!opts[p];
+  const anyFlag = !!(opts.telegram || opts.discord || opts.slack || opts.whatsapp || opts.signal);
+  const want = (p: BotPlatformFlag) => !anyFlag || !!opts[p];
 
   const transports: Transport[] = [];
   const notes: string[] = [];
@@ -58,6 +67,42 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
     }
   }
 
+  if (want('whatsapp') && (botCfg.whatsapp?.enabled ?? false)) {
+    const token = process.env.WHATSAPP_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+    if (!token || !phoneNumberId || !verifyToken) {
+      notes.push('whatsapp is enabled but WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_VERIFY_TOKEN are missing — add them to ~/.qodex/.env (Cloud API, not WhatsApp Web)');
+    } else if (!allow.whatsapp!.allowedUsers!.length) {
+      notes.push('whatsapp allowlist is empty — set bot.whatsapp.allowedUsers to phone numbers (E.164 digits, no +)');
+    } else {
+      const { WhatsAppTransport } = await import('./adapters/whatsapp.js');
+      transports.push(new WhatsAppTransport({
+        token,
+        phoneNumberId,
+        verifyToken,
+        appSecret: process.env.WHATSAPP_APP_SECRET,
+      }));
+    }
+  }
+
+  if (want('signal') && (botCfg.signal?.enabled ?? false)) {
+    const account = process.env.SIGNAL_ACCOUNT;
+    if (!account) notes.push('signal is enabled but SIGNAL_ACCOUNT is missing — the +E164 of the signal-cli daemon');
+    else if (!allow.signal!.allowedUsers!.length) notes.push('signal allowlist is empty — set bot.signal.allowedUsers to +E164 numbers');
+    else {
+      const { createSignalTransport } = await import('./adapters/signal.js');
+      const rpc = process.env.SIGNAL_CLI_RPC ?? '127.0.0.1:7583';
+      const [rpcHost, rpcPortRaw] = rpc.split(':');
+      transports.push(createSignalTransport({
+        account,
+        rpcHost,
+        rpcPort: rpcPortRaw ? Number(rpcPortRaw) : 7583,
+        restUrl: process.env.SIGNAL_CLI_URL,
+      }));
+    }
+  }
+
   if (want('slack') && (botCfg.slack?.enabled ?? false)) {
     const appToken = process.env.SLACK_APP_TOKEN;
     const botToken = process.env.SLACK_BOT_TOKEN;
@@ -73,7 +118,7 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
 
   for (const n of notes) console.error('⚠️  ' + n);
   if (!transports.length) {
-    console.error('No bot transports started. Enable bot.telegram/discord/slack in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
+    console.error('No bot transports started. Enable bot.<platform> in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
     return;
   }
 
