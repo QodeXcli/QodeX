@@ -13,7 +13,7 @@ describe('formatLogLine', () => {
 
   it('should handle empty extra fields', () => {
     const result = formatLogLine('debug', 'detailed info', {});
-    expect(result).toBe('[DEBUG] detailed info');
+    expect(result).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[DEBUG\] detailed info/);
   });
 
   it('should handle different log levels', () => {
