@@ -68,3 +68,41 @@ describe('SessionStore.searchFacts (FTS5 end-to-end on a temp store)', () => {
     }
   });
 });
+
+describe('SessionStore.searchConversations + /retry truncate', () => {
+  it('finds a past user turn by keyword and scopes to cwd', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'conv-'));
+    try {
+      const store = new SessionStore(path.join(dir, 's.db'));
+      const a = store.createSession('/work/a', 'm');
+      const b = store.createSession('/work/b', 'm');
+      store.recordTurn(a, [{ role: 'user', content: 'add cursor pagination to orders' }], { input: 1, output: 1, costUsd: 0 });
+      store.recordTurn(a, [{ role: 'assistant', content: 'I added offset-based paging' }], { input: 1, output: 1, costUsd: 0 });
+      store.recordTurn(b, [{ role: 'user', content: 'unrelated weather question' }], { input: 1, output: 1, costUsd: 0 });
+      const hits = store.searchConversations('pagination orders', { cwd: '/work/a', limit: 8 });
+      expect(hits.some(h => /pagination/i.test(h.snippet))).toBe(true);
+      expect(hits.every(h => h.cwd === '/work/a')).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('truncateAfterLastUser keeps the last question and drops the answer', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'retry-'));
+    try {
+      const store = new SessionStore(path.join(dir, 's.db'));
+      const id = store.createSession('/work/a', 'm');
+      store.recordTurn(id, [{ role: 'user', content: 'first' }], { input: 1, output: 0, costUsd: 0 });
+      store.recordTurn(id, [{ role: 'assistant', content: 'answer 1' }], { input: 0, output: 1, costUsd: 0 });
+      store.recordTurn(id, [{ role: 'user', content: 'try again with tests' }], { input: 1, output: 0, costUsd: 0 });
+      store.recordTurn(id, [{ role: 'assistant', content: 'answer 2' }, { role: 'tool', content: 'ok' }], { input: 0, output: 1, costUsd: 0 });
+      const last = store.truncateAfterLastUser(id);
+      expect(last).toBe('try again with tests');
+      const loaded = store.loadSession(id)!;
+      expect(loaded.messages.filter(m => m.role === 'assistant')).toHaveLength(1);
+      expect(loaded.messages.at(-1)?.content).toBe('try again with tests');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});

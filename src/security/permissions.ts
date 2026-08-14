@@ -4,6 +4,38 @@ import { assessCommand, canGrantAlways, matchDenyRule, normalizeCommand } from '
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
+/** How the TUI answers permission prompts this session. Cycle with Shift+Tab. */
+export type ApprovalMode = 'manual' | 'auto' | 'always';
+
+export const APPROVAL_MODES: readonly ApprovalMode[] = ['manual', 'auto', 'always'];
+
+export const APPROVAL_MODE_META: Record<ApprovalMode, { label: string; hint: string }> = {
+  manual: { label: 'manual', hint: 'Ask before file edits and shell commands.' },
+  auto: { label: 'auto', hint: 'File edits run without asking; shell still asks.' },
+  always: { label: 'always yes', hint: 'Tools run without asking. Hard-deny and irreversible still stop.' },
+};
+
+/** File-mutating tools that "auto" (accept-edits) covers. Shell / MCP stay on evaluate(). */
+const AUTO_EDIT_TOOLS = new Set([
+  'write_file',
+  'edit_text',
+  'multi_edit',
+  'multi_file_edit',
+  'edit_symbol',
+]);
+
+export function isAutoEditTool(tool: string): boolean {
+  return AUTO_EDIT_TOOLS.has(tool);
+}
+
+export function parseApprovalMode(raw: string): ApprovalMode | null {
+  const s = raw.trim().toLowerCase();
+  if (s === 'manual' || s === 'off' || s === 'ask') return 'manual';
+  if (s === 'auto' || s === 'edits' || s === 'accept') return 'auto';
+  if (s === 'always' || s === 'on' || s === 'yes' || s === 'always-yes' || s === 'always_yes' || s === 'yolo') return 'always';
+  return null;
+}
+
 export interface PermissionRequest {
   tool: string;
   operation: string;        // e.g., shell command, file path
@@ -78,10 +110,10 @@ export class PermissionEngine {
       return 'ask';
     }
 
-    // Session-wide auto-approve overrides everything except hard denies and
-    // always-ask (handled above).
-    // Set by `/auto on`; cleared by `/auto off`.
-    if (_autoApproveSession) return 'allow';
+    // Session-wide approval mode (Shift+Tab / `/auto`). Hard denies and always-ask
+    // already returned above, so "always yes" still cannot silently run sudo / rm -rf.
+    if (_approvalMode === 'always') return 'allow';
+    if (_approvalMode === 'auto' && isAutoEditTool(req.tool)) return 'allow';
 
     // "Allow this tool for the whole session" — from gradient picker
     if (this.sessionToolAllows.has(req.tool)) return 'allow';
@@ -182,12 +214,24 @@ export class PermissionEngine {
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
-// Session-wide auto-approve toggle.
+// Session-wide approval mode.
 //
-// `/auto on` flips this on, making PermissionEngine.evaluate() return 'allow' for
-// everything except hard-denied patterns. Single global flag because it's session-
-// scoped and reset on process restart — file-system / DB state would be inappropriate.
+// Shift+Tab cycles manual → auto → always. `/auto on` is "always"; `/auto off` is
+// "manual". Module-global because it's session-scoped and reset on process restart.
 
-let _autoApproveSession = false;
-export function setAutoApproveSession(enabled: boolean): void { _autoApproveSession = enabled; }
-export function getAutoApproveSession(): boolean { return _autoApproveSession; }
+let _approvalMode: ApprovalMode = 'manual';
+
+export function getApprovalMode(): ApprovalMode { return _approvalMode; }
+export function setApprovalMode(mode: ApprovalMode): void { _approvalMode = mode; }
+export function cycleApprovalMode(): ApprovalMode {
+  const i = APPROVAL_MODES.indexOf(_approvalMode);
+  _approvalMode = APPROVAL_MODES[(i + 1) % APPROVAL_MODES.length]!;
+  return _approvalMode;
+}
+
+/** @deprecated Prefer setApprovalMode. `true` = always, `false` = manual. */
+export function setAutoApproveSession(enabled: boolean): void {
+  _approvalMode = enabled ? 'always' : 'manual';
+}
+/** True only in "always yes" — not in accept-edits `auto`. */
+export function getAutoApproveSession(): boolean { return _approvalMode === 'always'; }

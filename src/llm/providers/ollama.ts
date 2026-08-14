@@ -66,7 +66,10 @@ export class OllamaProvider extends Provider {
       const data = (await res.json()) as { models: OllamaModel[] };
       return (data.models ?? []).map(m => ({
         id: m.name,
-        contextWindow: this.guessContextWindow(m.name),
+        // Advertise the window we actually ALLOCATE, not the catalog's 128k/256k
+        // marketing number. Otherwise the agent packs 200k and Ollama either
+        // truncates the system prompt or spends seconds zeroing a huge KV cache.
+        contextWindow: this.numCtxFor(m.name),
         maxOutput: 8192,
         inputCostPerMillion: 0,
         outputCostPerMillion: 0,
@@ -185,6 +188,9 @@ export class OllamaProvider extends Provider {
       // so we pay prefill once, not on every iteration. Configurable; default 30m.
       keep_alive: this.opts.keepAlive ?? '30m',
       ...(this.opts.draftModel ? { draft_model: this.opts.draftModel } : {}),
+      // Native thinking switch. `/no_think` in the prompt is a soft hint; this is
+      // what actually turns Qwen3/DeepSeek-R1 thinking off on Ollama 0.9+.
+      ...(req.think !== undefined ? { think: req.think } : {}),
     };
 
     if (req.tools && req.tools.length > 0) {
@@ -261,6 +267,15 @@ export class OllamaProvider extends Provider {
 
           try {
             const chunk = JSON.parse(line);
+
+            // Hidden reasoning — Ollama 0.9+ thinking models (Qwen3, DeepSeek-R1,
+            // GPT-OSS…) stream this in `message.thinking`, NOT `message.content`.
+            // Dropping it made the TUI sit on "crafting…" for tens of seconds after
+            // the weights were already loaded. Forward it so the UI can show progress
+            // and so TTFT isn't the entire think pass.
+            if (chunk.message?.thinking) {
+              yield { type: 'thinking_delta', delta: String(chunk.message.thinking) };
+            }
 
             // Text content
             if (chunk.message?.content) {

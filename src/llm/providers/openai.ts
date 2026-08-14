@@ -215,6 +215,8 @@ export class OpenAIProvider extends Provider {
       if (req.grammar) extra.grammar = req.grammar;
       // Reasoning effort for models that support it. Unknown field elsewhere → ignored.
       if (req.reasoningEffort) extra.reasoning_effort = req.reasoningEffort;
+      // Ollama-compat / some local servers honor `think`. Cloud OpenAI ignores it.
+      if (req.think !== undefined) extra.think = req.think;
       // Speculative decoding hints. Different local servers (LM Studio,
       // llama.cpp, vLLM) read different field names; buildSpecDecodeExtras emits
       // the right one(s). All are ignored by servers/endpoints that don't speak
@@ -260,6 +262,14 @@ export class OpenAIProvider extends Provider {
         if (delta?.content) {
           textChars += delta.content.length;
           yield { type: 'text_delta', delta: delta.content };
+        }
+
+        // Local OpenAI-compatible servers (LM Studio, vLLM, llama.cpp) put
+        // reasoning in a separate field. Same bug class as Ollama's
+        // `message.thinking`: ignore it and the TUI looks frozen after a fast load.
+        const reasoning = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
+        if (reasoning) {
+          yield { type: 'thinking_delta', delta: String(reasoning) };
         }
 
         if (delta?.tool_calls) {

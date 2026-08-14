@@ -23,6 +23,13 @@ import { parseSteerInput } from '../agent/steering.js';
 import type { ModelRouter } from '../llm/router.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { PermissionEngine } from '../security/permissions.js';
+import {
+  type ApprovalMode,
+  getApprovalMode,
+  cycleApprovalMode,
+  setApprovalMode as setApprovalModeGlobal,
+  APPROVAL_MODE_META,
+} from '../security/permissions.js';
 import type { QodexConfig } from '../config/defaults.js';
 import type { Message } from '../session/store.js';
 import { getSessionStore } from '../session/store.js';
@@ -35,6 +42,7 @@ import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
 import { summarizeToolResult } from './render/tool-summary.js';
 import { handleSlashCommand } from './slash-commands.js';
+import { slashAliasMap } from '../skills/registry.js';
 import { annotateImagePrompt } from '../utils/image-paths.js';
 import { Welcome } from './prompts/welcome.js';
 import { BootSplash } from './prompts/boot-splash.js';
@@ -108,6 +116,10 @@ export function App(props: AppProps): React.ReactElement {
   const promptHistoryRef = useRef<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [streamingText, setStreamingText] = useState('');
+  // Hidden reasoning tokens (Ollama `message.thinking` / LM Studio reasoning_content).
+  // Count only — we don't dump the trace into the transcript, but we MUST show
+  // that the model is working or the TUI looks frozen after a fast model load.
+  const [thinkingChars, setThinkingChars] = useState(0);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => {
@@ -126,6 +138,7 @@ export function App(props: AppProps): React.ReactElement {
     return [];
   });
   const [mode, setMode] = useState<'normal' | 'plan'>('normal');
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => getApprovalMode());
   // Gates the main UI behind the animated boot splash. Flips to true when the splash
   // finishes (or immediately when motion is disabled / not a TTY).
   const [booted, setBooted] = useState(false);
@@ -290,6 +303,30 @@ export function App(props: AppProps): React.ReactElement {
       if (exitTimer.current) { clearTimeout(exitTimer.current); exitTimer.current = null; }
     }
 
+    // Shift+Tab cycles approval: manual → auto → always yes → manual.
+    // If a prompt is already on screen, auto-answer it when the new mode would
+    // have skipped the ask (always yes; or auto + a file-edit diff).
+    if ((key.tab && key.shift) || _input === '\u001b[Z') {
+      const next = cycleApprovalMode();
+      setApprovalMode(next);
+      const meta = APPROVAL_MODE_META[next];
+      setHistory(h => [...h, {
+        type: 'system',
+        text: `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
+        id: nextId(),
+      }]);
+      const pending = pendingPromptRef.current as PendingPrompt | null;
+      if (pending) {
+        const shouldAccept = next === 'always' || (next === 'auto' && !!pending.diff);
+        const answer = shouldAccept ? pickAutoAnswer(pending.options) : null;
+        if (answer) {
+          setPendingPrompt(null);
+          pending.resolve(answer);
+        }
+      }
+      return;
+    }
+
     // Interrupt a running turn with either Ctrl+C or Esc. Esc is what most
     // people reach for; Ctrl+C is the fallback. When idle, Ctrl+C asks first.
     if ((key.ctrl && _input === 'c') || key.escape) {
@@ -334,7 +371,7 @@ export function App(props: AppProps): React.ReactElement {
     });
   }, []);
 
-  const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string }) => {
+  const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string; skipUserHistory?: boolean }) => {
     if (!agentRef.current) return;
 
     // Slash command? Only when called from user input (not from internal re-submit of rendered template)
@@ -354,6 +391,10 @@ export function App(props: AppProps): React.ReactElement {
         if (result.action?.type === 'set_mode') {
           setMode(result.action.mode);
         }
+        if (result.action?.type === 'set_approval_mode') {
+          setApprovalModeGlobal(result.action.mode);
+          setApprovalMode(result.action.mode);
+        }
         if (result.action?.type === 'set_max_iterations') {
           maxIterOverrideRef.current = result.action.value;
         }
@@ -371,6 +412,41 @@ export function App(props: AppProps): React.ReactElement {
               ...prior,
             ]);
           }
+        }
+        if (result.action?.type === 'retry') {
+          const last = getSessionStore().truncateAfterLastUser(sessionId);
+          if (!last) {
+            setHistory(h => [...h, { type: 'system', text: 'Nothing to retry — no previous user turn.', id: nextId() }]);
+            return;
+          }
+          const loaded = getSessionStore().loadSession(sessionId);
+          if (loaded) setMessages(loaded.messages);
+          setHistory(h => {
+            let lastUser = -1;
+            for (let i = 0; i < h.length; i++) if (h[i]!.type === 'user') lastUser = i;
+            return lastUser >= 0 ? h.slice(0, lastUser + 1) : h;
+          });
+          await submitPrompt(last, { displayAs: last, skipUserHistory: true });
+          return;
+        }
+        if (result.action?.type === 'compact') {
+          if (!agentRef.current) {
+            setHistory(h => [...h, { type: 'system', text: 'Agent is not ready yet.', id: nextId() }]);
+            return;
+          }
+          const compacted = await agentRef.current.compactConversation(messages);
+          if (!compacted) {
+            setHistory(h => [...h, { type: 'system', text: 'Nothing to compact — history is already short, or the summarizer returned nothing useful.', id: nextId() }]);
+            return;
+          }
+          getSessionStore().replaceMessages(sessionId, compacted.messages);
+          setMessages(compacted.messages);
+          setHistory(h => [...h, {
+            type: 'system',
+            text: `Compacted ${compacted.turnsCompacted} older turn(s), saved ~${compacted.savedTokens} tokens. Recent turns kept verbatim.`,
+            id: nextId(),
+          }]);
+          return;
         }
         if (result.action?.type === 'exit') {
           exit();
@@ -391,9 +467,12 @@ export function App(props: AppProps): React.ReactElement {
       }
     }
 
-    setHistory(h => [...h, { type: 'user', text: opts?.displayAs ?? prompt, id: nextId() }]);
+    if (!opts?.skipUserHistory) {
+      setHistory(h => [...h, { type: 'user', text: opts?.displayAs ?? prompt, id: nextId() }]);
+    }
     setBusy(true);
     clearStreaming();
+    setThinkingChars(0);
     setActiveTools([]);
 
     const ac = new AbortController();
@@ -447,6 +526,12 @@ export function App(props: AppProps): React.ReactElement {
       })) {
         if (ac.signal.aborted) break;
         switch (event.type) {
+          case 'thinking_start':
+            setThinkingChars(0);
+            break;
+          case 'thinking_delta':
+            setThinkingChars(n => n + String(event.data?.delta ?? '').length);
+            break;
           case 'text_delta':
             accumulated += event.data.delta ?? '';
             // Filter what we DISPLAY to user. The agent loop will run text-tool-recovery
@@ -457,6 +542,7 @@ export function App(props: AppProps): React.ReactElement {
             pushStreaming(stripLeakedToolTags(stripThinkingForDisplay(stripLeakedToolJson(accumulated))));
             break;
           case 'thinking_done':
+            setThinkingChars(0);
             // Clear the live streaming region BEFORE committing the message to the
             // <Static> history. If the committed copy is appended to <Static> while
             // streamingText still holds the full text, Ink re-paints that streamed
@@ -583,6 +669,14 @@ export function App(props: AppProps): React.ReactElement {
       setHistory(h => [...h, { type: 'system', text: `↪ Steering note sent to the running task: ${preview}`, id: nextId() }]);
       return;
     }
+    // Hermes-style interrupt-and-redirect: a plain message mid-task is a course
+    // correction, not a queued next job. Slash commands still queue (or handle).
+    if (busy && agentRef.current && !v.startsWith('/')) {
+      agentRef.current.pushSteer(v);
+      const preview = v.length > 56 ? v.slice(0, 56) + '…' : v;
+      setHistory(h => [...h, { type: 'system', text: `↪ Redirected the running task: ${preview}`, id: nextId() }]);
+      return;
+    }
     // If a turn is in flight (or a permission prompt is open), QUEUE it instead of
     // dropping it — the drain effect runs it the moment the agent is free.
     if (busy || pendingPrompt) {
@@ -681,13 +775,16 @@ export function App(props: AppProps): React.ReactElement {
               p.resolve(a);
             }}
           />
+          <Box paddingX={1}>
+            <Text dimColor>Shift+Tab cycles approval · now {APPROVAL_MODE_META[approvalMode].label}</Text>
+          </Box>
         </Box>
       )}
 
       {!pendingPrompt && (
         <Box flexDirection="column" marginTop={1}>
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}
-          <LiveHeader width={cols} mode={mode} busy={busy} motion={motion} />
+          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} />
           {/* Input lives in its own bordered box, visually detached from the transcript above. */}
           <Box
             width={cols}
@@ -700,12 +797,13 @@ export function App(props: AppProps): React.ReactElement {
               onChange={setInput}
               onSubmit={handleSubmit}
               cwd={props.cwd}
-              placeholder={busy ? 'Type ahead — runs when the task finishes…' : 'Type a task, or /help'}
+              placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}
               active={!pendingPrompt}
               busy={busy}
               historyRef={promptHistoryRef}
+              extraSlashNames={[...slashAliasMap().keys()]}
               prefix={busy
                 ? (motion ? <Spinner type="dots" /> : <Text color="cyan">·</Text>)
                 : <Text color={mode === 'plan' ? 'yellow' : 'cyan'}>{mode === 'plan' ? '📋' : '❯'}</Text>}
@@ -730,6 +828,7 @@ export function App(props: AppProps): React.ReactElement {
             width={cols}
             model={explicitModel ?? props.config.defaults.model}
             mode={mode}
+            approvalMode={approvalMode}
             tokens={budgetStatus.tokens}
             costUsd={budgetStatus.costUsd}
             contextTokens={budgetStatus.contextTokens}
@@ -769,16 +868,34 @@ function ToolActivityLine(props: { name: string; partialArgs: string; motion: bo
  * running. While the agent is busy it shows a soft working hint next to the mark; idle,
  * it's just the shimmering brand. Animation is gated by `motion` (TTY + opt-in).
  */
-function LiveHeader(props: { width: number; mode: 'normal' | 'plan'; busy: boolean; motion: boolean }): React.ReactElement {
+function LiveHeader(props: {
+  width: number;
+  mode: 'normal' | 'plan';
+  approvalMode: ApprovalMode;
+  busy: boolean;
+  thinkingChars?: number;
+  motion: boolean;
+}): React.ReactElement {
   const phase = useShimmer(props.motion);
+  const approval = APPROVAL_MODE_META[props.approvalMode];
+  const thinkTok = props.thinkingChars && props.thinkingChars > 0
+    ? Math.max(1, Math.round(props.thinkingChars / 4))
+    : 0;
   return (
     <Box width={props.width} paddingX={1} marginBottom={0}>
       <GradientText text="✦ QodeX" stops={AURORA} phase={phase} bold />
       {props.busy
-        ? <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
+        ? thinkTok > 0
+          ? <Text color="yellow">  ·  thinking… {thinkTok} tok  ·  Esc to stop</Text>
+          : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
         : props.mode === 'plan'
           ? <Text color="yellow">  ·  plan mode</Text>
           : <Text dimColor>  ·  ready</Text>}
+      {props.mode !== 'plan' && (
+        <Text color={approvalColor(props.approvalMode)} dimColor={props.approvalMode === 'manual'}>
+          {'  ·  '}{approval.label}
+        </Text>
+      )}
     </Box>
   );
 }
@@ -788,10 +905,26 @@ function LiveHeader(props: { width: number; mode: 'normal' | 'plan'; busy: boole
  * key hints on the right. "credit" reads "local · free" for on-device models (cost $0) and
  * the running dollar amount once a paid API is in play. Updates live as budget events land.
  */
+function pickAutoAnswer(options: string[]): string | null {
+  const lower = options.map(o => o.toLowerCase());
+  for (const want of ['accept', 'yes', 'y', 'always']) {
+    const i = lower.indexOf(want);
+    if (i !== -1) return options[i]!;
+  }
+  return null;
+}
+
+function approvalColor(mode: ApprovalMode): 'green' | 'cyan' | 'yellow' {
+  if (mode === 'always') return 'yellow';
+  if (mode === 'auto') return 'cyan';
+  return 'green';
+}
+
 function StatusBar(props: {
   width: number;
   model: string;
   mode: 'normal' | 'plan';
+  approvalMode: ApprovalMode;
   tokens: number;
   costUsd: number;
   contextTokens: number;
@@ -801,7 +934,7 @@ function StatusBar(props: {
   elapsedMs: number;
   busy: boolean;
 }): React.ReactElement {
-  const { width, model, mode, tokens, costUsd, contextTokens, contextWindow, providerName, providerIsLocal, elapsedMs, busy } = props;
+  const { width, model, mode, approvalMode, tokens, costUsd, contextTokens, contextWindow, providerName, providerIsLocal, elapsedMs, busy } = props;
   const tok = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
   // WHERE the model runs, stated — not guessed from cost: 'ollama·local', 'lmstudio·local',
   // 'anthropic·api'… A billing API at $0.0000 still shows ·api so cloud is never mistaken
@@ -832,6 +965,8 @@ function StatusBar(props: {
         )}
         <Text dimColor>  ·  </Text>
         <Text color={mode === 'plan' ? 'yellow' : 'green'}>{mode}</Text>
+        <Text dimColor>  ·  </Text>
+        <Text color={approvalColor(approvalMode)}>{APPROVAL_MODE_META[approvalMode].label}</Text>
         {ctxMeter !== '' && (
           <>
             <Text dimColor>  ·  </Text>
@@ -848,7 +983,7 @@ function StatusBar(props: {
         )}
         <Text dimColor>{'  ·  '}</Text>
         <Text color={costUsd > 0 ? 'magenta' : 'green'}>{credit}</Text>
-        <Text dimColor>  ·  ⏎ send  ·  ^C exit</Text>
+        <Text dimColor>  ·  ⏎ send  ·  ⇧⇥ mode  ·  ^C exit</Text>
       </Box>
     </Box>
   );

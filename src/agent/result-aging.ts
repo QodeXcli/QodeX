@@ -5,7 +5,7 @@
  * read-cache.ts handles *file reads* (supersede + opt-in outline aging). But a
  * large UNIQUE result — a 60KB `shell` build log, a wall of `grep` matches, a
  * `browser_*` page snapshot — is carried IN FULL on every subsequent iteration
- * until the 0.75×ctx auto-compact threshold, which short/medium tasks never
+ * until the 0.80×ctx auto-compact threshold, which short/medium tasks never
  * reach. One 60KB log emitted at turn 2 of a 10-iteration task costs its ~15k
  * tokens again on every one of the remaining 8 requests (~120k tokens) — the
  * same order as an entire observed 46-minute run.

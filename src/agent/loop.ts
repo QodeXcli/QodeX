@@ -37,12 +37,14 @@ import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import { BudgetTracker } from './budget.js';
+import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
 import { applySpillGuard } from './tool-spill.js';
 import { efficiencyDefaults, resolveSetting } from './efficiency-profile.js';
+import { nextRelief } from './context-pressure.js';
 import { gatherInfraSignals, deriveAutoDisabledTools, ratchetAutoDisabled } from './tool-profile.js';
 import { decideThinking, applyThinkingDecision, countTrailingToolErrors, modelSupportsSoftSwitch } from './thinking-control.js';
 import { detectLmStudioContextWindows } from '../setup/model-detector.js';
@@ -72,7 +74,7 @@ import { GitSandbox } from './git-sandbox.js';
 import { logger } from '../utils/logger.js';
 
 export interface AgentEvent {
-  type: 'thinking_start' | 'text_delta' | 'thinking_done'
+  type: 'thinking_start' | 'thinking_delta' | 'text_delta' | 'thinking_done'
       | 'tool_call_start' | 'tool_call_args_delta' | 'tool_call_executing'
       | 'tool_result' | 'tool_ui'
       | 'iteration_start' | 'iteration_done'
@@ -205,7 +207,7 @@ export class AgentLoop {
   /** Auto-compact older turns when context exceeds the threshold of the model's window. Enabled by default. */
   private autoCompactEnabled = true;
   /** Fraction of the context window above which auto-compaction triggers. */
-  private autoCompactThreshold = 0.75;
+  private autoCompactThreshold = 0.80;
   /** Fallback context window (tokens) when the caller/model doesn't specify one. */
   private defaultContextWindow = 32_768;
   /** True when the user set compaction.contextWindow in config (it then wins over model-detected). */
@@ -996,7 +998,7 @@ export class AgentLoop {
    *  can REVERT a toggle (e.g. context.efficient turned back off) as well as apply one. */
   private applyConfigDerived(): void {
     this.autoCompactEnabled = true;
-    this.autoCompactThreshold = 0.75;
+    this.autoCompactThreshold = 0.80;
     const cfg = this.config as any;
     const compactCfg = cfg.compaction;
     if (cfg?.context?.efficient === true) this.autoCompactThreshold = efficiencyDefaults(true).compactThreshold;
@@ -1176,12 +1178,6 @@ export class AgentLoop {
     // LLM-critic rounds spent this run (semantic review after mechanical verify).
     let criticRounds = 0;
 
-    // Auto-compaction cooldown: the iteration index until which we skip the
-    // compaction check. Set after a successful compaction so we don't re-summarize
-    // for a few iterations (the summary itself is large; let real work accumulate
-    // before considering another pass). 0 = check every iteration.
-    let compactCooldownUntil = 0;
-
     // Previous turn's dispatched prompt — used to measure how much of the prompt the
     // inference server can serve from its KV cache (longest byte-stable prefix). A drop
     // here is the canary for an accidental prefix-busting change (reordered tools,
@@ -1309,26 +1305,52 @@ export class AgentLoop {
         budget.incrementIteration();
         budget.checkpoint();
       } catch (e: any) {
-        let msg = e.message;
-        if (e.budgetType === 'iterations') {
-          msg += '\nTo continue without an iteration cap, type /unlimited (this session) ' +
-            'or set `defaults.maxIterations: 0` in ~/.qodex/config.yaml. ' +
-            'You can also raise it with /iterations <n>.';
-        }
-        yield { type: 'error', data: { message: msg, budgetType: e.budgetType } };
+        yield { type: 'error', data: { message: e.message, budgetType: e.budgetType } };
         return;
       }
 
-      // Warn once at ~80% of the iteration cap so a long task doesn't just stop dead.
+      // Iteration cap is a fuse, not a finish line. A working task extends and
+      // keeps going; only a detected runaway stops. Users should not need /unlimited
+      // to finish a real project.
+      if (budget.atIterationCap()) {
+        let maxReadRepeatAtCap = 0;
+        for (const [key, n] of callCounts) {
+          if (key.startsWith('read_file|') && n > maxReadRepeatAtCap) maxReadRepeatAtCap = n;
+        }
+        const verdict = decideIterationPressure(true, {
+          stuckLoop: detectStuckLoop(recentCalls),
+          errorLoop: !!detectErrorLoop(recentErrors),
+          readAbort: readLoopAction(maxReadRepeatAtCap) === 'abort',
+          consecutiveFailures: consecutiveFailures.count,
+        });
+        if (verdict === 'extend') {
+          const next = nextIterationCap(budget.getMaxIterations());
+          budget.extendIterations(next);
+          yield {
+            type: 'notice',
+            data: {
+              message:
+                `Still making progress at step ${budget.getIterations()} — continuing ` +
+                `(fuse extended to ${next}; Esc to stop).`,
+            },
+          };
+        } else {
+          const msg =
+            `Stopped: the task is looping, not just long (${budget.getIterations()} steps). ` +
+            `The iteration fuse only fires when the same tools keep failing or repeating. ` +
+            `Narrow the task, or /unlimited if you want it to keep trying anyway.`;
+          yield { type: 'error', data: { message: msg, budgetType: 'iterations' } };
+          return;
+        }
+      }
+
       if (budget.shouldWarnIterations()) {
         const u = budget.getUsage();
         yield {
           type: 'notice',
           data: {
             message:
-              `⚠ Approaching the iteration limit (${u.iterations}/${budget.getMaxIterations()}). ` +
-              `If this task is large, type /unlimited to remove the cap for this session ` +
-              `(or /iterations <n> to raise it), then continue.`,
+              `Large task — ${u.iterations} steps so far. I'll keep going while there's progress. Esc to stop.`,
           },
         };
       }
@@ -1383,55 +1405,6 @@ export class AgentLoop {
         const merged = compactFileReads(messages.concat(newMessages), { agingOutline: readCacheAging });
         messages = merged.slice(0, split);
         newMessages = merged.slice(split);
-      }
-
-      // ── Auto-compaction ──
-      // Fire when the combined context exceeds a fraction of the model window,
-      // BEFORE routing so the routing token estimate sees the compacted size.
-      // A cooldown after each compaction prevents back-to-back summarization.
-      // compactMessages preserves the most recent turns verbatim and never
-      // splits a tool_call from its tool_result.
-      const iterNow = budget.getUsage().iterations;
-      if (this.autoCompactEnabled && iterNow >= compactCooldownUntil) {
-        const combined = messages.concat(newMessages);
-        const { shouldCompact } = await import('../utils/compaction.js');
-        // Use the ROUTED MODEL's real context window, not a fixed 32k guess.
-        // A model with a 256k window was being compacted as if it had 32k,
-        // throwing away working memory the model could still hold. We resolve
-        // the model's actual window and only fall back to the configured /
-        // default value when the router can't tell us.
-        let modelCtxWindow: number | undefined;
-        try {
-          const probe = this.router.route(
-            (mode.mode === 'plan' ? 'planning' : 'subagent') as any,
-            this.estimateTokens(combined),
-            {},
-          );
-          if (probe?.modelInfo?.contextWindow && probe.modelInfo.contextWindow > 0) {
-            modelCtxWindow = probe.modelInfo.contextWindow;
-          }
-        } catch { /* router probe failed — fall back below */ }
-        const ctxWindow = (options as any).explicitContextWindow
-          ?? (this.contextWindowExplicit ? this.defaultContextWindow : undefined)
-          ?? modelCtxWindow
-          ?? this.defaultContextWindow
-          ?? 32_768;
-        if (shouldCompact(combined, ctxWindow, this.autoCompactThreshold)) {
-          yield { type: 'progress', data: { message: '🗜  Context over threshold — summarizing older turns…' } } as any;
-          const compacted = await this.runCompaction(combined, ctxWindow, options.signal);
-          if (compacted) {
-            // Replace the whole working set with the compacted list; the summary
-            // becomes part of the base, and this run's accumulator resets.
-            messages = compacted;
-            newMessages = [];
-            compactCooldownUntil = iterNow + 3; // skip the next few iterations
-            prevDispatched = null; // prefix changed → cache canary reset
-            yield { type: 'progress', data: { message: '🗜  Compaction done — recent turns preserved.' } } as any;
-          } else {
-            // Summarization no-op'd or failed; don't retry immediately.
-            compactCooldownUntil = iterNow + 2;
-          }
-        }
       }
 
       // Classify task to pick a model
@@ -1542,7 +1515,6 @@ export class AgentLoop {
       }
       const agedRaw = dedupedRaw;
 
-      // Prune context to fit the chosen model's window. Reserve 20% for output + tools schema.
       // ── Live context sync ── the config's contextWindow goes stale the moment the
       // user reloads the model at a different length in LM Studio (the 32k-clamp OOM
       // class of bugs). Once per session we read the GROUND TRUTH from LM Studio's
@@ -1574,19 +1546,64 @@ export class AgentLoop {
       }
       this.lastModelSource = modelSource;
       this.lastEffectiveCtxWindow = effectiveCtxWindow;
-      const contextBudget = Math.floor(effectiveCtxWindow * 0.75);
-      const estTokens = this.estimateTokens(agedRaw);
-      // ─── Hooks: PreCompact ───────────────────────────────────────────────────
-      // Fired right before we drop oldest turn groups. Lets users back up the conversation,
-      // ship a snapshot to remote storage, etc.
-      if (estTokens > contextBudget && hooks?.hasAny('PreCompact')) {
-        try {
-          await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
-        } catch (e: any) {
-          logger.warn('PreCompact hook dispatch failed', { err: e.message });
+      const ctxWindow = (options as any).explicitContextWindow
+        ?? (this.contextWindowExplicit ? this.defaultContextWindow : undefined)
+        ?? effectiveCtxWindow
+        ?? this.defaultContextWindow
+        ?? 32_768;
+
+      // ── Context pressure ── never stop because the window is full.
+      // At 80% we compact; if still over we compact harder; only then prune.
+      // Policy lives in context-pressure.ts — this loop just executes and re-measures.
+      let relieved = agedRaw;
+      let compactPass = 0;
+      while (true) {
+        const step = nextRelief({
+          tokens: this.estimateTokens(relieved),
+          window: ctxWindow,
+          compactAt: this.autoCompactThreshold,
+          compactPass,
+          compactEnabled: this.autoCompactEnabled,
+        });
+        if (!step) break;
+        if (step.kind === 'compact') {
+          if (hooks?.hasAny('PreCompact')) {
+            try {
+              await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
+            } catch (e: any) {
+              logger.warn('PreCompact hook dispatch failed', { err: e.message });
+            }
+          }
+          yield { type: 'progress', data: { message: `🗜  ${step.reason}` } } as any;
+          const compacted = await this.runCompaction(relieved, ctxWindow, options.signal, step.keepLastTurns);
+          compactPass += 1;
+          if (compacted) {
+            relieved = compacted;
+            prevDispatched = null;
+            yield { type: 'progress', data: { message: '🗜  Compaction done — recent turns preserved.' } } as any;
+          } else {
+            // Summarizer failed / nothing to fold — skip the rest of the ladder, prune if needed.
+            compactPass = 3;
+          }
+          continue;
         }
+        // Last resort: prune oldest units to the fit budget. Never abort the run.
+        if (hooks?.hasAny('PreCompact')) {
+          try {
+            await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
+          } catch (e: any) {
+            logger.warn('PreCompact hook dispatch failed', { err: e.message });
+          }
+        }
+        relieved = this.pruneMessages(relieved, step.maxTokens);
+        break;
       }
-      let allMessages = this.pruneMessages(agedRaw, contextBudget);
+      if (relieved !== agedRaw && relieved.length) {
+        messages = relieved;
+        newMessages = [];
+      }
+      const estTokens = this.estimateTokens(relieved);
+      let allMessages = relieved;
 
       // Text-tool mode: inject the protocol + tool-list block as a separate system message
       // (after pruning, so it's never dropped, and after the main system prefix so caches
@@ -1613,7 +1630,10 @@ export class AgentLoop {
       // reasoning pass. /no_think is appended only to the OUTBOUND copy, only at
       // the tail (pure append — prefix cache stays stable); history stays clean.
       // Off via reasoning.adaptive:false. See src/agent/thinking-control.ts.
+      // ALSO send the native `think` flag — Ollama 0.9+ ignores `/no_think` in the
+      // prompt and still emits a hidden `message.thinking` pass otherwise.
       let outboundMessages = allMessages;
+      let thinkSwitch: boolean | undefined;
       if ((this.config as any)?.reasoning?.adaptive !== false && modelSupportsSoftSwitch(route.model)) {
         const decision = decideThinking({
           iteration: this.currentTurn,
@@ -1621,8 +1641,10 @@ export class AgentLoop {
           recentToolErrors: countTrailingToolErrors(allMessages),
           forceThink: this.forceThinkNext,
           rethinkEvery: (this.config as any)?.reasoning?.rethinkEvery,
+          trivial: isTrivialMessage(latestUserText),
         });
         this.forceThinkNext = false;
+        thinkSwitch = decision === 'think';
         outboundMessages = applyThinkingDecision(allMessages, decision, route.model);
         if (decision === 'no_think') {
           logger.info('Adaptive thinking: routine step — /no_think', { iteration: this.currentTurn });
@@ -1640,6 +1662,7 @@ export class AgentLoop {
         signal: options.signal,
         ...(forceCall ? { toolChoice: 'required' as const } : {}),
         ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+        ...(thinkSwitch !== undefined ? { think: thinkSwitch } : {}),
       });
 
       yield { type: 'thinking_start', data: { model: route.model } };
@@ -1662,11 +1685,17 @@ export class AgentLoop {
           streamError = 'Cancelled by user';
           break;
         }
-        if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta')) {
+        if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta' || event.type === 'thinking_delta')) {
           firstTokenAt = Date.now();
         }
 
         switch (event.type) {
+          case 'thinking_delta':
+            // Do NOT fold thinking into assistantText — that would leak into history
+            // and the next prefill. The TUI uses this only as a live "still working" signal.
+            yield { type: 'thinking_delta', data: { delta: event.delta } };
+            break;
+
           case 'text_delta':
             assistantText += event.delta ?? '';
             yield { type: 'text_delta', data: { delta: event.delta } };
@@ -1738,7 +1767,82 @@ export class AgentLoop {
         });
       }
 
-      // Stream errored
+      // Stream errored — one automatic retry on defaults.fallbackModel when the
+      // primary died before any token (connection / 5xx). Mid-stream failures
+      // are not retried: we'd duplicate already-yielded text.
+      if (streamError) {
+        const fbId = (this.config as any)?.defaults?.fallbackModel as string | undefined;
+        const retryable = !options.signal?.aborted && !firstTokenAt && !!fbId
+          && /cannot reach|econnrefused|etimedout|fetch failed|http 5|unavailable|overloaded/i.test(streamError);
+        if (retryable && fbId) {
+          let fb: ReturnType<typeof this.router.resolveModel> | null = null;
+          try { fb = this.router.resolveModel(fbId); } catch { fb = null; }
+          if (fb && fb.resolvedId !== route.model) {
+            yield {
+              type: 'notice',
+              data: { message: `Primary model failed (${streamError.slice(0, 80)}) — retrying on ${fb.resolvedId}` },
+            };
+            streamError = null;
+            assistantText = '';
+            toolCallBuffers.clear();
+            const fbStream = fb.provider.complete({
+              model: fb.resolvedId,
+              messages: outboundMessages,
+              tools,
+              signal: options.signal,
+              ...(forceCall ? { toolChoice: 'required' as const } : {}),
+              ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+            });
+            for await (const event of fbStream) {
+              if (options.signal?.aborted) {
+                streamError = 'Cancelled by user';
+                break;
+              }
+              if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta' || event.type === 'thinking_delta')) {
+                firstTokenAt = Date.now();
+              }
+              switch (event.type) {
+                case 'thinking_delta':
+                  yield { type: 'thinking_delta', data: { delta: event.delta } };
+                  break;
+                case 'text_delta':
+                  assistantText += event.delta ?? '';
+                  yield { type: 'text_delta', data: { delta: event.delta } };
+                  break;
+                case 'tool_call_delta': {
+                  const idx = event.toolCallIndex ?? 0;
+                  let buf = toolCallBuffers.get(idx);
+                  if (!buf) {
+                    buf = { args: '' };
+                    toolCallBuffers.set(idx, buf);
+                  }
+                  if (event.toolCallId) buf.id = event.toolCallId;
+                  if (event.toolName) buf.name = event.toolName;
+                  if (event.toolArgsDelta) buf.args += event.toolArgsDelta;
+                  if (event.toolName) {
+                    yield { type: 'tool_call_start', data: { index: idx, id: buf.id, name: event.toolName } };
+                  }
+                  if (event.toolArgsDelta) {
+                    yield { type: 'tool_call_args_delta', data: { index: idx, delta: event.toolArgsDelta } };
+                  }
+                  break;
+                }
+                case 'usage':
+                  lastUsage = {
+                    input: event.usage!.input,
+                    output: event.usage!.output,
+                    cacheRead: event.usage!.cacheRead ?? 0,
+                    cacheCreation: event.usage!.cacheCreation ?? 0,
+                  };
+                  break;
+                case 'error':
+                  streamError = event.error ?? 'Unknown stream error';
+                  break;
+              }
+            }
+          }
+        }
+      }
       if (streamError) {
         yield { type: 'error', data: { message: explainStreamError(streamError) } };
         return;
@@ -2853,6 +2957,7 @@ export class AgentLoop {
     combined: Message[],
     ctxWindow: number,
     signal: AbortSignal | undefined,
+    keepLastTurns = 6,
   ): Promise<Message[] | null> {
     const { compactMessages } = await import('../utils/compaction.js');
 
@@ -2890,7 +2995,7 @@ export class AgentLoop {
       return text.trim();
     };
 
-    const result = await compactMessages(combined, { keepLastTurns: 6, summarize });
+    const result = await compactMessages(combined, { keepLastTurns, summarize });
     if (result.turnsCompacted === 0) return null;
     logger.info('Auto-compaction ran', {
       turnsCompacted: result.turnsCompacted,
@@ -2900,6 +3005,42 @@ export class AgentLoop {
       ctxWindow,
     });
     return result.messages;
+  }
+
+  /**
+   * Manual `/compact`: fold older turns now, even if the auto threshold hasn't
+   * been hit. Returns the compacted list, or null when there wasn't enough
+   * history (or the summarizer failed).
+   */
+  async compactConversation(messages: Message[], signal?: AbortSignal): Promise<{ messages: Message[]; savedTokens: number; turnsCompacted: number } | null> {
+    const { compactMessages } = await import('../utils/compaction.js');
+    const estTokens = this.estimateTokens(messages);
+    const { route: sumRoute } = routeWithOffload(
+      this.router, 'general', estTokens,
+      { kind: 'compaction', taskClass: 'general', estimatedTokens: estTokens, mutating: false },
+      this.config,
+    );
+    const summarize = async (msgs: Message[]): Promise<string> => {
+      const stream = sumRoute.provider.complete({
+        model: sumRoute.model,
+        messages: msgs,
+        tools: [],
+        signal,
+      });
+      let text = '';
+      for await (const ev of stream) {
+        if (signal?.aborted) break;
+        if (ev.type === 'text_delta') text += ev.delta ?? '';
+      }
+      return text.trim();
+    };
+    const result = await compactMessages(messages, { keepLastTurns: 4, summarize });
+    if (result.turnsCompacted === 0) return null;
+    return {
+      messages: result.messages,
+      savedTokens: result.before - result.after,
+      turnsCompacted: result.turnsCompacted,
+    };
   }
 
   private classifyTask(initial: Message[], scratch: Message[]): TaskClass {

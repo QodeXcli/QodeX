@@ -72,6 +72,13 @@ export interface QodexConfig {
     // A built-in provider, OR a custom gateway name from providers.custom[].name.
     provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | (string & {});
     model: string;
+    /**
+     * If the primary model errors before the first token (Ollama down, 5xx,
+     * timeout), retry the same turn once on this model. Hermes-style provider
+     * fallback — the thing that keeps a local-first session alive when the
+     * resident model flakes. Unset = no fallback.
+     */
+    fallbackModel?: string;
     preferLocal: boolean;
     /** Preload the local default model at startup so the first prompt isn't a cold load.
      *  Local backends only; no effect on cloud models. Default true. */
@@ -263,14 +270,14 @@ export interface QodexConfig {
     }>;
   };
   /**
-   * Auto-compaction tuning. When the conversation exceeds `threshold` of the
-   * context window, older turns are summarized into a single system message and
-   * recent turns are kept verbatim. All optional — sane defaults apply.
+   * Auto-compaction tuning. When the conversation reaches `threshold` of the
+   * context window (default 80%), older turns are summarized and the run
+   * CONTINUES — a full window never stops the agent. All optional.
    */
   compaction?: {
     /** Master switch. Default true. */
     enabled?: boolean;
-    /** Fraction of the context window that triggers compaction. Default 0.75. */
+    /** Fraction of the context window that triggers compaction. Default 0.80. */
     threshold?: number;
     /**
      * Context window in tokens for the threshold math. When unset, QodeX uses
@@ -639,11 +646,9 @@ export const DEFAULT_CONFIG: QodexConfig = {
     model: 'qwen2.5-coder:32b',
     preferLocal: true,
     warmOnStart: true,
-    // Headroom for larger multi-file / creative tasks. Local models in particular
-    // spend iterations re-reading + self-correcting; 25 was too tight and tasks hit
-    // the cap mid-flight. The loop now also warns at ~80% before the hard stop.
-    // Set to 0 for NO iteration limit (token/cost/time budgets still apply). You can
-    // also lift it per-session at runtime with /unlimited or /iterations <n>.
+    // First review point, not a finish line. Hitting this while the task is
+    // still making progress EXTENDS the cap (see iteration-pressure.ts). The
+    // run only stops here if loop detectors say it's stuck. 0 = no review point.
     maxIterations: 50,
     web_search_backend: 'duckduckgo',
   },

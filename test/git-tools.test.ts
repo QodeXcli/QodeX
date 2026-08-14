@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
-import { GitStatusTool } from '../src/tools/git/status.js';
+import { GitStatusTool, parsePorcelainV2Line } from '../src/tools/git/status.js';
 import { GitDiffTool } from '../src/tools/git/diff.js';
 import { GitLogTool } from '../src/tools/git/log.js';
 import { GitBranchTool } from '../src/tools/git/branch.js';
@@ -48,6 +48,21 @@ describe('Git tools — using a real temp repo', () => {
     await fs.rm(repo, { recursive: true, force: true });
   });
 
+  it('parsePorcelainV2Line keeps paths that contain spaces', () => {
+    const changed = parsePorcelainV2Line(
+      '1 M. N... 100644 100644 100644 abcdef0 abcdef1 src/My File.ts',
+    );
+    expect(changed).toMatchObject({ kind: 'changed', x: 'M', y: '.', path: 'src/My File.ts' });
+
+    const untracked = parsePorcelainV2Line('? docs/draft notes.md');
+    expect(untracked).toMatchObject({ kind: 'untracked', path: 'docs/draft notes.md' });
+
+    const renamed = parsePorcelainV2Line(
+      '2 R. N... 100644 100644 100644 abcdef0 abcdef1 R100 new name.ts\told name.ts',
+    );
+    expect(renamed).toMatchObject({ kind: 'changed', path: 'new name.ts' });
+  });
+
   // ─────── git_status ───────
 
   it('git_status reports a clean working tree on a fresh repo', async () => {
@@ -76,6 +91,14 @@ describe('Git tools — using a real temp repo', () => {
     expect((r.metadata as any).staged).toBe(1);
     expect((r.metadata as any).unstaged).toBe(1);
     expect((r.metadata as any).untracked).toBe(1);
+  });
+
+  it('git_status reports a file whose name contains spaces', async () => {
+    await fs.writeFile(path.join(repo, 'My Notes.md'), 'hello');
+    gitSetup(repo, ['add', 'My Notes.md']);
+    const r = await new GitStatusTool().execute({}, makeCtx(repo));
+    expect(r.content).toContain('My Notes.md');
+    expect(r.content).not.toMatch(/My$/m);
   });
 
   it('git_status returns NOT_A_GIT_REPO outside a repo', async () => {

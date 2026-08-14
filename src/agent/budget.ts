@@ -75,13 +75,27 @@ export class BudgetTracker {
           `Time budget exceeded: ${(wallMs / 1000).toFixed(0)}s/${this.maxWallSeconds}s (stalled ${(idleMs / 1000).toFixed(0)}s)`, 'time');
       }
     }
-    if (this.maxIterations > 0 && this.iterations > this.maxIterations) {
-      throw new BudgetExceededError(`Iteration budget exceeded: ${this.iterations}/${this.maxIterations}`, 'iterations');
-    }
+    // Iteration count is NOT a hard stop here. See iteration-pressure.ts — the
+    // cap is a fuse: the loop extends it while the task is making progress.
   }
 
   getMaxIterations(): number {
     return this.maxIterations;
+  }
+
+  getIterations(): number {
+    return this.iterations;
+  }
+
+  /** True when a finite cap is set and we have just crossed it. */
+  atIterationCap(): boolean {
+    return this.maxIterations > 0 && this.iterations > this.maxIterations;
+  }
+
+  /** Raise the fuse and allow another 80% warning against the new number. */
+  extendIterations(newMax: number): void {
+    this.maxIterations = Math.max(this.maxIterations, Math.floor(newMax));
+    this.iterationWarned = false;
   }
 
   /** Override the iteration cap at runtime (0 = unlimited). Used by /unlimited and /iterations. */

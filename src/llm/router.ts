@@ -28,16 +28,17 @@ export type TaskClass = 'planning' | 'tool-decision' | 'code-generation' | 'refl
 
 /**
  * Cap Ollama's default `num_ctx` to what the host can hold. Ollama allocates a KV
- * cache sized to `num_ctx` up front, so a model's full 32k/128k window on a small
- * box thrashes RAM and makes every turn slow — even warm. We shrink the DEFAULT on
- * weaker tiers; an explicit `providers.ollama.options.num_ctx` still overrides. When
- * hardware is unknown or large, return undefined (no cap → model's full window).
+ * cache sized to `num_ctx` up front, so a model's full 32k/128k/256k window makes
+ * every turn crawl — even warm — because the runtime zeros a huge cache before the
+ * first token. We always return a ceiling (never "unlimited"): large/unknown boxes
+ * still get 32k, which is plenty for an agent turn and matches what compaction
+ * can actually use. An explicit `providers.ollama.options.num_ctx` still overrides.
  */
-export function ollamaNumCtxCeiling(hw?: QodexConfig['hardware']): number | undefined {
-  if (!hw) return undefined;
-  if (hw.tier === 'small' || (hw.ramGb && hw.ramGb <= 8)) return 8192;
-  if (hw.tier === 'medium' || (hw.ramGb && hw.ramGb <= 16)) return 16384;
-  return undefined; // large / xl → use the model's full window
+export function ollamaNumCtxCeiling(hw?: QodexConfig['hardware']): number {
+  if (hw && (hw.tier === 'small' || (hw.ramGb != null && hw.ramGb <= 8))) return 8192;
+  if (hw && (hw.tier === 'medium' || (hw.ramGb != null && hw.ramGb <= 16))) return 16384;
+  if (hw && (hw.tier === 'xl' || (hw.ramGb != null && hw.ramGb >= 64))) return 65536;
+  return 32768; // large, unknown, or no hardware profile
 }
 
 export interface RouteDecision {

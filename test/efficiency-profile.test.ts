@@ -15,7 +15,7 @@ console.log('— balanced (default, OFF) stays cache-coherent —');
   const b = efficiencyDefaults(false);
   check('minTurns 3', b.agingMinTurns === 3);
   check('maxChars 6000', b.agingMaxChars === 6000);
-  check('compact threshold 0.75', b.compactThreshold === 0.75);
+  check('compact threshold 0.80', b.compactThreshold === 0.80);
 }
 
 console.log('— aggressive (efficient ON) = sliding token window —');

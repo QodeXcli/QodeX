@@ -79,6 +79,15 @@ export interface WorklogEntry {
   created_at: string;
 }
 
+export interface ConversationHit {
+  sessionId: string;
+  title: string;
+  cwd: string;
+  role: string;
+  snippet: string;
+  updatedAt: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -161,6 +170,7 @@ export class SessionStore {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_scope ON session_facts(scope)`);
 
     this.initFactsFts();
+    this.initMessagesFts();
 
     this.insertSession = this.db.prepare(`
       INSERT INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, ?)
@@ -397,6 +407,39 @@ export class SessionStore {
    * Search remembered facts by relevance (FTS5 bm25 rank), scoped like getFactsByScope.
    * Empty/again-unusable query ⇒ []. Falls back to a LIKE scan when FTS5 isn't available.
    */
+  private messagesFtsReady = false;
+
+  /**
+   * FTS5 over conversation text so `/search` can find past turns the way Hermes
+   * searches its session store. External-content table + triggers; LIKE fallback.
+   */
+  private initMessagesFts(): void {
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, coalesce(old.content, ''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, coalesce(old.content, ''));
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+        END;
+      `);
+      const ftsN = (this.db.prepare(`SELECT count(*) AS n FROM messages_fts`).get() as { n: number }).n;
+      const msgN = (this.db.prepare(`SELECT count(*) AS n FROM messages`).get() as { n: number }).n;
+      if (ftsN === 0 && msgN > 0) {
+        this.db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
+      }
+      this.messagesFtsReady = true;
+    } catch (e: any) {
+      logger.debug('FTS over messages unavailable; /search will fall back to LIKE', { err: e?.message });
+      this.messagesFtsReady = false;
+    }
+  }
+
   searchFacts(query: string, scope: 'project' | 'user', cwd: string, limit = 20): string[] {
     const where = scope === 'user' ? `f.scope = 'user'` : `f.cwd = ? AND f.scope = 'project'`;
     const scopeArgs = scope === 'user' ? [] : [cwd];
@@ -421,6 +464,100 @@ export class SessionStore {
       `SELECT DISTINCT fact FROM session_facts WHERE ${where.replace(/f\./g, '')} AND ${likeClauses} ORDER BY id DESC LIMIT ?`,
     ).all(...scopeArgs, ...likeArgs, limit) as { fact: string }[];
     return rows.map(r => r.fact);
+  }
+
+  /**
+   * Search past user/assistant turns across sessions. Hermes's headline
+   * "search your own past conversations" — QodeX had FTS only on facts.
+   */
+  searchConversations(query: string, opts: { cwd?: string; limit?: number } = {}): ConversationHit[] {
+    const limit = opts.limit ?? 8;
+    const match = buildFtsMatch(query);
+    const cwdClause = opts.cwd ? 'AND s.cwd = ?' : '';
+    const cwdArgs = opts.cwd ? [opts.cwd] : [];
+    const clip = (s: string) => {
+      const t = s.replace(/\s+/g, ' ').trim();
+      return t.length > 160 ? t.slice(0, 157) + '…' : t;
+    };
+    if (this.messagesFtsReady && match) {
+      try {
+        const rows = this.db.prepare(
+          `SELECT s.id AS sessionId, COALESCE(s.title, '') AS title, s.cwd AS cwd,
+                  m.role AS role, m.content AS content, s.updated_at AS updatedAt
+           FROM messages_fts ft
+           JOIN messages m ON m.id = ft.rowid
+           JOIN sessions s ON s.id = m.session_id
+           WHERE messages_fts MATCH ? AND m.role IN ('user','assistant')
+             AND m.content IS NOT NULL AND length(m.content) > 0
+             ${cwdClause}
+           ORDER BY rank
+           LIMIT ?`,
+        ).all(match, ...cwdArgs, limit) as ConversationHit[] & { content?: string }[];
+        return rows.map(r => ({
+          sessionId: r.sessionId,
+          title: r.title,
+          cwd: r.cwd,
+          role: r.role,
+          snippet: clip(String((r as any).content ?? '')),
+          updatedAt: r.updatedAt,
+        }));
+      } catch (e: any) {
+        logger.debug('Conversation FTS failed; falling back to LIKE', { err: e?.message });
+      }
+    }
+    const tokens = factTokens(query);
+    if (!tokens.length) return [];
+    const like = tokens.map(() => `m.content LIKE ?`).join(' AND ');
+    const likeArgs = tokens.map(t => `%${t}%`);
+    const rows = this.db.prepare(
+      `SELECT s.id AS sessionId, COALESCE(s.title, '') AS title, s.cwd AS cwd,
+              m.role AS role, m.content AS content, s.updated_at AS updatedAt
+       FROM messages m JOIN sessions s ON s.id = m.session_id
+       WHERE m.role IN ('user','assistant') AND ${like} ${cwdClause}
+       ORDER BY m.id DESC LIMIT ?`,
+    ).all(...likeArgs, ...cwdArgs, limit) as Array<ConversationHit & { content: string }>;
+    return rows.map(r => ({
+      sessionId: r.sessionId,
+      title: r.title,
+      cwd: r.cwd,
+      role: r.role,
+      snippet: clip(r.content ?? ''),
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  /** Replace the session transcript (used after /compact). */
+  replaceMessages(sessionId: string, messages: Message[]): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId);
+      let turn = 0;
+      for (const msg of messages) {
+        if (msg.role === 'user') turn += 1;
+        this.insertMessage.run(
+          sessionId,
+          Math.max(turn, 1),
+          msg.role,
+          msg.content ?? null,
+          msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
+          msg.tool_call_id ?? null,
+          msg.name ?? null,
+        );
+      }
+    });
+    tx();
+  }
+
+  /**
+   * Drop assistant/tool messages after the last user turn so `/retry` can
+   * re-ask the same question. Returns that last user text, or null.
+   */
+  truncateAfterLastUser(sessionId: string): string | null {
+    const last = this.db.prepare(
+      `SELECT id, content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1`,
+    ).get(sessionId) as { id: number; content: string | null } | undefined;
+    if (!last) return null;
+    this.db.prepare(`DELETE FROM messages WHERE session_id = ? AND id > ?`).run(sessionId, last.id);
+    return (last.content ?? '').trim() || null;
   }
 
   // ---- Project memory: a named project + a human-readable worklog per cwd. ----

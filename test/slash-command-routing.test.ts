@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
+import { setApprovalMode } from '../src/security/permissions.js';
+
+afterEach(() => setApprovalMode('manual'));
 
 /**
  * Regression: an input that starts with '/' but is actually a filesystem path (or URL)
@@ -56,5 +59,56 @@ describe('slash-command routing vs file paths', () => {
   it('/model <id> sets the model', async () => {
     const r = await handleSlashCommand('/model claude-sonnet-4-6', 'test', process.cwd());
     expect(r.action).toEqual({ type: 'set_model', model: 'claude-sonnet-4-6' });
+  });
+
+  it('/retry and /compact emit host actions', async () => {
+    expect((await handleSlashCommand('/retry', 'test', process.cwd())).action).toEqual({ type: 'retry' });
+    expect((await handleSlashCommand('/compact', 'test', process.cwd())).action).toEqual({ type: 'compact' });
+  });
+
+  it('/search with no query shows usage', async () => {
+    const r = await handleSlashCommand('/search', 'test', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.message).toMatch(/Usage: \/search/);
+  });
+
+  it('unknown command suggests nearby names', async () => {
+    const r = await handleSlashCommand('/helpp', 'test', process.cwd());
+    expect(r.message).toMatch(/Unknown command/);
+  });
+
+  it('/auto always sets always-yes approval', async () => {
+    const { setApprovalMode } = await import('../src/security/permissions.js');
+    setApprovalMode('manual');
+    const r = await handleSlashCommand('/auto always', 'test', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'always' });
+    expect(r.message).toMatch(/always yes/i);
+  });
+
+  it('/auto on stays an alias for always', async () => {
+    const r = await handleSlashCommand('/auto on', 'test', process.cwd());
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'always' });
+  });
+
+  it('/auto auto sets accept-edits mode', async () => {
+    const r = await handleSlashCommand('/auto auto', 'test', process.cwd());
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'auto' });
+    expect(r.message).toMatch(/file edits/i);
+  });
+
+  it('/auto off restores manual', async () => {
+    const r = await handleSlashCommand('/auto off', 'test', process.cwd());
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'manual' });
+  });
+
+  it('bare /auto reports the current mode and Shift+Tab', async () => {
+    const { setApprovalMode } = await import('../src/security/permissions.js');
+    setApprovalMode('manual');
+    const r = await handleSlashCommand('/auto', 'test', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.action).toBeUndefined();
+    expect(r.message).toMatch(/manual/i);
+    expect(r.message).toMatch(/Shift\+Tab/);
   });
 });

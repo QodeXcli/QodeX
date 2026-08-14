@@ -6,6 +6,61 @@ const GitStatusArgs = z.object({
   show_untracked: z.boolean().optional().describe('Include untracked files (default true)'),
 });
 
+/** Everything after the Nth ASCII space — so a path with spaces is not chopped. */
+export function restAfterNthSpace(s: string, n: number): string {
+  let seen = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ' ') {
+      seen++;
+      if (seen === n) return s.slice(i + 1);
+    }
+  }
+  return '';
+}
+
+export type PorcelainLine =
+  | { kind: 'head'; value: string }
+  | { kind: 'upstream'; value: string }
+  | { kind: 'ab'; ahead: number; behind: number }
+  | { kind: 'untracked'; path: string }
+  | { kind: 'changed'; x: string; y: string; path: string }
+  | { kind: 'unmerged'; path: string };
+
+/**
+ * Parse one `git status --porcelain=v2 --branch` line.
+ * The old `split(' ')[8]` parser dropped everything after the first space in a
+ * path (`src/My File.ts` → `src/My`), which made status/commit tools miss files.
+ */
+export function parsePorcelainV2Line(raw: string): PorcelainLine | null {
+  if (!raw) return null;
+  if (raw.startsWith('# branch.head ')) return { kind: 'head', value: raw.slice('# branch.head '.length).trim() };
+  if (raw.startsWith('# branch.upstream ')) return { kind: 'upstream', value: raw.slice('# branch.upstream '.length).trim() };
+  if (raw.startsWith('# branch.ab ')) {
+    const parts = raw.slice('# branch.ab '.length).split(' ');
+    return {
+      kind: 'ab',
+      ahead: Math.abs(parseInt(parts[0] ?? '0', 10) || 0),
+      behind: Math.abs(parseInt(parts[1] ?? '0', 10) || 0),
+    };
+  }
+  const kind = raw[0];
+  if (kind === '?') return { kind: 'untracked', path: raw.slice(2) };
+  if (kind === '!') return null;
+  if (kind === '1' || kind === '2') {
+    const xy = raw.split(' ', 3)[1] ?? '..';
+    const x = xy[0] ?? '.';
+    const y = xy[1] ?? '.';
+    // 1: 8 fields then path. 2 (rename): 9 fields then `path\torigPath`.
+    const rest = restAfterNthSpace(raw, kind === '2' ? 9 : 8);
+    const path = kind === '2' ? (rest.split('\t')[0] ?? rest) : rest;
+    return { kind: 'changed', x, y, path };
+  }
+  if (kind === 'u') {
+    return { kind: 'unmerged', path: restAfterNthSpace(raw, 10) };
+  }
+  return null;
+}
+
 /**
  * Compact, model-friendly git status. Uses `--porcelain=v2 --branch` for stable parsing.
  *
@@ -55,49 +110,18 @@ export class GitStatusTool extends Tool<z.infer<typeof GitStatusArgs>> {
     const unmerged: string[] = [];
 
     for (const raw of r.stdout.split('\n')) {
-      if (!raw) continue;
-      // # branch.head <name>
-      if (raw.startsWith('# branch.head ')) {
-        branch = raw.slice('# branch.head '.length).trim();
+      const parsed = parsePorcelainV2Line(raw);
+      if (!parsed) continue;
+      if (parsed.kind === 'head') { branch = parsed.value; continue; }
+      if (parsed.kind === 'upstream') { upstream = parsed.value; continue; }
+      if (parsed.kind === 'ab') { ahead = parsed.ahead; behind = parsed.behind; continue; }
+      if (parsed.kind === 'untracked') { untracked.push(`??  ${parsed.path}`); continue; }
+      if (parsed.kind === 'changed') {
+        if (parsed.x !== '.') staged.push(`${parsed.x}   ${parsed.path}`);
+        if (parsed.y !== '.') unstaged.push(`${parsed.y}   ${parsed.path}`);
         continue;
       }
-      // # branch.upstream <name>
-      if (raw.startsWith('# branch.upstream ')) {
-        upstream = raw.slice('# branch.upstream '.length).trim();
-        continue;
-      }
-      // # branch.ab +<ahead> -<behind>
-      if (raw.startsWith('# branch.ab ')) {
-        const parts = raw.slice('# branch.ab '.length).split(' ');
-        ahead = Math.abs(parseInt(parts[0] ?? '0', 10) || 0);
-        behind = Math.abs(parseInt(parts[1] ?? '0', 10) || 0);
-        continue;
-      }
-      // "1 XY ..." = changed; "2 XY ..." = renamed/copied; "u XY ..." = unmerged; "? path" = untracked
-      const kind = raw[0];
-      if (kind === '?') {
-        untracked.push(`??  ${raw.slice(2)}`);
-        continue;
-      }
-      if (kind === '!') continue; // ignored
-      if (kind === '1' || kind === '2') {
-        // Format: 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
-        const segs = raw.split(' ');
-        const xy = segs[1] ?? '..';
-        const x = xy[0]!;
-        const y = xy[1]!;
-        // For rename/copy, path is the last two-space-separated fields joined by tab
-        const path = kind === '2' ? (segs[9] ?? '') : (segs[8] ?? '');
-        if (x !== '.') staged.push(`${x}   ${path}`);
-        if (y !== '.') unstaged.push(`${y}   ${path}`);
-        continue;
-      }
-      if (kind === 'u') {
-        const segs = raw.split(' ');
-        const path = segs[10] ?? '';
-        unmerged.push(`UU  ${path}`);
-        continue;
-      }
+      if (parsed.kind === 'unmerged') { unmerged.push(`UU  ${parsed.path}`); continue; }
     }
 
     const lines: string[] = [];

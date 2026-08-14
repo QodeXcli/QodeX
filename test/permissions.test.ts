@@ -1,6 +1,16 @@
-import { describe, it, expect } from 'vitest';
-import { PermissionEngine, setAutoApproveSession } from '../src/security/permissions.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import {
+  PermissionEngine,
+  setAutoApproveSession,
+  setApprovalMode,
+  getApprovalMode,
+  cycleApprovalMode,
+  parseApprovalMode,
+  getAutoApproveSession,
+} from '../src/security/permissions.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+
+afterEach(() => setApprovalMode('manual'));
 
 describe('PermissionEngine', () => {
   it('auto-approves matching patterns', () => {
@@ -93,5 +103,63 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate(req)).toBe('ask');
     engine.rememberDecision(req, 'allow', 'session');
     expect(engine.evaluate(req)).toBe('allow'); // not re-nagged after explicit consent
+  });
+});
+
+describe('approval modes (manual / auto / always yes)', () => {
+  it('parses aliases used by /auto and Shift+Tab', () => {
+    expect(parseApprovalMode('manual')).toBe('manual');
+    expect(parseApprovalMode('off')).toBe('manual');
+    expect(parseApprovalMode('auto')).toBe('auto');
+    expect(parseApprovalMode('edits')).toBe('auto');
+    expect(parseApprovalMode('always')).toBe('always');
+    expect(parseApprovalMode('on')).toBe('always');
+    expect(parseApprovalMode('yes')).toBe('always');
+    expect(parseApprovalMode('nope')).toBeNull();
+  });
+
+  it('cycles manual → auto → always → manual', () => {
+    setApprovalMode('manual');
+    expect(cycleApprovalMode()).toBe('auto');
+    expect(cycleApprovalMode()).toBe('always');
+    expect(cycleApprovalMode()).toBe('manual');
+    expect(getApprovalMode()).toBe('manual');
+  });
+
+  it('manual still asks for file edits and unknown shell', () => {
+    setApprovalMode('manual');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
+  });
+
+  it('auto accepts file edits but still asks for unknown shell', () => {
+    setApprovalMode('auto');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'multi_edit', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'edit_symbol', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'npm test' })).toBe('allow');
+  });
+
+  it('always yes auto-approves edits and ordinary shell, not irreversible or always-ask', () => {
+    setApprovalMode('always');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm -rf /' })).toBe('deny');
+  });
+
+  it('setAutoApproveSession(true) still maps to always yes', () => {
+    setAutoApproveSession(true);
+    expect(getApprovalMode()).toBe('always');
+    expect(getAutoApproveSession()).toBe(true);
+    setAutoApproveSession(false);
+    expect(getApprovalMode()).toBe('manual');
+    expect(getAutoApproveSession()).toBe(false);
   });
 });

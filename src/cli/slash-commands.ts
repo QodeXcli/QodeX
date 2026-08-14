@@ -21,9 +21,12 @@ export interface SlashResult {
     | { type: 'clear' }
     | { type: 'set_model'; model: string }
     | { type: 'set_mode'; mode: 'plan' | 'normal' }
+    | { type: 'set_approval_mode'; mode: 'manual' | 'auto' | 'always' }
     | { type: 'set_max_iterations'; value: number }
     | { type: 'set_effort'; value: 'low' | 'medium' | 'high' | 'off' }
     | { type: 'switch_session'; sessionId: string }
+    | { type: 'retry' }
+    | { type: 'compact' }
     | { type: 'exit' }
     | {
         /**
@@ -168,9 +171,9 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       return {
         handled: true,
         message:
-          'Iteration limit removed for this session. The agent will keep going until the task is done ' +
-          '(token/cost/time budgets still apply; press Esc or Ctrl+C to stop). ' +
-          'To make this permanent, set `defaults.maxIterations: 0` in ~/.qodex/config.yaml.',
+          'Iteration fuse removed for this session — it will keep going until the task is done ' +
+          '(token/cost/time budgets still apply; Esc / Ctrl+C to stop). ' +
+          'Without this, a working task already auto-extends past the default cap.',
         action: { type: 'set_max_iterations', value: 0 },
       };
     }
@@ -263,6 +266,9 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /undo-session      Roll back the entire session
     /sessions          List recent sessions
     /resume <id>       Continue a previous session
+    /search <query>    Search past conversations (this project)
+    /retry             Redo the last turn
+    /compact           Summarize older history to free context
     /exit              Exit QodeX
 
   Mode & model
@@ -271,7 +277,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /model <id>        Override model for this conversation (bare /model lists models)
     /effort <level>    Reasoning effort: low|medium|high|off (for models that support it)
     /trellis [init]    Show Trellis harness status, or scaffold .trellis/ (spec+tasks+journals)
-    /auto on|off       Auto-approve all permission prompts (session-only)
+    /auto [manual|auto|always]  Approval mode (or Shift+Tab). on=always, off=manual
     /network           Diagnose internet + local backend connectivity
     /tools [--all]     List all registered tools by category
     /memory            Show / manage persisted project facts
@@ -306,8 +312,31 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /schedule                      List scheduled tasks (add/rm/install via shell: \`qodex schedule …\`)
     /mcp-build <name> [desc]       Guided 4-stage scaffold of a new MCP server
 
-  Coming in v0.5.1
-    /compact           Summarise older history with the active model`,
+  Tab completes a command name. Mid-task, a plain message redirects the running agent.`,
+      };
+    }
+
+    case 'search': {
+      const q = arg.trim();
+      if (!q) return { handled: true, message: 'Usage: /search <query> — finds past turns in this project.' };
+      const hits = getSessionStore().searchConversations(q, { cwd, limit: 8 });
+      if (hits.length === 0) return { handled: true, message: `No past turns matched “${q}”.` };
+      const lines = hits.map(h => {
+        const id = h.sessionId.slice(0, 8);
+        const title = h.title ? ` · ${h.title}` : '';
+        return `  ${id}${title}  [${h.role}]\n    ${h.snippet}`;
+      });
+      return {
+        handled: true,
+        message: `Found ${hits.length} turn(s):\n${lines.join('\n')}\n\n/resume <id> to continue one.`,
+      };
+    }
+
+    case 'retry': {
+      return {
+        handled: true,
+        action: { type: 'retry' },
+        message: 'Retrying the last turn…',
       };
     }
 
@@ -480,7 +509,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       // Manually trigger compaction signal — agent loop catches this and compacts
       return {
         handled: true,
-        action: { type: 'compact' } as any,
+        action: { type: 'compact' },
         message: 'Compacting conversation history… old turns will be summarized; recent ones preserved.',
       };
     }
@@ -1097,26 +1126,41 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     }
 
     case 'auto': {
-      // /auto on|off  — session-wide auto-approve of permission prompts
+      // /auto [manual|auto|always] — session approval mode. on=always, off=manual.
+      // Shift+Tab in the TUI cycles the same three modes.
+      const { parseApprovalMode, setApprovalMode, getApprovalMode, APPROVAL_MODE_META } =
+        await import('../security/permissions.js');
       const sub = args[0]?.toLowerCase();
-      if (sub !== 'on' && sub !== 'off') {
+      if (!sub) {
+        const cur = getApprovalMode();
+        const meta = APPROVAL_MODE_META[cur];
         return {
           handled: true,
           message:
-            'Usage: /auto on | off\n' +
-            'When ON, all permission prompts auto-approve for THIS session only. Hard-denied patterns (rm -rf /, etc.) still refuse. Re-disable with /auto off.',
+            `Approval: ${meta.label} — ${meta.hint}\n` +
+            'Usage: /auto manual | auto | always\n' +
+            '  manual  — ask before edits and shell (default)\n' +
+            '  auto    — file edits run without asking; shell still asks\n' +
+            '  always  — tools run without asking (hard-deny / irreversible still stop)\n' +
+            'Aliases: /auto off = manual, /auto on = always. Shift+Tab cycles the three.',
         };
       }
-      // Toggle via PermissionEngine — exposed via the active config's runtime layer
-      const { setAutoApproveSession, getAutoApproveSession } = await import('../security/permissions.js');
-      setAutoApproveSession(sub === 'on');
-      const status = getAutoApproveSession() ? 'ENABLED' : 'disabled';
+      const mode = parseApprovalMode(sub);
+      if (!mode) {
+        return {
+          handled: true,
+          message: 'Usage: /auto manual | auto | always   (aliases: off, on)',
+        };
+      }
+      setApprovalMode(mode);
+      const meta = APPROVAL_MODE_META[mode];
       return {
         handled: true,
+        action: { type: 'set_approval_mode', mode },
         message:
-          sub === 'on'
-            ? `⚠ Auto-approve ${status} for this session. All tool calls will run without prompting.\n  Hard-deny patterns still apply. Disable with /auto off.`
-            : `Auto-approve ${status}. Permission prompts restored.`,
+          mode === 'always'
+            ? `⚠ Approval: ${meta.label} — ${meta.hint}\n  Hard-deny patterns still apply. Shift+Tab or /auto manual to go back.`
+            : `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
       };
     }
 
@@ -1334,7 +1378,10 @@ Never invent commits. If the range is empty, say so and stop.`;
       const customs = await loadCustomCommands(cwd);
       const spec = customs.get(cmd ?? '');
       if (!spec) {
-        return { handled: true, message: `Unknown command: /${cmd}. Try /help, /commands, or /skills.` };
+        const { suggestSlashCommands } = await import('./slash-catalog.js');
+        const hints = suggestSlashCommands(`/${cmd}`).slice(0, 3).map(s => `/${s.name}`);
+        const hint = hints.length ? ` Did you mean ${hints.join(', ')}?` : ' Try /help, /commands, or /skills.';
+        return { handled: true, message: `Unknown command: /${cmd}.${hint}` };
       }
       const rendered = renderTemplate(spec.template, arg, { cwd });
       if (rendered.trim().length === 0) {

@@ -18,8 +18,9 @@
  *
  * Triggers:
  *
- *   - Automatic: when estimated tokens > `auto_threshold * ctxWindow`
- *     (default 0.70). Triggered between turns, not mid-turn.
+ *   - Automatic: when estimated tokens ≥ 80% of ctxWindow (see context-pressure.ts).
+ *     Triggered between iterations, never mid-tool-call. The run does not stop
+ *     when the window fills — pressure escalates (shorter tail, then prune).
  *   - Manual: /compact slash command.
  *
  * The summary message is marked with a sentinel content prefix
@@ -223,7 +224,7 @@ export async function compactMessages(
 /**
  * Check whether compaction should fire based on a threshold.
  */
-export function shouldCompact(messages: Message[], ctxWindow: number, threshold = 0.70): boolean {
+export function shouldCompact(messages: Message[], ctxWindow: number, threshold = 0.80): boolean {
   const tokens = estimateTokens(messages);
-  return tokens > Math.floor(ctxWindow * threshold);
+  return tokens >= Math.floor(ctxWindow * threshold);
 }

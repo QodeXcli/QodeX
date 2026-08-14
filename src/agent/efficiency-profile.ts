@@ -27,7 +27,7 @@ export interface EfficiencyDefaults {
 // AGGRESSIVE (context.efficient — the local/no-cache "volatile tier") is a Sliding Token
 // Window: large tool outputs (shell logs, grep walls) are compressed the very next turn, so
 // the per-call payload C stays small even on long sessions where caching doesn't apply.
-const BALANCED: EfficiencyDefaults = { agingMinTurns: 3, agingMaxChars: 6_000, compactThreshold: 0.75 };
+const BALANCED: EfficiencyDefaults = { agingMinTurns: 3, agingMaxChars: 6_000, compactThreshold: 0.80 };
 const AGGRESSIVE: EfficiencyDefaults = { agingMinTurns: 1, agingMaxChars: 2_000, compactThreshold: 0.55 };
 
 /** Return the default profile values for the given mode. */
