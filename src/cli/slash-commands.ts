@@ -374,7 +374,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           `Started side run ${started.id} — main chat stays free.\n` +
           `  ${started.prompt.slice(0, 80)}\n` +
           `Use /bg to list, /bg stop ${started.id} to cancel.\n` +
-          `Tip: Shift+Tab to auto/always so the side run can edit without prompting.`,
+          `Approvals from this run join the same queue as the main chat.`,
       };
     }
 

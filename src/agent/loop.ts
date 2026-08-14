@@ -314,6 +314,9 @@ export class AgentLoop {
       modelOverride?: string;
       /** Role name — drives model selection, system prompt, tool restriction. Default 'subagent'. */
       role?: string;
+      executionMode?: 'subagent' | 'normal';
+      askUser?: (prompt: string, options?: string[]) => Promise<string>;
+      onToolUI?: (event: import('../tools/base.js').ToolUIEvent) => void;
     },
   ): Promise<{ finalText: string; toolCallsRun: number; ok: boolean; error?: string; modelUsed?: string }> {
     let finalText = '';
@@ -405,10 +408,21 @@ export class AgentLoop {
       // CRITICAL: we pass `allowedTools` so the system prompt lists ONLY the tools the
       // sub-agent can actually call. Small/quantized models will hallucinate they don't
       // have web_search if it isn't named in prose — see Sub-Agent persona fix.
-      const initialMessages = await this.buildInitialMessages(prompt, 'subagent', dispatchModel.model, role, allowedTools);
+      // Operator side-runs (`/background`) are full agents: isolated session,
+      // full tools, approvals via the hub. Model-owned `task` stays restricted.
+      const execMode = opts.executionMode ?? 'subagent';
+      const initialMessages = await this.buildInitialMessages(
+        prompt,
+        execMode,
+        dispatchModel.model,
+        execMode === 'normal' ? undefined : role,
+        allowedTools,
+      );
 
       for await (const event of this.run(initialMessages, opts.sessionId, {
-        mode: { mode: 'subagent', allowedTools },
+        mode: execMode === 'normal'
+          ? { mode: 'normal', blockedTools: ['task', 'orchestrate'] }
+          : { mode: 'subagent', allowedTools },
         signal: opts.signal,
         // run() reads `maxIterationsOverride` (not `maxIterations`) to cap the child's
         // budget — passing the wrong key silently left every sub-agent on the parent's
@@ -416,12 +430,9 @@ export class AgentLoop {
         maxIterationsOverride: opts.maxIterations,
         maxIterations: opts.maxIterations,
         modelOverride: { provider: dispatchModel.provider, model: dispatchModel.model },
-        // A sub-agent runs unattended: it has no interactive user to answer a
-        // permission prompt. Without an askUser, any tool that prompts would call
-        // `ctx.askUser` === undefined and crash the whole delegation. Supply a
-        // conservative auto-decline so a gated tool degrades to a tool-level refusal
-        // (which the child can adapt to) instead of killing the run.
-        askUser: async () => 'no',
+        onToolUI: opts.onToolUI,
+        // Side runs pass the hub. Model-owned task stays auto-decline (unattended).
+        askUser: opts.askUser ?? (async () => 'no'),
       } as any)) {
         if (event.type === 'tool_call_start') toolCallsRun += 1;
         if (event.type === 'final') {
@@ -543,7 +554,10 @@ export class AgentLoop {
       // role is purposefully focused. We still re-state QodeX identity AND the EXACT
       // available tools — small local models (Qwen 6-bit on LM Studio) lose identity
       // and tool awareness when relying only on the role prompt body.
-      sysPrompt = `You are **QodeX**, a local-first agentic coding CLI. When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
+      const { renderIdentitySection } = await import('../context/identity.js');
+      const idHead = renderIdentitySection(identity.block);
+      sysPrompt = (idHead ? `${idHead}\n\n` : '') +
+        `You are **QodeX**, a local-first agentic coding CLI. When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
         `${customSysPromptOverride}\n\n` +
         (trellis?.specBlock ? `${trellis.specBlock}\n\n` : '') +
         `Working directory: ${this.cwd}\n` +

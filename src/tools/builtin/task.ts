@@ -53,16 +53,25 @@ const TaskArgs = z.object({
  * dependencies without making `task` aware of them directly. The agent loop sets this
  * via setSubAgentFactory() during bootstrap.
  */
+export interface SubAgentOpts {
+  maxIterations: number;
+  signal?: AbortSignal;
+  sessionId: string;
+  modelOverride?: string;
+  /** Role name — drives which provider/model + system prompt + allowed tools. */
+  role?: string;
+  /**
+   * Operator-owned runs (`/background`) use the full tool surface minus
+   * recursion. Model-owned `task` stays on 'subagent'.
+   */
+  executionMode?: 'subagent' | 'normal';
+  askUser?: (prompt: string, options?: string[]) => Promise<string>;
+  onToolUI?: (event: import('../base.js').ToolUIEvent) => void;
+}
+
 type SubAgentRunner = (
   prompt: string,
-  opts: {
-    maxIterations: number;
-    signal?: AbortSignal;
-    sessionId: string;
-    modelOverride?: string;
-    /** Role name — drives which provider/model + system prompt + allowed tools. */
-    role?: string;
-  },
+  opts: SubAgentOpts,
 ) => Promise<{ finalText: string; toolCallsRun: number; ok: boolean; error?: string; modelUsed?: string }>;
 
 let subAgentRunner: SubAgentRunner | null = null;

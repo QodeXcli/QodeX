@@ -12,6 +12,7 @@
  */
 
 import { getSubAgentRunner } from '../tools/builtin/task.js';
+import { getOperatorHub } from '../operator/hub.js';
 import { logger } from '../utils/logger.js';
 
 export type SideRunStatus = 'running' | 'done' | 'failed' | 'cancelled';
@@ -89,18 +90,21 @@ export function startSideRun(prompt: string, parentSessionId: string): SideRun |
   runs.set(id, run);
   notify(run);
 
-  // The child shares PermissionEngine: Shift+Tab auto/always covers its edits.
-  // In manual mode gated tools auto-decline (no TUI prompt from a side run).
+  const hub = getOperatorHub();
 
   void (async () => {
     try {
       const result = await runner(trimmed, {
-        maxIterations: 40,
+        maxIterations: 0,
         signal: ac.signal,
         sessionId,
-        // askUser is not on SubAgentRunner opts today — the child auto-declines.
-        // Approval inheritance is applied by the parent being in auto/always
-        // (PermissionEngine evaluate) which the child shares.
+        executionMode: 'normal',
+        askUser: (prompt, options) => hub.requestApproval(id, prompt, options ?? ['yes', 'no']),
+        onToolUI: (ev) => {
+          if (ev.type === 'shell-stdout') hub.emitLive(id, 'out', ev.line);
+          else if (ev.type === 'shell-stderr') hub.emitLive(id, 'err', ev.line);
+          else if (ev.type === 'progress') hub.emitLive(id, 'progress', ev.message);
+        },
       });
       if (ac.signal.aborted) {
         run.status = 'cancelled';

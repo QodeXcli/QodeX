@@ -48,6 +48,7 @@ import { Welcome } from './prompts/welcome.js';
 import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
+import { getOperatorHub } from '../operator/hub.js';
 
 type HistoryItem =
   | { type: 'user'; text: string; id: string }
@@ -61,6 +62,7 @@ interface PendingPrompt {
   options: string[];
   resolve: (answer: string) => void;
   diff?: { path: string; before: string | null; after: string };
+  hubId?: string;
 }
 
 export interface AppProps {
@@ -370,9 +372,9 @@ export function App(props: AppProps): React.ReactElement {
   }, [sessionId, props.cwd]);
 
   useEffect(() => {
-    let unsub = () => {};
+    let unsubSide = () => {};
     void import('../agent/side-runs.js').then(m => {
-      unsub = m.onSideRunChange(run => {
+      unsubSide = m.onSideRunChange(run => {
         if (run.status === 'running') return;
         const preview = (run.result || run.error || '').replace(/\s+/g, ' ').trim().slice(0, 140);
         const icon = run.status === 'done' ? '✓' : run.status === 'cancelled' ? '■' : '✗';
@@ -383,15 +385,39 @@ export function App(props: AppProps): React.ReactElement {
         }]);
       });
     });
-    return () => { unsub(); };
+    const hub = getOperatorHub();
+    const unsubHub = hub.subscribe(ev => {
+      if (ev.kind === 'approval') {
+        const diff = pendingDiffRef.current ?? undefined;
+        pendingDiffRef.current = null;
+        const label = ev.source === 'main' ? ev.prompt : `[${ev.source}] ${ev.prompt}`;
+        setPendingPrompt({
+          prompt: label,
+          options: ev.options,
+          hubId: ev.id,
+          diff,
+          resolve: (a) => { hub.answer(ev.id, a); },
+        });
+      } else if (ev.kind === 'approval-cleared') {
+        setPendingPrompt(p => (p?.hubId === ev.id ? null : p));
+      } else if (ev.kind === 'live') {
+        const tag = ev.source === 'main' ? '' : `${ev.source} `;
+        const mark = ev.stream === 'err' ? '!' : ev.stream === 'progress' ? '·' : ' ';
+        const line = `${mark}${tag}${ev.line}`.slice(0, 200);
+        liveShellRef.current = [...liveShellRef.current, line].slice(-8);
+        if (liveShellTimer.current === null) {
+          liveShellTimer.current = setTimeout(() => {
+            liveShellTimer.current = null;
+            setLiveShell(liveShellRef.current);
+          }, 80);
+        }
+      }
+    });
+    return () => { unsubSide(); unsubHub(); };
   }, [nextId]);
 
   const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    return new Promise<string>(resolve => {
-      const diff = pendingDiffRef.current;
-      pendingDiffRef.current = null;
-      setPendingPrompt({ prompt, options, resolve, diff: diff ?? undefined });
-    });
+    return getOperatorHub().requestApproval('main', prompt, options);
   }, []);
 
   const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string; skipUserHistory?: boolean }) => {
@@ -546,16 +572,10 @@ export function App(props: AppProps): React.ReactElement {
             pendingDiffRef.current = uiEvent;
           } else if (uiEvent.type === 'progress') {
             setHistory(h => [...h, { type: 'system', text: uiEvent.message, id: nextId() }]);
-          } else if (uiEvent.type === 'shell-stdout' || uiEvent.type === 'shell-stderr') {
-            const mark = uiEvent.type === 'shell-stderr' ? '!' : ' ';
-            const line = `${mark}${uiEvent.line}`.slice(0, 200);
-            liveShellRef.current = [...liveShellRef.current, line].slice(-8);
-            if (liveShellTimer.current === null) {
-              liveShellTimer.current = setTimeout(() => {
-                liveShellTimer.current = null;
-                setLiveShell(liveShellRef.current);
-              }, 80);
-            }
+          } else if (uiEvent.type === 'shell-stdout') {
+            getOperatorHub().emitLive('main', 'out', uiEvent.line);
+          } else if (uiEvent.type === 'shell-stderr') {
+            getOperatorHub().emitLive('main', 'err', uiEvent.line);
           }
         },
       })) {
