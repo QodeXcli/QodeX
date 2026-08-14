@@ -23,6 +23,6 @@ describe('formatLogLine', () => {
 
   it('should handle extra fields with various types', () => {
     const result = formatLogLine('info', 'data', { success: true, value: 10.5 });
-    expect(result).toBe('[INFO] data success=true value=10.5');
+    expect(result).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[INFO\] data success=true value=10.5/);
   });
 });
