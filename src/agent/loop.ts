@@ -55,6 +55,7 @@ import { routeWithOffload, offloadOverride, toolsetIsReadOnly } from '../llm/off
 import { getHooksManager, extractFilePathsFromArgs } from '../hooks/manager.js';
 import { SessionInsights, type InsightsSnapshot } from './insights.js';
 import { appendAudit } from '../security/audit-log.js';
+import { episodeVerified, recordEpisode, shouldRecordEpisode } from '../context/episodic-memory.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { detectProjectInfo } from '../context/project-info.js';
 import { loadProjectRules } from '../context/claude-md.js';
@@ -317,6 +318,41 @@ export class AgentLoop {
     const s = this.insightsBySession.get(sessionId);
     if (!s || s.isEmpty()) return;
     try { getSessionStore().saveInsights(sessionId, s.snapshot()); } catch { /* never stall the loop */ }
+  }
+
+  /**
+   * Write a lean episode for THIS turn so the next similar task can recall it.
+   * Fire-and-forget. Independent of sandbox / flywheel — those used to nest the
+   * only write, so daily `run()` sessions never filled the store.
+   */
+  private maybeRecordEpisode(opts: {
+    prompt: string;
+    summary: string;
+    filesChanged: string[];
+    toolsUsed: string[];
+    toolCalls: number;
+    mode?: string;
+    aborted?: boolean;
+  }): void {
+    if ((this.config as any).learning?.episodicMemory?.enabled === false) return;
+    if (opts.aborted) return;
+    if (opts.mode === 'plan' || opts.mode === 'subagent') return;
+    if (!shouldRecordEpisode({
+      prompt: opts.prompt,
+      filesChanged: opts.filesChanged,
+      toolCalls: opts.toolCalls,
+    })) return;
+    const files = opts.filesChanged.map(f =>
+      path.isAbsolute(f) ? path.relative(this.cwd, f) : f,
+    ).filter(Boolean);
+    void recordEpisode(this.cwd, {
+      prompt: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 400),
+      summary: (opts.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+      filesChanged: files,
+      toolsUsed: opts.toolsUsed,
+      toolCalls: opts.toolCalls,
+      verified: episodeVerified(this.verifyLedger),
+    });
   }
 
   private noteToolInsight(
@@ -914,24 +950,8 @@ export class AgentLoop {
               logger.debug('Dataset export skipped', { err: e?.message });
             }
           }
-          // ── Episodic memory: record a lean "how I solved this" episode for later recall ──
-          if ((this.config as any).learning?.episodicMemory?.enabled) {
-            try {
-              const { recordEpisode } = await import('../context/episodic-memory.js');
-              await recordEpisode(this.cwd, {
-                prompt: String(firstUserMsg),
-                summary: finalContent.slice(0, 300),
-                filesChanged: changedFiles,
-                toolsUsed: [...this.sessionToolNames],
-                toolCalls: this.totalToolCalls,
-                // This branch IS the objective-success path (sandbox compiled + merged, verify +
-                // completion gates passed) — recall can boost these over unverified history.
-                verified: true,
-              });
-            } catch (e: any) {
-              logger.debug('Episode record skipped', { err: e?.message });
-            }
-          }
+          // Episodes are recorded in run() itself — nesting them here (sandbox + flywheel)
+          // meant a normal session never wrote a single line.
         }
         // ── Skill-learning: capture a CANDIDATE skill (opt-in, quarantined) ──
         // We're on the objectively-successful path: the sandbox compiled and squash-merged,
@@ -1265,6 +1285,9 @@ export class AgentLoop {
     // type-check exactly what it touched. `verifyRepairAttempts` caps consecutive
     // forced-repair rounds; `verifyGaveUp` ensures the give-up note is shown only once.
     const touchedSourceFiles = new Set<string>();
+    /** Tools executed in THIS run — session totals would leak prior turns into a "thanks" episode. */
+    const runToolNames = new Set<string>();
+    let runToolCalls = 0;
     let verifyRepairAttempts = 0;
     let verifyGaveUp = false;
     // LLM-critic rounds spent this run (semantic review after mechanical verify).
@@ -2320,6 +2343,15 @@ export class AgentLoop {
         }
 
         this.persistInsights(sessionId);
+        this.maybeRecordEpisode({
+          prompt: latestUserText,
+          summary: assistantText,
+          filesChanged: [...touchedSourceFiles],
+          toolsUsed: [...runToolNames],
+          toolCalls: runToolCalls,
+          mode: mode.mode,
+          aborted: options.signal?.aborted,
+        });
         yield { type: 'final', data: { content: assistantText, usage: budget.getUsage() } };
         return;
       }
@@ -2478,7 +2510,9 @@ export class AgentLoop {
 
       // Execute tools — read-only in parallel, mutating sequentially
       this.totalToolCalls += toolCalls.length; // task-complexity signal for skill capture
+      runToolCalls += toolCalls.length;
       for (const tc of toolCalls) {
+        runToolNames.add(tc.function.name);
         if (this.sessionToolSequence.length < AgentLoop.TOOL_SEQUENCE_CAP) this.sessionToolSequence.push(tc.function.name);
       }
       const txn = await journal.begin(sessionId, undefined, this.effectiveCwd ?? this.cwd);

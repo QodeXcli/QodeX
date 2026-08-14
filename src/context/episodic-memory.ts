@@ -42,10 +42,40 @@ function episodesPath(projectRoot: string): string {
   return path.join(os.homedir(), '.qodex', 'episodes', `${hash}.jsonl`);
 }
 
-/** Append one episode after an objectively-successful task. Best-effort. */
+/**
+ * Should this finished turn become an episode? PURE.
+ *
+ * A turn is worth remembering when the agent actually did work: it changed a
+ * file, or it made a few tool calls (a research/debug pass with no write).
+ * Empty / "thanks" / plan-only turns stay out — they pollute recall.
+ */
+export function shouldRecordEpisode(opts: {
+  prompt: string;
+  filesChanged: readonly string[];
+  toolCalls: number;
+  minToolCalls?: number;
+}): boolean {
+  if (!(opts.prompt ?? '').trim()) return false;
+  if (opts.filesChanged.length > 0) return true;
+  return opts.toolCalls >= (opts.minToolCalls ?? 2);
+}
+
+/**
+ * Map the verify ledger to Episode.verified. PURE.
+ * No check ran → unknown (neutral in the ranker). The last entry is the latest
+ * gate result, so a fail-then-repair-pass is verified.
+ */
+export function episodeVerified(ledger: readonly { passed: boolean }[]): boolean | undefined {
+  if (!ledger.length) return undefined;
+  return ledger[ledger.length - 1]!.passed;
+}
+
+/** Append one episode after a finished turn. Best-effort. */
 export async function recordEpisode(projectRoot: string, rec: Omit<Episode, 'ts'>): Promise<void> {
   try {
-    if (!rec.prompt.trim()) return;
+    if (!(rec.prompt ?? '').trim()) return;
+    // Unit tests must not fill ~/.qodex/episodes. Set QODEX_EPISODES to a dir to opt in.
+    if (process.env.VITEST && !process.env.QODEX_EPISODES) return;
     const full = episodesPath(projectRoot);
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.appendFile(full, JSON.stringify({ ts: new Date().toISOString(), ...rec }) + '\n', 'utf-8');

@@ -576,10 +576,9 @@ export interface QodexConfig {
      * proven approach. Smart retrieval (top-K above a threshold), concise injection.
      */
     episodicMemory?: {
-      /** Record a lean "how I solved this" episode after a task, and inject the most similar
-       *  past ones next time. Default TRUE — unlike skill capture it costs no model call
-       *  (one JSONL line to write, a lexical match to recall), so the "I have solved this
-       *  before" benefit is on unless you turn it off. */
+      /** Record a lean "how I solved this" episode after a finished run() turn that
+       *  actually did work (a file change, or ≥2 tool calls), and inject the most
+       *  similar past ones next time. Independent of sandbox / flywheel. Default TRUE. */
       enabled?: boolean;
       /** How many past episodes to inject. Default 2. */
       topK?: number;
@@ -719,11 +718,9 @@ export const DEFAULT_CONFIG: QodexConfig = {
     // Skill CAPTURE stays off: it writes candidate files and spends a judge call, so it is a
     // deliberate opt-in rather than something that starts happening to a new user's disk.
     enabled: false,
-    // Episodic memory is ON. Unlike capture it costs no model call — recording is one JSONL
-    // line at the end of a task, and recall is a lexical match over past episodes. What it
-    // buys is the thing an agent otherwise cannot do: "I have solved this before, here is
-    // what worked." Leaving it off by default meant that benefit never reached anyone who
-    // did not go looking for a config switch.
+    // Episodic memory is ON. Recording is one JSONL line at the end of a live run()
+    // (not gated on sandbox/flywheel); recall is a lexical match. Leaving the write
+    // nested under those flags meant daily sessions never stored anything.
     episodicMemory: { enabled: true },
   },
   security: {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rankEpisodes, buildEpisodeBlock, fileFreshness, type Episode } from '../src/context/episodic-memory.js';
+import { rankEpisodes, buildEpisodeBlock, fileFreshness, shouldRecordEpisode, episodeVerified, type Episode } from '../src/context/episodic-memory.js';
 
 const ep = (prompt: string, summary: string, files: string[] = []): Episode =>
   ({ ts: '2026-06-25T00:00:00Z', prompt, summary, filesChanged: files, toolsUsed: [] });
@@ -89,6 +89,34 @@ describe('buildEpisodeBlock — concise, bounded', () => {
     expect(block).toContain('# Similar past work');
     expect(block).toContain('cursor');
     expect(block).toContain('src/users.ts');
+  });
+});
+
+describe('shouldRecordEpisode — write-path gate', () => {
+  it('skips empty prompts and no-op turns', () => {
+    expect(shouldRecordEpisode({ prompt: '', filesChanged: ['a.ts'], toolCalls: 4 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: '   ', filesChanged: [], toolCalls: 0 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: 'thanks', filesChanged: [], toolCalls: 0 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: 'thanks', filesChanged: [], toolCalls: 1 })).toBe(false);
+  });
+
+  it('records a turn that changed a file, even with no extra tools', () => {
+    expect(shouldRecordEpisode({ prompt: 'fix the login button', filesChanged: ['src/Login.tsx'], toolCalls: 1 })).toBe(true);
+  });
+
+  it('records a research turn with several tool calls and no writes', () => {
+    expect(shouldRecordEpisode({ prompt: 'where is auth handled', filesChanged: [], toolCalls: 2 })).toBe(true);
+  });
+});
+
+describe('episodeVerified — last gate result wins', () => {
+  it('is unknown when nothing ran', () => {
+    expect(episodeVerified([])).toBeUndefined();
+  });
+  it('is the last ledger entry (repair-then-pass counts as verified)', () => {
+    expect(episodeVerified([{ passed: false }, { passed: true }])).toBe(true);
+    expect(episodeVerified([{ passed: false }, { passed: false }])).toBe(false);
+    expect(episodeVerified([{ passed: true }])).toBe(true);
   });
 });
 
