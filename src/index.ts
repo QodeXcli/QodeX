@@ -18,6 +18,7 @@ import { Command } from 'commander';
 import { render } from 'ink';
 import React from 'react';
 import { loadConfig, ensureQodexHome, setActiveConfig } from './config/loader.js';
+import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './config/profile.js';
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { PermissionEngine } from './security/permissions.js';
@@ -67,7 +68,7 @@ async function bootstrap(): Promise<{
   // Non-blocking: token counts use the calibrated heuristic until this resolves.
   void import('./utils/tokenizer.js').then(t => t.warmTokenizer()).catch((err) => logger.debug('tokenizer warm-up failed', { err }));
 
-  const config = await loadConfig(process.cwd());
+  const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
   // Import Claude Code plugins/standalone assets: agents → dispatchable roles (for the
   // `task` tool + plugin commands like /review-pr), plus plugin-declared MCP servers and
   // hooks. User config always wins on collisions. (Skills/commands are loaded separately
@@ -175,6 +176,7 @@ program
   .version(readVersion())
   .argument('[prompt...]', 'Initial prompt (omit to launch interactive REPL)')
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
+  .option('--profile <name>', 'Named config overlay (~/.qodex/profiles/<name>.yaml or QODEX_PROFILE). Not -p — that is --print.')
   .option('--json', 'When used with --print, emit NDJSON events to stdout')
   .option('-y, --yes', 'Auto-approve all permission prompts (headless mode only)')
   // ── Guardrailed autonomy contract (headless -p only) ──
@@ -190,6 +192,10 @@ program
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
   .option('--list-sessions', 'List recent sessions and exit')
+  .hook('preAction', thisCommand => {
+    const name = (thisCommand.optsWithGlobals() as { profile?: string }).profile;
+    if (typeof name === 'string' && name.trim()) setRequestedProfile(name.trim());
+  })
   .action(async (promptArgs: string[], opts: any) => {
     // First-run check: if no config exists and we're interactive, suggest the wizard
     // (don't block — user can press Ctrl+C and proceed with defaults if they want).
@@ -577,8 +583,43 @@ program
   .command('config')
   .description('Show effective configuration')
   .action(async () => {
-    const config = await loadConfig(process.cwd());
-    console.log(JSON.stringify(config, null, 2));
+    const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
+    const active = getActiveProfile();
+    const body = active
+      ? { profile: { name: active.name, source: active.source, path: active.path }, ...config }
+      : config;
+    console.log(JSON.stringify(body, null, 2));
+  });
+
+const profileCmd = program
+  .command('profile')
+  .description('Named config overlays (qodex --profile <name> / QODEX_PROFILE)');
+
+profileCmd
+  .command('list', { isDefault: true })
+  .description('List file + inline profiles')
+  .action(async () => {
+    const { listProfiles } = await import('./config/profile.js');
+    const rows = await listProfiles();
+    if (rows.length === 0) {
+      console.log('No profiles. Add ~/.qodex/profiles/<name>.yaml or a profiles.<name> block in ~/.qodex/config.yaml.');
+      return;
+    }
+    try { await loadConfig(process.cwd(), { profile: getRequestedProfile() }); } catch { /* list even if overlay is missing */ }
+    const active = getActiveProfile()?.name ?? getRequestedProfile() ?? process.env.QODEX_PROFILE;
+    for (const r of rows) {
+      const mark = r.name === active ? ' *' : '  ';
+      console.log(`${mark}${r.name.padEnd(16)} ${r.source.padEnd(7)} ${r.path}`);
+    }
+  });
+
+profileCmd
+  .command('show <name>')
+  .description('Print one profile overlay')
+  .action(async (name: string) => {
+    const { loadProfileOverlay } = await import('./config/profile.js');
+    const hit = await loadProfileOverlay(name);
+    console.log(JSON.stringify({ name: hit.name, source: hit.source, path: hit.path, overlay: hit.overlay }, null, 2));
   });
 
 program
@@ -1233,7 +1274,7 @@ program
   .action(async (_opts: unknown, cmd: Command) => {
     // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
     const opts = cmd.optsWithGlobals() as { model?: string; vram?: string; apply?: boolean };
-    const config = await loadConfig(process.cwd());
+    const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
     const baseUrl = (config as any).providers?.ollama?.baseUrl ?? 'http://localhost:11434';
     const model = opts.model ?? (config as any).defaults?.model;
     if (!model) { console.error('No model — pass --model <id> or set defaults.model.'); process.exit(1); }

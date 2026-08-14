@@ -35,6 +35,8 @@ function resolveHomedir(): string {
 export const QODEX_HOME = path.join(resolveHomedir(), '.qodex');
 export const QODEX_LOG_FILE = path.join(QODEX_HOME, 'qodex.log');
 export const QODEX_CONFIG_FILE = path.join(QODEX_HOME, 'config.yaml');
+/** Named overlays: `qodex --profile studio` reads ~/.qodex/profiles/studio.yaml */
+export const QODEX_PROFILES_DIR = path.join(QODEX_HOME, 'profiles');
 export const QODEX_TXN_DB = path.join(QODEX_HOME, 'transactions.db');
 export const QODEX_SESSION_DB = path.join(QODEX_HOME, 'sessions.db');
 export const QODEX_TELEMETRY_DB = path.join(QODEX_HOME, 'telemetry.db');
@@ -79,6 +81,11 @@ export interface QodexConfig {
      * resident model flakes. Unset = no fallback.
      */
     fallbackModel?: string;
+    /**
+     * Named overlay applied last (after user + project yaml). Overridden by
+     * `--profile` / `QODEX_PROFILE`. `-p` is `--print`, not this.
+     */
+    profile?: string;
     preferLocal: boolean;
     /** Preload the local default model at startup so the first prompt isn't a cold load.
      *  Local backends only; no effect on cloud models. Default true. */

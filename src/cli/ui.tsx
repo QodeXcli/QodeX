@@ -50,6 +50,7 @@ import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getOperatorHub } from '../operator/hub.js';
 import { pickWorkingCwd } from '../session/handoff.js';
+import { getActiveProfile } from '../config/profile.js';
 import { SideRunDock } from './prompts/side-run-dock.js';
 import {
   appendLaneLine,
@@ -1090,6 +1091,12 @@ function StatusBar(props: {
     <Box width={width} paddingX={1} justifyContent="space-between">
       <Box>
         <Text dimColor>{model}</Text>
+        {getActiveProfile() && (
+          <>
+            <Text dimColor>  ·  </Text>
+            <Text color="magenta" dimColor={!busy}>{getActiveProfile()!.name}</Text>
+          </>
+        )}
         {source !== '' && (
           <>
             <Text dimColor>  ·  </Text>
