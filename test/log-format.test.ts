@@ -18,7 +18,7 @@ describe('formatLogLine', () => {
 
   it('should handle different log levels', () => {
     const result = formatLogLine('error', 'critical failure');
-    expect(result).toBe('[ERROR] critical failure');
+    expect(result).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ERROR\] critical failure/);
   });
 
   it('should handle extra fields with various types', () => {
