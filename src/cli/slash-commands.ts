@@ -268,7 +268,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /resume <id>       Continue a previous session
     /search <query>    Search past conversations (this project)
     /background <task> Isolated parallel agent (main chat stays free)
-    /bg [stop <id>]    List or stop side runs
+    /bg [stop <id>]    List or stop side runs (Ctrl+B expands the dock)
     /phone             Handoff this session to the bot on your phone
     /identity          Show standing IDENTITY.md
     /plugins           List drop-in user plugins
@@ -374,7 +374,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           `Started side run ${started.id} — main chat stays free.\n` +
           `  ${started.prompt.slice(0, 80)}\n` +
           `Use /bg to list, /bg stop ${started.id} to cancel.\n` +
-          `Approvals from this run join the same queue as the main chat.`,
+          `Live output is in the bg dock above the input (Ctrl+B expands). Approvals join the main queue.`,
       };
     }
 

@@ -18,7 +18,7 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'compact', description: 'Summarize older history to free context' },
   { name: 'search', args: '<query>', description: 'Search past conversations' },
   { name: 'background', args: '<task>', description: 'Run an isolated agent in parallel' },
-  { name: 'bg', args: '[stop <id>]', description: 'List or stop side runs' },
+  { name: 'bg', args: '[stop <id>]', description: 'List or stop side runs (Ctrl+B dock)' },
   { name: 'phone', description: 'Handoff this session to Telegram / Discord' },
   { name: 'identity', description: 'Show standing IDENTITY.md' },
   { name: 'plugins', description: 'List user plugins' },

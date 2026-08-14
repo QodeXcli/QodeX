@@ -50,6 +50,13 @@ import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getOperatorHub } from '../operator/hub.js';
 import { pickWorkingCwd } from '../session/handoff.js';
+import { SideRunDock } from './prompts/side-run-dock.js';
+import {
+  appendLaneLine,
+  applyRunToLanes,
+  markLanesRead,
+  type Lane,
+} from '../operator/live-lanes.js';
 
 type HistoryItem =
   | { type: 'user'; text: string; id: string }
@@ -126,6 +133,10 @@ export function App(props: AppProps): React.ReactElement {
   const [liveShell, setLiveShell] = useState<string[]>([]);
   const liveShellRef = useRef<string[]>([]);
   const liveShellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lanes, setLanes] = useState<Lane[]>([]);
+  const lanesRef = useRef<Lane[]>([]);
+  const [dockOpen, setDockOpen] = useState(false);
+  const dockOpenRef = useRef(false);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => {
@@ -318,6 +329,20 @@ export function App(props: AppProps): React.ReactElement {
       if (exitTimer.current) { clearTimeout(exitTimer.current); exitTimer.current = null; }
     }
 
+    // Ctrl+B toggles the side-run dock (background live stays out of the transcript).
+    if (key.ctrl && _input === 'b') {
+      setDockOpen(open => {
+        const next = !open;
+        dockOpenRef.current = next;
+        if (next) {
+          lanesRef.current = markLanesRead(lanesRef.current);
+          setLanes(lanesRef.current);
+        }
+        return next;
+      });
+      return;
+    }
+
     // Shift+Tab cycles approval: manual → auto → always yes → manual.
     // If a prompt is already on screen, auto-answer it when the new mode would
     // have skipped the ask (always yes; or auto + a file-edit diff).
@@ -388,6 +413,8 @@ export function App(props: AppProps): React.ReactElement {
     let unsubSide = () => {};
     void import('../agent/side-runs.js').then(m => {
       unsubSide = m.onSideRunChange(run => {
+        lanesRef.current = applyRunToLanes(lanesRef.current, run);
+        setLanes(lanesRef.current);
         if (run.status === 'running') return;
         const preview = (run.result || run.error || '').replace(/\s+/g, ' ').trim().slice(0, 140);
         const icon = run.status === 'done' ? '✓' : run.status === 'cancelled' ? '■' : '✗';
@@ -414,14 +441,31 @@ export function App(props: AppProps): React.ReactElement {
       } else if (ev.kind === 'approval-cleared') {
         setPendingPrompt(p => (p?.hubId === ev.id ? null : p));
       } else if (ev.kind === 'live') {
-        const tag = ev.source === 'main' ? '' : `${ev.source} `;
+        if (ev.source !== 'main') {
+          lanesRef.current = appendLaneLine(
+            lanesRef.current,
+            ev.source,
+            ev.stream,
+            ev.line,
+            { bumpUnread: !dockOpenRef.current },
+          );
+          if (liveShellTimer.current === null) {
+            liveShellTimer.current = setTimeout(() => {
+              liveShellTimer.current = null;
+              setLiveShell(liveShellRef.current);
+              setLanes(lanesRef.current);
+            }, 80);
+          }
+          return;
+        }
         const mark = ev.stream === 'err' ? '!' : ev.stream === 'progress' ? '·' : ' ';
-        const line = `${mark}${tag}${ev.line}`.slice(0, 200);
+        const line = `${mark}${ev.line}`.slice(0, 200);
         liveShellRef.current = [...liveShellRef.current, line].slice(-8);
         if (liveShellTimer.current === null) {
           liveShellTimer.current = setTimeout(() => {
             liveShellTimer.current = null;
             setLiveShell(liveShellRef.current);
+            setLanes(lanesRef.current);
           }, 80);
         }
       }
@@ -838,6 +882,8 @@ export function App(props: AppProps): React.ReactElement {
           ))}
         </Box>
       )}
+
+      <SideRunDock lanes={lanes} expanded={dockOpen} width={cols} />
 
       {pendingPrompt && (
         <Box flexDirection="column">

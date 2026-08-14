@@ -466,7 +466,11 @@ export class AgentLoop {
         // Side runs pass the hub. Model-owned task stays auto-decline (unattended).
         askUser: opts.askUser ?? (async () => 'no'),
       } as any)) {
-        if (event.type === 'tool_call_start') toolCallsRun += 1;
+        if (event.type === 'tool_call_start') {
+          toolCallsRun += 1;
+          const name = (event.data as { name?: string } | undefined)?.name;
+          if (name && opts.onToolUI) opts.onToolUI({ type: 'progress', message: name });
+        }
         if (event.type === 'final') {
           finalText = (event.data as any)?.content ?? '';
         }
