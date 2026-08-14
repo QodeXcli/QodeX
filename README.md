@@ -13,7 +13,11 @@ qodex setup && qodex
 
 **Version 2.6.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
+[![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/QodeXcli/QodeX?color=green)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
+[![Docs](https://img.shields.io/badge/docs-live-blue.svg)](https://qodexcli.github.io/QodeX/)
 
 ---
 
