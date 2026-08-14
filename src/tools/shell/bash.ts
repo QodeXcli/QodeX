@@ -1,16 +1,13 @@
 import { z } from 'zod';
-import crossSpawn from 'cross-spawn';
-import { childEnv } from '../../secrets/sanitize.js';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import { formatExecResult, resolveRuntime } from '../../runtime/exec.js';
 
 const ArgsSchema = z.object({
   command: z.string().describe('Shell command to run. Use sparingly — prefer dedicated tools for file ops, git ops, etc.'),
   timeout_seconds: z.number().int().min(1).max(600).optional().describe('Max execution time in seconds. Default 120.'),
   description: z.string().optional().describe('Short human-readable description of what this command does (shown in permission prompts).'),
 });
-
-const MAX_OUTPUT_BYTES = 60_000;
 
 export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
   name = 'shell';
@@ -74,95 +71,23 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
       }
     }
 
-    const result = await this.runCommand(cmd, ctx, timeoutMs);
+    const exec = ctx.exec ?? ((req) => resolveRuntime().exec(req));
+    const ran = await exec({
+      command: cmd,
+      cwd: ctx.cwd,
+      timeoutMs,
+      signal: ctx.signal,
+      onStdoutLine: line => ctx.emit({ type: 'shell-stdout', line }),
+      onStderrLine: line => ctx.emit({ type: 'shell-stderr', line }),
+    });
+    const formatted = formatExecResult(cmd, ran);
+    const result: ToolResult = {
+      ...formatted,
+      metadata: { exitCode: ran.code, signal: ran.signal, truncated: ran.truncated, backend: ran.backend },
+    };
     if (snapshotWarning) {
       return { ...result, content: `${snapshotWarning}\n${result.content}` };
     }
     return result;
-  }
-
-  private runCommand(cmd: string, ctx: ToolContext, timeoutMs: number): Promise<ToolResult> {
-    return new Promise(resolve => {
-      // cross-spawn handles Windows shell quoting and path escaping correctly.
-      // shell:true lets us run a raw command string with pipes, redirects, etc.
-      //
-      // The command was chosen by the MODEL, so the child must NOT inherit our provider
-      // credentials — a plain `{ ...process.env }` hands ANTHROPIC_API_KEY and friends to
-      // anything the agent decides to run (`env`, a curl, a compromised dev dependency).
-      // childEnv() strips credential-shaped variables and leaves the rest (PATH, HOME,
-      // LANG, NODE_ENV…) untouched, so ordinary commands are unaffected.
-      const proc = crossSpawn(cmd, [], {
-        cwd: ctx.cwd,
-        env: childEnv({ FORCE_COLOR: '0' }),
-        shell: true,
-        signal: ctx.signal,
-      });
-
-      const stdoutChunks: Buffer[] = [];
-      const stderrChunks: Buffer[] = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      let truncated = false;
-      const timer = setTimeout(() => {
-        try { proc.kill('SIGTERM'); } catch {}
-        setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
-      }, timeoutMs);
-
-      proc.stdout?.on('data', (chunk: Buffer) => {
-        if (stdoutBytes < MAX_OUTPUT_BYTES) {
-          stdoutChunks.push(chunk);
-          stdoutBytes += chunk.length;
-        } else {
-          truncated = true;
-        }
-        // Stream lines to UI
-        const text = chunk.toString('utf-8');
-        for (const line of text.split('\n')) {
-          if (line) ctx.emit({ type: 'shell-stdout', line });
-        }
-      });
-
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        if (stderrBytes < MAX_OUTPUT_BYTES) {
-          stderrChunks.push(chunk);
-          stderrBytes += chunk.length;
-        } else {
-          truncated = true;
-        }
-        const text = chunk.toString('utf-8');
-        for (const line of text.split('\n')) {
-          if (line) ctx.emit({ type: 'shell-stderr', line });
-        }
-      });
-
-      proc.on('error', err => {
-        clearTimeout(timer);
-        resolve({ content: `[SHELL_ERROR] ${err.message}`, isError: true });
-      });
-
-      proc.on('close', (code, signal) => {
-        clearTimeout(timer);
-        const stdout = Buffer.concat(stdoutChunks).toString('utf-8');
-        const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-
-        const parts: string[] = [];
-        parts.push(`$ ${cmd}`);
-        if (stdout.trim()) parts.push(stdout.trim());
-        if (stderr.trim()) parts.push(`[stderr]\n${stderr.trim()}`);
-        if (truncated) parts.push(`[output truncated at ~${MAX_OUTPUT_BYTES} bytes]`);
-
-        if (signal) {
-          parts.push(`[killed by signal: ${signal}${signal === 'SIGTERM' ? ` (likely timeout after ${timeoutMs / 1000}s)` : ''}]`);
-        } else {
-          parts.push(`[exit code: ${code}]`);
-        }
-
-        resolve({
-          content: parts.join('\n'),
-          isError: code !== 0,
-          metadata: { exitCode: code, signal, truncated },
-        });
-      });
-    });
   }
 }

@@ -35,6 +35,7 @@ import { getSessionStore } from '../session/store.js';
 import { ToolRegistry, expandToolPatterns, type ToolExecutionMode } from '../tools/registry.js';
 import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
+import { resolveRuntime } from '../runtime/exec.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import { BudgetTracker } from './budget.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
@@ -2676,6 +2677,7 @@ export class AgentLoop {
         checkpoint: (label: string) => this.activeSandbox?.checkpoint(label) ?? Promise.resolve(null),
         backtrack: () => this.activeSandbox?.backtrack() ?? Promise.resolve(null),
       } : undefined,
+      exec: (req) => resolveRuntime(this.config).exec(req),
       currentTurn: this.currentTurn,
     };
 

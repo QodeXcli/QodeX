@@ -429,6 +429,23 @@ export interface QodexConfig {
     enabled?: boolean;
   };
   /**
+   * Where the agent's *shell* runs. Distinct from `sandbox` (git branches).
+   *   - local  : today's bare metal (default)
+   *   - docker : command runs in a container; project bind-mounted at /workspace;
+   *              host $HOME and docker.sock are not visible. Pair with --profile cloud.
+   */
+  runtime?: {
+    backend?: 'local' | 'docker';
+    docker?: {
+      image?: string;
+      network?: 'none' | 'bridge';
+      memory?: string;
+      cpus?: string;
+      workdir?: string;
+      user?: string;
+    };
+  };
+  /**
    * MCP SERVER mode — when QodeX runs as an MCP server (`qodex mcp serve`),
    * exposing its tools to editors. Controls which tools are visible and how
    * tool calls are authorized in this non-interactive context.
@@ -658,6 +675,10 @@ export const DEFAULT_CONFIG: QodexConfig = {
     // run only stops here if loop detectors say it's stuck. 0 = no review point.
     maxIterations: 50,
     web_search_backend: 'duckduckgo',
+  },
+  runtime: {
+    backend: 'local',
+    docker: { image: 'node:22-bookworm', network: 'none', memory: '2g', cpus: '2' },
   },
   providers: {
     ollama: { baseUrl: 'http://localhost:11434' },

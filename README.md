@@ -1,10 +1,17 @@
-# QodeX — the local-first LLM agent & coding CLI agent
+# QodeX — the coding agent that stays on your side of the glass
 
-> **QodeX is an open-source LLM agent for your terminal — a local-first, agentic coding CLI.** It runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A privacy-first AI coding agent built so a model on *your* machine does real, multi-step engineering work — fully offline if you want.
+Most agent CLIs are a rented brain with a terminal skin. QodeX is the opposite: a **local-first agentic coding CLI** that treats *your* machine as the source of truth. Qwen3-Coder on Ollama / LM Studio by default. Claude / GPT / Gemini / DeepSeek only if you invite them. Your repo does not become someone else's training set.
 
-> If you're looking for an **LLM agent**, a **CLI agent**, an **AI coding agent**, or an **autonomous terminal agent** that doesn't ship your code to someone else's cloud — that's QodeX.
+It does not just *chat about* code. It reads, edits, tests, and — if you ask — ships. And when you are not at the desk, it does not get the keys to the whole Mac: **shell can run in a Docker sandbox**, and **`--profile cloud`** is one switch between "think local" and "think in the cloud, execute in a box."
 
-**Version 2.5.0** · 100+ built-in tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+> Looking for an **LLM agent**, a **CLI agent**, or an **autonomous terminal agent** that can go fully offline? That's QodeX.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+qodex setup && qodex
+```
+
+**Version 2.5.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
 
@@ -13,6 +20,8 @@
 ## Highlights
 
 - **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
+- **`--profile studio` / `--profile cloud`** — named overlays, not a second product. Local Qwen on the Mac Studio in one file; a cloud model + Docker-isolated shell in another. `-p` is still `--print`.
+- **Shell in a box, not on bare metal** — `runtime.backend: docker` bind-mounts the project and drops host `$HOME`, `docker.sock`, privileged mode, and host networking. File edits stay in the repo (a coding agent that cannot touch files is a chatbot). The Mac outside `/workspace` stays out of reach.
 - **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.
 - **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills, an **independent judge model** promotes them, **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. Your agent next week is measurably better than today's — and it never overwrites a skill you wrote.
 - **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord / Slack service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
@@ -48,6 +57,7 @@ QodeX takes the opposite stance: **protect the model.** A layer of deterministic
 - **Auto-verification** — after the model thinks it's done, QodeX detects the project type and runs the real checker (`tsc`, `eslint`, `ruff`, `pyright`, `go vet`, `cargo`, `php -l` …) on touched files and force-feeds any errors back.
 - **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or `/auto on` to skip).
 - **Git-backed sandbox** — risky work runs on a hidden branch with checkpoints; auto-snapshot (`git stash`) before destructive commands, one command to roll back.
+- **Process sandbox (Docker)** — a second, different isolation: the *shell* runs in a container so a remote-ish turn cannot `rm` your home directory. Pair it with `--profile cloud`. Not a Hub client — Hub is for approvals; this is where commands actually execute.
 - **Skill security scanner** — skills installed from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode payloads *before* they touch disk.
 
 The result raises the **floor** (what a weak model is allowed to ship) without needing a bigger model.
@@ -79,7 +89,7 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 
 - **Read and edit code** — `read_file`, `write_file`, `edit_text`, `edit_symbol` (AST-aware), `multi_edit` (single-file sequential), `multi_file_edit` (atomic across up to 50 files).
 - **Understand a codebase** — `ls`, `glob`, `grep`, plus a Tree-sitter code-graph: `project_overview`, `analyze_impact`, `find_callers`, `find_references`, `find_dead_code`, `safe_rename`.
-- **Run commands** — `bash`, plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
+- **Run commands** — `shell` on the host, or inside Docker when `runtime.backend: docker`; plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
 - **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes.
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
@@ -230,7 +240,50 @@ memory:
 
 It all lives under `~/.qodex/` — **nothing is uploaded**, the same privacy line as your code.
 
+## Two worlds, one flag
+
+You should not rebuild your life to try a cloud model for an afternoon. Drop two YAML files in `~/.qodex/profiles/` and flip them like a light switch.
+
+```yaml
+# ~/.qodex/profiles/studio.yaml  — the Mac Studio, Qwen, zero egress
+defaults:
+  provider: ollama
+  model: qwen3-coder
+runtime:
+  backend: local
+```
+
+```yaml
+# ~/.qodex/profiles/cloud.yaml  — think in the cloud, execute in a box
+defaults:
+  provider: anthropic
+  model: claude-sonnet-4-6
+runtime:
+  backend: docker
+  docker:
+    image: node:22-bookworm
+    network: none
+    memory: 2g
+```
+
+```bash
+qodex --profile studio          # local model, host shell
+qodex --profile cloud           # cloud model, Docker-isolated shell
+qodex --profile cloud bot       # same box, now from Telegram
+QODEX_PROFILE=cloud qodex
+qodex profile list
+qodex profile show studio
+```
+
+`-p` is `--print` (headless). Profiles are `--profile` / `QODEX_PROFILE` / `defaults.profile`. Merge order: built-in defaults → `~/.qodex/config.yaml` → project `.qodex/config.yaml` → **the overlay last**. A missing name is a hard error — you never silently stay on local while believing you are in the box.
+
+The Docker runtime bind-mounts the project at `/workspace`. It does **not** mount `docker.sock`, does **not** pass host `$HOME`, drops every capability, and defaults `--network none`. If Docker is not installed you get `[SANDBOX_UNAVAILABLE]`, not a quiet fall-through onto bare metal.
+
+That is the point of building the sandbox *before* another chat surface: when you are on the sofa and the agent wants to try a script, the script meets a container — not the rest of the Mac.
+
 ## Install
+
+Thirty seconds. Then `qodex setup`. Then type a real task in the repo you already have open. If it reads `package.json` and tells you the truth, you are in.
 
 ### One line (macOS · Linux · WSL)
 
@@ -344,13 +397,14 @@ qodex --version      # the version now running
 ## Quick start
 
 ```bash
-# Setup wizard — detects local models, writes ~/.qodex/config.yaml
-qodex setup
-
-# Or just start it
-qodex
+qodex setup          # detects local models, writes ~/.qodex/config.yaml
+qodex                # or:  qx
 > read package.json and summarize what this project does
 ```
+
+Stuck between a local 32B and a cloud API? Don't rewrite config — `qodex --profile studio` vs `qodex --profile cloud`. Need the shell off the host? Put `runtime.backend: docker` in the cloud profile.
+
+## Configuration
 
 ## Configuration
 
@@ -610,7 +664,9 @@ So "the agent did X overnight" stops being a claim and becomes a **checkable rec
 - **Per-tool permissions** — read-only tools auto-approved; mutating tools ask once; "allow once / session / pattern / always" picker.
 - **Code-graph index** — Tree-sitter-backed, persists to `.qodex/codegraph.db`, incremental.
 - **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`; a human-readable **Markdown mirror** (`/memory export|import`) and a budget-aware **Light Memory Mode** over the same store. All local, all under `~/.qodex/`.
-- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord / Slack adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review.
+- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord / Slack adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review. Bot asks share the **Operator Hub** with the TUI on **per-conversation lanes**, so a parked Telegram approval cannot starve `[bg1]`.
+- **Named profiles** — `--profile` / `QODEX_PROFILE` last-word overlays (`~/.qodex/profiles/<name>.yaml`). Not `-p`.
+- **Execution runtime** — `runtime.backend: local | docker`. Docker is process isolation for `shell`, not a second agent. Hub stays I/O; git sandbox stays branches.
 - **Multi-provider router** — Ollama, LM Studio, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter all first-class.
 - **ESM strict** throughout; **hooks** (pre/post-tool) for guardrails or instrumentation.
 
@@ -620,6 +676,7 @@ So "the agent did X overnight" stops being a claim and becomes a **checkable rec
 - **Faster iteration** — no network latency per tool call.
 - **Works offline** — `/network` tells you what's reachable.
 - **$0 to run** if you have the hardware; cloud providers are opt-in per role (e.g. sub-agents on Claude, vision on GPT).
+- **When you *do* go remote, the blast radius is a container** — not your home directory. That is the only honest way to put a coding agent on a phone.
 
 ## Status
 
