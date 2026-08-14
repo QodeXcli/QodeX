@@ -79,6 +79,28 @@ export const COMMANDS: BotCommand[] = [
     },
   },
   {
+    name: 'insights',
+    description: 'Token / tool / latency for this session',
+    run: async ({ agent, key, reply }) => {
+      const sid = agent.status ? (await agent.status(key)).sessionId : undefined;
+      try {
+        const { getActiveAgent } = await import('../agent/loop.js');
+        const { formatInsights, parseInsightsSnapshot } = await import('../agent/insights.js');
+        const live = sid ? getActiveAgent()?.getInsights(sid) : undefined;
+        const persisted = sid
+          ? parseInsightsSnapshot((await import('../session/store.js')).getSessionStore().loadInsightsJson(sid))
+          : null;
+        const snap = (live && (live.tokens.llmCalls > 0 || Object.keys(live.tools).length > 0))
+          ? live
+          : persisted;
+        if (!snap) return reply('No insights yet. Send a task first, then `/insights`.');
+        await reply('```\n' + formatInsights(snap) + '\n```');
+      } catch {
+        await reply('Could not load insights for this conversation.');
+      }
+    },
+  },
+  {
     name: 'auto',
     description: 'Auto-approve actions: /auto on | off',
     run: async ({ agent, args, key, reply }) => {

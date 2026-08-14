@@ -12,6 +12,8 @@
  * does not know about transports.
  */
 
+import { appendAudit } from '../security/audit-log.js';
+
 export const TUI_LANE = 'tui';
 export const TUI_ORIGIN = 'tui';
 
@@ -114,6 +116,7 @@ export class OperatorHub {
       const done = s.inflight;
       s.inflight = null;
       this.emit({ kind: 'approval-cleared', id });
+      appendAudit({ type: 'approval', id, answer, origin: done.origin, source: done.source, lane: done.lane });
       done.resolve(answer);
       this.pump(lane);
       return true;

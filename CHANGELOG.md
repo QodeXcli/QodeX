@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.7.0 — 2026-08-14
+
+**Raw telemetry from 2.6 becomes something you can act on — without a slower CLI start.**
+
+`/cost` and `/tokens` still exist. `/insights` is the session report: provider usage (including cache), tool success/fail, and where the wall clock went (TTFT vs generate vs tools). Nothing new is fetched from OpenAI or Anthropic. Rates stay catalog/config; token counts stay the stream `usage` you already pay for.
+
+1. **`/insights`.** In-memory accumulator on the live `AgentLoop`. No SQLite, no extra RTT. Persist a JSON snapshot on the session row so `qodex sessions show` / `export` work after restart.
+
+2. **`qodex sessions`.** `list` (default), `show <id>`, `export <id>` (Markdown), `search <query>` over conversation FTS.
+
+3. **`execution.allow`.** Literal prefixes (`git status`, `npm test`) skip OperatorHub. Same rank as `security.autoApprove`. Deny / always-ask / irreversible still win. Empty by default — the built-in regex allow-list is unchanged.
+
+4. **`.qodex/audit.jsonl`.** Append-only: policy decisions that skipped the hub, operator answers (origin = tui / telegram / whatsapp / …), tool ok/fail + duration. No prompts, no stdout. Created on first event, not at startup.
+
+```
+src/agent/insights.ts
+src/security/allow-rules.ts
+src/security/audit-log.ts
+src/security/permissions.ts
+src/agent/loop.ts
+src/session/store.ts
+src/cli/slash-commands.ts
+src/operator/hub.ts
+src/index.ts
+```
+
 ## v2.6.0 — 2026-08-14
 
 **The operator plane is a real product now: one hub, isolated sessions, a boxed shell, and official chat transports.**

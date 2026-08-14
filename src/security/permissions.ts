@@ -1,8 +1,24 @@
 import type { QodexConfig } from '../config/defaults.js';
 import type { Tool } from '../tools/base.js';
 import { assessCommand, canGrantAlways, matchDenyRule, normalizeCommand } from './command-risk.js';
+import { compileAllowRules, matchAllowRule, type AllowMatcher } from './allow-rules.js';
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
+
+/** Why evaluate() returned what it did — used by the audit trail and tests. */
+export type PermissionVia =
+  | 'deny-rule'
+  | 'deny-pattern'
+  | 'irreversible'
+  | 'always-ask'
+  | 'mode-always'
+  | 'mode-auto-edit'
+  | 'session-tool'
+  | 'session-pair'
+  | 'command-grant'
+  | 'allow-rule'
+  | 'read-only'
+  | 'ask';
 
 /** How the TUI answers permission prompts this session. Cycle with Shift+Tab. */
 export type ApprovalMode = 'manual' | 'auto' | 'always';
@@ -56,6 +72,10 @@ export class PermissionEngine {
   private alwaysAllowPatterns: RegExp[] = [];
   private sessionToolAllows = new Set<string>();
   private toolReadOnlyCache = new Map<string, boolean>();
+  /** Literal /regex allow-list from `execution.allow` — same rank as autoApprove. */
+  private executionAllow: AllowMatcher[];
+  /** Optional hook (audit log). Never required; a throw here is swallowed. */
+  onDecision?: (req: PermissionRequest, decision: PermissionDecision, via: PermissionVia) => void;
 
   constructor(
     config: QodexConfig,
@@ -66,6 +86,7 @@ export class PermissionEngine {
     this.denyPatterns = config.security.autoReject.map(p => new RegExp(p));
     this.alwaysAskPatterns = (config.security.alwaysAsk ?? []).map(p => new RegExp(p));
     this.denyRules = [...(config.security.denyRules ?? [])];
+    this.executionAllow = compileAllowRules((config as any).execution?.allow);
   }
 
   /**
@@ -73,13 +94,28 @@ export class PermissionEngine {
    * Returns 'ask' when policy is undecided.
    */
   evaluate(req: PermissionRequest): PermissionDecision {
+    const r = this.decide(req);
+    try { this.onDecision?.(req, r.decision, r.via); } catch { /* audit must not stall */ }
+    return r.decision;
+  }
+
+  /** Same as evaluate, plus the reason — for tests and the audit trail. */
+  evaluateDetailed(req: PermissionRequest): { decision: PermissionDecision; via: PermissionVia } {
+    const r = this.decide(req);
+    try { this.onDecision?.(req, r.decision, r.via); } catch { /* */ }
+    return r;
+  }
+
+  private decide(req: PermissionRequest): { decision: PermissionDecision; via: PermissionVia } {
     // User deny rules outrank everything, including /auto and yolo — that is the point of
     // being able to write one.
-    if (this.denyRules.length && matchDenyRule(req.operation, this.denyRules)) return 'deny';
+    if (this.denyRules.length && matchDenyRule(req.operation, this.denyRules)) {
+      return { decision: 'deny', via: 'deny-rule' };
+    }
 
     // Hard deny patterns next — even auto-approve mode can't bypass these.
     for (const p of this.denyPatterns) {
-      if (p.test(req.operation)) return 'deny';
+      if (p.test(req.operation)) return { decision: 'deny', via: 'deny-pattern' };
     }
 
     // Irreversible commands are confirmed EVERY time. No standing grant, no session
@@ -89,8 +125,8 @@ export class PermissionEngine {
       !this.isReadOnlyTool(req.tool) && assessCommand(req.operation).tier === 'irreversible';
     if (irreversible) {
       const k = `${req.tool}:${req.operation}`;
-      if (this.sessionDenies.has(k)) return 'deny';
-      return 'ask';
+      if (this.sessionDenies.has(k)) return { decision: 'deny', via: 'session-pair' };
+      return { decision: 'ask', via: 'irreversible' };
     }
 
     // Always-ask patterns next — system-mutating commands (defaults write, sudo,
@@ -103,43 +139,42 @@ export class PermissionEngine {
     const isAlwaysAsk = this.alwaysAskPatterns.some(p => p.test(req.operation));
     if (isAlwaysAsk) {
       const key = `${req.tool}:${req.operation}`;
-      if (this.sessionDenies.has(key)) return 'deny';
-      if (this.sessionAllows.has(key)) return 'allow';
-      if (this.commandGrants.has(normalizeCommand(req.operation))) return 'allow';
-      if (this.alwaysAllowPatterns.some(p => p.test(req.operation))) return 'allow';
-      return 'ask';
+      if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair' };
+      if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
+      if (this.commandGrants.has(normalizeCommand(req.operation))) return { decision: 'allow', via: 'command-grant' };
+      if (this.alwaysAllowPatterns.some(p => p.test(req.operation))) return { decision: 'allow', via: 'allow-rule' };
+      return { decision: 'ask', via: 'always-ask' };
     }
 
     // Session-wide approval mode (Shift+Tab / `/auto`). Hard denies and always-ask
     // already returned above, so "always yes" still cannot silently run sudo / rm -rf.
-    if (_approvalMode === 'always') return 'allow';
-    if (_approvalMode === 'auto' && isAutoEditTool(req.tool)) return 'allow';
+    if (_approvalMode === 'always') return { decision: 'allow', via: 'mode-always' };
+    if (_approvalMode === 'auto' && isAutoEditTool(req.tool)) return { decision: 'allow', via: 'mode-auto-edit' };
 
     // "Allow this tool for the whole session" — from gradient picker
-    if (this.sessionToolAllows.has(req.tool)) return 'allow';
+    if (this.sessionToolAllows.has(req.tool)) return { decision: 'allow', via: 'session-tool' };
 
     // Session-level deny
     const key = `${req.tool}:${req.operation}`;
-    if (this.sessionDenies.has(key)) return 'deny';
-    if (this.sessionAllows.has(key)) return 'allow';
+    if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair' };
+    if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
 
     // Exact-command grants from a previous "always" answer.
-    if (this.commandGrants.has(normalizeCommand(req.operation))) return 'allow';
+    if (this.commandGrants.has(normalizeCommand(req.operation))) return { decision: 'allow', via: 'command-grant' };
 
     // Legacy pattern grants (kept for any caller still adding them).
     for (const p of this.alwaysAllowPatterns) {
-      if (p.test(req.operation)) return 'allow';
+      if (p.test(req.operation)) return { decision: 'allow', via: 'allow-rule' };
     }
 
-    // Auto-approve patterns
-    for (const p of this.allowPatterns) {
-      if (p.test(req.operation)) return 'allow';
-    }
+    // Auto-approve regex + execution.allow literals — same rank, hub is never asked.
+    if (this.allowPatterns.some(p => p.test(req.operation))) return { decision: 'allow', via: 'allow-rule' };
+    if (matchAllowRule(req.operation, this.executionAllow)) return { decision: 'allow', via: 'allow-rule' };
 
     // For pure read tools: always allow
-    if (this.isReadOnlyTool(req.tool)) return 'allow';
+    if (this.isReadOnlyTool(req.tool)) return { decision: 'allow', via: 'read-only' };
 
-    return 'ask';
+    return { decision: 'ask', via: 'ask' };
   }
 
   /**

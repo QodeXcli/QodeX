@@ -61,6 +61,12 @@ describe('slash-command routing vs file paths', () => {
     expect(r.action).toEqual({ type: 'set_model', model: 'claude-sonnet-4-6' });
   });
 
+  it('/insights with no live session explains the empty state', async () => {
+    const r = await handleSlashCommand('/insights', 'no-such-session', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.message).toMatch(/No insights yet/i);
+  });
+
   it('/retry and /compact emit host actions', async () => {
     expect((await handleSlashCommand('/retry', 'test', process.cwd())).action).toEqual({ type: 'retry' });
     expect((await handleSlashCommand('/compact', 'test', process.cwd())).action).toEqual({ type: 'compact' });

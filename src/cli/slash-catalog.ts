@@ -32,6 +32,7 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'effort', args: '<low|medium|high|off>', description: 'Reasoning effort' },
   { name: 'memory', description: 'Show / manage learned facts' },
   { name: 'cost', description: 'Token and cost usage' },
+  { name: 'insights', description: 'Token / tool / latency breakdown' },
   { name: 'tokens', description: 'Per-turn token breakdown' },
   { name: 'tools', args: '[--all]', description: 'List registered tools' },
   { name: 'skills', description: 'List installed skills' },

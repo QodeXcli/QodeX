@@ -61,6 +61,7 @@ export interface SessionMeta {
   total_output_tokens: number;
   total_cost_usd: number;
   turn_count: number;
+  insights_json?: string | null;
 }
 
 export type WorklogKind = 'work' | 'decision' | 'blocker' | 'note';
@@ -168,6 +169,12 @@ export class SessionStore {
     }
     // Safe now that the column is guaranteed to exist (new schema or just-migrated).
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_scope ON session_facts(scope)`);
+
+    // v2.7: persist /insights snapshot without a new table.
+    const sessionCols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!sessionCols.some(c => c.name === 'insights_json')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN insights_json TEXT`);
+    }
 
     this.initFactsFts();
     this.initMessagesFts();
@@ -294,6 +301,24 @@ export class SessionStore {
     this.db.prepare(`UPDATE sessions SET status = ? WHERE id = ?`).run(status, sessionId);
   }
 
+  /** Persist a session insights snapshot. Best-effort JSON; never throws to the caller. */
+  saveInsights(sessionId: string, snapshot: unknown): void {
+    try {
+      this.db.prepare(`UPDATE sessions SET insights_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(JSON.stringify(snapshot), sessionId);
+    } catch (e: any) {
+      logger.debug('saveInsights failed', { err: e?.message });
+    }
+  }
+
+  loadInsightsJson(sessionId: string): unknown | null {
+    const row = this.db.prepare(`SELECT insights_json FROM sessions WHERE id = ?`).get(sessionId) as
+      | { insights_json?: string | null }
+      | undefined;
+    if (!row?.insights_json) return null;
+    try { return JSON.parse(row.insights_json); } catch { return null; }
+  }
+
   /** Delete all messages from a session and reset counters. Session row remains. */
   clearMessages(sessionId: string): void {
     const tx = this.db.transaction(() => {
@@ -305,6 +330,7 @@ export class SessionStore {
           total_output_tokens = 0,
           total_cost_usd = 0,
           title = NULL,
+          insights_json = NULL,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(sessionId);

@@ -53,6 +53,8 @@ import { SnapshotService } from '../safety/snapshot.js';
 import { resolveRole } from '../llm/role-resolver.js';
 import { routeWithOffload, offloadOverride, toolsetIsReadOnly } from '../llm/offload-policy.js';
 import { getHooksManager, extractFilePathsFromArgs } from '../hooks/manager.js';
+import { SessionInsights, type InsightsSnapshot } from './insights.js';
+import { appendAudit } from '../security/audit-log.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { detectProjectInfo } from '../context/project-info.js';
 import { loadProjectRules } from '../context/claude-md.js';
@@ -180,6 +182,8 @@ export class AgentLoop {
   // Feeds the trust receipt — uncounterfeitable because the WORKER measured it, not the model.
   private verifyLedger: Array<{ command: string; passed: boolean }> = [];
   private styleBlock: string | null = null; // inferred code-style block, computed once per session
+  /** Per-session operational insights (tokens / tools / latency). In-memory; persisted to the session row. */
+  private insightsBySession = new Map<string, SessionInsights>();
 
   /** Record a tool failure to episodic memory (best-effort, opt-in). Only fires when
    *  failure-driven learning is enabled; the pattern miner later decides what's worth
@@ -289,6 +293,40 @@ export class AgentLoop {
   /** Public read accessor for slash commands to operate on snapshots. */
   getSnapshotService(): SnapshotService | undefined {
     return this.snapshotService;
+  }
+
+  private insightsFor(sessionId: string): SessionInsights {
+    let s = this.insightsBySession.get(sessionId);
+    if (!s) {
+      s = new SessionInsights(sessionId);
+      this.insightsBySession.set(sessionId, s);
+    }
+    return s;
+  }
+
+  /** Live snapshot for `/insights`. */
+  getInsights(sessionId: string): InsightsSnapshot {
+    return this.insightsFor(sessionId).snapshot();
+  }
+
+  resetInsights(sessionId: string): void {
+    this.insightsBySession.get(sessionId)?.reset();
+  }
+
+  persistInsights(sessionId: string): void {
+    const s = this.insightsBySession.get(sessionId);
+    if (!s || s.isEmpty()) return;
+    try { getSessionStore().saveInsights(sessionId, s.snapshot()); } catch { /* never stall the loop */ }
+  }
+
+  private noteToolInsight(
+    sessionId: string,
+    name: string,
+    result: { isError?: boolean },
+    durationMs: number,
+  ): void {
+    this.insightsFor(sessionId).recordTool({ name, ok: !result.isError, durationMs });
+    appendAudit({ type: 'tool', tool: name, ok: !result.isError, durationMs, sessionId }, this.cwd);
   }
 
   /** Allow slash commands to toggle features at runtime without restart. */
@@ -1907,6 +1945,20 @@ export class AgentLoop {
       // every subsequent tool round. Works for every provider, including local ones
       // that report no cache fields at all.
       const cost = computeCost(lastUsage, route.modelInfo);
+      {
+        const totalMs = Date.now() - dispatchStart;
+        const ttftMs = firstTokenAt ? firstTokenAt - dispatchStart : 0;
+        this.insightsFor(sessionId).recordLlm({
+          input: lastUsage.input,
+          output: lastUsage.output,
+          cacheRead: (lastUsage as any).cacheRead ?? 0,
+          cacheCreation: (lastUsage as any).cacheCreation ?? 0,
+          costUsd: cost,
+          thinkMs: ttftMs,
+          generateMs: Math.max(0, totalMs - ttftMs),
+        });
+        this.persistInsights(sessionId);
+      }
       const cacheRead = (lastUsage as any).cacheRead ?? 0;
       const totalInputSeen = lastUsage.input + cacheRead;
       const freshInput = Math.max(0, totalInputSeen - promptHighWater);
@@ -2267,6 +2319,7 @@ export class AgentLoop {
           }
         }
 
+        this.persistInsights(sessionId);
         yield { type: 'final', data: { content: assistantText, usage: budget.getUsage() } };
         return;
       }
@@ -2309,6 +2362,7 @@ export class AgentLoop {
         newMessages.push(m);
         sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
         logger.warn('Aborting run: read-loop hard cap hit', { maxReadRepeat, model: route.model });
+        this.persistInsights(sessionId);
         yield { type: 'final', data: { content: msg, usage: budget.getUsage() } };
         return;
       }
@@ -2440,7 +2494,12 @@ export class AgentLoop {
       // Parallel read-only execution
       if (readOnlyCalls.length > 0) {
         const results = await Promise.all(
-          readOnlyCalls.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
+          readOnlyCalls.map(async tc => {
+            const t0 = Date.now();
+            const r = await this.executeToolCall(tc, txn, sessionId, options);
+            this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
+            return r;
+          }),
         );
         budget.noteProgress();
         for (let i = 0; i < readOnlyCalls.length; i++) {
@@ -2475,7 +2534,9 @@ export class AgentLoop {
         if (batch.length === 1) {
           // Single → execute as before
           const tc = batch[0]!;
+          const t0 = Date.now();
           const r = await this.executeToolCall(tc, txn, sessionId, options);
+          this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
           budget.noteProgress();
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
@@ -2493,7 +2554,12 @@ export class AgentLoop {
           // Multiple disjoint-path mutations → parallel
           logger.info('Mutating tools running in parallel (disjoint paths)', { count: batch.length, tools: batch.map(b => b.function.name) });
           const results = await Promise.all(
-            batch.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
+            batch.map(async tc => {
+              const t0 = Date.now();
+              const r = await this.executeToolCall(tc, txn, sessionId, options);
+              this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
+              return r;
+            }),
           );
           budget.noteProgress();
           for (let i = 0; i < batch.length; i++) {

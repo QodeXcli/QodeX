@@ -230,6 +230,15 @@ export interface QodexConfig {
     denyRules?: string[];
     sandboxShell: boolean;
   };
+  /**
+   * Safe-command allow-list. Literals (`git status`, `npm test`) skip the
+   * OperatorHub without turning `/auto` on. `/regex/` and `^…` still work.
+   * Deny / always-ask / irreversible still win. Empty by default — the built-in
+   * `security.autoApprove` regexes already cover the common read-only set.
+   */
+  execution?: {
+    allow?: string[];
+  };
   ui: {
     theme: 'dark' | 'light';
     showThinking: boolean;
@@ -776,6 +785,9 @@ export const DEFAULT_CONFIG: QodexConfig = {
       '\\bpfctl\\b',
     ],
     sandboxShell: false,
+  },
+  execution: {
+    allow: [],
   },
   ui: {
     theme: 'dark',

@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.6.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.7.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -518,6 +518,7 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
 /cost  /tokens     Token / cost usage
+/insights          Token / tool / latency breakdown
 /index [--force]   Build/refresh the code graph
 /mcp               List connected MCP servers
 /memory [export|import|forget <s>|clear]   Learned facts — show · mirror to MEMORY.md · import edits · drop · wipe
@@ -526,6 +527,8 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 ```
 
 Plus any custom commands you drop in `.qodex/commands/` as markdown.
+
+From the shell: `qodex sessions list|show <id>|export <id>|search <query>`. Safe shell that should skip the approval hub: `execution.allow` in `config.yaml` (`git status`, `npm test`, …).
 
 ## End-to-end example
 

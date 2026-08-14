@@ -22,6 +22,7 @@ import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './co
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { PermissionEngine } from './security/permissions.js';
+import { appendAudit } from './security/audit-log.js';
 import { App } from './cli/ui.js';
 import { runHeadless } from './cli/modes/headless.js';
 import { contractFromFlags } from './agent/autonomy-contract.js';
@@ -100,6 +101,16 @@ async function bootstrap(): Promise<{
     logger.warn('User plugins not loaded', { err: e?.message });
   }
   const permissions = new PermissionEngine(config);
+  permissions.onDecision = (req, decision, via) => {
+    if (decision === 'ask') return;
+    appendAudit({
+      type: 'permission',
+      tool: req.tool,
+      operation: req.operation,
+      decision,
+      via,
+    });
+  };
 
   // Code graph — project-local SQLite
   const qodexProjectDir = path.join(process.cwd(), '.qodex');
@@ -391,18 +402,117 @@ program
     console.log(`Rolled back ${result.txnsRolled} transactions, restored ${result.filesRestored} files.`);
   });
 
-program
+const sessionsCmd = program
   .command('sessions')
-  .description('List recent sessions')
-  .action(async () => {
+  .description('List, show, search, or export sessions');
+
+function printSessionList(limit: number): void {
+  const sessions = getSessionStore().listRecentSessions(limit, process.cwd());
+  if (sessions.length === 0) {
+    console.log('No sessions.');
+    return;
+  }
+  for (const s of sessions) {
+    const title = s.title ?? '(untitled)';
+    console.log(
+      `  ${s.id.slice(0, 8)}  ${new Date(s.updated_at).toLocaleString()}  ${s.turn_count} turns  ` +
+      `${s.total_input_tokens.toLocaleString()} in / ${s.total_output_tokens.toLocaleString()} out  ` +
+      `$${s.total_cost_usd.toFixed(3)}  — ${title}`,
+    );
+  }
+}
+
+function resolveSessionArg(id: string) {
+  const store = getSessionStore();
+  const all = store.listRecentSessions(100);
+  const match = all.find(s => s.id === id || s.id.startsWith(id));
+  return match ? store.loadSession(match.id) : null;
+}
+
+sessionsCmd
+  .command('list', { isDefault: true })
+  .description('List recent sessions in this directory')
+  .option('-n, --limit <n>', 'How many to list', '20')
+  .action(async (opts: { limit?: string }) => {
     await bootstrap();
-    const sessions = getSessionStore().listRecentSessions(20, process.cwd());
-    if (sessions.length === 0) {
-      console.log('No sessions.');
+    const n = Math.max(1, parseInt(opts.limit ?? '20', 10) || 20);
+    printSessionList(n);
+  });
+
+sessionsCmd
+  .command('show <id>')
+  .description('Session metadata and /insights snapshot')
+  .action(async (id: string) => {
+    await bootstrap();
+    const loaded = resolveSessionArg(id);
+    if (!loaded) {
+      console.error(`No session matches '${id}'.`);
+      process.exitCode = 1;
       return;
     }
-    for (const s of sessions) {
-      console.log(`  ${s.id.slice(0, 8)}  ${new Date(s.updated_at).toLocaleString()}  ${s.turn_count} turns  $${s.total_cost_usd.toFixed(3)}`);
+    const m = loaded.meta;
+    console.log(`Session ${m.id}`);
+    console.log(`  cwd     ${m.cwd}`);
+    console.log(`  model   ${m.model}`);
+    console.log(`  turns   ${m.turn_count}  ·  ${m.status}`);
+    console.log(`  tokens  ${m.total_input_tokens.toLocaleString()} in / ${m.total_output_tokens.toLocaleString()} out`);
+    console.log(`  cost    $${m.total_cost_usd.toFixed(4)}`);
+    console.log(`  updated ${m.updated_at}`);
+    if (m.title) console.log(`  title   ${m.title}`);
+    const { parseInsightsSnapshot, formatInsights } = await import('./agent/insights.js');
+    const snap = parseInsightsSnapshot(getSessionStore().loadInsightsJson(m.id));
+    if (snap) {
+      console.log('');
+      console.log(formatInsights(snap));
+    } else {
+      console.log('\nNo insights snapshot yet. Open the session and run /insights after a turn.');
+    }
+  });
+
+sessionsCmd
+  .command('export <id>')
+  .description('Write session insights as Markdown to stdout')
+  .action(async (id: string) => {
+    await bootstrap();
+    const loaded = resolveSessionArg(id);
+    if (!loaded) {
+      console.error(`No session matches '${id}'.`);
+      process.exitCode = 1;
+      return;
+    }
+    const { parseInsightsSnapshot, formatInsightsMarkdown } = await import('./agent/insights.js');
+    const snap = parseInsightsSnapshot(getSessionStore().loadInsightsJson(loaded.meta.id));
+    if (!snap) {
+      console.error('No insights snapshot stored for this session.');
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(formatInsightsMarkdown(snap, {
+      title: loaded.meta.title,
+      model: loaded.meta.model,
+      cwd: loaded.meta.cwd,
+    }));
+  });
+
+sessionsCmd
+  .command('search <query...>')
+  .description('Search past conversation text in this directory')
+  .action(async (queryParts: string[]) => {
+    await bootstrap();
+    const q = queryParts.join(' ').trim();
+    if (!q) {
+      console.error('Usage: qodex sessions search <query>');
+      process.exitCode = 1;
+      return;
+    }
+    const hits = getSessionStore().searchConversations(q, { cwd: process.cwd(), limit: 12 });
+    if (hits.length === 0) {
+      console.log('No matches.');
+      return;
+    }
+    for (const h of hits) {
+      console.log(`  ${h.sessionId.slice(0, 8)}  ${h.role.padEnd(9)}  ${h.title || '(untitled)'}`);
+      console.log(`           ${h.snippet}`);
     }
   });
 

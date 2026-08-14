@@ -301,6 +301,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
 
   Observability
     /cost              Show token/cost usage
+    /insights          Token / tool / latency breakdown (this session)
     /tokens            Per-turn token breakdown (inline)
     /todos             Show current todo list
 
@@ -437,6 +438,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     case 'clear': {
       clearTodos(sessionId);
       getSessionStore().clearMessages(sessionId);
+      try {
+        const { getActiveAgent } = await import('../agent/loop.js');
+        getActiveAgent()?.resetInsights(sessionId);
+      } catch { /* no live agent */ }
       return {
         handled: true,
         action: { type: 'clear' },
@@ -738,8 +743,25 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
   Turns: ${m.turn_count}
   Input tokens: ${m.total_input_tokens.toLocaleString()}
   Output tokens: ${m.total_output_tokens.toLocaleString()}
-  Cost: $${m.total_cost_usd.toFixed(4)}`,
+  Cost: $${m.total_cost_usd.toFixed(4)}
+  (for tool + latency breakdown: /insights)`,
       };
+    }
+
+    case 'insights': {
+      const { getActiveAgent } = await import('../agent/loop.js');
+      const { formatInsights, parseInsightsSnapshot } = await import('../agent/insights.js');
+      const agent = getActiveAgent();
+      let snap = agent?.getInsights(sessionId);
+      if (!snap || (snap.tokens.llmCalls === 0 && Object.keys(snap.tools).length === 0)) {
+        const persisted = parseInsightsSnapshot(getSessionStore().loadInsightsJson(sessionId));
+        if (persisted) snap = persisted;
+      }
+      if (!snap || (snap.tokens.llmCalls === 0 && Object.keys(snap.tools).length === 0)) {
+        return { handled: true, message: 'No insights yet for this session. Run a turn first.' };
+      }
+      try { agent?.persistInsights(sessionId); } catch { /* */ }
+      return { handled: true, message: formatInsights(snap) };
     }
 
     case 'telemetry': {
@@ -1236,6 +1258,8 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
             '  manual  — ask before edits and shell (default)\n' +
             '  auto    — file edits run without asking; shell still asks\n' +
             '  always  — tools run without asking (hard-deny / irreversible still stop)\n' +
+            'Safe shell can skip the hub without /auto: execution.allow in config.yaml\n' +
+            '  (e.g. `git status`, `npm test`). Deny / always-ask / irreversible still win.\n' +
             'Aliases: /auto off = manual, /auto on = always. Shift+Tab cycles the three.',
         };
       }
