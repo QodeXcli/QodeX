@@ -1,0 +1,28 @@
+import { formatLogLine } from '../src/utils/log-format';
+
+describe('formatLogLine', () => {
+  it('should format a log line with level and message', () => {
+    const result = formatLogLine('info', 'hello');
+    expect(result).toBe('[INFO] hello');
+  });
+
+  it('should format a log line with extra fields', () => {
+    const result = formatLogLine('warn', 'something happened', { user: 'testuser', id: 123 });
+    expect(result).toBe('[WARN] something happened user=testuser id=123');
+  });
+
+  it('should handle empty extra fields', () => {
+    const result = formatLogLine('debug', 'detailed info', {});
+    expect(result).toBe('[DEBUG] detailed info');
+  });
+
+  it('should handle different log levels', () => {
+    const result = formatLogLine('error', 'critical failure');
+    expect(result).toBe('[ERROR] critical failure');
+  });
+
+  it('should handle extra fields with various types', () => {
+    const result = formatLogLine('info', 'data', { success: true, value: 10.5 });
+    expect(result).toBe('[INFO] data success=true value=10.5');
+  });
+});
