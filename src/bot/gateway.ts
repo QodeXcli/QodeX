@@ -17,8 +17,9 @@ import type { Transport, Incoming, AgentRunner, TurnSink, ArtifactCard, Button }
 import { StreamPump } from './stream-pump.js';
 import { isAuthorized, type AllowConfig } from './auth.js';
 import { findCommand, menuDescriptors, type GatewayControls } from './commands.js';
+import { botLane, getOperatorHub, TUI_ORIGIN, type HubEvent } from '../operator/hub.js';
 
-interface PendingAsk { resolve: (v: string) => void; options: string[] }
+interface PendingAsk { hubId: string; options: string[] }
 
 export interface GatewayOptions {
   transports: Transport[];
@@ -33,20 +34,47 @@ export class BotGateway {
   private asks = new Map<string, PendingAsk>();       // key → awaiting permission answer
   private pendingEdit = new Map<string, string>();    // key → artifactId awaiting an "/edit" instruction
   private now: () => number;
+  private unsubHub: (() => void) | null = null;
 
   constructor(private opts: GatewayOptions) {
     this.now = opts.now ?? (() => Date.now());
   }
 
   async start(): Promise<void> {
+    this.unsubHub = getOperatorHub().subscribe(ev => this.onHub(ev));
     for (const t of this.opts.transports) {
       await t.start(m => void this.onMessage(t, m));
       await t.setCommands?.(menuDescriptors()).catch(() => {}); // native `/` menu — best-effort
     }
   }
   async stop(): Promise<void> {
+    this.unsubHub?.();
+    this.unsubHub = null;
     for (const ac of this.busy.values()) ac.abort();
     for (const t of this.opts.transports) await t.stop();
+  }
+
+  /** Hub is sink-dumb. We only present asks whose origin is one of our chats. Never live. */
+  private onHub(ev: HubEvent): void {
+    if (ev.kind === 'approval-cleared') {
+      for (const [key, ask] of this.asks) {
+        if (ask.hubId === ev.id) this.asks.delete(key);
+      }
+      return;
+    }
+    if (ev.kind !== 'approval') return;
+    if (!ev.origin || ev.origin === TUI_ORIGIN) return;
+    const t = this.transportForOrigin(ev.origin);
+    if (!t) return;
+    const chatId = ev.origin.slice(ev.origin.indexOf(':') + 1);
+    this.asks.set(ev.origin, { hubId: ev.id, options: ev.options });
+    const row = ev.options.map(o => ({ label: o, data: `ask:${o}` }));
+    void t.send(chatId, `🔐 ${ev.prompt}`, [row]);
+  }
+
+  private transportForOrigin(origin: string): Transport | undefined {
+    const platform = origin.slice(0, origin.indexOf(':'));
+    return this.opts.transports.find(t => t.platform === platform);
   }
 
   private key(t: Transport, m: Incoming): string { return `${t.platform}:${m.chatId}`; }
@@ -56,8 +84,19 @@ export class BotGateway {
     return {
       isBusy: () => this.busy.has(key),
       queueDepth: () => this.queue.get(key)?.length ?? 0,
-      abort: () => { const ac = this.busy.get(key); if (!ac) return false; ac.abort(); return true; },
-      reset: async () => { this.busy.get(key)?.abort(); this.queue.delete(key); await this.opts.agent.reset?.(key); },
+      abort: () => {
+        const ac = this.busy.get(key);
+        if (!ac) return false;
+        ac.abort();
+        getOperatorHub().cancelLane(botLane(key));
+        return true;
+      },
+      reset: async () => {
+        this.busy.get(key)?.abort();
+        this.queue.delete(key);
+        getOperatorHub().cancelLane(botLane(key));
+        await this.opts.agent.reset?.(key);
+      },
       runTask: (txt) => this.runAndDrain(t, chatId, key, txt),
     };
   }
@@ -144,7 +183,10 @@ export class BotGateway {
     const sink: TurnSink = {
       onDelta: s => pump.push(s),
       onStatus: () => {},                          // tool/status lines stay quiet to avoid noise
-      ask: (prompt, options) => this.askUser(t, chatId, key, prompt, options),
+      ask: (prompt, options) => getOperatorHub().requestApproval('bot', prompt, options, {
+        lane: botLane(key),
+        origin: key,
+      }),
       artifact: card => { turnCard = card; },      // held until the stream finishes, then rendered below
     };
 
@@ -158,12 +200,14 @@ export class BotGateway {
       clearInterval(drainTimer);
       this.busy.delete(key);
       this.asks.delete(key);
+      getOperatorHub().cancelLane(botLane(key));
       return;
     }
     clearInterval(drainTimer);
     await pump.finish().catch(() => {});
     this.busy.delete(key);
     this.asks.delete(key);
+    getOperatorHub().cancelLane(botLane(key));
     if (turnCard) await this.presentCard(t, chatId, turnCard).catch(() => {});
   }
 
@@ -196,22 +240,13 @@ export class BotGateway {
     if (action === 'edit') { this.pendingEdit.set(key, id); await t.send(chatId, `✏️ What should I change about “${id}”? Send the tweak and I’ll update it live.`); return; }
   }
 
-  private askUser(t: Transport, chatId: string, key: string, prompt: string, options: string[]): Promise<string> {
-    return new Promise<string>(resolve => {
-      this.asks.set(key, { resolve, options });
-      const row = options.map(o => ({ label: o, data: `ask:${o}` }));
-      void t.send(chatId, `🔐 ${prompt}`, [row]);
-    });
-  }
-
   private stripAsk(data: string): string { return data.startsWith('ask:') ? data.slice(4) : data; }
 
   private resolveAsk(key: string, value: string): void {
     const ask = this.asks.get(key);
     if (!ask) return;
-    this.asks.delete(key);
     // Snap free-text to the closest offered option; default to the first (usually the safe "no").
     const match = ask.options.find(o => o.toLowerCase() === value.toLowerCase()) ?? ask.options[0]!;
-    ask.resolve(match);
+    getOperatorHub().answer(ask.hubId, match);
   }
 }

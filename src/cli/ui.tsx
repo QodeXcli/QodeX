@@ -430,13 +430,18 @@ export function App(props: AppProps): React.ReactElement {
       if (ev.kind === 'approval') {
         const diff = pendingDiffRef.current ?? undefined;
         pendingDiffRef.current = null;
-        const label = ev.source === 'main' ? ev.prompt : `[${ev.source}] ${ev.prompt}`;
-        setPendingPrompt({
-          prompt: label,
-          options: ev.options,
-          hubId: ev.id,
-          diff,
-          resolve: (a) => { hub.answer(ev.id, a); },
+        const tag = ev.origin && ev.origin !== 'tui' ? ev.origin : ev.source;
+        const label = tag === 'main' ? ev.prompt : `[${tag}] ${ev.prompt}`;
+        setPendingPrompt(p => {
+          // Another lane may be inflight (bot). Don't steal the TUI's open ask.
+          if (p && p.hubId && p.hubId !== ev.id) return p;
+          return {
+            prompt: label,
+            options: ev.options,
+            hubId: ev.id,
+            diff,
+            resolve: (a) => { hub.answer(ev.id, a); },
+          };
         });
       } else if (ev.kind === 'approval-cleared') {
         setPendingPrompt(p => (p?.hubId === ev.id ? null : p));

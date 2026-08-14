@@ -18,6 +18,7 @@ import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from '../cli/modes
 import { logger } from '../utils/logger.js';
 import type { AgentRunner, TurnSink, RunnerStatus, ArtifactCard } from './types.js';
 import { SessionMap } from './session-map.js';
+import { botLane, getOperatorHub } from '../operator/hub.js';
 
 export interface RunnerDeps {
   config: QodexConfig;
@@ -128,7 +129,10 @@ export class QodexAgentRunner implements AgentRunner {
     const auto = this.autoByKey.get(convKey) ?? false;
     const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
       if (auto) { const yes = options.find(o => /^(y|yes|allow|approve|ok|always)\b/i.test(o.trim())); if (yes) return yes; }
-      return sink.ask(prompt, options);
+      return getOperatorHub().requestApproval('bot', prompt, options, {
+        lane: botLane(convKey),
+        origin: convKey,
+      });
     };
 
     const display = new StreamDisplayFilter();

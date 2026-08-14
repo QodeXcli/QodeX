@@ -1,6 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BotGateway } from '../src/bot/gateway.ts';
 import type { Transport, Incoming, MessageRef, Button, AgentRunner, TurnSink } from '../src/bot/types.ts';
+import { resetOperatorHub } from '../src/operator/hub.js';
+
+beforeEach(() => { resetOperatorHub(); });
 
 /** A fake transport that captures sends and lets the test inject inbound messages. */
 function fakeTransport(platform: 'telegram' | 'discord' = 'telegram') {
@@ -85,6 +88,22 @@ describe('BotGateway', () => {
     inject({ callbackData: 'ask:yes', callbackId: 'cb1' }); // user taps "yes"
     await flush(); await flush();
     expect(answered).toBe('yes');
+  });
+
+  it('presents a hub ask for this chat and ignores a tui-lane ask', async () => {
+    const { t, sent } = fakeTransport();
+    const gw = new BotGateway({ transports: [t], agent: { runTurn: async () => '' }, allow: allowAll });
+    await gw.start();
+    const { getOperatorHub, botLane } = await import('../src/operator/hub.js');
+    const hub = getOperatorHub();
+    void hub.requestApproval('main', 'tui only?', ['yes', 'no']);
+    void hub.requestApproval('bot', 'from telegram?', ['yes', 'no'], {
+      lane: botLane('telegram:c1'),
+      origin: 'telegram:c1',
+    });
+    await flush();
+    expect(sent.some(s => s.text.includes('tui only'))).toBe(false);
+    expect(sent.some(s => s.text.includes('from telegram'))).toBe(true);
   });
 
   it('/stop aborts the running turn', async () => {

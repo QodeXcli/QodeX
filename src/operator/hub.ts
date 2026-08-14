@@ -1,24 +1,38 @@
 /**
  * Operator hub — one process-wide control plane.
  *
- * Hermes re-wires the agent at every surface (CLI, gateway, ACP, cron). QodeX
- * keeps a single hub:
+ * Approvals are FIFO *inside a lane*, not across the whole process:
+ *   - lane `tui`     main chat + /background  (one operator at the keyboard)
+ *   - lane `bot:…`   one conversation         (a remote operator)
  *
- *   - approval  one FIFO queue for EVERY run (main turn, /background, later bot)
- *   - live      tagged stdout/stderr/progress from any run
+ * A parked Telegram ask must not starve [bg1]. Live events stay a dumb
+ * tagged broadcast — subscribers decide whether to render them.
  *
- * The TUI is a subscriber, not the owner. A side run that needs a yes/no parks
- * here and the same Confirmation widget answers it. Surfaces never talk to
- * each other.
- *
- * PURE queue logic is in this file so it is unit-testable without Ink.
+ * `origin` is metadata for subscribers (tui vs telegram:chatId). The hub
+ * does not know about transports.
  */
+
+export const TUI_LANE = 'tui';
+export const TUI_ORIGIN = 'tui';
+
+export function botLane(convKey: string): string {
+  return `bot:${convKey}`;
+}
 
 export interface ApprovalRequest {
   id: string;
   source: string;
   prompt: string;
   options: string[];
+  lane: string;
+  origin: string;
+}
+
+export interface ApprovalOpts {
+  /** FIFO isolation key. Default `tui`. */
+  lane?: string;
+  /** Who should present this ask. Default `tui`. */
+  origin?: string;
 }
 
 export type LiveStream = 'out' | 'err' | 'progress';
@@ -30,17 +44,35 @@ export type HubEvent =
 
 type ApprovalWaiter = ApprovalRequest & { resolve: (answer: string) => void };
 
+interface LaneState {
+  queue: ApprovalWaiter[];
+  inflight: ApprovalWaiter | null;
+}
+
+function snapshot(w: ApprovalWaiter): ApprovalRequest {
+  const { id, source, prompt, options, lane, origin } = w;
+  return { id, source, prompt, options, lane, origin };
+}
+
 export class OperatorHub {
   private seq = 0;
-  private queue: ApprovalWaiter[] = [];
-  private inflight: ApprovalWaiter | null = null;
+  private lanes = new Map<string, LaneState>();
   private listeners = new Set<(ev: HubEvent) => void>();
+
+  private laneState(id: string): LaneState {
+    let s = this.lanes.get(id);
+    if (!s) {
+      s = { queue: [], inflight: null };
+      this.lanes.set(id, s);
+    }
+    return s;
+  }
 
   subscribe(fn: (ev: HubEvent) => void): () => void {
     this.listeners.add(fn);
-    if (this.inflight) {
-      const { id, source, prompt, options } = this.inflight;
-      fn({ kind: 'approval', id, source, prompt, options });
+    for (const s of this.lanes.values()) {
+      if (!s.inflight) continue;
+      try { fn({ kind: 'approval', ...snapshot(s.inflight) }); } catch { /* */ }
     }
     return () => { this.listeners.delete(fn); };
   }
@@ -51,36 +83,81 @@ export class OperatorHub {
     }
   }
 
-  /** Ask the operator. FIFO — a side-run never jumps the main turn. */
-  requestApproval(source: string, prompt: string, options: string[] = ['yes', 'no']): Promise<string> {
+  /** Ask the operator. FIFO inside `lane` — other lanes stay free. */
+  requestApproval(
+    source: string,
+    prompt: string,
+    options: string[] = ['yes', 'no'],
+    opts: ApprovalOpts = {},
+  ): Promise<string> {
+    const lane = opts.lane ?? TUI_LANE;
+    const origin = opts.origin ?? TUI_ORIGIN;
     return new Promise(resolve => {
       this.seq += 1;
-      this.queue.push({
+      this.laneState(lane).queue.push({
         id: `ap${this.seq}`,
         source,
         prompt,
         options: options.length ? options : ['yes', 'no'],
+        lane,
+        origin,
         resolve,
       });
-      this.pump();
+      this.pump(lane);
     });
   }
 
-  /** The surface calls this when the user answers the inflight prompt. */
+  /** The surface calls this when the user answers any inflight prompt. */
   answer(id: string, answer: string): boolean {
-    if (!this.inflight || this.inflight.id !== id) return false;
-    const done = this.inflight;
-    this.inflight = null;
-    this.emit({ kind: 'approval-cleared', id });
-    done.resolve(answer);
-    this.pump();
-    return true;
+    for (const [lane, s] of this.lanes) {
+      if (!s.inflight || s.inflight.id !== id) continue;
+      const done = s.inflight;
+      s.inflight = null;
+      this.emit({ kind: 'approval-cleared', id });
+      done.resolve(answer);
+      this.pump(lane);
+      return true;
+    }
+    return false;
   }
 
-  pending(): ApprovalRequest | null {
-    if (!this.inflight) return null;
-    const { id, source, prompt, options } = this.inflight;
-    return { id, source, prompt, options };
+  /** Drop a queued or inflight ask (abort / /stop). Resolves so the waiter is not leaked. */
+  cancel(id: string, answer = 'no'): boolean {
+    for (const [lane, s] of this.lanes) {
+      if (s.inflight?.id === id) return this.answer(id, answer);
+      const i = s.queue.findIndex(w => w.id === id);
+      if (i < 0) continue;
+      const [w] = s.queue.splice(i, 1);
+      w!.resolve(answer);
+      return true;
+    }
+    return false;
+  }
+
+  /** Resolve every ask on a lane (conversation aborted). */
+  cancelLane(lane: string, answer = 'no'): number {
+    const s = this.lanes.get(lane);
+    if (!s) return 0;
+    const waiters = s.inflight ? [s.inflight, ...s.queue] : s.queue.slice();
+    const inflightId = s.inflight?.id;
+    s.queue = [];
+    s.inflight = null;
+    if (inflightId) this.emit({ kind: 'approval-cleared', id: inflightId });
+    for (const w of waiters) w.resolve(answer);
+    return waiters.length;
+  }
+
+  pending(lane: string = TUI_LANE): ApprovalRequest | null {
+    const w = this.lanes.get(lane)?.inflight;
+    return w ? snapshot(w) : null;
+  }
+
+  pendingAll(): ApprovalRequest[] {
+    const out: ApprovalRequest[] = [];
+    for (const s of this.lanes.values()) {
+      if (s.inflight) out.push(snapshot(s.inflight));
+    }
+    return out;
   }
 
   emitLive(source: string, stream: LiveStream, line: string): void {
@@ -89,11 +166,11 @@ export class OperatorHub {
     this.emit({ kind: 'live', source, stream, line: text });
   }
 
-  private pump(): void {
-    if (this.inflight || this.queue.length === 0) return;
-    this.inflight = this.queue.shift()!;
-    const { id, source, prompt, options } = this.inflight;
-    this.emit({ kind: 'approval', id, source, prompt, options });
+  private pump(lane: string): void {
+    const s = this.laneState(lane);
+    if (s.inflight || s.queue.length === 0) return;
+    s.inflight = s.queue.shift()!;
+    this.emit({ kind: 'approval', ...snapshot(s.inflight) });
   }
 }
 

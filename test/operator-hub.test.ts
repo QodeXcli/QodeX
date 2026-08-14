@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OperatorHub, resetOperatorHub } from '../src/operator/hub.js';
+import { OperatorHub, botLane, resetOperatorHub } from '../src/operator/hub.js';
 
 describe('OperatorHub — one approval queue for every surface', () => {
   let hub: OperatorHub;
@@ -14,6 +14,8 @@ describe('OperatorHub — one approval queue for every surface', () => {
 
     expect(seen).toEqual(['main']);
     expect(hub.pending()?.source).toBe('main');
+    expect(hub.pending()?.lane).toBe('tui');
+    expect(hub.pending()?.origin).toBe('tui');
 
     hub.answer(hub.pending()!.id, 'yes');
     expect(await a).toBe('yes');
@@ -44,5 +46,59 @@ describe('OperatorHub — one approval queue for every surface', () => {
     hub.emitLive('main', 'out', '  ');
     hub.emitLive('bg1', 'out', 'ok\n');
     expect(lines).toEqual(['ok']);
+  });
+
+  it('keeps bot and tui lanes inflight at the same time', async () => {
+    const seen: string[] = [];
+    hub.subscribe(ev => { if (ev.kind === 'approval') seen.push(`${ev.source}@${ev.origin}`); });
+
+    const local = hub.requestApproval('bg1', 'edit local.ts?', ['yes', 'no']);
+    const remote = hub.requestApproval('bot', 'edit remote.ts?', ['yes', 'no'], {
+      lane: botLane('telegram:9'),
+      origin: 'telegram:9',
+    });
+
+    expect(seen).toEqual(['bg1@tui', 'bot@telegram:9']);
+    expect(hub.pending('tui')?.source).toBe('bg1');
+    expect(hub.pending(botLane('telegram:9'))?.origin).toBe('telegram:9');
+    expect(hub.pendingAll()).toHaveLength(2);
+
+    // Answering the remote ask must not stall [bg1].
+    hub.answer(hub.pending(botLane('telegram:9'))!.id, 'yes');
+    expect(await remote).toBe('yes');
+    expect(hub.pending('tui')?.source).toBe('bg1');
+
+    hub.answer(hub.pending('tui')!.id, 'no');
+    expect(await local).toBe('no');
+    expect(hub.pendingAll()).toHaveLength(0);
+  });
+
+  it('cancelLane resolves every waiter on that lane only', async () => {
+    const a = hub.requestApproval('main', 'a?', ['yes', 'no']);
+    const b = hub.requestApproval('bg1', 'b?', ['yes', 'no']);
+    const remote = hub.requestApproval('bot', 'c?', ['yes', 'no'], {
+      lane: botLane('telegram:1'),
+      origin: 'telegram:1',
+    });
+
+    expect(hub.cancelLane('tui', 'no')).toBe(2);
+    expect(await a).toBe('no');
+    expect(await b).toBe('no');
+    expect(hub.pending('tui')).toBeNull();
+    expect(hub.pending(botLane('telegram:1'))?.source).toBe('bot');
+
+    hub.answer(hub.pending(botLane('telegram:1'))!.id, 'yes');
+    expect(await remote).toBe('yes');
+  });
+
+  it('replays every inflight lane to a late subscriber', () => {
+    void hub.requestApproval('main', 'tui?', ['yes']);
+    void hub.requestApproval('bot', 'bot?', ['yes'], {
+      lane: botLane('discord:x'),
+      origin: 'discord:x',
+    });
+    const seen: string[] = [];
+    hub.subscribe(ev => { if (ev.kind === 'approval') seen.push(ev.origin); });
+    expect(seen.sort()).toEqual(['discord:x', 'tui']);
   });
 });
