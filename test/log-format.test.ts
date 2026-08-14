@@ -8,7 +8,7 @@ describe('formatLogLine', () => {
 
   it('should format a log line with extra fields', () => {
     const result = formatLogLine('warn', 'something happened', { user: 'testuser', id: 123 });
-    expect(result).toBe('[WARN] something happened user=testuser id=123');
+    expect(result).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[WARN\] something happened user=testuser id=123/);
   });
 
   it('should handle empty extra fields', () => {
