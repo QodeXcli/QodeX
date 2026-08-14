@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.6.0 — 2026-08-14
+
+**The operator plane is a real product now: one hub, isolated sessions, a boxed shell, and official chat transports.**
+
+This is the close of the architecture cycle that started with “main chat and `[bg1]` must not leak into each other.” QodeX 2.6 does not add a second agent. It gives the existing one a control plane, a working directory that survives handoff, a file CAS, named worlds, a Docker runtime, and WhatsApp/Signal that are *transports* — not unofficial phone clones.
+
+`/insights` is still unstarted on purpose. `/cost` and `/tokens` already cover spend; a session-behaviour report can land in 2.7.
+
+1. **Operator Hub, multi-lane.** Approvals and live lines multiplex through one process-wide hub. FIFO is *per lane*: TUI + `/background` stay ordered; a parked Telegram/WhatsApp ask cannot starve `[bg1]`. First `answer(id)` wins. Live is a tagged broadcast — the bot does not subscribe.
+
+2. **Background dock.** `[bg1]` no longer dumps into the main transcript. A collapsible dock (`Ctrl+B`) shows per-run lanes, unread counts, and the last live lines.
+
+3. **OCC on write.** `Transaction.write` compare-and-swaps against the snapshot the edit was computed from, under a brief exclusive apply. Stale writes become `[FILE_CHANGED]`, not a silent overwrite. Read ledgers are per `sessionId`.
+
+4. **Session cwd.** After `/continue` or `--resume`, tools resolve against the session's directory, not `process.cwd()` of the host process.
+
+5. **`--profile`.** Named last-word overlays (`~/.qodex/profiles/<name>.yaml` or inline `profiles.<name>`). `-p` remains `--print`. Missing/invalid names fail fast.
+
+6. **Docker runtime.** `runtime.backend: docker` runs `shell` in a container: project bind-mounted, host `$HOME` / `docker.sock` / `--privileged` / host-net refused, `--network none` by default. File edits stay in the repo. Pair with `--profile cloud`.
+
+7. **WhatsApp Cloud API + signal-cli.** Thin `BotGateway` adapters. WhatsApp is official Graph + webhook; every POST is HMAC'd with `WHATSAPP_APP_SECRET` over the raw body before `JSON.parse`. Signal talks to *your* `signal-cli` daemon. Deny-by-default allowlists on both.
+
+8. **Pages.** Static `docs/` deploy — no flaky legacy Jekyll builder.
+
+```
+src/operator/hub.ts
+src/operator/live-lanes.ts
+src/cli/prompts/side-run-dock.tsx
+src/filesystem/apply-guard.ts
+src/session/handoff.ts
+src/config/profile.ts
+src/runtime/exec.ts
+src/runtime/docker-args.ts
+src/bot/adapters/whatsapp.ts
+src/bot/adapters/signal.ts
+```
+
 ## v2.4.0 — 2026-06-20
 
 **`provider add` confirms your pick before configuring — no more wrong-provider from a stray paste.**

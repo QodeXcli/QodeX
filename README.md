@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.5.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.6.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
 
