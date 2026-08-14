@@ -49,6 +49,7 @@ import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getOperatorHub } from '../operator/hub.js';
+import { pickWorkingCwd } from '../session/handoff.js';
 
 type HistoryItem =
   | { type: 'user'; text: string; id: string }
@@ -134,6 +135,15 @@ export function App(props: AppProps): React.ReactElement {
       if (loaded) return props.resumeSessionId;
     }
     return store.createSession(props.cwd, props.config.defaults.model);
+  });
+  // Session cwd, not the host process. After --resume / switch_session / phone
+  // handoff, tools must keep editing the project the transcript belongs to.
+  const [activeCwd, setActiveCwd] = useState<string>(() => {
+    if (props.resumeSessionId) {
+      const loaded = getSessionStore().loadSession(props.resumeSessionId);
+      return pickWorkingCwd({ sessionCwd: loaded?.meta.cwd, hostCwd: props.cwd });
+    }
+    return props.cwd;
   });
   const [messages, setMessages] = useState<Message[]>(() => {
     if (props.resumeSessionId) {
@@ -247,7 +257,7 @@ export function App(props: AppProps): React.ReactElement {
       registry: props.registry,
       permissions: props.permissions,
       config: props.config,
-      cwd: props.cwd,
+      cwd: activeCwd,
     });
     agentRef.current = agent;
     // Publish to singletons so slash commands and the task tool can find this agent
@@ -368,8 +378,11 @@ export function App(props: AppProps): React.ReactElement {
   // Surface the active session id so the launcher can print a resume hint on exit.
   useEffect(() => { props.onSessionActive?.(sessionId); }, [sessionId]);
   useEffect(() => {
-    void import('../session/handoff.js').then(m => m.writeHandoff(sessionId, props.cwd));
-  }, [sessionId, props.cwd]);
+    agentRef.current?.setWorkingDirectory(activeCwd);
+  }, [activeCwd]);
+  useEffect(() => {
+    void import('../session/handoff.js').then(m => m.writeHandoff(sessionId, activeCwd));
+  }, [sessionId, activeCwd]);
 
   useEffect(() => {
     let unsubSide = () => {};
@@ -425,7 +438,7 @@ export function App(props: AppProps): React.ReactElement {
 
     // Slash command? Only when called from user input (not from internal re-submit of rendered template)
     if (!opts?.displayAs && prompt.trim().startsWith('/')) {
-      const result = await handleSlashCommand(prompt, sessionId, props.cwd, props.config);
+      const result = await handleSlashCommand(prompt, sessionId, activeCwd, props.config);
       if (result.handled) {
         if (result.message) {
           setHistory(h => [...h, { type: 'user', text: prompt, id: nextId() }, { type: 'system', text: result.message!, id: nextId() }]);
@@ -454,6 +467,9 @@ export function App(props: AppProps): React.ReactElement {
           const loaded = getSessionStore().loadSession(result.action.sessionId);
           if (loaded) {
             setSessionId(result.action.sessionId);
+            const nextCwd = pickWorkingCwd({ sessionCwd: loaded.meta.cwd, hostCwd: props.cwd });
+            setActiveCwd(nextCwd);
+            agentRef.current?.setWorkingDirectory(nextCwd);
             setMessages(loaded.messages);
             const prior = messagesToHistory(loaded.messages) as HistoryItem[];
             setHistory([
@@ -539,7 +555,7 @@ export function App(props: AppProps): React.ReactElement {
 
     // Auto-detect image paths in user-typed input and nudge the agent toward
     // vision_analyze. Only for real user input (not internal template re-submits).
-    const modelPrompt = !opts?.displayAs ? annotateImagePrompt(prompt, props.cwd) : prompt;
+    const modelPrompt = !opts?.displayAs ? annotateImagePrompt(prompt, activeCwd) : prompt;
 
     // Build initial system + user message if no history yet
     let initial: Message[];
@@ -703,7 +719,7 @@ export function App(props: AppProps): React.ReactElement {
       setActiveTools([]);
       abortRef.current = null;
     }
-  }, [sessionId, mode, explicitModel, messages, props.cwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
+  }, [sessionId, mode, explicitModel, messages, props.cwd, activeCwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
 
   const handleSubmit = useCallback((value: string) => {
     const v = value.trim();
@@ -791,7 +807,7 @@ export function App(props: AppProps): React.ReactElement {
             return (
               <Welcome
                 key="__welcome__"
-                cwd={props.cwd}
+                cwd={activeCwd}
                 config={props.config}
                 registry={props.registry}
                 router={props.router}
@@ -862,7 +878,7 @@ export function App(props: AppProps): React.ReactElement {
               value={input}
               onChange={setInput}
               onSubmit={handleSubmit}
-              cwd={props.cwd}
+              cwd={activeCwd}
               placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}

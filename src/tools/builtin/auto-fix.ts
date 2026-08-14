@@ -101,7 +101,7 @@ export class AutoFixTool extends Tool<z.infer<typeof AutoFixArgs>> {
       session = {
         id: args.id,
         command: args.command,
-        cwd: args.cwd ?? process.cwd(),
+        cwd: args.cwd ?? _ctx.cwd ?? process.cwd(),
         startedAt: Date.now(),
         iteration: 0,
         maxIterations: args.max_iterations ?? 10,

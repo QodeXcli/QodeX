@@ -69,10 +69,14 @@ export class WriteFileTool extends Tool<z.infer<typeof ArgsSchema>> {
       contentToWrite = dec.content; // may be the user-edited version from [E] Edit
     }
 
-    // Execute through transaction
+    // Execute through transaction. `base` is the snapshot this overwrite was
+    // computed against (null = create). Re-checked after the approval pause.
     try {
-      await ctx.transaction.write(abs, contentToWrite);
+      await ctx.transaction.write(abs, contentToWrite, { base: before, label: rel });
     } catch (e: any) {
+      if (typeof e?.message === 'string' && e.message.startsWith('[FILE_CHANGED]')) {
+        return { content: e.message, isError: true };
+      }
       return { content: `[ERROR] Failed to write ${args.path}: ${e.message}`, isError: true };
     }
 

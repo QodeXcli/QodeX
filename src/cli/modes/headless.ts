@@ -112,6 +112,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   let sessionId: string;
   let initialMessages;
 
+  let resumeCwd: string | undefined;
   if (opts.resumeSessionId) {
     const loaded = store.loadSession(opts.resumeSessionId);
     if (!loaded) {
@@ -120,6 +121,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     }
     sessionId = opts.resumeSessionId;
     initialMessages = [...loaded.messages, { role: 'user' as const, content: effectivePrompt }];
+    const { pickWorkingCwd } = await import('../../session/handoff.js');
+    resumeCwd = pickWorkingCwd({ sessionCwd: loaded.meta.cwd, hostCwd: opts.cwd });
   } else {
     sessionId = store.createSession(opts.cwd, explicitModelOverride ?? opts.config.defaults.model);
   }
@@ -129,7 +132,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     registry: opts.registry,
     permissions: opts.permissions,
     config, // contract budgets (if any) applied above
-    cwd: opts.cwd,
+    cwd: resumeCwd ?? opts.cwd,
   });
 
   if (!initialMessages) {

@@ -458,6 +458,10 @@ export class ToolRegistry {
       const result = await tool.execute(parsed, ctx);
       return result;
     } catch (e: any) {
+      // Apply-guard CAS refusals are already a complete observation for the model.
+      if (typeof e?.message === 'string' && e.message.startsWith('[FILE_CHANGED]')) {
+        return { content: e.message, isError: true };
+      }
       return {
         content: `[TOOL_ERROR] ${name} failed: ${e.message}\nReview the error and try a different approach.`,
         isError: true,

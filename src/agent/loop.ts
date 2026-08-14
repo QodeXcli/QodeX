@@ -141,8 +141,21 @@ export class AgentLoop {
    * Single-threaded JS event loop ⇒ no lock needed.
    */
   private steerQueue: string[] = [];
-  /** Session ledger of files the model has demonstrably read (read-before-write gate). */
-  private readLedger = new ReadLedger();
+  /**
+   * Per-session read ledgers. Main chat and `/background` share this AgentLoop
+   * instance; they must NOT share "I have seen this file" or a write in one
+   * session would launder staleness for the other.
+   */
+  private readLedgers = new Map<string, ReadLedger>();
+
+  private ledgerFor(sessionId: string): ReadLedger {
+    let led = this.readLedgers.get(sessionId);
+    if (!led) {
+      led = new ReadLedger();
+      this.readLedgers.set(sessionId, led);
+    }
+    return led;
+  }
   /** Skills already auto-injected this session — never inject the same one twice. */
   private autoInjectedSkills = new Set<string>();
   /** Monotonic union of tool names shipped this session. The relevance gate only ever
@@ -226,7 +239,7 @@ export class AgentLoop {
     this.registry = opts.registry;
     this.permissions = opts.permissions;
     this.config = opts.config;
-    this.cwd = opts.cwd;
+    this.cwd = path.resolve(opts.cwd);
     // Auto-compaction + efficiency tuning are DERIVED from config. Factored into a method so a
     // mid-session config hot-reload (refreshMutableConfig, run at each run() start) re-derives
     // them too — a dashboard toggle to `context.efficient` then takes effect on the next task.
@@ -241,6 +254,25 @@ export class AgentLoop {
         retentionTurns: (opts.config as any).safety?.snapshotRetentionTurns ?? 50,
       });
     }
+  }
+
+  /**
+   * Rebind the working root after a session handoff / resume.
+   * Tools resolve every relative path against this, not `process.cwd()`.
+   * Clears a previously attached directory — that attachment belonged to the old root.
+   */
+  setWorkingDirectory(cwd: string): void {
+    this.cwd = path.resolve(cwd);
+    this.effectiveCwd = undefined;
+    if (this.snapshotService) {
+      this.snapshotService = new SnapshotService(this.cwd, 'pending', {
+        retentionTurns: (this.config as any).safety?.snapshotRetentionTurns ?? 50,
+      });
+    }
+  }
+
+  workingDirectory(): string {
+    return this.effectiveCwd ?? this.cwd;
   }
 
   /** Update the snapshot service's session id when a real session starts. */
@@ -2390,7 +2422,7 @@ export class AgentLoop {
       for (const tc of toolCalls) {
         if (this.sessionToolSequence.length < AgentLoop.TOOL_SEQUENCE_CAP) this.sessionToolSequence.push(tc.function.name);
       }
-      const txn = await journal.begin(sessionId);
+      const txn = await journal.begin(sessionId, undefined, this.effectiveCwd ?? this.cwd);
       const toolMessages: Message[] = [];
 
       const readOnlyCalls: ToolCall[] = [];
@@ -2718,7 +2750,7 @@ export class AgentLoop {
           let st: fsSync.Stats | null = null;
           try { st = fsSync.statSync(absP); } catch { st = null; }
           if (!st || !st.isFile()) continue; // new file (or non-file): creation is allowed
-          const verdict = this.readLedger.check(absP, st.mtimeMs);
+          const verdict = this.ledgerFor(sessionId).check(absP, st.mtimeMs);
           if (!verdict.ok) {
             const rel = path.relative(this.effectiveCwd ?? this.cwd, absP) || p;
             logger.info('Read-before-write gate refused mutation', {
@@ -2821,7 +2853,7 @@ export class AgentLoop {
           const absP = path.isAbsolute(p) ? p : path.resolve(this.effectiveCwd ?? this.cwd, p);
           try {
             const st = fsSync.statSync(absP);
-            if (st.isFile()) this.readLedger.mark(absP, st.mtimeMs);
+            if (st.isFile()) this.ledgerFor(sessionId).mark(absP, st.mtimeMs);
           } catch { /* file gone or unreadable — nothing to record */ }
         }
       }
@@ -2845,7 +2877,7 @@ export class AgentLoop {
               if (!isCodeFile(absP)) continue;
               const impact = await computeBlastRadius(graph, absP, {
                 cwd: cwd0,
-                wasRead: (fp) => this.readLedger.has(fp),
+                wasRead: (fp) => this.ledgerFor(sessionId).has(fp),
                 signal: toolAbort.signal,
               });
               if (impact.note) {
@@ -2925,7 +2957,7 @@ export class AgentLoop {
     sessionId: string,
     options: AgentOptions,
   ): Promise<VisualReviewOutcome> {
-    const txn = await getJournal().begin(sessionId);
+    const txn = await getJournal().begin(sessionId, undefined, this.effectiveCwd ?? this.cwd);
     let res;
     try {
       const ctx: ToolContext = {

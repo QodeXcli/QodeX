@@ -22,7 +22,7 @@
 const EDIT_TOOLS = new Set(['edit_text', 'multi_edit', 'write_file', 'edit_symbol', 'multi_file_edit']);
 const TEST_RUNNER_RE = /\b(jest|vitest|pytest|mocha|npm (run )?test|yarn test|pnpm test|go test|cargo test|phpunit|rspec|unittest|tox|gradle test|mvn test|ctest)\b/i;
 const TEST_RESULT_RE = /\b(\d+ pass|passing|passed|\d+ failed|failing|test suite|tests? (ran|passed|failed)|✓|✗|PASS\b|FAIL\b)/i;
-const ERROR_PREFIX_RE = /^\s*\[(ACCESS_DENIED|SYNTAX_REJECTED|MULTI_EDIT_REJECTED|ERROR|PREFLIGHT|ARCHITECTURE_GATE)/i;
+const ERROR_PREFIX_RE = /^\s*\[(ACCESS_DENIED|SYNTAX_REJECTED|MULTI_EDIT_REJECTED|FILE_CHANGED|ERROR|PREFLIGHT|ARCHITECTURE_GATE)/i;
 
 export interface CompletionClaims {
   claimsFixOrChange: boolean; // "I fixed / resolved / updated / created …"

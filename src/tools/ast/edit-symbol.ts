@@ -281,7 +281,7 @@ export class EditSymbolTool extends Tool<z.infer<typeof ArgsSchema>> {
       if (answer === 'always') ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
     }
 
-    await ctx.transaction.write(abs, updated);
+    await ctx.transaction.write(abs, updated, { base: source, label: rel });
 
     const lineCount = args.new_code.split('\n').length;
     return {

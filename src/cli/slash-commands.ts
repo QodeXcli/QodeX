@@ -387,7 +387,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           `This session is ready on your phone.\n` +
           `  ${formatHandoff({ sessionId, cwd, updatedAt: new Date().toISOString() })}\n\n` +
           `On Telegram/Discord/Slack: /continue\n` +
-          `That binds the bot to this exact transcript. Keep the bot pointed at the same project directory.`,
+          `That binds the bot to this transcript and this project directory.`,
       };
     }
 

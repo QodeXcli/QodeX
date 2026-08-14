@@ -12,6 +12,7 @@ import type { ToolRegistry } from '../tools/registry.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { getSessionStore } from '../session/store.js';
+import { pickWorkingCwd } from '../session/handoff.js';
 import { StreamDisplayFilter } from '../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from '../cli/modes/final-dedupe.js';
 import { logger } from '../utils/logger.js';
@@ -40,8 +41,18 @@ export class QodexAgentRunner implements AgentRunner {
     return this.modelByKey.get(convKey) ?? this.deps.config.defaults.model;
   }
 
+  /**
+   * Working root for this conversation. After `/continue` or `/resume` this is
+   * the session's cwd (the CLI project), not wherever `qodex bot` was launched.
+   */
+  private cwdFor(sessionId: string | undefined): string {
+    const sessionCwd = sessionId ? getSessionStore().loadSession(sessionId)?.meta.cwd : undefined;
+    return pickWorkingCwd({ sessionCwd, hostCwd: this.deps.cwd });
+  }
+
   async status(convKey: string): Promise<RunnerStatus> {
-    return { model: this.modelFor(convKey), cwd: this.deps.cwd, sessionId: (await this.map.get(convKey)) ?? undefined, auto: this.autoByKey.get(convKey) ?? false };
+    const sessionId = (await this.map.get(convKey)) ?? undefined;
+    return { model: this.modelFor(convKey), cwd: this.cwdFor(sessionId), sessionId, auto: this.autoByKey.get(convKey) ?? false };
   }
 
   async setModel(convKey: string, model: string): Promise<string> {
@@ -53,17 +64,19 @@ export class QodexAgentRunner implements AgentRunner {
     this.autoByKey.set(convKey, on);
   }
 
-  async listSessions(limit = 8): Promise<{ id: string; title: string; when: string }[]> {
-    return getSessionStore().listRecentSessions(limit, this.deps.cwd).map(s => ({
+  async listSessions(convKey?: string, limit = 8): Promise<{ id: string; title: string; when: string }[]> {
+    const sid = convKey ? await this.map.get(convKey) : undefined;
+    return getSessionStore().listRecentSessions(limit, this.cwdFor(sid)).map(s => ({
       id: s.id,
       title: s.title?.trim() || `${s.turn_count} turn${s.turn_count === 1 ? '' : 's'}`,
       when: relTime(s.updated_at),
     }));
   }
 
-  async listEpisodes(limit = 8): Promise<{ when: string; prompt: string; summary: string }[]> {
+  async listEpisodes(convKey?: string, limit = 8): Promise<{ when: string; prompt: string; summary: string }[]> {
     const { readEpisodes } = await import('../context/episodic-memory.js');
-    const eps = await readEpisodes(this.deps.cwd);
+    const sid = convKey ? await this.map.get(convKey) : undefined;
+    const eps = await readEpisodes(this.cwdFor(sid));
     return eps.slice(-limit).reverse().map(e => ({ when: relTime(e.ts), prompt: e.prompt, summary: e.summary }));
   }
 
@@ -71,7 +84,7 @@ export class QodexAgentRunner implements AgentRunner {
   async resume(convKey: string, idOrPrefix: string): Promise<boolean> {
     const store = getSessionStore();
     const match = store.loadSession(idOrPrefix) ? idOrPrefix
-      : store.listRecentSessions(50, this.deps.cwd).find(s => s.id.startsWith(idOrPrefix))?.id;
+      : store.listRecentSessions(100).find(s => s.id.startsWith(idOrPrefix))?.id;
     if (!match) return false;
     await this.map.set(convKey, match);
     return true;
@@ -83,22 +96,26 @@ export class QodexAgentRunner implements AgentRunner {
     const config = model === this.deps.config.defaults.model
       ? this.deps.config
       : { ...this.deps.config, defaults: { ...this.deps.config.defaults, model } }; // per-chat model override
+    // Resolve (or create) the durable session FIRST so the AgentLoop is born
+    // with that session's cwd — not the directory the bot process happened to
+    // start in. `/continue` binds a CLI session; tools must edit THAT project.
+    let sessionId = await this.map.get(convKey);
+    const existing = sessionId ? store.loadSession(sessionId) : null;
+    const cwd = this.cwdFor(sessionId);
+
     const agent = new AgentLoop({
       router: this.deps.router,
       registry: this.deps.registry,
       permissions: this.deps.permissions,
       config,
-      cwd: this.deps.cwd,
+      cwd,
     });
 
-    // Resolve (or create) the durable session for this conversation.
-    let sessionId = await this.map.get(convKey);
-    const existing = sessionId ? store.loadSession(sessionId) : null;
     let messages;
     if (existing) {
       messages = [...existing.messages, { role: 'user' as const, content: userText }];
     } else {
-      sessionId = store.createSession(this.deps.cwd, model);
+      sessionId = store.createSession(cwd, model);
       await this.map.set(convKey, sessionId);
       messages = await agent.buildInitialMessages(userText, 'normal', model);
     }

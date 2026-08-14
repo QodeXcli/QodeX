@@ -355,7 +355,10 @@ program
         explicitModel: opts.model,
         onSessionActive: (id: string) => {
           activeSessionId = id;
-          void import('./session/handoff.js').then(m => m.writeHandoff(id, process.cwd()));
+          void import('./session/handoff.js').then(m => {
+            const loaded = getSessionStore().loadSession(id);
+            return m.writeHandoff(id, loaded?.meta.cwd ?? process.cwd());
+          });
         },
       }),
     );

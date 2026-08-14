@@ -122,9 +122,9 @@ export const COMMANDS: BotCommand[] = [
   {
     name: 'episodes',
     description: 'Past tasks I solved here (episodic memory)',
-    run: async ({ agent, reply }) => {
+    run: async ({ agent, key, reply }) => {
       if (!agent.listEpisodes) return reply(NA('Episodic memory'));
-      const eps = await agent.listEpisodes(8);
+      const eps = await agent.listEpisodes(key, 8);
       if (!eps.length) return reply('No episodic memory for this project yet — I record one after each verified-successful task.');
       const body = eps.map(e => `• _(${e.when})_ ${truncate(e.prompt, 60)}\n   ↳ ${truncate(e.summary, 90)}`).join('\n');
       await reply(`🧠 *What I’ve done here before*\n${body}`);
@@ -133,9 +133,9 @@ export const COMMANDS: BotCommand[] = [
   {
     name: 'sessions',
     description: 'List recent sessions you can /resume',
-    run: async ({ agent, reply }) => {
+    run: async ({ agent, key, reply }) => {
       if (!agent.listSessions) return reply(NA('Session history'));
-      const list = await agent.listSessions(8);
+      const list = await agent.listSessions(key, 8);
       if (!list.length) return reply('No past sessions for this project yet.');
       const body = list.map(s => `• \`${s.id.slice(0, 8)}\` — ${s.title} _(${s.when})_`).join('\n');
       await reply(`🧵 *Recent sessions*\n${body}\n\nResume one with \`/resume <id>\`.`);
@@ -151,7 +151,7 @@ export const COMMANDS: BotCommand[] = [
       if (!h) return reply('No CLI session waiting. In the terminal run `/phone`, then `/continue` here.');
       const ok = await agent.resume(key, h.sessionId);
       await reply(ok
-        ? `🧵 Continuing the CLI session\n${formatHandoff(h)}`
+        ? `🧵 Continuing the CLI session — tools will use this project, not the bot's launch directory.\n${formatHandoff(h)}`
         : `Found a handoff (${formatHandoff(h)}) but that session is gone. Try \`/sessions\`.`);
     },
   },

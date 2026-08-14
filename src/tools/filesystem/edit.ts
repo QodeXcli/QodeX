@@ -125,7 +125,7 @@ export class EditTextTool extends Tool<z.infer<typeof ArgsSchema>> {
       updated = dec.content; // may be the user-edited version from [E] Edit
     }
 
-    await ctx.transaction.write(abs, updated);
+    await ctx.transaction.write(abs, updated, { base: content, label: rel });
 
     return {
       content: `Edited ${rel} (${occurrences} replacement${occurrences > 1 ? 's' : ''})${tierNote}`,

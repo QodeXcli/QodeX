@@ -115,10 +115,10 @@ export interface AgentRunner {
   setModel?(convKey: string, model: string): Promise<string>;
   /** Toggle per-conversation auto-approve (skip permission prompts). */
   setAuto?(convKey: string, on: boolean): Promise<void>;
-  /** Recent resumable sessions for this bot's working directory. */
-  listSessions?(limit?: number): Promise<{ id: string; title: string; when: string }[]>;
+  /** Recent resumable sessions for this conversation's working directory. */
+  listSessions?(convKey?: string, limit?: number): Promise<{ id: string; title: string; when: string }[]>;
   /** Rebind this conversation to a past session; returns false if the id is unknown. */
   resume?(convKey: string, sessionId: string): Promise<boolean>;
   /** Recent EPISODIC-memory entries (past tasks QodeX solved here) for the working directory. */
-  listEpisodes?(limit?: number): Promise<{ when: string; prompt: string; summary: string }[]>;
+  listEpisodes?(convKey?: string, limit?: number): Promise<{ when: string; prompt: string; summary: string }[]>;
 }

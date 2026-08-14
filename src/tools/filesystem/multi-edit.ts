@@ -75,7 +75,7 @@ export class MultiEditTool extends Tool<z.infer<typeof ArgsSchema>> {
       content = dec.content; // may be the user-edited version from [E] Edit
     }
 
-    await ctx.transaction.write(abs, content);
+    await ctx.transaction.write(abs, content, { base: original, label: rel });
 
     return { content: `Applied ${args.edits.length} edits to ${rel}` };
   }
