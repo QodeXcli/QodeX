@@ -5,7 +5,9 @@
  * numbers banned. This adapter talks to graph.facebook.com like any Business app.
  *
  * Secrets ( ~/.qodex/.env ): WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
- * WHATSAPP_VERIFY_TOKEN. Optional WHATSAPP_APP_SECRET verifies webhook POSTs.
+ * WHATSAPP_VERIFY_TOKEN, and WHATSAPP_APP_SECRET (required — POST bodies are
+ * authenticated with X-Hub-Signature-256 over the raw bytes. Verify Token is
+ * only the GET handshake; without the HMAC a tunneled webhook is forgeable).
  *
  * WhatsApp cannot edit a message in place. StreamPump edits become *delta*
  * follow-ups so we do not reprint the whole answer every 2s.
@@ -22,7 +24,8 @@ export interface WhatsAppOpts {
   token: string;
   phoneNumberId: string;
   verifyToken: string;
-  appSecret?: string;
+  /** App Secret — required. Every POST is HMAC-checked before JSON.parse. */
+  appSecret: string;
   port?: number;
   host?: string;
 }
@@ -67,17 +70,18 @@ export function parseWhatsAppWebhook(body: unknown): WhatsAppChange[] {
   return out;
 }
 
-export function verifyWhatsAppSignature(raw: string, header: string | undefined, appSecret: string): boolean {
-  if (!header) return false;
-  const got = header.startsWith('sha256=') ? header.slice(7) : header;
-  const expect = createHmac('sha256', appSecret).update(raw).digest('hex');
-  try {
-    const a = Buffer.from(got, 'hex');
-    const b = Buffer.from(expect, 'hex');
-    return a.length === b.length && timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
+/** HMAC over the raw POST bytes. Verify Token is never sent on POST. */
+export function verifyWhatsAppSignature(
+  rawBody: Buffer,
+  header: string | undefined,
+  appSecret: string,
+): boolean {
+  if (!appSecret || !header || !header.startsWith('sha256=')) return false;
+  const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody).digest('hex');
+  const a = Buffer.from(header, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function title20(s: string): string {
@@ -93,7 +97,11 @@ export class WhatsAppTransport implements Transport {
   private lastText = new Map<string, string>();
   private seq = 0;
 
-  constructor(private opts: WhatsAppOpts) {}
+  constructor(private opts: WhatsAppOpts) {
+    if (!opts.appSecret?.trim()) {
+      throw new Error('WHATSAPP_APP_SECRET is required — POST webhooks must be signed with X-Hub-Signature-256');
+    }
+  }
 
   private async graph(path: string, body: unknown): Promise<any> {
     const res = await fetch(`${GRAPH}/${path}`, {
@@ -127,6 +135,12 @@ export class WhatsAppTransport implements Transport {
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse, onMessage: (m: Incoming) => void): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    const path = url.pathname.replace(/\/+$/u, '') || '/';
+    if (path !== '/' && path !== '/webhook') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
     if (req.method === 'GET') {
       const mode = url.searchParams.get('hub.mode');
       const token = url.searchParams.get('hub.verify_token');
@@ -146,17 +160,15 @@ export class WhatsAppTransport implements Transport {
       return;
     }
     const raw = await readBody(req);
-    if (this.opts.appSecret) {
-      const sig = req.headers['x-hub-signature-256'];
-      const header = Array.isArray(sig) ? sig[0] : sig;
-      if (!verifyWhatsAppSignature(raw, header, this.opts.appSecret)) {
-        res.writeHead(401);
-        res.end('bad signature');
-        return;
-      }
+    const sig = req.headers['x-hub-signature-256'];
+    const header = Array.isArray(sig) ? sig[0] : sig;
+    if (!verifyWhatsAppSignature(raw, header, this.opts.appSecret)) {
+      res.writeHead(401);
+      res.end('unauthorized');
+      return;
     }
     let parsed: unknown;
-    try { parsed = JSON.parse(raw || '{}'); } catch {
+    try { parsed = JSON.parse(raw.toString('utf8') || '{}'); } catch {
       res.writeHead(400);
       res.end('bad json');
       return;
@@ -212,11 +224,11 @@ export class WhatsAppTransport implements Transport {
   async typing(): Promise<void> { /* Cloud API has no typing indicator */ }
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }

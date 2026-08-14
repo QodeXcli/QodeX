@@ -544,6 +544,7 @@ echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
 #   echo 'WHATSAPP_TOKEN=...' >> ~/.qodex/.env
 #   echo 'WHATSAPP_PHONE_NUMBER_ID=...' >> ~/.qodex/.env
 #   echo 'WHATSAPP_VERIFY_TOKEN=pick-a-string' >> ~/.qodex/.env
+#   echo 'WHATSAPP_APP_SECRET=...' >> ~/.qodex/.env   # required — POST HMAC; verify token is GET-only
 #   Signal via your own signal-cli daemon (no unofficial phone clone):
 #   echo 'SIGNAL_ACCOUNT=+15551234567' >> ~/.qodex/.env
 #   # signal-cli -a +15551234567 daemon --tcp 127.0.0.1:7583

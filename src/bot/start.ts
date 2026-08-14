@@ -71,8 +71,9 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
     const token = process.env.WHATSAPP_TOKEN;
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
     const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
-    if (!token || !phoneNumberId || !verifyToken) {
-      notes.push('whatsapp is enabled but WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_VERIFY_TOKEN are missing — add them to ~/.qodex/.env (Cloud API, not WhatsApp Web)');
+    const appSecret = process.env.WHATSAPP_APP_SECRET;
+    if (!token || !phoneNumberId || !verifyToken || !appSecret) {
+      notes.push('whatsapp is enabled but WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_VERIFY_TOKEN / WHATSAPP_APP_SECRET are missing — App Secret is required so POST bodies can be checked with X-Hub-Signature-256');
     } else if (!allow.whatsapp!.allowedUsers!.length) {
       notes.push('whatsapp allowlist is empty — set bot.whatsapp.allowedUsers to phone numbers (E.164 digits, no +)');
     } else {
@@ -81,7 +82,7 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
         token,
         phoneNumberId,
         verifyToken,
-        appSecret: process.env.WHATSAPP_APP_SECRET,
+        appSecret,
       }));
     }
   }

@@ -30,13 +30,22 @@ describe('WhatsApp Cloud API webhook parse', () => {
     expect(parseWhatsAppWebhook({ entry: [{ changes: [{ value: { statuses: [{}] } }] }] })).toEqual([]);
   });
 
-  it('verifies X-Hub-Signature-256', () => {
+  it('accepts a matching X-Hub-Signature-256 over the raw bytes', () => {
     const secret = 'app-secret';
-    const raw = '{"ok":true}';
+    const raw = Buffer.from('{"ok":true}', 'utf8');
     const hex = createHmac('sha256', secret).update(raw).digest('hex');
     expect(verifyWhatsAppSignature(raw, `sha256=${hex}`, secret)).toBe(true);
-    expect(verifyWhatsAppSignature(raw, 'sha256=deadbeef', secret)).toBe(false);
+  });
+
+  it('rejects a missing header, a bad prefix, a wrong secret, and a forged body', () => {
+    const secret = 'app-secret';
+    const raw = Buffer.from('{"from":"15551230000","text":{"body":"rm -rf /"}}', 'utf8');
+    const hex = createHmac('sha256', secret).update(raw).digest('hex');
     expect(verifyWhatsAppSignature(raw, undefined, secret)).toBe(false);
+    expect(verifyWhatsAppSignature(raw, hex, secret)).toBe(false);
+    expect(verifyWhatsAppSignature(raw, `sha256=${hex}`, 'other-secret')).toBe(false);
+    expect(verifyWhatsAppSignature(Buffer.from('{"from":"15551230000"}'), `sha256=${hex}`, secret)).toBe(false);
+    expect(verifyWhatsAppSignature(raw, 'sha256=deadbeef', secret)).toBe(false);
   });
 });
 
