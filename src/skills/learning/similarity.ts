@@ -17,9 +17,24 @@ const STOP = new Set([
   'candidate', 'task', 'when', 'how', 'you', 'your', 'machine',
 ]);
 
-/** Tokenize to lowercased alphanumeric words ≥3 chars, minus stopwords. */
+/**
+ * Tokenize for lexical recall / skill-dedup.
+ *
+ * Splits camelCase and path/kebab/snake identifiers so `formatLogLine` and
+ * `src/utils/log-format.ts` share `log`/`format` with a prose query. Keeps
+ * Unicode letters (Persian/Arabic/…) — the old `/[a-z0-9]+/` regex dropped them
+ * and a Farsi prompt could never match an English episode (cosine 0).
+ *
+ * Then drops 1-char tokens and English stopwords (common noise). PURE.
+ */
 export function tokenize(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(t => t.length >= 3 && !STOP.has(t));
+  if (!text) return [];
+  const normalized = text
+    .replace(/([a-z\u00C0-\u024F])([A-Z])/g, '$1 $2')
+    .replace(/[-_./\\]+/g, ' ')
+    .toLowerCase();
+  const tokens = normalized.match(/[\p{Letter}\p{Number}]+/gu) ?? [];
+  return tokens.filter(t => t.length > 1 && !STOP.has(t));
 }
 
 /** Term-frequency map for a token list. */

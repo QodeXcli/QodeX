@@ -7,6 +7,13 @@ describe('Gap 1 — semantic similarity for skill dedup', () => {
   it('tokenize drops stopwords and short tokens', () => {
     expect(tokenize('Build a React form with validation')).toEqual(['build', 'react', 'form', 'validation']);
   });
+  it('tokenize keeps Unicode letters and splits identifiers / paths', () => {
+    expect(tokenize('formatLogLine')).toEqual(['format', 'log', 'line']);
+    expect(tokenize('src/utils/log-format.ts')).toEqual(['src', 'utils', 'log', 'format', 'ts']);
+    expect(tokenize('یک فیلد timestamp با فرمت ISO')).toEqual(
+      expect.arrayContaining(['timestamp', 'iso', 'یک', 'فیلد', 'فرمت']),
+    );
+  });
   it('cosine: identical text → 1, disjoint → 0', () => {
     const a = termFreq(tokenize('create react button component'));
     expect(cosineSim(a, a)).toBeCloseTo(1, 5);

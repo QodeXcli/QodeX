@@ -7,6 +7,7 @@ import { getSessionStore } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 import { StreamDisplayFilter } from '../../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from './final-dedupe.js';
+import { headlessAskChoice } from './headless-ask.js';
 import {
   type AutonomyContract,
   type ContractUsage,
@@ -173,18 +174,15 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   let display = new StreamDisplayFilter();
 
   const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    if (opts.autoApproveAll) {
-      const yes = options.find(o => o.toLowerCase().startsWith('y'));
-      if (yes) return yes;
+    const { choice, denied } = headlessAskChoice(options, !!opts.autoApproveAll);
+    if (denied) {
+      if (opts.json) {
+        process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, denied: true }) + '\n');
+      } else {
+        console.error(`Permission request: ${prompt} → auto-denied in headless mode (use --yes to auto-approve)`);
+      }
     }
-    // In headless without auto-approve, deny by default
-    if (opts.json) {
-      process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, denied: true }) + '\n');
-    } else {
-      console.error(`Permission request: ${prompt} → auto-denied in headless mode (use --yes to auto-approve)`);
-    }
-    const no = options.find(o => o.toLowerCase().startsWith('n'));
-    return no ?? options[0]!;
+    return choice;
   };
 
   // ── Autonomy contract: arm the write-scope gate ──

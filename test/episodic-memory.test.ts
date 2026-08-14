@@ -16,6 +16,21 @@ describe('rankEpisodes — retrieve the most SIMILAR past task', () => {
     expect(m).toHaveLength(1);
     expect(m[0]!.prompt).toMatch(/cursor pagination/);
   });
+  it('identifier-split + latin overlap recalls a path-named episode', () => {
+    const corpus = [
+      ep('In src/utils/log-format.ts add a JSDoc above formatLogLine', 'documented the helper', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('update the log format helper and formatLogLine output', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+    expect(m[0]!.filesChanged[0]).toMatch(/log-format/);
+  });
+  it('a Persian query matches a Persian episode (unicode tokens survive)', () => {
+    const corpus = [
+      ep('تابع فرمت لاگ را در هلپر اضافه کردم', 'خروجی [LEVEL] message', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('یک فیلد به خروجی فرمت لاگ در هلپر اضافه کن', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+  });
   it('an UNRELATED query retrieves nothing (smart, not always-on)', () => {
     expect(rankEpisodes('upgrade the kubernetes ingress controller', CORPUS, { minScore: 0.18 })).toHaveLength(0);
   });
