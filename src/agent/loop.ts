@@ -322,10 +322,9 @@ export class AgentLoop {
 
   /**
    * Write a lean episode for THIS turn so the next similar task can recall it.
-   * Fire-and-forget. Independent of sandbox / flywheel — those used to nest the
-   * only write, so daily `run()` sessions never filled the store.
+   * Must be awaited — headless `process.exit` otherwise kills the append.
    */
-  private maybeRecordEpisode(opts: {
+  private async maybeRecordEpisode(opts: {
     prompt: string;
     summary: string;
     filesChanged: string[];
@@ -333,7 +332,7 @@ export class AgentLoop {
     toolCalls: number;
     mode?: string;
     aborted?: boolean;
-  }): void {
+  }): Promise<void> {
     if ((this.config as any).learning?.episodicMemory?.enabled === false) return;
     if (opts.aborted) return;
     if (opts.mode === 'plan' || opts.mode === 'subagent') return;
@@ -345,14 +344,17 @@ export class AgentLoop {
     const files = opts.filesChanged.map(f =>
       path.isAbsolute(f) ? path.relative(this.cwd, f) : f,
     ).filter(Boolean);
-    void recordEpisode(this.cwd, {
-      prompt: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 400),
-      summary: (opts.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
-      filesChanged: files,
-      toolsUsed: opts.toolsUsed,
-      toolCalls: opts.toolCalls,
-      verified: episodeVerified(this.verifyLedger),
-    });
+    try {
+      await recordEpisode(this.cwd, {
+        prompt: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 400),
+        summary: (opts.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        filesChanged: files,
+        toolsUsed: opts.toolsUsed,
+        toolCalls: opts.toolCalls,
+        verified: episodeVerified(this.verifyLedger),
+      });
+      logger.info('Episode recorded', { files, toolCalls: opts.toolCalls });
+    } catch { /* never stall the loop */ }
   }
 
   private noteToolInsight(
@@ -2343,7 +2345,7 @@ export class AgentLoop {
         }
 
         this.persistInsights(sessionId);
-        this.maybeRecordEpisode({
+        await this.maybeRecordEpisode({
           prompt: latestUserText,
           summary: assistantText,
           filesChanged: [...touchedSourceFiles],
