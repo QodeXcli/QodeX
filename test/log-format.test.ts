@@ -3,7 +3,7 @@ import { formatLogLine } from '../src/utils/log-format';
 describe('formatLogLine', () => {
   it('should format a log line with level and message', () => {
     const result = formatLogLine('info', 'hello');
-    expect(result).toBe('[INFO] hello');
+    expect(result).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[INFO\] hello/);
   });
 
   it('should format a log line with extra fields', () => {
