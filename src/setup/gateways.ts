@@ -70,11 +70,14 @@ export const KNOWN_GATEWAYS: Record<string, GatewaySpec> = {
     title: 'Atlas Cloud',
     baseUrl: 'https://api.atlascloud.ai/v1',
     apiKeyEnv: 'ATLASCLOUD_API_KEY',
-    keyHint: 'Get a key at https://www.atlascloud.ai/console/api-keys.',
-    suggestedModel: 'qwen/qwen3.5-flash',
-    suggestedContextWindow: 1000000,
+    keyHint: 'Get a key at https://console.atlascloud.ai/ (docs: https://www.atlascloud.ai/docs/en/api-keys).',
+    // Official LLM docs use this id on the OpenAI-compatible /v1 chat endpoint.
+    // The previous pin (`qwen/qwen3.5-flash`) is not a documented Atlas chat id —
+    // every request 404'd after `provider add atlascloud`.
+    suggestedModel: 'deepseek-v3',
+    suggestedContextWindow: 131072,
     suggestedToolCalls: true,
-    note: 'OpenAI-compatible LLM endpoint. Atlas Cloud media generation uses a separate API and is not configured by this LLM gateway.',
+    note: 'OpenAI-compatible LLM endpoint (https://api.atlascloud.ai/v1). Image/video generation uses a separate Atlas API and is not this gateway. Browse models at https://www.atlascloud.ai/models/list.',
   },
   moonshot: {
     name: 'moonshot',

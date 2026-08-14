@@ -40,6 +40,8 @@ console.log('— registry —');
   check('every gateway has name/baseUrl/apiKeyEnv with valid URL', allValid);
   check('atlascloud uses the Atlas OpenAI-compatible LLM endpoint', findGateway('atlascloud')?.baseUrl === 'https://api.atlascloud.ai/v1');
   check('atlascloud uses ATLASCLOUD_API_KEY', findGateway('atlascloud')?.apiKeyEnv === 'ATLASCLOUD_API_KEY');
+  check('atlascloud default model is a documented chat id, not a media/qwen guess', findGateway('atlascloud')?.suggestedModel === 'deepseek-v3');
+  check('atlascloud key hint points at the real console', /console\.atlascloud\.ai/.test(findGateway('atlascloud')?.keyHint ?? ''));
 }
 
 console.log('— buildCustomEntry —');
@@ -51,7 +53,7 @@ console.log('— buildCustomEntry —');
 
   const atlas = buildCustomEntry({ spec: findGateway('atlascloud')! });
   check('builds Atlas Cloud from spec', atlas.name === 'atlascloud' && atlas.baseUrl === 'https://api.atlascloud.ai/v1');
-  check('pins Atlas Cloud suggested model', atlas.models?.[0].id === 'qwen/qwen3.5-flash');
+  check('pins Atlas Cloud suggested model', atlas.models?.[0].id === 'deepseek-v3');
 
   // explicit override for an unlisted gateway
   const c = buildCustomEntry({ name: 'mygw', baseUrl: 'https://x.example/v1', apiKeyEnv: 'MYGW_KEY' });
