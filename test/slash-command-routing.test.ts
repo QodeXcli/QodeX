@@ -66,6 +66,18 @@ describe('slash-command routing vs file paths', () => {
     expect((await handleSlashCommand('/compact', 'test', process.cwd())).action).toEqual({ type: 'compact' });
   });
 
+  it('/background without a runner explains how to enable it', async () => {
+    const r = await handleSlashCommand('/background write the tests', 'test', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.message).toMatch(/sub-agents/i);
+  });
+
+  it('/identity with no file points at the two IDENTITY.md paths', async () => {
+    const r = await handleSlashCommand('/identity', 'test', process.cwd());
+    expect(r.handled).toBe(true);
+    expect(r.message).toMatch(/IDENTITY\.md/);
+  });
+
   it('/search with no query shows usage', async () => {
     const r = await handleSlashCommand('/search', 'test', process.cwd());
     expect(r.handled).toBe(true);

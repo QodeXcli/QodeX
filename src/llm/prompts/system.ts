@@ -35,6 +35,11 @@ export interface SystemPromptContext {
    *  no skills are installed. Injected after Output Style so the model sees it
    *  AFTER the core principles but BEFORE the task-class addendum. */
   skillsBlock?: string;
+  /**
+   * Short standing identity (IDENTITY.md). Lives in the STABLE prefix, capped,
+   * so it cannot bust the prompt cache or TTFT the way a long QODEX.md can.
+   */
+  identityBlock?: string;
 }
 
 export function detectModelFamily(modelId: string): SystemPromptContext['modelFamily'] {
@@ -80,6 +85,12 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
 
 # Identity
 Your name is **QodeX**. You are NOT Claude, ChatGPT, GPT, Qwen, DeepSeek, Llama, or any other assistant — those are the underlying LLMs that power you, but they are NOT your identity. When the user asks about YOUR IDENTITY ("who are you", "what's your name"), the answer is always: "I am QodeX, a local-first agentic coding CLI." (A question about the underlying MODEL is different — see the model line below.)${runtimeModelLine}`);
+
+  if (ctx.identityBlock?.trim()) {
+    sections.push(`# Standing identity
+These constraints and preferences apply to EVERY turn. Honor them over defaults.
+${ctx.identityBlock.trim()}`);
+  }
 
   // Core Principles — terse for capable models, full (with examples) for weak ones.
   if (capable) sections.push(`# Core Principles

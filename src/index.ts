@@ -92,6 +92,12 @@ async function bootstrap(): Promise<{
   }
   const router = new ModelRouter(config);
   const registry = new ToolRegistry();
+  try {
+    const { registerUserPlugins } = await import('./plugins/loader.js');
+    await registerUserPlugins(registry, process.cwd());
+  } catch (e: any) {
+    logger.warn('User plugins not loaded', { err: e?.message });
+  }
   const permissions = new PermissionEngine(config);
 
   // Code graph — project-local SQLite
@@ -347,7 +353,10 @@ program
         initialPrompt,
         resumeSessionId,
         explicitModel: opts.model,
-        onSessionActive: (id: string) => { activeSessionId = id; },
+        onSessionActive: (id: string) => {
+          activeSessionId = id;
+          void import('./session/handoff.js').then(m => m.writeHandoff(id, process.cwd()));
+        },
       }),
     );
     await waitUntilExit();

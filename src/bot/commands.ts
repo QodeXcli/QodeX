@@ -142,6 +142,20 @@ export const COMMANDS: BotCommand[] = [
     },
   },
   {
+    name: 'continue',
+    description: 'Pick up the CLI session on this chat',
+    run: async ({ agent, key, reply }) => {
+      if (!agent.resume) return reply(NA('Resume'));
+      const { readHandoff, formatHandoff } = await import('../session/handoff.js');
+      const h = await readHandoff();
+      if (!h) return reply('No CLI session waiting. In the terminal run `/phone`, then `/continue` here.');
+      const ok = await agent.resume(key, h.sessionId);
+      await reply(ok
+        ? `🧵 Continuing the CLI session\n${formatHandoff(h)}`
+        : `Found a handoff (${formatHandoff(h)}) but that session is gone. Try \`/sessions\`.`);
+    },
+  },
+  {
     name: 'resume',
     description: 'Continue a past session: /resume <id>',
     run: async ({ agent, args, key, reply }) => {

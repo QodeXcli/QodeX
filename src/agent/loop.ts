@@ -472,7 +472,8 @@ export class AgentLoop {
     if (attachedDir) {
       try { if (fsSync.statSync(attachedDir).isDirectory()) this.effectiveCwd = attachedDir; } catch { /* not a real dir — ignore */ }
     }
-    const [projectInfo, projectRules, directoryTree, gitBranch, projectSignals, trellis] = await Promise.all([
+    const { loadIdentity } = await import('../context/identity.js');
+    const [projectInfo, projectRules, directoryTree, gitBranch, projectSignals, trellis, identity] = await Promise.all([
       detectProjectInfo(this.cwd),
       loadProjectRules(this.cwd),
       // Pass the user prompt as a hint so the tree builder can weight relevant folders.
@@ -485,6 +486,7 @@ export class AgentLoop {
       detectProjectSignals(this.cwd),
       // Trellis harness (.trellis/ spec+tasks+journals), if the project uses it.
       loadTrellisContext(this.cwd),
+      loadIdentity(this.cwd),
     ]);
     // Light Memory Mode: in 'lightweight' the prompt carries only !important facts + the newest
     // others within a token budget (the rest stay in the DB, recall-on-demand); 'auto' switches to
@@ -581,6 +583,7 @@ export class AgentLoop {
         taskClass,
         stackAddendum,
         skillsBlock: buildSkillsSystemBlock({ prompt: userPrompt }),
+        identityBlock: identity.block,
       });
     }
 

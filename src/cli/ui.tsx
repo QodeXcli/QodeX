@@ -120,6 +120,9 @@ export function App(props: AppProps): React.ReactElement {
   // Count only — we don't dump the trace into the transcript, but we MUST show
   // that the model is working or the TUI looks frozen after a fast model load.
   const [thinkingChars, setThinkingChars] = useState(0);
+  const [liveShell, setLiveShell] = useState<string[]>([]);
+  const liveShellRef = useRef<string[]>([]);
+  const liveShellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => {
@@ -362,6 +365,26 @@ export function App(props: AppProps): React.ReactElement {
 
   // Surface the active session id so the launcher can print a resume hint on exit.
   useEffect(() => { props.onSessionActive?.(sessionId); }, [sessionId]);
+  useEffect(() => {
+    void import('../session/handoff.js').then(m => m.writeHandoff(sessionId, props.cwd));
+  }, [sessionId, props.cwd]);
+
+  useEffect(() => {
+    let unsub = () => {};
+    void import('../agent/side-runs.js').then(m => {
+      unsub = m.onSideRunChange(run => {
+        if (run.status === 'running') return;
+        const preview = (run.result || run.error || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+        const icon = run.status === 'done' ? '✓' : run.status === 'cancelled' ? '■' : '✗';
+        setHistory(h => [...h, {
+          type: 'system',
+          text: `${icon} Side run ${run.id} ${run.status}${preview ? ` — ${preview}` : ''}`,
+          id: nextId(),
+        }]);
+      });
+    });
+    return () => { unsub(); };
+  }, [nextId]);
 
   const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
     return new Promise<string>(resolve => {
@@ -473,6 +496,8 @@ export function App(props: AppProps): React.ReactElement {
     setBusy(true);
     clearStreaming();
     setThinkingChars(0);
+    liveShellRef.current = [];
+    setLiveShell([]);
     setActiveTools([]);
 
     const ac = new AbortController();
@@ -521,6 +546,16 @@ export function App(props: AppProps): React.ReactElement {
             pendingDiffRef.current = uiEvent;
           } else if (uiEvent.type === 'progress') {
             setHistory(h => [...h, { type: 'system', text: uiEvent.message, id: nextId() }]);
+          } else if (uiEvent.type === 'shell-stdout' || uiEvent.type === 'shell-stderr') {
+            const mark = uiEvent.type === 'shell-stderr' ? '!' : ' ';
+            const line = `${mark}${uiEvent.line}`.slice(0, 200);
+            liveShellRef.current = [...liveShellRef.current, line].slice(-8);
+            if (liveShellTimer.current === null) {
+              liveShellTimer.current = setTimeout(() => {
+                liveShellTimer.current = null;
+                setLiveShell(liveShellRef.current);
+              }, 80);
+            }
           }
         },
       })) {
@@ -592,6 +627,8 @@ export function App(props: AppProps): React.ReactElement {
             break;
           }
           case 'tool_result':
+            liveShellRef.current = [];
+            setLiveShell([]);
             setActiveTools(prev => prev.filter(t => t.id !== event.data.id));
             setHistory(h => [...h, {
               type: 'tool',
@@ -756,6 +793,15 @@ export function App(props: AppProps): React.ReactElement {
       {!pendingPrompt && activeTools.map(t => (
         <ToolActivityLine key={t.id} name={t.name} partialArgs={t.partialArgs} motion={motion} />
       ))}
+      {!pendingPrompt && liveShell.length > 0 && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {liveShell.map((line, i) => (
+            <Text key={i} color={line.startsWith('!') ? 'red' : undefined} dimColor={!line.startsWith('!')}>
+              {line.slice(0, Math.max(20, cols - 4))}
+            </Text>
+          ))}
+        </Box>
+      )}
 
       {pendingPrompt && (
         <Box flexDirection="column">

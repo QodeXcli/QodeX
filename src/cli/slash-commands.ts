@@ -267,6 +267,11 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /sessions          List recent sessions
     /resume <id>       Continue a previous session
     /search <query>    Search past conversations (this project)
+    /background <task> Isolated parallel agent (main chat stays free)
+    /bg [stop <id>]    List or stop side runs
+    /phone             Handoff this session to the bot on your phone
+    /identity          Show standing IDENTITY.md
+    /plugins           List drop-in user plugins
     /retry             Redo the last turn
     /compact           Summarize older history to free context
     /exit              Exit QodeX
@@ -330,6 +335,95 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         handled: true,
         message: `Found ${hits.length} turn(s):\n${lines.join('\n')}\n\n/resume <id> to continue one.`,
       };
+    }
+
+    case 'background':
+    case 'bg': {
+      const { startSideRun, listSideRuns, stopSideRun, getSideRun } = await import('../agent/side-runs.js');
+      const raw = arg.trim();
+      const [head, ...rest] = raw.split(/\s+/);
+      if (!raw || cmd === 'bg' && (!head || head === 'list')) {
+        const all = listSideRuns();
+        if (all.length === 0) {
+          return { handled: true, message: 'No side runs. Start one with /background <task>.' };
+        }
+        const lines = all.map(r => {
+          const age = Math.round((Date.now() - r.startedAt) / 1000);
+          const st = r.status === 'running' ? '…' : r.status === 'done' ? '✓' : r.status === 'cancelled' ? '■' : '✗';
+          return `  ${st} ${r.id}  ${r.status}  ${age}s  ${r.prompt.slice(0, 60)}`;
+        });
+        return { handled: true, message: `Side runs:\n${lines.join('\n')}\n\n/bg stop <id> to cancel.` };
+      }
+      if (head === 'stop') {
+        const id = rest[0] ?? '';
+        if (!id) return { handled: true, message: 'Usage: /bg stop <id>' };
+        const ok = stopSideRun(id);
+        return { handled: true, message: ok ? `Stopped ${id}.` : `No running side run matches "${id}".` };
+      }
+      if (head === 'status' && rest[0]) {
+        const r = getSideRun(rest[0]);
+        if (!r) return { handled: true, message: `No side run matches "${rest[0]}".` };
+        const tail = (r.result || r.error || '').trim().slice(0, 800);
+        return { handled: true, message: `${r.id}  ${r.status}\n${r.prompt}\n${tail || '(no output yet)'}` };
+      }
+      const started = startSideRun(raw, sessionId);
+      if ('error' in started) return { handled: true, message: started.error };
+      return {
+        handled: true,
+        message:
+          `Started side run ${started.id} — main chat stays free.\n` +
+          `  ${started.prompt.slice(0, 80)}\n` +
+          `Use /bg to list, /bg stop ${started.id} to cancel.\n` +
+          `Tip: Shift+Tab to auto/always so the side run can edit without prompting.`,
+      };
+    }
+
+    case 'phone': {
+      const { writeHandoff, formatHandoff } = await import('../session/handoff.js');
+      await writeHandoff(sessionId, cwd);
+      return {
+        handled: true,
+        message:
+          `This session is ready on your phone.\n` +
+          `  ${formatHandoff({ sessionId, cwd, updatedAt: new Date().toISOString() })}\n\n` +
+          `On Telegram/Discord/Slack: /continue\n` +
+          `That binds the bot to this exact transcript. Keep the bot pointed at the same project directory.`,
+      };
+    }
+
+    case 'identity': {
+      const { loadIdentity, userIdentityPath, projectIdentityPath } = await import('../context/identity.js');
+      const id = await loadIdentity(cwd);
+      if (!id.block) {
+        return {
+          handled: true,
+          message:
+            'No IDENTITY.md yet — the model has no standing persona.\n' +
+            `  user:    ${userIdentityPath()}\n` +
+            `  project: ${projectIdentityPath(cwd)}\n` +
+            'Write a short file (constraints, tone, "never do X"). Capped at 1600 chars so it stays in the cacheable prefix.',
+        };
+      }
+      return {
+        handled: true,
+        message: `Identity from:\n${id.sources.map(s => `  ${s}`).join('\n')}\n\n${id.block}`,
+      };
+    }
+
+    case 'plugins': {
+      const { lastLoadedPlugins, userPluginsDir, projectPluginsDir } = await import('../plugins/loader.js');
+      const list = lastLoadedPlugins();
+      if (list.length === 0) {
+        return {
+          handled: true,
+          message:
+            'No user plugins loaded.\n' +
+            `Drop a folder with plugin.json in:\n  ${userPluginsDir()}\n  ${projectPluginsDir(cwd)}\n` +
+            'Each tool is a named shell template — no rebuild, no eval.',
+        };
+      }
+      const lines = list.map(p => `  ${p.name}  (${p.tools.join(', ') || 'no tools'})\n    ${p.dir}`);
+      return { handled: true, message: `Plugins:\n${lines.join('\n')}` };
     }
 
     case 'retry': {
