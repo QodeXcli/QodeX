@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   classifyPromptClass,
   compileTaskBrief,
   extractMentionedPaths,
   formatTaskBrief,
   inferTaskEffort,
+  readNamedFileSnippets,
 } from '../src/agent/task-brief.js';
 
 describe('classifyPromptClass', () => {
@@ -41,6 +45,18 @@ describe('compileTaskBrief', () => {
     expect(text).toMatch(/kind: debug/);
     expect(text).toMatch(/src\/agent\/loop\.ts/);
     expect(text).toMatch(/stay on this request/);
+    expect(text).toMatch(/do not ls\/glob/);
+  });
+});
+
+describe('readNamedFileSnippets', () => {
+  it('injects existing files and refuses path escape', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qodex-named-'));
+    fs.writeFileSync(path.join(dir, 'hello.ts'), 'export const n = 1;\n');
+    const block = await readNamedFileSnippets(dir, ['hello.ts', '../secret.ts']);
+    expect(block).toMatch(/hello\.ts/);
+    expect(block).toMatch(/export const n = 1/);
+    expect(block).not.toMatch(/secret/);
   });
 });
 

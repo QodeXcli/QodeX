@@ -41,7 +41,9 @@ import { BudgetTracker } from './budget.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
-import { classifyPromptClass, compileTaskBrief, formatTaskBrief } from './task-brief.js';
+import { classifyPromptClass, compileTaskBrief, formatTaskBrief, readNamedFileSnippets } from './task-brief.js';
+import { setActiveAgent, getActiveAgent } from './active.js';
+export { setActiveAgent, getActiveAgent } from './active.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
 import { applySpillGuard } from './tool-spill.js';
@@ -597,6 +599,8 @@ export class AgentLoop {
     if (attachedDir) {
       try { if (fsSync.statSync(attachedDir).isDirectory()) this.effectiveCwd = attachedDir; } catch { /* not a real dir — ignore */ }
     }
+    const taskBrief = compileTaskBrief(userPrompt);
+    const briefBlock = formatTaskBrief(taskBrief, userPrompt);
     const { loadIdentity } = await import('../context/identity.js');
     const [projectInfo, projectRules, directoryTree, gitBranch, projectSignals, trellis, identity] = await Promise.all([
       detectProjectInfo(this.cwd),
@@ -690,9 +694,7 @@ export class AgentLoop {
         `If a task needs web data, use \`web_search\` / \`web_fetch\` (if listed above). Do not claim you lack internet access — those tools ARE your internet access.`;
     } else {
       // Classify the user's intent so the prompt can inject task-shaped reasoning.
-      const taskClass = classifyPromptClass(userPrompt);
-      const taskBrief = compileTaskBrief(userPrompt);
-      const briefBlock = formatTaskBrief(taskBrief, userPrompt);
+      const taskClass = taskBrief.taskClass;
       // Stack-specialist expertise: detect from the user's words + what's on disk, then
       // inject the deep how-an-expert-builds-THIS block(s). Orthogonal to task class.
       const stacks = detectStacks(userPrompt, projectSignals);
@@ -785,6 +787,17 @@ export class AgentLoop {
           }
         } catch (e: any) {
           logger.debug('Auto-retrieval pre-pass failed (ignored)', { err: e?.message });
+        }
+      }
+      if (taskBrief.paths.length) {
+        try {
+          const named = await readNamedFileSnippets(this.effectiveCwd ?? this.cwd, taskBrief.paths);
+          if (named) {
+            volatileTail += `\n\n${named}`;
+            logger.info('Named files injected', { count: taskBrief.paths.length });
+          }
+        } catch (e: any) {
+          logger.debug('Named-file inject skipped', { err: e?.message });
         }
       }
     }
@@ -1762,7 +1775,7 @@ export class AgentLoop {
       if ((this.config as any)?.reasoning?.adaptive !== false && modelSupportsSoftSwitch(route.model)) {
         const decision = decideThinking({
           iteration: this.currentTurn,
-          taskComplex: this.planGateComplex,
+          taskComplex: this.planGateComplex || runBrief.effort === 'high',
           recentToolErrors: countTrailingToolErrors(allMessages),
           forceThink: this.forceThinkNext,
           rethinkEvery: (this.config as any)?.reasoning?.rethinkEvery,
@@ -3334,17 +3347,7 @@ export class AgentLoop {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────────
-// Active-agent singleton.
-//
-// The TUI creates exactly one AgentLoop per session. Slash commands need to operate
-// on its state (toggle subagents on/off, list snapshots, etc.) without taking the
-// loop as a parameter — that would require plumbing through every slash command.
-// Pattern matches the active-config singleton in config/loader.ts.
 
-let _activeAgent: AgentLoop | null = null;
-export function setActiveAgent(agent: AgentLoop | null): void { _activeAgent = agent; }
-export function getActiveAgent(): AgentLoop | null { return _activeAgent; }
 
 /**
  * Strip standalone JSON objects from text.

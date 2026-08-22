@@ -6,6 +6,8 @@
  * Effort auto-raises `reasoning_effort` to high only when the task is hard —
  * local models must not pay a thinking tax on "fix the typo".
  */
+import { promises as fs } from 'fs';
+import * as path from 'path';
 import { isTrivialMessage } from './trivial-message.js';
 import { looksLikeBuildTask } from './preflight-gate.js';
 
@@ -98,7 +100,10 @@ export function compileTaskBrief(prompt: string): TaskBrief {
 export function formatTaskBrief(brief: TaskBrief, prompt: string): string {
   if (isTrivialMessage(prompt)) return '';
   const lines = ['# This task', `- kind: ${brief.taskClass}`, `- effort: ${brief.effort}`];
-  if (brief.paths.length) lines.push(`- files named: ${brief.paths.join(', ')}`);
+  if (brief.paths.length) {
+    lines.push(`- files named: ${brief.paths.join(', ')}`);
+    lines.push('- read those paths with read_file first; do not ls/glob to discover them.');
+  }
   if (brief.constraints.length) {
     lines.push('- constraints:');
     for (const c of brief.constraints) lines.push(`  - ${c}`);
@@ -108,4 +113,38 @@ export function formatTaskBrief(brief: TaskBrief, prompt: string): string {
     lines.push('- think through the approach before the first mutating tool; verify before claiming done.');
   }
   return lines.join('\n');
+}
+
+const NAMED_FILE_MAX = 3;
+const NAMED_FILE_CHARS = 8_000;
+
+function safeUnderCwd(cwd: string, rel: string): string | null {
+  const root = path.resolve(cwd);
+  const abs = path.resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  return abs;
+}
+
+/**
+ * Inject the bodies of user-named files so the first turn does not burn
+ * tool rounds on ls/glob. Caps count and size. Best-effort. Skips missing/binary.
+ */
+export async function readNamedFileSnippets(cwd: string, paths: string[]): Promise<string> {
+  if (!paths.length) return '';
+  const chunks: string[] = [];
+  for (const rel of paths.slice(0, NAMED_FILE_MAX)) {
+    const abs = safeUnderCwd(cwd, rel);
+    if (!abs) continue;
+    try {
+      const st = await fs.stat(abs);
+      if (!st.isFile() || st.size > 64_000) continue;
+      const buf = await fs.readFile(abs);
+      if (buf.includes(0)) continue;
+      let body = buf.toString('utf8');
+      if (body.length > NAMED_FILE_CHARS) body = body.slice(0, NAMED_FILE_CHARS) + '\n…';
+      chunks.push(`### ${rel}\n\`\`\`\n${body.replace(/\n+$/, '')}\n\`\`\``);
+    } catch { /* missing */ }
+  }
+  if (!chunks.length) return '';
+  return `# Files the user named (on disk — do not ls for these)\n\n${chunks.join('\n\n')}`;
 }

@@ -749,7 +749,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     }
 
     case 'insights': {
-      const { getActiveAgent } = await import('../agent/loop.js');
+      const { getActiveAgent } = await import('../agent/active.js');
       const { formatInsights, parseInsightsSnapshot } = await import('../agent/insights.js');
       const agent = getActiveAgent();
       let snap = agent?.getInsights(sessionId);
