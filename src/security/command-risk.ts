@@ -38,7 +38,9 @@ export interface RiskAssessment {
  * we refuse a blanket grant IS this reason.
  */
 const IRREVERSIBLE: { re: RegExp; reason: string }[] = [
-  { re: /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/, reason: 'recursive/forced delete' },
+  // Short flags (`-rf`, `-r -f`) AND GNU long flags. `rm --recursive --force /tmp`
+  // used to miss this rule, rank as merely mutating, and slip through always-yes.
+  { re: /\brm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+|--(?:recursive|force)\b\s*)+/, reason: 'recursive/forced delete' },
   { re: /\brmdir\s+\/(\s|$)/, reason: 'removing a root directory' },
   { re: /\bgit\s+push\b.*(--force|-f)\b/, reason: 'force push rewrites remote history' },
   { re: /\bgit\s+reset\s+--hard\b/, reason: 'discards uncommitted work irrecoverably' },

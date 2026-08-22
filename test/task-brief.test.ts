@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   classifyPromptClass,
   compileTaskBrief,
+  extractConstraints,
   extractMentionedPaths,
   formatTaskBrief,
   inferTaskEffort,
@@ -63,5 +64,29 @@ describe('readNamedFileSnippets', () => {
 describe('extractMentionedPaths', () => {
   it('skips http urls', () => {
     expect(extractMentionedPaths('see https://example.com/foo.ts and src/a.ts')).toEqual(['src/a.ts']);
+  });
+  it('does not treat versions or abbreviations as files', () => {
+    expect(extractMentionedPaths('shipped in v2.7.0; edit src/index.ts')).toEqual(['src/index.ts']);
+    expect(extractMentionedPaths('e.g. foo.ts')).toEqual(['foo.ts']);
+    expect(extractMentionedPaths('Node 20.11.0')).toEqual([]);
+    expect(extractMentionedPaths('see www.example.com and bar.py')).toEqual(['bar.py']);
+  });
+  it('still names real source files', () => {
+    expect(extractMentionedPaths('touch package.json and src/cli/ui.tsx')).toEqual([
+      'src/cli/ui.tsx',
+      'package.json',
+    ]);
+  });
+});
+
+describe('extractConstraints', () => {
+  it('keeps explicit do-not / without-changing', () => {
+    const c = extractConstraints('In src/a.ts add a timestamp. Do not change any other file.');
+    expect(c.some(s => /do not change/i.test(s))).toBe(true);
+    expect(extractConstraints('fix the typo without changing tests').some(s => /without changing/i.test(s))).toBe(true);
+  });
+  it('does not treat prose only/without as constraints', () => {
+    expect(extractConstraints('The only output is ISO 8601.')).toEqual([]);
+    expect(extractConstraints('without tests this will break')).toEqual([]);
   });
 });

@@ -147,7 +147,16 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('allow');
     expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
     expect(engine.evaluate({ tool: 'shell', operation: 'git push --force' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm --recursive --force /tmp/x' })).toBe('ask');
     expect(engine.evaluate({ tool: 'shell', operation: 'rm -rf /' })).toBe('deny');
+  });
+
+  it('leaving always yes restores asking for writes (no leftover tool grant)', () => {
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    setApprovalMode('always');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
+    setApprovalMode('manual');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('ask');
   });
 
   it('setAutoApproveSession(true) still maps to always yes', () => {

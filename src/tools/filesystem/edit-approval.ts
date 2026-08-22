@@ -40,17 +40,27 @@ export function interpretApprovalAnswer(answer: string): 'accept' | 'edit' | 're
   return 'reject'; // 'no' / 'n' / 'reject' / anything unrecognized → safe default
 }
 
+/** Split `$EDITOR` / `$VISUAL` so `code --wait` is argv, not a missing binary. PURE. */
+export function splitEditorArgv(editor: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  for (const m of editor.trim().matchAll(re)) out.push(m[1] ?? m[2] ?? m[3]!);
+  return out;
+}
+
 /** Open `content` in the user's editor, return the edited text (or null on failure). */
 function editInEditor(content: string, originalPath: string): string | null {
   const editor = process.env.VISUAL || process.env.EDITOR;
   if (!editor) return null; // no editor configured → caller falls back
+  const argv = splitEditorArgv(editor);
+  if (!argv.length) return null;
   try {
     const dir = mkdtempSync(join(tmpdir(), 'qodex-edit-'));
     const ext = extname(originalPath) || '.txt';
     const tmp = join(dir, `proposal${ext}`);
     writeFileSync(tmp, content, 'utf8');
     // stdio:'inherit' hands the TTY to the editor; on exit Ink repaints.
-    execFileSync(editor, [tmp], { stdio: 'inherit' });
+    execFileSync(argv[0]!, [...argv.slice(1), tmp], { stdio: 'inherit' });
     return readFileSync(tmp, 'utf8');
   } catch (e: any) {
     // Editor flow failed (mkdtemp/write/spawn/read). Log so it's traceable —
@@ -71,12 +81,10 @@ export async function confirmEdit(
   emitEditDiff(ctx, opts.rel, opts.before, opts.after);
 
   const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
+  // Mode only — a tool-wide session grant survived Shift+Tab back to manual and
+  // kept auto-writing every file after the user thought they had left always-yes.
   if (isAlwaysYesAnswer(answer)) setApprovalMode('always');
   const branch = interpretApprovalAnswer(answer);
-
-  if (isAlwaysYesAnswer(answer) && ctx.permissions && opts.permReq) {
-    ctx.permissions.rememberDecision(opts.permReq, 'allow', 'tool');
-  }
 
   if (branch === 'reject') return { kind: 'reject' };
   if (branch === 'revise') return { kind: 'revise' };

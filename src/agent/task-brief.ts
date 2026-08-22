@@ -24,12 +24,30 @@ export interface TaskBrief {
   constraints: string[];
 }
 
-const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,8}\b|\b[\w.-]+\.\w{1,8}\b/g;
+/**
+ * Paths the user named. Slash-paths just need a letter-starting extension so
+ * `src/foo.ts` hits and `docs/v2.7.0` does not. Bare names use a code/config
+ * allow-list — otherwise `v2.7.0`, `e.g.`, `20.11.0`, `www.example.com` steal
+ * named-file slots and can bump effort to high (paths.length >= 3).
+ */
+const SLASH_PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z][\w]{0,7}\b/g;
+const BARE_EXT =
+  'tsx?|jsx?|mjs|cjs|mts|cts|py|rb|go|rs|java|kt|kts|cs|cpp|cc|cxx|hpp|hxx|c|h|mm?|swift|php|sh|bash|zsh|jsonc?|ya?ml|toml|mdx?|html?|css|scss|less|vue|svelte|astro|sql|graphql|gql|proto|xml|env|ini|cfg|conf|lock|txt|csv|svg|zig|lua|dart|exs?|erl|hs|clj|scala|tf|hcl|nix|wasm|ps1|bat|r';
+const BARE_FILE_RE = new RegExp(String.raw`\b[A-Za-z][\w.-]*\.(?:${BARE_EXT})\b`, 'gi');
+
+function stripMentionedPaths(s: string): string {
+  return s.replace(SLASH_PATH_RE, ' ').replace(BARE_FILE_RE, ' ');
+}
+
+function looksLikeUrlPrefix(src: string, index: number): boolean {
+  const pre = src.slice(Math.max(0, index - 8), index);
+  return /:\/\//.test(pre) || /www\.$/i.test(pre);
+}
 
 /** Same verb table the loop used inline — one source so tests and the prompt cannot drift. */
 export function classifyPromptClass(prompt: string): PromptTaskClass {
   // Paths like ui.tsx / button.tsx must not flip the class to frontend.
-  const text = String(prompt ?? '').toLowerCase().replace(PATH_RE, ' ');
+  const text = stripMentionedPaths(String(prompt ?? '').toLowerCase());
   if (/\b(django|drf|django ?rest|serializer|viewset|queryset|orm|migration|makemigrations|models?\.py|celery|wsgi|asgi|manage\.py|backend|back ?end|api ?endpoint|rest ?api)\b/.test(text)
     || /(جنگو|بک‌?اند|بک ?اند|بکند|سمت ?سرور|پایگاه ?داده|دیتابیس)/.test(text)) {
     return 'backend';
@@ -54,24 +72,61 @@ export function extractMentionedPaths(prompt: string): string[] {
   const src = String(prompt ?? '');
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const m of src.matchAll(PATH_RE)) {
-    const h = m[0]!;
-    const i = m.index ?? 0;
-    if (i >= 3 && /:\/\//.test(src.slice(Math.max(0, i - 8), i))) continue;
-    if (seen.has(h)) continue;
+  const spans: [number, number][] = [];
+
+  const consider = (h: string, i: number): void => {
+    const span: [number, number] = [i, i + h.length];
+    // Record URL spans too so a later bare `foo.ts` inside https://…/foo.ts is dropped.
+    if (looksLikeUrlPrefix(src, i)) {
+      spans.push(span);
+      return;
+    }
+    if (out.length >= 8) return;
+    if (seen.has(h)) return;
     seen.add(h);
     out.push(h);
-    if (out.length >= 8) break;
+    spans.push(span);
+  };
+
+  for (const m of src.matchAll(new RegExp(SLASH_PATH_RE.source, SLASH_PATH_RE.flags))) {
+    consider(m[0]!, m.index ?? 0);
+  }
+  for (const m of src.matchAll(new RegExp(BARE_FILE_RE.source, BARE_FILE_RE.flags))) {
+    const h = m[0]!;
+    const i = m.index ?? 0;
+    const j = i + h.length;
+    if (spans.some(([a, b]) => i >= a && j <= b)) continue;
+    consider(h, i);
   }
   return out;
 }
 
+// `only` / `without` as bare starters match prose ("the only output is ISO",
+// "without tests this will break") and then get injected as fake constraints.
 const CONSTRAINT_RE =
-  /(?:don't|do not|never|must not|without|only|بدون|نکن|نباید|فقط)[^.!?\n،؛]{0,80}/gi;
+  /(?:don't|do not|never|must not|بدون|نکن|نباید|فقط)[^.!?\n،؛]{0,80}/gi;
+const ONLY_CONSTRAINT_RE =
+  /\bonly\s+(?:this|these|the named|change|edit|touch|modify|update|write)[^.!?\n،؛]{0,80}/gi;
+const WITHOUT_CONSTRAINT_RE =
+  /\bwithout\s+(?:chang(?:e|ing)|modif(?:y|ying)|touch(?:ing)?|edit(?:ing)?|alter(?:ing)?|updat(?:e|ing)|add(?:ing)?|remov(?:e|ing)|delet(?:e|ing)|creat(?:e|ing)|install(?:ing)?)[^.!?\n،؛]{0,80}/gi;
 
 export function extractConstraints(prompt: string): string[] {
-  const hits = String(prompt ?? '').match(CONSTRAINT_RE) ?? [];
-  return hits.map(s => s.replace(/\s+/g, ' ').trim()).filter(s => s.length >= 8).slice(0, 5);
+  const src = String(prompt ?? '');
+  const hits = [
+    ...(src.match(CONSTRAINT_RE) ?? []),
+    ...(src.match(ONLY_CONSTRAINT_RE) ?? []),
+    ...(src.match(WITHOUT_CONSTRAINT_RE) ?? []),
+  ];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of hits) {
+    const s = raw.replace(/\s+/g, ' ').trim();
+    if (s.length < 8 || seen.has(s.toLowerCase())) continue;
+    seen.add(s.toLowerCase());
+    out.push(s);
+    if (out.length >= 5) break;
+  }
+  return out;
 }
 
 export function inferTaskEffort(prompt: string, taskClass: PromptTaskClass, paths: string[]): TaskEffort {
