@@ -7,6 +7,7 @@ import {
   cycleApprovalMode,
   parseApprovalMode,
   getAutoApproveSession,
+  interpretPermissionAnswer,
 } from '../src/security/permissions.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 
@@ -157,6 +158,18 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
     setApprovalMode('manual');
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('ask');
+  });
+
+  it('interpretPermissionAnswer is fail-safe: only explicit yes/always run', () => {
+    expect(interpretPermissionAnswer('yes')).toBe('allow');
+    expect(interpretPermissionAnswer('y')).toBe('allow');
+    expect(interpretPermissionAnswer('accept')).toBe('allow');
+    expect(interpretPermissionAnswer('بله')).toBe('allow');
+    expect(interpretPermissionAnswer('always yes')).toBe('always');
+    expect(interpretPermissionAnswer('no')).toBe('deny');
+    expect(interpretPermissionAnswer('sure')).toBe('deny');
+    expect(interpretPermissionAnswer('ok wait')).toBe('deny');
+    expect(interpretPermissionAnswer('')).toBe('deny');
   });
 
   it('setAutoApproveSession(true) still maps to always yes', () => {

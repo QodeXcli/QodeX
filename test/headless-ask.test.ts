@@ -33,4 +33,11 @@ describe('headlessAskChoice — fail-safe', () => {
       denied: true,
     });
   });
+
+  it('bot /auto on edit options must pick accept, not always yes', () => {
+    // Same helper the bot runner uses — matching `always` as a prefix used to
+    // yolo the whole process on the first write_file prompt.
+    expect(headlessAskChoice(EDIT_OPTS, true).choice).toBe('accept');
+    expect(headlessAskChoice(EDIT_OPTS, true).choice).not.toBe('always yes');
+  });
 });

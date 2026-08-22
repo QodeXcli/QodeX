@@ -132,13 +132,15 @@ export function extractConstraints(prompt: string): string[] {
 export function inferTaskEffort(prompt: string, taskClass: PromptTaskClass, paths: string[]): TaskEffort {
   if (isTrivialMessage(prompt)) return 'low';
   const p = prompt.toLowerCase();
+  // Tiny edits before the build-task heuristic — "fix a typo in the frontend"
+  // contains the strong signal `frontend` and used to raise effort to high.
+  if (prompt.length < 80 && paths.length <= 1 && /\b(typo|rename|comment|jsdoc)\b/.test(p)) return 'low';
   if (looksLikeBuildTask(prompt)) return 'high';
   if (paths.length >= 3) return 'high';
   if (/\b(from scratch|architecture|security|production|carefully|root cause|race|deadlock|migrate)\b/.test(p)
     || /(از صفر|معماری|امنیت|با دقت|علت اصلی)/.test(p)) return 'high';
   if (taskClass === 'debug' && /\b(crash|exception|hang|regression|race)\b/.test(p)) return 'high';
   if (taskClass === 'analysis' || taskClass === 'review') return 'high';
-  if (prompt.length < 80 && paths.length <= 1 && /\b(typo|rename|comment|jsdoc)\b/.test(p)) return 'low';
   if (taskClass === 'explain' && prompt.length < 160) return 'low';
   return 'medium';
 }

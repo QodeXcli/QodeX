@@ -50,6 +50,20 @@ export function isAlwaysYesAnswer(answer: string): boolean {
   return a === 'always' || a === 'always yes' || a === 'always-yes' || a === 'alwaysyes';
 }
 
+const ONE_SHOT_ALLOW = new Set(['yes', 'y', 'accept', 'ok', 'allow', 'approve', 'بله', 'آره']);
+
+/**
+ * How a permission prompt answer should be read. Unrecognized text is deny —
+ * shell/MCP used to treat anything that wasn't "no" as yes, so a bot typed
+ * reply of "sure"/"ok wait" ran the command.
+ */
+export function interpretPermissionAnswer(answer: string): 'allow' | 'always' | 'deny' {
+  const a = (answer || '').trim().toLowerCase();
+  if (isAlwaysYesAnswer(a)) return 'always';
+  if (ONE_SHOT_ALLOW.has(a)) return 'allow';
+  return 'deny';
+}
+
 export function parseApprovalMode(raw: string): ApprovalMode | null {
   const s = raw.trim().toLowerCase();
   if (s === 'manual' || s === 'off' || s === 'ask') return 'manual';

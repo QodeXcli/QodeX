@@ -16,6 +16,7 @@ import { pickWorkingCwd } from '../session/handoff.js';
 import { StreamDisplayFilter } from '../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from '../cli/modes/final-dedupe.js';
 import { logger } from '../utils/logger.js';
+import { headlessAskChoice } from '../cli/modes/headless-ask.js';
 import type { AgentRunner, TurnSink, RunnerStatus, ArtifactCard } from './types.js';
 import { SessionMap } from './session-map.js';
 import { botLane, getOperatorHub } from '../operator/hub.js';
@@ -123,12 +124,15 @@ export class QodexAgentRunner implements AgentRunner {
     const sid: string = sessionId!; // always set by the branch above
     store.recordTurn(sid, [{ role: 'user', content: userText }], { input: 0, output: 0, costUsd: 0 });
 
-    // /auto on → approve permission prompts automatically (skip the buttons) for the affirmative
-    // option only; a prompt with no clear "yes/allow" still falls back to asking, so we never
-    // silently green-light something ambiguous.
+    // /auto on → pick a one-shot affirm (accept/yes), never "always yes". The old regex
+    // matched `always yes` on edit options first, which flipped process-wide yolo.
+    // No clear affirm → still ask, so we never silently green-light something ambiguous.
     const auto = this.autoByKey.get(convKey) ?? false;
     const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-      if (auto) { const yes = options.find(o => /^(y|yes|allow|approve|ok|always)\b/i.test(o.trim())); if (yes) return yes; }
+      if (auto) {
+        const { choice, denied } = headlessAskChoice(options, true);
+        if (!denied) return choice;
+      }
       return getOperatorHub().requestApproval('bot', prompt, options, {
         lane: botLane(convKey),
         origin: convKey,

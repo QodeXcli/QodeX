@@ -37,6 +37,9 @@ describe('compileTaskBrief', () => {
   it('keeps a JSDoc one-file tweak low', () => {
     expect(inferTaskEffort('add a jsdoc comment to foo.ts', 'general', ['foo.ts'])).toBe('low');
   });
+  it('a short typo in the frontend stays low (frontend is a build-task signal)', () => {
+    expect(inferTaskEffort('fix a typo in the frontend', 'debug', [])).toBe('low');
+  });
   it('formatTaskBrief is empty for greetings', () => {
     expect(formatTaskBrief(compileTaskBrief('سلام'), 'سلام')).toBe('');
   });
