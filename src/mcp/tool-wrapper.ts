@@ -5,6 +5,7 @@ import type { MCPClient } from './client.js';
 import type { MCPToolDef } from './types.js';
 import { logger } from '../utils/logger.js';
 import { redactValue } from '../utils/redact.js';
+import { isAlwaysYesAnswer, setApprovalMode } from '../security/permissions.js';
 
 /**
  * Wraps an MCP-exposed tool as a QodeX Tool so the agent loop can call it through the
@@ -67,12 +68,14 @@ export class MCPToolWrapper extends Tool<Record<string, unknown>> {
       const summary = this.summarizeArgs(args);
       const answer = await ctx.askUser(
         `Run MCP tool ${this.name}${summary ? `\n  args: ${summary}` : ''}?`,
-        ['yes', 'no', 'always'],
+        ['yes', 'no', 'always yes'],
       );
-      if (answer === 'no') {
+      const a = (answer || '').trim().toLowerCase();
+      if (a === 'no' || a === 'n' || a === 'reject') {
         return { content: `[USER_REJECTED] User declined MCP tool ${this.name}`, isError: true };
       }
-      if (answer === 'always') {
+      if (isAlwaysYesAnswer(answer)) {
+        setApprovalMode('always');
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
       }
     }

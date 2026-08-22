@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { headlessAskChoice } from '../src/cli/modes/headless-ask.js';
 
-const EDIT_OPTS = ['accept', 'always', 'edit', 'continue', 'reject'];
+const EDIT_OPTS = ['accept', 'always yes', 'edit', 'continue', 'reject'];
 const YES_NO = ['yes', 'no'];
 
 describe('headlessAskChoice — fail-safe', () => {
   it('--yes on edit options returns accept, not the first look-alike', () => {
     expect(headlessAskChoice(EDIT_OPTS, true)).toEqual({ choice: 'accept', denied: false });
+  });
+
+  it('--yes matches the always yes label', () => {
+    expect(headlessAskChoice(['always yes', 'reject'], true)).toEqual({ choice: 'always yes', denied: false });
   });
 
   it('--yes on yes/no returns yes', () => {

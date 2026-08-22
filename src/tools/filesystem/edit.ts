@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { confirmEdit, reviseResult } from './edit-approval.js';
+import { confirmEdit, emitEditDiff, reviseResult } from './edit-approval.js';
 
 const ArgsSchema = z.object({
   path: z.string().describe('Path to file (absolute or relative)'),
@@ -123,6 +123,8 @@ export class EditTextTool extends Tool<z.infer<typeof ArgsSchema>> {
       }
       if (dec.kind === 'revise') return reviseResult(rel);
       updated = dec.content; // may be the user-edited version from [E] Edit
+    } else {
+      emitEditDiff(ctx, rel, content, updated);
     }
 
     await ctx.transaction.write(abs, updated, { base: content, label: rel });

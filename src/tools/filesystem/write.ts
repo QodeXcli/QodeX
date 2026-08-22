@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { confirmEdit, reviseResult } from './edit-approval.js';
+import { confirmEdit, emitEditDiff, reviseResult } from './edit-approval.js';
 import { isBinaryBuffer } from '../../utils/binary.js';
 
 const ArgsSchema = z.object({
@@ -67,6 +67,8 @@ export class WriteFileTool extends Tool<z.infer<typeof ArgsSchema>> {
       }
       if (dec.kind === 'revise') return reviseResult(rel);
       contentToWrite = dec.content; // may be the user-edited version from [E] Edit
+    } else {
+      emitEditDiff(ctx, rel, before, contentToWrite);
     }
 
     // Execute through transaction. `base` is the snapshot this overwrite was

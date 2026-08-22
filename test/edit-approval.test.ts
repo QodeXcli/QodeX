@@ -15,6 +15,7 @@ check('"accept" → accept', interpretApprovalAnswer('accept') === 'accept');
 check('"yes" → accept', interpretApprovalAnswer('yes') === 'accept');
 check('"y" → accept', interpretApprovalAnswer('y') === 'accept');
 check('"always" → accept', interpretApprovalAnswer('always') === 'accept');
+check('"always yes" → accept', interpretApprovalAnswer('always yes') === 'accept');
 
 console.log('— edit —');
 check('"edit" → edit', interpretApprovalAnswer('edit') === 'edit');
@@ -41,8 +42,8 @@ check('reviseResult names the file', r.content.includes('handler.php'));
 check('reviseResult tells model NOT to repeat', r.content.includes('Do NOT re-apply'));
 
 console.log('— "always" is an offered option (was missing → edits could never be remembered) —');
-check('APPROVE_OPTIONS includes "always"', APPROVE_OPTIONS.includes('always'));
-check('"always" still maps to accept branch', interpretApprovalAnswer('always') === 'accept');
+check('APPROVE_OPTIONS includes "always yes"', APPROVE_OPTIONS.includes('always yes'));
+check('"always yes" maps to accept branch', interpretApprovalAnswer('always yes') === 'accept');
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

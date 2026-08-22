@@ -34,10 +34,12 @@ import type { QodexConfig } from '../config/defaults.js';
 import type { Message } from '../session/store.js';
 import { getSessionStore } from '../session/store.js';
 import { messagesToHistory } from './resume-transcript.js';
-import { stripThinkingForDisplay, stripLeakedToolTags } from '../llm/thinking.js';
+import { stripThinkingForDisplay, stripLeakedToolTags, streamingThinking } from '../llm/thinking.js';
+import { isAlwaysYesAnswer } from '../security/permissions.js';
 import { isRedundantAssistantText, dedupeSelfRepeatedText } from './modes/final-dedupe.js';
 import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
+import { ThinkingPanel } from './prompts/thinking-panel.js';
 import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
 import { summarizeToolResult } from './render/tool-summary.js';
@@ -63,8 +65,11 @@ type HistoryItem =
   | { type: 'user'; text: string; id: string }
   | { type: 'assistant'; text: string; id: string }
   | { type: 'tool'; name: string; result: string; isError?: boolean; id: string }
+  | { type: 'diff'; path: string; before: string | null; after: string; id: string }
   | { type: 'system'; text: string; id: string }
   | { type: 'error'; text: string; id: string };
+
+const EDIT_DIFF_TOOLS = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
 
 interface PendingPrompt {
   prompt: string;
@@ -127,10 +132,11 @@ export function App(props: AppProps): React.ReactElement {
   const promptHistoryRef = useRef<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [streamingText, setStreamingText] = useState('');
-  // Hidden reasoning tokens (Ollama `message.thinking` / LM Studio reasoning_content).
-  // Count only — we don't dump the trace into the transcript, but we MUST show
-  // that the model is working or the TUI looks frozen after a fast model load.
+  // Live reasoning: structured thinking_delta AND in-band <thinking> tags.
+  // Shown in a dim pane while the model works; not stored in the model history.
   const [thinkingChars, setThinkingChars] = useState(0);
+  const [thinkingText, setThinkingText] = useState('');
+  const showThinking = (props.config as any).ui?.showThinking !== false;
   const [liveShell, setLiveShell] = useState<string[]>([]);
   const liveShellRef = useRef<string[]>([]);
   const liveShellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -649,12 +655,20 @@ export function App(props: AppProps): React.ReactElement {
         switch (event.type) {
           case 'thinking_start':
             setThinkingChars(0);
+            setThinkingText('');
             break;
-          case 'thinking_delta':
-            setThinkingChars(n => n + String(event.data?.delta ?? '').length);
+          case 'thinking_delta': {
+            const d = String(event.data?.delta ?? '');
+            setThinkingChars(n => n + d.length);
+            if (showThinking && d) setThinkingText(t => (t + d).slice(-8000));
             break;
+          }
           case 'text_delta':
             accumulated += event.data.delta ?? '';
+            if (showThinking) {
+              const fromTags = streamingThinking(accumulated);
+              if (fromTags) setThinkingText(fromTags.slice(-8000));
+            }
             // Filter what we DISPLAY to user. The agent loop will run text-tool-recovery
             // on the final text anyway, but in the stream we don't want to flash raw tool
             // calls (JSON-shaped, <function=…>, or <tool_call>) or <thinking> blocks.
@@ -712,18 +726,28 @@ export function App(props: AppProps): React.ReactElement {
             }
             break;
           }
-          case 'tool_result':
+          case 'tool_result': {
             liveShellRef.current = [];
             setLiveShell([]);
             setActiveTools(prev => prev.filter(t => t.id !== event.data.id));
-            setHistory(h => [...h, {
-              type: 'tool',
-              name: event.data.name,
-              result: event.data.result,
-              isError: event.data.isError,
-              id: nextId(),
-            }]);
+            const diff = EDIT_DIFF_TOOLS.has(event.data.name) ? pendingDiffRef.current : null;
+            if (diff) pendingDiffRef.current = null;
+            setHistory(h => {
+              const next: HistoryItem[] = [...h];
+              if (diff && !event.data.isError) {
+                next.push({ type: 'diff', path: diff.path, before: diff.before, after: diff.after, id: nextId() });
+              }
+              next.push({
+                type: 'tool',
+                name: event.data.name,
+                result: event.data.result,
+                isError: event.data.isError,
+                id: nextId(),
+              });
+              return next;
+            });
             break;
+          }
           case 'tool_ui': {
             // If a diff event came in, store it for upcoming permission prompt
             if (event.data.type === 'diff') {
@@ -766,6 +790,8 @@ export function App(props: AppProps): React.ReactElement {
       if (loaded) setMessages(loaded.messages);
       setBusy(false);
       clearStreaming();
+      setThinkingText('');
+      setThinkingChars(0);
       setActiveTools([]);
       abortRef.current = null;
     }
@@ -876,6 +902,10 @@ export function App(props: AppProps): React.ReactElement {
 
       {/* Tool activity hides while a permission prompt is up — the prompt IS the activity,
           and every extra dynamic line enlarges the frame Ink re-paints. */}
+      {!pendingPrompt && showThinking && thinkingText && (
+        <ThinkingPanel text={thinkingText} width={cols} />
+      )}
+
       {!pendingPrompt && activeTools.map(t => (
         <ToolActivityLine key={t.id} name={t.name} partialArgs={t.partialArgs} motion={motion} />
       ))}
@@ -904,6 +934,10 @@ export function App(props: AppProps): React.ReactElement {
             prompt={pendingPrompt.prompt}
             options={pendingPrompt.options}
             onAnswer={(a) => {
+              if (isAlwaysYesAnswer(a)) {
+                setApprovalModeGlobal('always');
+                setApprovalMode('always');
+              }
               const p = pendingPrompt;
               setPendingPrompt(null);
               p.resolve(a);
@@ -1041,7 +1075,7 @@ function LiveHeader(props: {
  */
 function pickAutoAnswer(options: string[]): string | null {
   const lower = options.map(o => o.toLowerCase());
-  for (const want of ['accept', 'yes', 'y', 'always']) {
+  for (const want of ['accept', 'yes', 'y', 'always yes', 'always']) {
     const i = lower.indexOf(want);
     if (i !== -1) return options[i]!;
   }
@@ -1139,6 +1173,12 @@ function HistoryItemView({ item }: { item: HistoryItem }): React.ReactElement {
       );
     case 'assistant':
       return <AssistantMessage text={item.text} />;
+    case 'diff':
+      return (
+        <Box marginLeft={1} marginY={0}>
+          <DiffViewer path={item.path} before={item.before} after={item.after} maxLines={24} />
+        </Box>
+      );
     case 'tool': {
       // Compact, Claude-Code-style display: a one-line metric + at most a short
       // preview, instead of dumping the whole file/output into the transcript.

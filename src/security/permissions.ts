@@ -44,6 +44,12 @@ export function isAutoEditTool(tool: string): boolean {
   return AUTO_EDIT_TOOLS.has(tool);
 }
 
+/** Picker labels that mean session-wide always yes (not a one-shot accept). PURE. */
+export function isAlwaysYesAnswer(answer: string): boolean {
+  const a = (answer || '').trim().toLowerCase();
+  return a === 'always' || a === 'always yes' || a === 'always-yes' || a === 'alwaysyes';
+}
+
 export function parseApprovalMode(raw: string): ApprovalMode | null {
   const s = raw.trim().toLowerCase();
   if (s === 'manual' || s === 'off' || s === 'ask') return 'manual';
@@ -129,13 +135,13 @@ export class PermissionEngine {
       return { decision: 'ask', via: 'irreversible' };
     }
 
-    // Always-ask patterns next — system-mutating commands (defaults write, sudo,
-    // package installs, disk/network config). These OVERRIDE session auto-approve
-    // and autoApprove patterns: silently running them risks destabilizing the
-    // user's machine, so we force an explicit prompt every time. The only escape
-    // is a per-pair/pattern decision the user themselves granted THIS session
-    // (handled below), so a user who already said "always allow" for one specific
-    // command isn't re-nagged — but `/auto on` alone never covers these.
+    // always yes (Shift+Tab / picker): skip the hub for ordinary work AND always-ask
+    // (sudo, brew, …). Hard-deny and irreversible already returned above.
+    if (_approvalMode === 'always') return { decision: 'allow', via: 'mode-always' };
+
+    // Always-ask patterns — system-mutating commands. These OVERRIDE `auto` (accept
+    // edits) and autoApprove regexes, but not `always yes`. The escape hatch is a
+    // per-command grant this session, or switching to always yes.
     const isAlwaysAsk = this.alwaysAskPatterns.some(p => p.test(req.operation));
     if (isAlwaysAsk) {
       const key = `${req.tool}:${req.operation}`;
@@ -146,9 +152,6 @@ export class PermissionEngine {
       return { decision: 'ask', via: 'always-ask' };
     }
 
-    // Session-wide approval mode (Shift+Tab / `/auto`). Hard denies and always-ask
-    // already returned above, so "always yes" still cannot silently run sudo / rm -rf.
-    if (_approvalMode === 'always') return { decision: 'allow', via: 'mode-always' };
     if (_approvalMode === 'auto' && isAutoEditTool(req.tool)) return { decision: 'allow', via: 'mode-auto-edit' };
 
     // "Allow this tool for the whole session" — from gradient picker

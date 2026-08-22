@@ -7,6 +7,24 @@ interface ConfirmationProps {
   onAnswer: (answer: string) => void;
 }
 
+function pickByShortcut(options: string[], key: string): string | null {
+  if (!key) return null;
+  if (key === '!' || key === 'A') {
+    return options.find(o => o.toLowerCase().startsWith('always')) ?? null;
+  }
+  const lower = key.toLowerCase();
+  if (lower === 'y') {
+    return options.find(o => /^(accept|yes)$/i.test(o)) ?? null;
+  }
+  // Unique prefix only — so 'a' is accept, not "always yes".
+  const hits = options.filter(o => {
+    const oLower = o.toLowerCase();
+    if (oLower.startsWith('always')) return false;
+    return oLower.startsWith(lower);
+  });
+  return hits.length === 1 ? hits[0]! : null;
+}
+
 export function Confirmation({ prompt, options, onAnswer }: ConfirmationProps): React.ReactElement {
   const [selected, setSelected] = useState(0);
   const [done, setDone] = useState(false);
@@ -21,12 +39,10 @@ export function Confirmation({ prompt, options, onAnswer }: ConfirmationProps): 
       setDone(true);
       onAnswer(options[selected]!);
     } else if (input) {
-      const lower = input.toLowerCase();
-      // Shortcuts: y/n/a (first letter)
-      const idx = options.findIndex(o => o.toLowerCase().startsWith(lower));
-      if (idx !== -1) {
+      const hit = pickByShortcut(options, input);
+      if (hit) {
         setDone(true);
-        onAnswer(options[idx]!);
+        onAnswer(hit);
       }
     }
   });
@@ -43,7 +59,9 @@ export function Confirmation({ prompt, options, onAnswer }: ConfirmationProps): 
           </Box>
         ))}
       </Box>
-      <Text dimColor>← → to choose, Enter to confirm, or type {options.map(o => o[0]).join('/')}</Text>
+      <Text dimColor>← → · Enter  ·  y accept  ·  ! always yes  ·  e edit  ·  n reject</Text>
     </Box>
   );
 }
+
+export { pickByShortcut };

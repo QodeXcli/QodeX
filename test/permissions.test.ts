@@ -69,20 +69,15 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate({ tool: 'shell', operation: 'diskutil eraseDisk' })).toBe('ask');
   });
 
-  it('FORCES a prompt for system-mutating commands even when /auto on is active', () => {
+  it('accept-edits auto still asks for sudo; always yes does not', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
-    setAutoApproveSession(true);
-    try {
-      // The bug that broke the user's keyboard: defaults write ran silently
-      // under auto-approve. It must now ask regardless.
-      expect(engine.evaluate({ tool: 'shell', operation: 'defaults write -g AppleLocale fa_IR' })).toBe('ask');
-      expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
-      // Non-system commands still auto-approve under /auto on.
-      expect(engine.evaluate({ tool: 'shell', operation: 'echo hello' })).toBe('allow');
-      expect(engine.evaluate({ tool: 'shell', operation: 'npm run build' })).toBe('allow');
-    } finally {
-      setAutoApproveSession(false);
-    }
+    setApprovalMode('auto');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
+    setApprovalMode('always');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'echo hello' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'npm run build' })).toBe('allow');
   });
 
   it('still hard-denies catastrophic commands (deny beats always-ask)', () => {
@@ -145,12 +140,13 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'shell', operation: 'npm test' })).toBe('allow');
   });
 
-  it('always yes auto-approves edits and ordinary shell, not irreversible or always-ask', () => {
+  it('always yes auto-approves edits, shell, and always-ask; irreversible still asks; hard-deny still denies', () => {
     setApprovalMode('always');
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
     expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('allow');
-    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'git push --force' })).toBe('ask');
     expect(engine.evaluate({ tool: 'shell', operation: 'rm -rf /' })).toBe('deny');
   });
 

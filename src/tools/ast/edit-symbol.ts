@@ -3,8 +3,10 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { prepareDiffPreview } from '../../utils/ui-limits.js';
+import { emitEditDiff } from '../filesystem/edit-approval.js';
 import { detectLanguage, getParser, findSyntaxErrors, type FoundSymbol } from './parser.js';
 import { logger } from '../../utils/logger.js';
+import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
 
 const ArgsSchema = z.object({
   path: z.string().describe('Path to source file'),
@@ -276,9 +278,15 @@ export class EditSymbolTool extends Tool<z.infer<typeof ArgsSchema>> {
     if (decision === 'ask') {
       const preview = prepareDiffPreview(rel, source, updated);
       ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
-      const answer = await ctx.askUser(`Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?`, ['yes', 'no', 'always']);
-      if (answer === 'no') return { content: `[USER_REJECTED]`, isError: true };
-      if (answer === 'always') ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
+      const answer = await ctx.askUser(`Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?`, ['yes', 'no', 'always yes']);
+      const a = (answer || '').trim().toLowerCase();
+      if (a === 'no' || a === 'n' || a === 'reject') return { content: `[USER_REJECTED]`, isError: true };
+      if (isAlwaysYesAnswer(answer)) {
+        setApprovalMode('always');
+        ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
+      }
+    } else {
+      emitEditDiff(ctx, rel, source, updated);
     }
 
     await ctx.transaction.write(abs, updated, { base: source, label: rel });

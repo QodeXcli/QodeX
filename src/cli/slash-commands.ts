@@ -1257,7 +1257,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
             'Usage: /auto manual | auto | always\n' +
             '  manual  — ask before edits and shell (default)\n' +
             '  auto    — file edits run without asking; shell still asks\n' +
-            '  always  — tools run without asking (hard-deny / irreversible still stop)\n' +
+            '  always  — always yes: tools run without asking (hard-deny / irreversible still stop)\n' +
             'Safe shell can skip the hub without /auto: execution.allow in config.yaml\n' +
             '  (e.g. `git status`, `npm test`). Deny / always-ask / irreversible still win.\n' +
             'Aliases: /auto off = manual, /auto on = always. Shift+Tab cycles the three.',

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import type { ToolContext } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
+import { prepareDiffPreview } from '../../utils/ui-limits.js';
 
 /**
  * Shared interactive edit-approval flow — the "surgical assistant" gate.
@@ -26,13 +28,13 @@ export type EditDecision =
   | { kind: 'reject' }                     // hard stop
   | { kind: 'revise' };                    // soft: model should try a different edit
 
-export const APPROVE_OPTIONS = ['accept', 'always', 'edit', 'continue', 'reject'];
+export const APPROVE_OPTIONS = ['accept', 'always yes', 'edit', 'continue', 'reject'];
 
-/** Map a raw answer to a decision branch. PURE (the editor side-effect lives in
- *  confirmEdit). Tolerant of full words or first letters from the Confirmation UI. */
+export { isAlwaysYesAnswer } from '../../security/permissions.js';
+
 export function interpretApprovalAnswer(answer: string): 'accept' | 'edit' | 'revise' | 'reject' {
   const a = (answer || '').trim().toLowerCase();
-  if (a === 'accept' || a === 'yes' || a === 'y' || a === 'always') return 'accept';
+  if (a === 'accept' || a === 'yes' || a === 'y' || isAlwaysYesAnswer(a)) return 'accept';
   if (a === 'edit' || a === 'e') return 'edit';
   if (a === 'continue' || a === 'c' || a === 'revise') return 'revise';
   return 'reject'; // 'no' / 'n' / 'reject' / anything unrecognized → safe default
@@ -66,19 +68,13 @@ export async function confirmEdit(
   ctx: ToolContext,
   opts: { rel: string; before: string | null; after: string; absPath: string; permReq: any; label: string },
 ): Promise<EditDecision> {
-  const { prepareDiffPreview } = await import('../../utils/ui-limits.js');
-  const preview = prepareDiffPreview(opts.rel, opts.before ?? '', opts.after);
-  ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
+  emitEditDiff(ctx, opts.rel, opts.before, opts.after);
 
   const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
+  if (isAlwaysYesAnswer(answer)) setApprovalMode('always');
   const branch = interpretApprovalAnswer(answer);
 
-  // "always" = stop nagging me about edits/writes THIS session. The operation here is a
-  // FILE PATH (no spaces), so the pattern scope would only ever match this one file — the
-  // wrong grain entirely. The user means "let you edit files", so we remember at TOOL scope
-  // (every invocation of write_file/edit_text/… this session). Was previously a silent no-op:
-  // 'always' collapsed to 'accept' and nothing was persisted, so every file re-prompted.
-  if ((answer || '').trim().toLowerCase() === 'always' && ctx.permissions && opts.permReq) {
+  if (isAlwaysYesAnswer(answer) && ctx.permissions && opts.permReq) {
     ctx.permissions.rememberDecision(opts.permReq, 'allow', 'tool');
   }
 
@@ -91,6 +87,17 @@ export async function confirmEdit(
     return { kind: 'accept', content: edited ?? opts.after };
   }
   return { kind: 'accept', content: opts.after };
+}
+
+/** Show the red/green diff even when approval is skipped (always yes / auto). */
+export function emitEditDiff(
+  ctx: ToolContext,
+  rel: string,
+  before: string | null,
+  after: string,
+): void {
+  const preview = prepareDiffPreview(rel, before, after);
+  ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
 }
 
 /** The standard tool-result for a soft "continue/revise" reject. */

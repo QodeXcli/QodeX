@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { StreamDisplayFilter, stripThinkingForDisplay, stripLeakedToolTags, extractThinking } from '../src/llm/thinking.js';
+import { StreamDisplayFilter, stripThinkingForDisplay, stripLeakedToolTags, extractThinking, streamingThinking } from '../src/llm/thinking.js';
 
 /** Feed `chunks` through the filter one at a time and return the concatenated visible output. */
 function run(chunks: string[]): string {
@@ -115,6 +115,17 @@ describe('stripLeakedToolTags (full-string, for the re-rendering UI)', () => {
   it('holds a dangling partial <function= tag mid-stream', () => {
     expect(stripLeakedToolTags('reading now <function=read_fi')).toBe('reading now');
     expect(stripLeakedToolTags('reading now <function')).toBe('reading now');
+  });
+});
+
+describe('streamingThinking — live pane', () => {
+  it('returns closed blocks plus an in-progress open tag', () => {
+    expect(streamingThinking('<thinking>done</thinking>visible')).toBe('done');
+    expect(streamingThinking('visible <think>partial reasoning')).toContain('partial reasoning');
+  });
+  it('empty / no tags → empty', () => {
+    expect(streamingThinking('just text')).toBe('');
+    expect(streamingThinking('')).toBe('');
   });
 });
 

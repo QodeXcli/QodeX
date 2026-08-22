@@ -7,7 +7,7 @@
  * `accept`. Headless without an explicit yes must never write.
  */
 
-const AFFIRM = new Set(['accept', 'always', 'yes', 'y']);
+const AFFIRM = new Set(['accept', 'always', 'always yes', 'always-yes', 'yes', 'y']);
 const DENY = new Set(['reject', 'no', 'n', 'deny']);
 
 export function headlessAskChoice(

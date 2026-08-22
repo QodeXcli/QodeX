@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
 import { formatExecResult, resolveRuntime } from '../../runtime/exec.js';
+import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
 
 const ArgsSchema = z.object({
   command: z.string().describe('Shell command to run. Use sparingly — prefer dedicated tools for file ops, git ops, etc.'),
@@ -30,12 +31,14 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
       ctx.emit({ type: 'permission-request', tool: 'shell', operation: cmd, description: args.description });
       const answer = await ctx.askUser(
         `Run: ${cmd}${args.description ? `\n  (${args.description})` : ''}`,
-        ['yes', 'no', 'always'],
+        ['yes', 'no', 'always yes'],
       );
-      if (answer === 'no') {
+      const a = (answer || '').trim().toLowerCase();
+      if (a === 'no' || a === 'n' || a === 'reject') {
         return { content: `[USER_REJECTED] User declined to run: ${cmd}`, isError: true };
       }
-      if (answer === 'always') {
+      if (isAlwaysYesAnswer(answer)) {
+        setApprovalMode('always');
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
         // "always" now binds to THIS command, and irreversible commands refuse a standing
         // grant entirely. Say so, or the user believes they answered the question once and

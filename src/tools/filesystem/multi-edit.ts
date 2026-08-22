@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { confirmEdit, reviseResult } from './edit-approval.js';
+import { confirmEdit, emitEditDiff, reviseResult } from './edit-approval.js';
 
 const EditSchema = z.object({
   old_string: z.string().describe('Exact text to find'),
@@ -73,6 +73,8 @@ export class MultiEditTool extends Tool<z.infer<typeof ArgsSchema>> {
       if (dec.kind === 'reject') return { content: `[USER_REJECTED]`, isError: true };
       if (dec.kind === 'revise') return reviseResult(rel);
       content = dec.content; // may be the user-edited version from [E] Edit
+    } else {
+      emitEditDiff(ctx, rel, original, content);
     }
 
     await ctx.transaction.write(abs, content, { base: original, label: rel });
