@@ -41,6 +41,7 @@ import { BudgetTracker } from './budget.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
+import { classifyPromptClass, compileTaskBrief, formatTaskBrief } from './task-brief.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
 import { applySpillGuard } from './tool-spill.js';
@@ -689,12 +690,15 @@ export class AgentLoop {
         `If a task needs web data, use \`web_search\` / \`web_fetch\` (if listed above). Do not claim you lack internet access — those tools ARE your internet access.`;
     } else {
       // Classify the user's intent so the prompt can inject task-shaped reasoning.
-      const taskClass = this.classifyForPrompt([{ role: 'user', content: userPrompt }]);
+      const taskClass = classifyPromptClass(userPrompt);
+      const taskBrief = compileTaskBrief(userPrompt);
+      const briefBlock = formatTaskBrief(taskBrief, userPrompt);
       // Stack-specialist expertise: detect from the user's words + what's on disk, then
       // inject the deep how-an-expert-builds-THIS block(s). Orthogonal to task class.
       const stacks = detectStacks(userPrompt, projectSignals);
       const stackAddendum = buildStackAddendum(stacks);
       if (stacks.length > 0) logger.info('Stack specialist profiles active', { stacks });
+      if (briefBlock) logger.info('Task brief', { kind: taskBrief.taskClass, effort: taskBrief.effort, files: taskBrief.paths.length });
       sysPrompt = buildSystemPrompt({
         cwd: this.cwd,
         mode,
@@ -709,6 +713,7 @@ export class AgentLoop {
         availableToolNames: effectiveTools,
         taskClass,
         stackAddendum,
+        taskBrief: briefBlock,
         skillsBlock: buildSkillsSystemBlock({ prompt: userPrompt }),
         identityBlock: identity.block,
       });
@@ -1279,6 +1284,9 @@ export class AgentLoop {
       const lu = [...messages].reverse().find(m => m.role === 'user');
       return typeof lu?.content === 'string' ? lu.content : '';
     })();
+    const runBrief = compileTaskBrief(latestUserText);
+    const runEffort = options.reasoningEffort
+      ?? (runBrief.effort === 'high' ? 'high' as const : undefined);
     const userAskedExecution = userWantsExecution(latestUserText);
     let scopeNudged = false;
 
@@ -1778,7 +1786,7 @@ export class AgentLoop {
         tools,
         signal: options.signal,
         ...(forceCall ? { toolChoice: 'required' as const } : {}),
-        ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+        ...(runEffort ? { reasoningEffort: runEffort } : {}),
         ...(thinkSwitch !== undefined ? { think: thinkSwitch } : {}),
       });
 
@@ -1908,7 +1916,7 @@ export class AgentLoop {
               tools,
               signal: options.signal,
               ...(forceCall ? { toolChoice: 'required' as const } : {}),
-              ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+              ...(runEffort ? { reasoningEffort: runEffort } : {}),
             });
             for await (const event of fbStream) {
               if (options.signal?.aborted) {
@@ -3222,33 +3230,9 @@ export class AgentLoop {
    * picks ONE of refactor/debug/feature/review/explain/general based on the
    * user's verbs and structure.
    */
-  private classifyForPrompt(initial: Message[]): 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general' {
+  private classifyForPrompt(initial: Message[]): ReturnType<typeof classifyPromptClass> {
     const userMsg = initial.find(m => m.role === 'user')?.content ?? '';
-    const text = String(userMsg).toLowerCase();
-    // Backend / Django signals — checked FIRST so "design the Django models" classifies as backend, not frontend.
-    // Persian terms are matched WITHOUT \b — JS word boundaries don't fire around non-ASCII letters.
-    if (/\b(django|drf|django ?rest|serializer|viewset|queryset|orm|migration|makemigrations|models?\.py|celery|wsgi|asgi|manage\.py|backend|back ?end|api ?endpoint|rest ?api)\b/.test(text)
-      || /(جنگو|بک‌?اند|بک ?اند|بکند|سمت ?سرور|پایگاه ?داده|دیتابیس)/.test(text)) {
-      return 'backend';
-    }
-    // Frontend signals — strongest match (overrides feature/refactor when explicit).
-    if (/\b(design|redesign|ui|ux|frontend|landing(?: ?page)?|hero(?: section)?|component|style|theme|layout|animation|three\.?js|react three|r3f|page|button|navbar|header|footer|card|modal|dropdown|form ?design|color|palette|tailwind|shadcn|figma|wireframe|prototype|mockup|polish|aesthetic|beautiful|elegant|modern|minimalist|gradient|glassmorphism|neumorphism|skeuomorphic|3d|scene|webgl|shader|seo|json-?ld|structured ?data|schema\.?org|rich ?results|open ?graph|sitemap)\b/.test(text)
-      || /(دیزاین|طراحی|زیبا|فرانت|قشنگ|مدرن|گرادیان|ظاهر|رابط ?کاربری|سایت|وب ?سایت)/.test(text)) {
-      return 'frontend';
-    }
-    // Highest-signal first
-    if (/\b(refactor|restructure|clean ?up|simplify|extract|inline|rename|move|consolidate|deduplicate|untangle)\b/.test(text)) return 'refactor';
-    if (/\b(debug|fix|error|exception|crash|broken|bug|broke|stuck|hang|throwing|undefined|null|fail|regression|نمی‌?کار|نمیکار|خراب|باگ|اشکال|درست(?: نمی| نمی))\b/.test(text)) return 'debug';
-    if (/\b(review|critique|audit|inspect|code ?review|smell|improve|quality|بررسی)\b/.test(text)) return 'review';
-    if (/\b(explain|describe|what does|how does|walk through|understand|چطور|چگونه|توضیح)\b/.test(text)) return 'explain';
-    // Analytical / decision / business tasks — NOT coding. Checked before `feature` so
-    // "build a business plan" / "develop a strategy" classify as analysis, not a build task.
-    if (/\b(trade-?offs?|business ?plan|pros and cons|cost[- ]benefit|swot|feasibility|go-to-market|value proposition|market analysis|competitive analysis|monetiz|decision matrix|which (?:option |one )?(?:is )?better|compare\b[\s\S]*\b(?:vs|versus)\b|evaluate (?:the )?options|weigh (?:the )?(?:options|pros)|should (?:i|we) (?:use|choose|pick|go with)|strategy|analy[sz]e|analysis)\b/.test(text)
-      || /(تحلیل|بیزینس ?پلن|طرح ?کسب|کسب ?و ?کار|استراتژی|مقایسه|مزایا و معایب|سود و زیان|گزینه|ارزیابی|امکان ?سنجی|تصمیم|بازار)/.test(text)) {
-      return 'analysis';
-    }
-    if (/\b(add|build|implement|create|new feature|develop|integrate|بساز|اضافه|پیاده ?سازی|ایجاد)\b/.test(text)) return 'feature';
-    return 'general';
+    return classifyPromptClass(String(userMsg));
   }
 
   /** Drop oldest turn groups when context exceeds budget. Preserves tool_call/tool_result coupling. */

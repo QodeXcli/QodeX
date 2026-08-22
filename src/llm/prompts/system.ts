@@ -40,6 +40,8 @@ export interface SystemPromptContext {
    * so it cannot bust the prompt cache or TTFT the way a long QODEX.md can.
    */
   identityBlock?: string;
+  /** Per-turn compiled brief (kind / effort / named files). Volatile tail. */
+  taskBrief?: string;
 }
 
 export function detectModelFamily(modelId: string): SystemPromptContext['modelFamily'] {
@@ -504,6 +506,9 @@ ${ctx.directoryTree}
   }
   if (ctx.mode === 'normal' && ctx.stackAddendum && ctx.stackAddendum.trim()) {
     sections.push(ctx.stackAddendum.trim());
+  }
+  if (ctx.mode === 'normal' && ctx.taskBrief?.trim()) {
+    sections.push(ctx.taskBrief.trim());
   }
 
   return sections.filter(s => s.trim()).join('\n\n');
