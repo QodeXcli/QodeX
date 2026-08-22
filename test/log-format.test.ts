@@ -1,4 +1,5 @@
-import { formatLogLine } from '../src/utils/log-format';
+import { describe, it, expect } from 'vitest';
+import { formatLogLine } from '../src/utils/log-format.js';
 
 describe('formatLogLine', () => {
   it('should format a log line with level and message', () => {

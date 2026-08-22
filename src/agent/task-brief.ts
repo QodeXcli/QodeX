@@ -22,9 +22,12 @@ export interface TaskBrief {
   constraints: string[];
 }
 
+const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,8}\b|\b[\w.-]+\.\w{1,8}\b/g;
+
 /** Same verb table the loop used inline — one source so tests and the prompt cannot drift. */
 export function classifyPromptClass(prompt: string): PromptTaskClass {
-  const text = String(prompt ?? '').toLowerCase();
+  // Paths like ui.tsx / button.tsx must not flip the class to frontend.
+  const text = String(prompt ?? '').toLowerCase().replace(PATH_RE, ' ');
   if (/\b(django|drf|django ?rest|serializer|viewset|queryset|orm|migration|makemigrations|models?\.py|celery|wsgi|asgi|manage\.py|backend|back ?end|api ?endpoint|rest ?api)\b/.test(text)
     || /(جنگو|بک‌?اند|بک ?اند|بکند|سمت ?سرور|پایگاه ?داده|دیتابیس)/.test(text)) {
     return 'backend';
@@ -44,8 +47,6 @@ export function classifyPromptClass(prompt: string): PromptTaskClass {
   if (/\b(add|build|implement|create|new feature|develop|integrate|بساز|اضافه|پیاده ?سازی|ایجاد)\b/.test(text)) return 'feature';
   return 'general';
 }
-
-const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,8}\b|\b[\w.-]+\.\w{1,8}\b/g;
 
 export function extractMentionedPaths(prompt: string): string[] {
   const src = String(prompt ?? '');

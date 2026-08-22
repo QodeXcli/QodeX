@@ -15,6 +15,9 @@ describe('classifyPromptClass', () => {
     expect(classifyPromptClass('fix the crash in login')).toBe('debug');
     expect(classifyPromptClass('add a logout endpoint')).toBe('feature');
   });
+  it('does not treat ui.tsx in a path as a frontend task', () => {
+    expect(classifyPromptClass('fix the crash in src/cli/ui.tsx')).toBe('debug');
+  });
 });
 
 describe('compileTaskBrief', () => {

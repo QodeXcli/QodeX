@@ -24,6 +24,13 @@ describe('rankEpisodes — retrieve the most SIMILAR past task', () => {
     expect(m).toHaveLength(1);
     expect(m[0]!.filesChanged[0]).toMatch(/log-format/);
   });
+  it('Persian log/format gloss recalls an English log-format episode', () => {
+    const corpus = [
+      ep('In src/utils/log-format.ts add a JSDoc above formatLogLine', 'documented the helper', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('یک فیلد timestamp با فرمت ISO به خروجی فرمت لاگ در helper اضافه کن', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+  });
   it('a Persian query matches a Persian episode (unicode tokens survive)', () => {
     const corpus = [
       ep('تابع فرمت لاگ را در هلپر اضافه کردم', 'خروجی [LEVEL] message', ['src/utils/log-format.ts']),

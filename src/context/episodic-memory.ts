@@ -134,18 +134,38 @@ export function fileFreshness(files: string[], exists: (f: string) => boolean): 
  *  - Recency tie-break: episodes arrive oldest→newest, so a later index breaks near-ties
  *    toward the more recent solution (clock-free, stays pure).
  */
+/**
+ * Light FA→EN gloss for recall only (not skill-dedup). Lets «لاگ» overlap `log`
+ * without a translation model. PURE.
+ */
+const RECALL_GLOSS: [RegExp, string][] = [
+  [/لاگ/g, ' log '],
+  [/فرمت/g, ' format '],
+  [/هلپر/g, ' helper '],
+  [/تست(?:‌ها)?/g, ' test '],
+  [/فایل/g, ' file '],
+  [/تابع/g, ' function '],
+  [/زمان(?:‌استمپ)?|تایم‌?استمپ/g, ' timestamp '],
+];
+
+export function tokenizeForRecall(text: string): string[] {
+  let s = String(text ?? '');
+  for (const [re, en] of RECALL_GLOSS) s = s.replace(re, en);
+  return tokenize(s);
+}
+
 export function rankEpisodes(query: string, episodes: Episode[], opts: RankOptions = {}): EpisodeMatch[] {
   const topK = opts.topK ?? 2;
   const minScore = opts.minScore ?? 0.18;
   const lambda = Math.max(0, Math.min(1, opts.diversity ?? 0.3));
-  const qv = termFreq(tokenize(query));
+  const qv = termFreq(tokenizeForRecall(query));
   if (qv.size === 0) return [];
 
   // 1) Relevance pass — keep candidates above the floor, carrying their term vector + order.
   type Cand = { e: Episode; vec: Map<string, number>; score: number; idx: number };
   const cands: Cand[] = [];
   episodes.forEach((e, idx) => {
-    const vec = termFreq(tokenize(`${e.prompt} ${e.summary}`));
+    const vec = termFreq(tokenizeForRecall(`${e.prompt} ${e.summary} ${(e.filesChanged ?? []).join(' ')}`));
     let score = cosineSim(qv, vec);
     if (score < minScore || score >= 0.98) return;
     // File grounding: a half-stale episode keeps ~75% of its score; fully stale, ~50%.
