@@ -439,7 +439,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       clearTodos(sessionId);
       getSessionStore().clearMessages(sessionId);
       try {
-        const { getActiveAgent } = await import('../agent/loop.js');
+        const { getActiveAgent } = await import('../agent/active.js');
         getActiveAgent()?.resetInsights(sessionId);
       } catch { /* no live agent */ }
       return {
@@ -455,7 +455,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       const result = await journal.rollbackLast(sessionId, n);
 
       // Also tell the user if there are auto-snapshots they could fall further back to
-      const { getActiveAgent } = await import('../agent/loop.js');
+      const { getActiveAgent } = await import('../agent/active.js');
       const agent = getActiveAgent();
       const svc = agent?.getSnapshotService?.();
       const snapshots = svc?.list() ?? [];
@@ -477,7 +477,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       // file-edit journal): /restore is the heavier hammer — it git-stash-pops
       // the snapshot we took before the agent's first mutation of the turn.
       // Use when you want to throw away EVERYTHING the agent did in that turn.
-      const { getActiveAgent } = await import('../agent/loop.js');
+      const { getActiveAgent } = await import('../agent/active.js');
       const agent = getActiveAgent();
       const svc = agent?.getSnapshotService?.();
       if (!svc) {
@@ -921,7 +921,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       // /snapshot on|off    — toggle auto-snapshot for this session
       // /snapshot take "msg" — take one right now
       // /snapshot restore   — pop the most recent snapshot back onto the working tree
-      const { getActiveAgent } = await import('../agent/loop.js');
+      const { getActiveAgent } = await import('../agent/active.js');
       const agent = getActiveAgent();
       if (!agent) return { handled: true, message: 'Snapshot service requires an active agent.' };
 
@@ -973,7 +973,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     case 'subagent': {
       // /subagents          — show current mode
       // /subagents off|sequential|parallel — switch mode for this session
-      const { getActiveAgent } = await import('../agent/loop.js');
+      const { getActiveAgent } = await import('../agent/active.js');
       const agent = getActiveAgent();
       if (!agent) return { handled: true, message: 'Sub-agent settings require an active agent.' };
 
