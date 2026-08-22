@@ -245,6 +245,17 @@ export const MCP_REGISTRY: McpServerSpec[] = [
     docs: 'https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking',
   },
   {
+    id: 'parallel-search',
+    title: 'Parallel Search',
+    description: 'Search the live web and fetch clean Markdown from URLs without an account or API key.',
+    transport: 'remote',
+    auth: 'none',
+    url: 'https://search.parallel.ai/mcp',
+    streamable: true,
+    credentials: [],
+    note: 'No account, API key, or OAuth required. Exposes web_search and web_fetch. QodeX\'s built-in web_search remains available; add this server when you want those capabilities through MCP.',
+  },
+  {
     id: 'brave-search',
     title: 'Brave Search',
     description: 'Let the model verify docs and package versions before writing code against them.',
