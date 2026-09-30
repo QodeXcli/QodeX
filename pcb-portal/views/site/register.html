@@ -1,0 +1,26 @@
+<!--meta {"title": "Create an account | QodeX PCB", "robots": "noindex", "shell": "bare", "script": "auth", "nav": "register"} -->
+<div class="auth">
+  <div class="auth__panel">
+    <div class="auth__box">
+      <span class="eyebrow">Get started</span>
+      <h1>Create your account</h1>
+      <form id="form" class="stack" novalidate data-mode="register">
+        <label class="field"><span class="field__label">Full name</span><input type="text" name="name" autocomplete="name" required autofocus /></label>
+        <label class="field"><span class="field__label">Work email</span><input type="email" name="email" autocomplete="email" required /></label>
+        <div class="grid grid--2">
+          <label class="field"><span class="field__label">Company <span class="low">(optional)</span></span><input type="text" name="company" autocomplete="organization" /></label>
+          <label class="field"><span class="field__label">Country <span class="low">(optional)</span></span><input type="text" name="country" autocomplete="country-name" /></label>
+        </div>
+        <label class="field"><span class="field__label">Password</span><input type="password" name="password" autocomplete="new-password" minlength="8" required /><span class="field__hint">At least 8 characters.</span></label>
+        <label class="check"><input type="checkbox" name="acceptTerms" required /> <span>I agree to the <a href="/legal#terms" target="_blank">Terms of Service</a> and the <a href="/legal#ip" target="_blank">IP & confidentiality policy</a>.</span></label>
+        <div class="form-error" id="error" hidden></div>
+        <button class="btn btn--primary btn--lg btn--block" type="submit">Create account</button>
+        <p class="low">Already have an account? <a href="/login" id="alt">Sign in</a></p>
+      </form>
+    </div>
+  </div>
+  <div class="auth__art" aria-hidden="true">
+    <svg class="traces" viewBox="0 0 600 800" preserveAspectRatio="xMidYMid slice"><g fill="none" stroke="#df8244" stroke-width="3" stroke-linecap="round" opacity=".55"><path d="M540 100H360l-60 60v260l-60 60H60"/><path d="M540 140H380l-60 60v260l-60 60H60"/><path d="M540 180H400l-60 60v260l-60 60H60"/></g><g fill="#ffb076"><circle cx="540" cy="100" r="7"/><circle cx="540" cy="140" r="7"/><circle cx="540" cy="180" r="7"/></g></svg>
+    <blockquote>Upload a placed board, see the price in seconds, and get back a routed <span class="accent">.kicad_pcb</span> with the evidence to prove it.<cite>USD pricing · card, Apple Pay, Google Pay, PayPal</cite></blockquote>
+  </div>
+</div>

@@ -1,0 +1,63 @@
+<!--meta {
+  "title": "Trust & security — how QodeX protects your PCB designs | QodeX PCB",
+  "description": "How QodeX handles your design files: private storage, access limited to your account and your engineer, offline routing hardware, no AI training on customer data, payment data handled by Stripe and PayPal.",
+  "nav": "trust"
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">Trust & security</span>
+    <h1>Your board is your IP. We treat it that way.</h1>
+    <p class="lead">A plain-language description of how your files move through QodeX, who can see them, and what we will never do with them.</p>
+  </div>
+</section>
+
+<section class="section--tight">
+  <div class="container grid grid--4">
+    <div class="card feature"><div class="feature__icon">01</div><h3>Private storage</h3><p>Uploads are stored outside any public path under random identifiers and served only through an authenticated, ownership-checked endpoint.</p></div>
+    <div class="card feature"><div class="feature__icon">02</div><h3>Least access</h3><p>Only your account and the engineer assigned to your order can download your files. Every upload, status change and payment is logged on the order.</p></div>
+    <div class="card feature"><div class="feature__icon">03</div><h3>Offline routing</h3><p>Routing runs on dedicated machines that are not reachable from the internet. Only finished deliverables are uploaded back to your order.</p></div>
+    <div class="card feature"><div class="feature__icon">04</div><h3>No model training</h3><p>Customer files, copper geometry and metadata are never used to train or fine-tune AI models. This is written into our <a href="/legal#ip">terms</a>.</p></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container split split--even">
+    <div>
+      <span class="eyebrow">Data flow</span>
+      <h2>Where your file goes</h2>
+      <ol class="muted" style="line-height:1.9">
+        <li><strong>Your browser</strong> parses the board locally to show the preview and quote. Nothing is sent until you place the order.</li>
+        <li><strong>Upload over TLS</strong> to private portal storage, attached to your order only.</li>
+        <li><strong>Engineer workstation</strong> retrieves it for routing on offline hardware.</li>
+        <li><strong>Deliverables</strong> are uploaded to your order; you are notified in the portal.</li>
+        <li><strong>Deletion</strong> of order files is available on request once the order is complete.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Controls at a glance</h3>
+      <table class="table"><tbody>
+        <tr><td>Transport</td><td>HTTPS / TLS everywhere, HSTS</td></tr>
+        <tr><td>Passwords</td><td>scrypt-hashed, never stored in plain text</td></tr>
+        <tr><td>Sessions</td><td>HttpOnly, SameSite cookies; CSRF-guarded API</td></tr>
+        <tr><td>Browser hardening</td><td>Strict Content-Security-Policy, no third-party scripts</td></tr>
+        <tr><td>Payments</td><td>Hosted by Stripe / PayPal; card data never touches our servers</td></tr>
+        <tr><td>Payment integrity</td><td>Server-to-server verification of every payment</td></tr>
+        <tr><td>Uploads</td><td>Extension allow-list, size limits, integrity hashes (SHA-256)</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container grid grid--2">
+    <div class="card"><h3>Mutual NDA</h3><p class="muted">Need an NDA before sending anything? We sign mutual NDAs for team and enterprise customers before the first file is uploaded.</p><a class="btn" href="/contact?topic=security">Request an NDA</a></div>
+    <div class="card"><h3>Export-controlled designs</h3><p class="muted">If your design is subject to export controls (for example ITAR or EAR), contact us before uploading so we can confirm whether and how we can handle it. Do not upload controlled technical data without that confirmation.</p><a class="btn" href="/legal#export">Export compliance</a></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container container--narrow">
+    <h2>Report a vulnerability</h2>
+    <p class="muted">If you believe you have found a security issue, please email us via the <a href="/contact?topic=security">contact page</a> with the details. We will acknowledge within two business days and keep you updated until it is resolved. Please do not access other customers' data or degrade the service while testing.</p>
+  </div>
+</section>

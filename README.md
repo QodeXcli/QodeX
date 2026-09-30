@@ -10,6 +10,8 @@
 
 ---
 
+> **QodeX PCB portal** — a customer ordering / payment / 3D-viewer site for the QodeX PCB routing service lives in [`pcb-portal/`](pcb-portal/README.md).
+
 ## What makes it different
 
 Most agentic CLIs *delegate to the model* — they hand the model tools and trust it to use them well. That works with a frontier model and falls apart with a weaker local one (loops, half-finished edits, "done" when nothing was tested).

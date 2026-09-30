@@ -1,0 +1,50 @@
+<!--meta {
+  "title": "Evidence library — what a QodeX delivery dossier contains | QodeX PCB",
+  "description": "Every QodeX order ships with an evidence dossier: DRC and DFM results against your fab's rules, constrained-net tables for impedance, skew and length, and a 3D model for review.",
+  "nav": "evidence",
+  "script": "evidence"
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">Evidence library</span>
+    <h1>Don't trust the router. Check the evidence.</h1>
+    <p class="lead">Every delivery includes a dossier that lists each rule we checked and the result. Below is a sample built from our open demo board, so you can see exactly what you will receive.</p>
+  </div>
+</section>
+
+<section class="section--tight">
+  <div class="container split">
+    <div class="card" style="padding:0;overflow:hidden"><div class="viewer-box" id="viewer" style="height:520px"></div></div>
+    <aside class="stack-cards">
+      <div class="card">
+        <div class="card__title"><h3>Sample dossier summary</h3><span class="badge badge--completed">PASS</span></div>
+        <dl class="kv" id="summary"></dl>
+      </div>
+      <div class="card">
+        <h3>Rule results</h3>
+        <table class="table"><tbody>
+          <tr><td>Clearance (track–track, track–pad)</td><td><span class="badge badge--completed">0 violations</span></td></tr>
+          <tr><td>Minimum track width</td><td><span class="badge badge--completed">0 violations</span></td></tr>
+          <tr><td>Annular ring</td><td><span class="badge badge--completed">0 violations</span></td></tr>
+          <tr><td>Acid traps (&lt; 90°)</td><td><span class="badge badge--completed">0 found</span></td></tr>
+          <tr><td>Unconnected items</td><td><span class="badge badge--completed">0</span></td></tr>
+        </tbody></table>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="section__head"><span class="eyebrow">Constrained nets</span><h2>Net report</h2><p class="lead">Routed length, pads and vias for every net on the demo board — computed live from the file in your browser. Click a net name to highlight it in the 3D view.</p></div>
+    <div class="card table-wrap"><table class="table" id="nets"><thead><tr><th>Net</th><th class="num">Routed length</th><th class="num">Pads</th><th class="num">Vias</th><th class="num">Segments</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container grid grid--3">
+    <div class="card feature"><span class="feature__num">SECTION 1</span><h3>Board & stackup</h3><p>Outline, layer count, stackup and materials, finish, and the fab profile the board was checked against.</p></div>
+    <div class="card feature"><span class="feature__num">SECTION 2</span><h3>Rule results</h3><p>Every DRC and DFM rule with its limit, the worst-case measured value and its location on the board.</p></div>
+    <div class="card feature"><span class="feature__num">SECTION 3</span><h3>Constrained nets</h3><p>Impedance, skew and length results for every pair and group you defined, with pass/fail against your targets.</p></div>
+  </div>
+</section>

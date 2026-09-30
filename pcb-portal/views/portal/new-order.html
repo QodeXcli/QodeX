@@ -1,0 +1,63 @@
+<!--meta {"title": "New order | QodeX PCB", "shell": "app", "script": "new-order", "nav": "new"} -->
+<div class="page-head"><div><h1>New order</h1><p>Drop your board — it's analysed and previewed in your browser before anything is uploaded.</p></div></div>
+<form id="order-form" class="split" novalidate>
+  <div class="stack-cards">
+    <section class="card">
+      <div class="card__title"><h2>1 · Project files</h2><span class="low">Press <kbd>U</kbd> to browse</span></div>
+      <div class="dropzone" id="drop" tabindex="0" role="button" aria-label="Upload project files">
+        <div class="dropzone__icon">PCB</div>
+        <p><strong>Drop your <code>.kicad_pcb</code> here</strong> or click to browse</p>
+        <p class="low">Add the zipped project, schematics, Gerbers or a PDF with notes too. Up to <span id="max-mb"></span> MB per file.</p>
+        <input type="file" id="files" multiple hidden />
+      </div>
+      <ul class="file-list" id="file-list"></ul>
+      <div class="form-warn" id="parse-error" hidden style="margin-top:12px"></div>
+    </section>
+    <section class="card" id="preview-card" hidden>
+      <div class="card__title"><h2>3D preview</h2><span class="low">Rendered locally · try Inspect</span></div>
+      <div class="viewer-box" id="preview"></div>
+    </section>
+    <section class="card">
+      <div class="card__title"><h2>2 · Specification</h2></div>
+      <div class="stack">
+        <label class="field"><span class="field__label">Project title</span><input type="text" name="title" required maxlength="160" placeholder="e.g. Motor controller rev B" /></label>
+        <label class="field"><span class="field__label">Service</span><select name="service" id="service"></select><span class="field__hint" id="service-hint"></span></label>
+        <div class="grid grid--3">
+          <label class="field"><span class="field__label">Copper layers</span><select name="layers" id="layers"></select></label>
+          <label class="field"><span class="field__label">Width (mm)</span><input type="number" name="widthMm" step="0.01" min="3" max="1000" required /></label>
+          <label class="field"><span class="field__label">Height (mm)</span><input type="number" name="heightMm" step="0.01" min="3" max="1000" required /></label>
+        </div>
+        <div class="grid grid--3" id="fab-fields">
+          <label class="field"><span class="field__label">Quantity</span><input type="number" name="quantity" value="10" min="1" max="100000" /></label>
+          <label class="field"><span class="field__label">Board thickness</span><select name="thickness" id="thickness"></select></label>
+          <label class="field"><span class="field__label">Copper weight</span><select name="copperOz" id="copperOz"></select></label>
+          <label class="field"><span class="field__label">Surface finish</span><select name="finish" id="finish"></select></label>
+          <label class="field"><span class="field__label">Solder mask</span><select name="maskColor" id="maskColor"></select></label>
+          <label class="field"><span class="field__label">Silkscreen</span><select name="silkColor" id="silkColor"></select></label>
+        </div>
+        <div class="grid grid--2">
+          <label class="field"><span class="field__label">Target fab (DFM rules)</span><select name="fabHouse" id="fabHouse"></select></label>
+          <label class="field"><span class="field__label">Turnaround</span><select name="turnaround" id="turnaround"></select></label>
+        </div>
+        <label class="check"><input type="checkbox" name="impedanceControl" /> <span>Controlled impedance (differential pairs, RF feeds)</span></label>
+        <label class="field"><span class="field__label">Engineering notes</span><textarea name="notes" maxlength="5000" placeholder="Critical nets, impedance targets, currents, length windows, locked regions…"></textarea></label>
+      </div>
+    </section>
+  </div>
+  <aside class="stack-cards" style="position:sticky;top:84px">
+    <section class="card">
+      <span class="eyebrow">Quote</span>
+      <div class="price-big" id="price">—</div>
+      <ul class="price-lines" id="price-lines"></ul>
+      <p class="low" id="quote-note" style="margin:12px 0 0"></p>
+    </section>
+    <section class="card" id="meta-card" hidden>
+      <div class="card__title"><h3>Board analysis</h3><span class="badge badge--completed">Parsed</span></div>
+      <dl class="kv" id="meta"></dl>
+    </section>
+    <div class="form-error" id="error" hidden></div>
+    <div id="progress" class="low" hidden></div>
+    <button class="btn btn--primary btn--lg btn--block" type="submit" id="submit">Place order & continue to payment</button>
+    <p class="low">By placing the order you agree to the <a href="/legal#terms" target="_blank">terms</a>. Your files are never used to train models.</p>
+  </aside>
+</form>

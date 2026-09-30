@@ -1,0 +1,123 @@
+<!--meta {
+  "title": "How it works — topological PCB routing pipeline | QodeX PCB",
+  "description": "A technical walkthrough of the QodeX pipeline: lossless KiCad parsing, constraint extraction, topological routing with return-path awareness, and DFM polishing with an evidence dossier.",
+  "nav": "how",
+  "jsonLd": {
+    "@context": "https://schema.org",
+    "@type": "HowTo",
+    "name": "How QodeX routes a KiCad PCB",
+    "step": [
+      { "@type": "HowToStep", "name": "Upload a placed board", "text": "Upload your .kicad_pcb with components placed and net classes defined." },
+      { "@type": "HowToStep", "name": "Confirm the quote and pay", "text": "The price is computed from the board itself; pay in USD by card or PayPal." },
+      { "@type": "HowToStep", "name": "Routing and DFM polish", "text": "The board is routed against your constraints and the fab's capability table, then polished." },
+      { "@type": "HowToStep", "name": "Review and download", "text": "Inspect the routed board in 3D and download the KiCad file, fab outputs and evidence dossier." }
+    ]
+  }
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">How it works</span>
+    <h1>A compiler for copper.</h1>
+    <p class="lead">QodeX treats your board the way a compiler treats source code: parse it without loss, extract the constraints, solve the problem in an abstract space, then emit geometry and a proof that it satisfies every rule.</p>
+  </div>
+</section>
+
+<section class="section--tight">
+  <div class="container">
+    <div class="pipeline">
+      <div class="pipeline__step"><span class="pipeline__tag">01 · PARSE</span><h3>Lossless intake</h3><p>Comment-preserving S-expression tree.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">02 · CLASSIFY</span><h3>Constraints</h3><p>Net classes, pairs, groups, fab table.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">03 · ROUTE</span><h3>Topology first</h3><p>Escape, constrained groups, the rest.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">04 · POLISH</span><h3>DFM & dossier</h3><p>Geometry clean-up and evidence.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container doc-layout">
+    <nav class="toc" aria-label="On this page">
+      <h4>Stages</h4>
+      <a href="#parse">01 · Lossless intake</a>
+      <a href="#classify">02 · Constraint extraction</a>
+      <a href="#route">03 · Topological routing</a>
+      <a href="#polish">04 · DFM polish</a>
+      <h4>Delivery</h4>
+      <a href="#deliverables">What you receive</a>
+      <a href="#workflow">Order workflow</a>
+      <a href="#limits">When we say no</a>
+    </nav>
+    <article class="prose">
+      <h2 id="parse">01 · Lossless intake</h2>
+      <p>Most tools re-serialise a board after reading it, which reorders fields, drops comments and turns a small change into a thousand-line diff. QodeX parses the <code>.kicad_pcb</code> into a concrete syntax tree that remembers every token, including whitespace and comments.</p>
+      <p>Only the nodes we create — tracks, arcs, vias and zone fills — are ever written. Everything else is emitted byte-for-byte from the original file, so your Git history shows exactly the copper that was added.</p>
+      <div class="callout"><strong>Invariant:</strong> footprints, their positions, locked items, 3D model paths, custom fields and design rules you did not ask us to touch are never modified.</div>
+
+      <h2 id="classify">02 · Constraint extraction</h2>
+      <p>Constraints come from three places, in this order of precedence:</p>
+      <ol>
+        <li><strong>Your KiCad project</strong> — net classes, differential-pair naming, custom design rules (<code>.kicad_dru</code>), rule areas and the board stackup.</li>
+        <li><strong>Your order notes</strong> — impedance targets, length windows, currents per net, locked regions.</li>
+        <li><strong>The fab profile</strong> — minimum trace/space, drill sizes, annular ring, aspect ratio and via technologies of the fabricator you selected.</li>
+      </ol>
+      <p>Where your rules are tighter than the fab's, yours win. Where they are looser, the fab's are applied so the board is manufacturable as delivered.</p>
+      <table>
+        <thead><tr><th>Constraint</th><th>Source</th><th>Checked in dossier</th></tr></thead>
+        <tbody>
+          <tr><td>Trace width / clearance</td><td>Net class ∩ fab profile</td><td>Every segment</td></tr>
+          <tr><td>Differential impedance</td><td>Stackup + target</td><td>Per pair, per layer</td></tr>
+          <tr><td>Intra-pair skew</td><td>Order notes / rules</td><td>Per pair</td></tr>
+          <tr><td>Length window</td><td>Group definition</td><td>Per group</td></tr>
+          <tr><td>Annular ring, drill</td><td>Fab profile</td><td>Every via and pad</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="route">03 · Topological routing</h2>
+      <p>Routing is solved on the board's topology before any coordinates are fixed: which side of each obstacle a net passes, in what order nets cross a channel, and which layer each segment uses. Geometry is committed only once the topology is known to be feasible.</p>
+      <h3>Order of operations</h3>
+      <ol>
+        <li><strong>Escape routing</strong> for BGAs and fine-pitch parts, ring by ring, using the via technology your fab supports.</li>
+        <li><strong>Constrained groups</strong> — differential pairs, length-matched buses, RF feeds — routed together with their return paths.</li>
+        <li><strong>Power distribution</strong> sized for current, with via arrays for thermal and current capacity.</li>
+        <li><strong>General signals</strong>, with layer changes minimised and a stitching via next to every reference change.</li>
+      </ol>
+      <h3>Return paths are constraints, not afterthoughts</h3>
+      <p>For every constrained net we check the reference plane beneath it along its whole length. Crossing a plane split, an anti-pad void or a slot is treated like a clearance violation: the route is rejected and re-solved.</p>
+
+      <h2 id="polish">04 · DFM polish</h2>
+      <p>The polish pass cleans up geometry that is electrically fine but hurts yield:</p>
+      <ul class="checklist">
+        <li>Acute angles (acid traps) removed; bends mitred to 45° or arced</li>
+        <li>Teardrops added at pad and via entries</li>
+        <li>Copper slivers and starved thermals removed from pours</li>
+        <li>Annular ring and drill-to-copper checked against the fab table</li>
+        <li>Silkscreen clipped from pads and solder-mask openings</li>
+      </ul>
+
+      <h2 id="deliverables">What you receive</h2>
+      <table>
+        <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>board.kicad_pcb</code></td><td>Your board, routed. Opens in KiCad unchanged except for new copper.</td></tr>
+          <tr><td><code>board.glb</code></td><td>3D model for review in the portal or any glTF viewer.</td></tr>
+          <tr><td><code>fab/*.gbr, *.drl</code></td><td>Gerber X2 and Excellon drill files for the selected fab.</td></tr>
+          <tr><td><code>dossier.pdf</code></td><td>DRC / DFM evidence: every rule, every result, constrained-net tables.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="workflow">Order workflow</h2>
+      <ol>
+        <li>Upload the board in the portal. It is analysed in your browser and priced instantly.</li>
+        <li>Pay in USD by card, Apple Pay, Google Pay or PayPal.</li>
+        <li>Your order is queued; status updates and engineer messages appear in the portal.</li>
+        <li>Deliverables are uploaded to your order. Inspect them in 3D, download, and confirm.</li>
+      </ol>
+
+      <h2 id="limits">When we say no</h2>
+      <p>Some boards cannot be routed as placed — a connector wedged against a BGA, a four-layer stack asked to carry eight layers of signals. When that happens you get a report showing the congested regions and the smallest change that would make the board routable (for example, two extra layers, or moving three named parts), and you decide what to do. We do not silently move parts or relax your rules.</p>
+    </article>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container"><div class="cta-band"><h2>See it on your own board.</h2><p>Upload a placed <code>.kicad_pcb</code> and get a quote in seconds.</p><div class="row"><a class="btn btn--primary btn--lg" href="/portal/new">Start an order</a><a class="btn btn--lg" href="/studio">Try the 3D Studio</a></div></div></div>
+</section>

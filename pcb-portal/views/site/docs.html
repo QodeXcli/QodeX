@@ -1,0 +1,127 @@
+<!--meta {
+  "title": "Docs & DFM academy — preparing KiCad boards for routing | QodeX PCB",
+  "description": "How to prepare a KiCad board for QodeX routing: placement, net classes, differential pairs, stackup and impedance, fab profiles, file formats, and a DFM primer on acid traps, annular rings and teardrops.",
+  "nav": "docs"
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">Documentation</span>
+    <h1>Docs & DFM academy</h1>
+    <p class="lead">Everything you need to prepare a board for routing, read the deliverables, and understand the manufacturing rules behind them.</p>
+  </div>
+</section>
+<section class="section--tight">
+  <div class="container doc-layout">
+    <nav class="toc" aria-label="Documentation">
+      <h4>Getting started</h4>
+      <a href="#quickstart">Quick start</a>
+      <a href="#prepare">Preparing your board</a>
+      <a href="#netclasses">Net classes & pairs</a>
+      <a href="#stackup">Stackup & impedance</a>
+      <a href="#notes">Writing order notes</a>
+      <h4>Orders</h4>
+      <a href="#statuses">Order statuses</a>
+      <a href="#payments">Payments & receipts</a>
+      <a href="#formats">File formats</a>
+      <a href="#viewer">Using the 3D viewer</a>
+      <h4>DFM academy</h4>
+      <a href="#acid-traps">Acid traps</a>
+      <a href="#annular">Annular ring</a>
+      <a href="#teardrops">Teardrops</a>
+      <a href="#return-path">Return paths</a>
+      <a href="#glossary">Glossary</a>
+    </nav>
+    <article class="prose">
+      <h2 id="quickstart">Quick start</h2>
+      <ol>
+        <li><a href="/register">Create an account</a>.</li>
+        <li>Go to <a href="/portal/new">New order</a> and drop your <code>.kicad_pcb</code>. Layers, size, nets and pads are extracted in the browser and a 3D preview appears.</li>
+        <li>Choose the service, fab house and options. The price updates live.</li>
+        <li>Place the order and pay by card, Apple Pay, Google Pay or PayPal.</li>
+        <li>Follow progress and chat with your engineer on the order page. Deliverables appear there with a 3D preview.</li>
+      </ol>
+
+      <h2 id="prepare">Preparing your board</h2>
+      <ul>
+        <li><strong>Placement is final.</strong> Every footprint should be placed and oriented. We do not move parts.</li>
+        <li><strong>Outline on Edge.Cuts.</strong> A closed outline; cut-outs and slots as closed shapes inside it.</li>
+        <li><strong>Lock what must not change.</strong> Locked footprints and tracks are preserved exactly.</li>
+        <li><strong>Run DRC first.</strong> Unconnected-items warnings are expected; clearance errors on existing copper are not.</li>
+        <li><strong>Pre-route what you care about.</strong> Hand-routed tracks you leave in place are kept; we route the rest.</li>
+      </ul>
+
+      <h2 id="netclasses">Net classes & differential pairs</h2>
+      <p>Define net classes in <em>Board Setup → Net Classes</em> with track width, clearance and via sizes. Differential pairs are detected from KiCad naming (<code>USB_D+</code>/<code>USB_D-</code>, <code>ETH_TX_P</code>/<code>ETH_TX_N</code>) and routed with the class's pair width and gap.</p>
+      <table><thead><tr><th>Setting</th><th>Where</th><th>Used for</th></tr></thead><tbody>
+        <tr><td>Track width, clearance</td><td>Net class</td><td>Every segment of the net</td></tr>
+        <tr><td>Diff-pair width / gap</td><td>Net class</td><td>Coupled routing and impedance</td></tr>
+        <tr><td>Via size / drill</td><td>Net class</td><td>Layer transitions</td></tr>
+        <tr><td>Custom rules</td><td><code>.kicad_dru</code></td><td>Region and condition-based constraints</td></tr>
+      </tbody></table>
+
+      <h2 id="stackup">Stackup & impedance</h2>
+      <p>Impedance is solved from the stackup in <em>Board Setup → Physical Stackup</em>: dielectric thickness and εr per layer, copper thickness and finish. If you leave it at KiCad's defaults, we use the chosen fab's standard stackup for that layer count and tell you in the dossier.</p>
+      <div class="callout callout--cyan"><strong>Tip:</strong> state targets explicitly in the notes, e.g. <code>USB: 90 Ω diff ±10 %</code>, <code>RF_*: 50 Ω SE, grounded coplanar on F.Cu</code>.</div>
+
+      <h2 id="notes">Writing order notes</h2>
+      <p>Good notes are short and specific. Examples:</p>
+<pre><code>DDR4: byte lanes matched ±5 mil to DQS, addr/cmd fly-by ±25 mil
+PCIe x4: 85 Ω diff, max 2 layer changes per lane
+VIN_48V / SW: 12 A, keep on F.Cu + In2, 2 oz outer copper
+Keep-out: nothing under U7 (crystal) on In1</code></pre>
+
+      <h2 id="statuses">Order statuses</h2>
+      <table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody>
+        <tr><td>Awaiting quote</td><td>An engineer is reviewing the board before pricing (complex or unusual jobs).</td></tr>
+        <tr><td>Awaiting payment</td><td>Price is set; pay to start.</td></tr>
+        <tr><td>Paid — queued</td><td>Payment confirmed by the provider; waiting for a routing slot.</td></tr>
+        <tr><td>In progress</td><td>Routing and polish are running.</td></tr>
+        <tr><td>Delivered</td><td>Deliverables are on the order page. Review and confirm.</td></tr>
+        <tr><td>Completed</td><td>You confirmed receipt.</td></tr>
+      </tbody></table>
+
+      <h2 id="payments">Payments & receipts</h2>
+      <p>All prices are in US dollars. Checkout is handled by Stripe (cards, Apple Pay, Google Pay, Link) or PayPal — we never see your card number. An order is marked paid only after the provider confirms the payment to our server. Receipts are available under <a href="/portal/billing">Billing</a> and can be printed or saved as PDF.</p>
+
+      <h2 id="formats">File formats</h2>
+      <table><thead><tr><th>Type</th><th>Extensions</th><th>3D preview</th></tr></thead><tbody>
+        <tr><td>KiCad board</td><td><code>.kicad_pcb</code></td><td>Yes — full layer model</td></tr>
+        <tr><td>KiCad project</td><td><code>.kicad_pro .kicad_sch .kicad_dru .zip</code></td><td>—</td></tr>
+        <tr><td>3D models</td><td><code>.glb .gltf .stl .obj .wrl</code></td><td>Yes</td></tr>
+        <tr><td>Fabrication</td><td>Gerber (<code>.gbr .gtl .gbl …</code>), <code>.drl</code>, <code>.ipc</code></td><td>—</td></tr>
+        <tr><td>Documents</td><td><code>.pdf .png .jpg .txt .md .csv .xlsx</code></td><td>—</td></tr>
+      </tbody></table>
+
+      <h2 id="viewer">Using the 3D viewer</h2>
+      <table><thead><tr><th>Control</th><th>Action</th></tr></thead><tbody>
+        <tr><td>Left drag / right drag / wheel</td><td>Orbit / pan / zoom</td></tr>
+        <tr><td>Inspect</td><td>Hover to identify pads, vias, tracks and parts; click to highlight the whole net with its routed length</td></tr>
+        <tr><td>Measure</td><td>Click two points: distance, ΔX, ΔY and mils</td></tr>
+        <tr><td>Layers</td><td>Toggle copper and silk layers, fade the mask, explode the stack</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Leave the current tool and clear the selection</td></tr>
+      </tbody></table>
+
+      <h2 id="acid-traps">DFM academy · Acid traps</h2>
+      <p>An acid trap is an acute angle (less than 90°) between two copper features. During etching, etchant pools in the narrow corner and over-etches it, which can open the trace or leave it thin. The fix is geometric: join tracks at 90° or wider, and mitre or arc bends.</p>
+
+      <h3 id="annular">Annular ring</h3>
+      <p>The annular ring is the copper left around a drilled hole: <code>(pad diameter − drill) / 2</code>. Drill wander can break out of a ring that is too small. Fabs publish a minimum (commonly 0.1–0.15 mm on standard service); we check every via and pad against the selected fab's value.</p>
+
+      <h3 id="teardrops">Teardrops</h3>
+      <p>A teardrop is a tapered fillet where a track meets a pad or via. It adds copper where drill wander or thermal stress would otherwise crack a narrow neck, and improves yield on thin tracks and flex regions.</p>
+
+      <h3 id="return-path">Return paths</h3>
+      <p>Every signal current returns through the nearest reference plane, directly beneath the trace at high frequency. If the plane has a split or void under the trace, the return current detours, creating a loop antenna and an impedance discontinuity. That is why QodeX treats plane continuity under constrained nets as a routing constraint.</p>
+
+      <h2 id="glossary">Glossary</h2>
+      <table><tbody>
+        <tr><td><strong>DRC</strong></td><td>Design rule check — clearances, widths, connectivity.</td></tr>
+        <tr><td><strong>DFM</strong></td><td>Design for manufacturing — geometry that improves fabrication yield.</td></tr>
+        <tr><td><strong>Escape routing</strong></td><td>Getting signals out from under a dense package such as a BGA.</td></tr>
+        <tr><td><strong>Skew</strong></td><td>Arrival-time difference between the two halves of a differential pair.</td></tr>
+        <tr><td><strong>Stitching via</strong></td><td>A ground via placed next to a signal via to give its return current a short path between planes.</td></tr>
+        <tr><td><strong>Microvia</strong></td><td>A small laser-drilled via spanning one dielectric layer, used in HDI boards.</td></tr>
+      </tbody></table>
+    </article>
+  </div>
+</section>

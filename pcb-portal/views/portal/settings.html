@@ -1,0 +1,21 @@
+<!--meta {"title": "Account settings | QodeX PCB", "shell": "app", "script": "settings", "nav": "settings"} -->
+<div class="page-head"><div><h1>Account settings</h1><p>Profile details appear on your receipts.</p></div></div>
+<div class="grid grid--2">
+  <form class="card stack" id="profile" novalidate>
+    <div class="card__title"><h2>Profile</h2></div>
+    <label class="field"><span class="field__label">Email</span><input type="email" name="email" disabled /></label>
+    <label class="field"><span class="field__label">Full name</span><input type="text" name="name" required /></label>
+    <div class="grid grid--2">
+      <label class="field"><span class="field__label">Company</span><input type="text" name="company" /></label>
+      <label class="field"><span class="field__label">Country</span><input type="text" name="country" /></label>
+    </div>
+    <label class="field"><span class="field__label">Phone</span><input type="tel" name="phone" /></label>
+    <div class="row"><button class="btn btn--primary" type="submit">Save profile</button></div>
+  </form>
+  <form class="card stack" id="password" novalidate>
+    <div class="card__title"><h2>Password</h2></div>
+    <label class="field"><span class="field__label">Current password</span><input type="password" name="currentPassword" autocomplete="current-password" required /></label>
+    <label class="field"><span class="field__label">New password</span><input type="password" name="newPassword" autocomplete="new-password" minlength="8" required /><span class="field__hint">At least 8 characters. Other sessions will be signed out.</span></label>
+    <div class="row"><button class="btn btn--primary" type="submit">Change password</button></div>
+  </form>
+</div>

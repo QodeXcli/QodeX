@@ -1,0 +1,71 @@
+<!--meta {
+  "title": "Pricing & estimator — PCB routing in USD | QodeX PCB",
+  "description": "Transparent USD pricing for PCB routing, DFM review and fabrication. Estimate your price from layers, board size, nets and pads. Pay by card, Apple Pay, Google Pay or PayPal.",
+  "nav": "pricing",
+  "script": "pricing"
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">Pricing</span>
+    <h1>Priced by the board, not by the seat.</h1>
+    <p class="lead">No subscriptions, no credits to expire. Each order is priced from the board you upload — layers, area, nets and pads — and shown to you before you pay. All prices in US dollars.</p>
+  </div>
+</section>
+
+<section class="section--tight">
+  <div class="container split">
+    <form class="card stack" id="estimator" novalidate>
+      <div class="card__title"><h2>Estimator</h2><span class="low">Same formula as checkout</span></div>
+      <label class="field"><span class="field__label">Service</span><select name="service" id="service"></select></label>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Copper layers <b id="layers-out" class="accent mono"></b></span><input type="range" name="layersIdx" id="layers" min="0" max="8" step="1" value="2" /></label>
+        <label class="field"><span class="field__label">Quantity (fabrication)</span><input type="number" name="quantity" value="10" min="1" max="100000" /></label>
+      </div>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Width (mm)</span><input type="number" name="widthMm" value="80" min="3" max="1000" step="0.1" /></label>
+        <label class="field"><span class="field__label">Height (mm)</span><input type="number" name="heightMm" value="60" min="3" max="1000" step="0.1" /></label>
+      </div>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Nets</span><input type="number" name="nets" value="150" min="0" /></label>
+        <label class="field"><span class="field__label">Pads</span><input type="number" name="pads" value="600" min="0" /></label>
+      </div>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Surface finish</span><select name="finish" id="finish"></select></label>
+        <label class="field"><span class="field__label">Turnaround</span><select name="turnaround" id="turnaround"></select></label>
+      </div>
+      <label class="check"><input type="checkbox" name="impedanceControl" /> Controlled impedance</label>
+      <label class="check"><input type="checkbox" name="hasBGA" /> Board has BGA packages</label>
+      <p class="low" style="margin:0">Tip: drop your <code>.kicad_pcb</code> on the <a href="/portal/new">order page</a> and all of this is filled in from the file.</p>
+    </form>
+    <aside class="card" style="position:sticky;top:88px">
+      <span class="eyebrow">Estimated total</span>
+      <div class="price-big" id="price">—</div>
+      <ul class="price-lines" id="lines"></ul>
+      <a class="btn btn--primary btn--block btn--lg" style="margin-top:20px" href="/portal/new">Start this order</a>
+      <p class="low" style="margin-top:12px">Pay by card, Apple Pay, Google Pay or PayPal. Receipt issued for every payment.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="section__head"><span class="eyebrow">Services</span><h2>What each service includes</h2></div>
+    <div class="grid grid--4" id="services"></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container grid grid--2">
+    <div class="card">
+      <h3>Team & enterprise</h3>
+      <p class="muted">Volume pricing, invoicing on net terms, a mutual NDA before the first file, a named engineer and priority queueing. For export-controlled or regulated work, routing can be restricted to specific staff and hardware.</p>
+      <a class="btn" href="/contact?topic=sales">Contact sales</a>
+    </div>
+    <div class="card">
+      <h3>Pricing FAQ</h3>
+      <details class="faq"><summary>Is the estimate the final price?</summary><p>If you upload a board, the price at checkout is computed from the file itself with the same formula. Some complex boards are quoted manually by an engineer before payment.</p></details>
+      <details class="faq"><summary>What if you can't route my board?</summary><p>If the board cannot be routed as placed, we tell you why before routing starts. If we accept the job and cannot deliver, you are refunded.</p></details>
+      <details class="faq"><summary>Which currencies can I pay in?</summary><p>All prices are charged in USD. Your card issuer or PayPal handles conversion from your local currency.</p></details>
+    </div>
+  </div>
+</section>

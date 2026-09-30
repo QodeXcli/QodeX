@@ -1,0 +1,30 @@
+<!--meta {
+  "title": "3D Studio — free online KiCad PCB & glTF viewer | QodeX PCB",
+  "description": "Open any .kicad_pcb, GLB, glTF, STL, OBJ or VRML file in your browser. Highlight nets, explode the layer stack, fade the solder mask and measure. Files never leave your machine.",
+  "shell": "bare",
+  "script": "studio",
+  "nav": "studio",
+  "robots": "index,follow",
+  "jsonLd": {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "QodeX 3D Studio",
+    "applicationCategory": "DesignApplication",
+    "operatingSystem": "Any (web browser)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+} -->
+<h1 class="hp">QodeX 3D Studio — online KiCad PCB viewer</h1>
+<div class="studio" id="studio">
+  <div class="studio__drop" id="drop"><div id="viewer" style="position:absolute;inset:0"></div></div>
+  <div class="studio__bar">
+    <label class="btn btn--primary btn--sm">Open file…<input type="file" id="file" hidden accept=".kicad_pcb,.glb,.gltf,.stl,.obj,.wrl" /></label>
+    <select id="mask" class="btn--sm" style="width:auto;padding:5px 30px 5px 10px;font-size:13px" aria-label="Solder-mask colour">
+      <option value="green">Green mask</option><option value="black">Black mask</option><option value="matte_black">Matte black</option><option value="blue">Blue mask</option><option value="red">Red mask</option><option value="white">White mask</option><option value="purple">Purple mask</option><option value="yellow">Yellow mask</option>
+    </select>
+    <select id="finish" style="width:auto;padding:5px 30px 5px 10px;font-size:13px" aria-label="Surface finish">
+      <option value="enig">ENIG</option><option value="hasl">HASL</option><option value="osp">OSP</option><option value="immersion_silver">Immersion silver</option><option value="hard_gold">Hard gold</option>
+    </select>
+    <span class="low" id="fname">demo-board.kicad_pcb</span>
+  </div>
+</div>

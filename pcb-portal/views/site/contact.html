@@ -1,0 +1,36 @@
+<!--meta {
+  "title": "Contact — talk to a PCB engineer | QodeX PCB",
+  "description": "Questions about a board, enterprise terms, NDAs or security? Send us a message and an engineer will reply.",
+  "nav": "contact",
+  "script": "contact"
+} -->
+<section class="page-hero">
+  <div class="container split split--even">
+    <div>
+      <span class="eyebrow">Contact</span>
+      <h1>Talk to an engineer, not a funnel.</h1>
+      <p class="lead">Questions about a specific board, volume pricing, NDAs or export control — send a message and a field applications engineer will reply by email.</p>
+      <ul class="checklist" style="margin-top:24px">
+        <li>Board feasibility reviews before you order</li>
+        <li>Mutual NDA and invoicing for teams</li>
+        <li>Security questionnaires and vendor reviews</li>
+      </ul>
+      <p class="muted" style="margin-top:20px">Already have an order? Use the message thread on the order page — it goes straight to your engineer.</p>
+    </div>
+    <form class="card stack" id="contact-form" novalidate>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Name</span><input type="text" name="name" autocomplete="name" required /></label>
+        <label class="field"><span class="field__label">Work email</span><input type="email" name="email" autocomplete="email" required /></label>
+      </div>
+      <div class="grid grid--2">
+        <label class="field"><span class="field__label">Company</span><input type="text" name="company" autocomplete="organization" /></label>
+        <label class="field"><span class="field__label">Topic</span><select name="topic" id="topic"></select></label>
+      </div>
+      <label class="field"><span class="field__label">Message</span><textarea name="message" required minlength="10" placeholder="Layer count, board size, what makes it hard, timeline…"></textarea></label>
+      <label class="hp" aria-hidden="true">Website <input type="text" name="website" tabindex="-1" autocomplete="off" /></label>
+      <div class="form-error" id="error" hidden></div>
+      <div class="form-ok" id="ok" hidden>Thanks — your message is in. We'll reply by email.</div>
+      <button class="btn btn--primary btn--lg" type="submit">Send message</button>
+    </form>
+  </div>
+</section>

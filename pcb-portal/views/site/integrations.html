@@ -1,0 +1,71 @@
+<!--meta {
+  "title": "KiCad integration — lossless round-trip, Git-friendly | QodeX PCB",
+  "description": "QodeX works with the KiCad files you already have. Lossless S-expression round-trip for KiCad 6–9, net classes and design rules honoured, and a clean Git diff containing only new copper.",
+  "nav": "integrations"
+} -->
+<section class="page-hero">
+  <div class="container">
+    <span class="eyebrow">Integrations</span>
+    <h1>Stay in KiCad. We fit into your Git flow.</h1>
+    <p class="lead">No new EDA tool, no conversion, no re-drawn footprints. You send the board you already have and get the same file back with copper added — ready to open, review and commit.</p>
+  </div>
+</section>
+
+<section class="section--tight">
+  <div class="container grid grid--3">
+    <div class="card feature"><div class="feature__icon">6–9</div><h3>KiCad 6, 7, 8 and 9</h3><p>Boards from every current KiCad major version are routed natively. KiCad 5 files are accepted and upgraded on intake.</p></div>
+    <div class="card feature"><div class="feature__icon">Δ</div><h3>Diff-clean output</h3><p>Untouched nodes are emitted byte-for-byte, so <code>git diff</code> shows only new tracks, vias and fills.</p></div>
+    <div class="card feature"><div class="feature__icon">⚙</div><h3>Your rules, respected</h3><p>Net classes, differential pairs, custom <code>.kicad_dru</code> rules, rule areas and the stackup are all read from your project.</p></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container split split--even">
+    <div>
+      <span class="eyebrow">Recommended workflow</span>
+      <h2>Branch, upload, review, merge.</h2>
+      <ol class="muted" style="line-height:2">
+        <li>Finish placement and net classes; commit on a branch.</li>
+        <li>Upload the <code>.kicad_pcb</code> (or the zipped project) in the portal.</li>
+        <li>Download the routed board into the same path.</li>
+        <li>Review the diff and the 3D model, run KiCad DRC, merge.</li>
+      </ol>
+    </div>
+<pre><code>$ git switch -c route/rev-b
+$ git add hardware/ && git commit -m "placement frozen for routing"
+# upload hardware/controller.kicad_pcb at /portal/new
+# … routed board delivered …
+$ cp ~/Downloads/controller.kicad_pcb hardware/
+$ git diff --stat
+ hardware/controller.kicad_pcb | 1843 +++++++++
+ 1 file changed, 1843 insertions(+)
+$ kicad-cli pcb drc hardware/controller.kicad_pcb
+Found 0 DRC violations</code></pre>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="section__head"><span class="eyebrow">What to send</span><h2>File checklist</h2></div>
+    <div class="grid grid--2">
+      <div class="card"><h3>Required</h3><ul class="checklist"><li><code>.kicad_pcb</code> with every footprint placed</li><li>Board outline on <code>Edge.Cuts</code></li><li>Net classes for anything non-default</li></ul></div>
+      <div class="card"><h3>Recommended</h3><ul class="checklist"><li>Zipped project (<code>.kicad_pro</code>, <code>.kicad_sch</code>, <code>.kicad_dru</code>)</li><li>Stackup defined in Board Setup</li><li>Locked footprints/tracks you want untouched</li><li>Notes: impedance targets, currents, length windows</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container split split--even">
+    <div>
+      <span class="eyebrow">Other tools</span>
+      <h2>Altium, OrCAD, EAGLE?</h2>
+      <p class="muted">We focus on KiCad so the round-trip is truly lossless. If you work in another tool, KiCad can import Altium, CADSTAR, EAGLE and Fabmaster boards — import, save as <code>.kicad_pcb</code> and upload. Tell us in the notes and we'll review the import before routing.</p>
+    </div>
+    <div class="card">
+      <h3>3D outputs</h3>
+      <p class="muted">Every order includes a GLB you can open in the portal or any glTF viewer. Want to make your own? In KiCad 8/9:</p>
+      <pre><code>kicad-cli pcb export glb -o board.glb board.kicad_pcb</code></pre>
+      <p class="muted" style="margin:0">Then drop it into the <a href="/studio">3D Studio</a>.</p>
+    </div>
+  </div>
+</section>

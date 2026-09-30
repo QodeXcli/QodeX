@@ -1,0 +1,20 @@
+<!--meta {"title": "Sign in | QodeX PCB", "robots": "noindex", "shell": "bare", "script": "auth", "nav": "login"} -->
+<div class="auth">
+  <div class="auth__panel">
+    <div class="auth__box">
+      <span class="eyebrow">Welcome back</span>
+      <h1>Sign in</h1>
+      <form id="form" class="stack" novalidate data-mode="login">
+        <label class="field"><span class="field__label">Email</span><input type="email" name="email" autocomplete="email" required autofocus /></label>
+        <label class="field"><span class="field__label">Password</span><input type="password" name="password" autocomplete="current-password" required /></label>
+        <div class="form-error" id="error" hidden></div>
+        <button class="btn btn--primary btn--lg btn--block" type="submit">Sign in</button>
+        <p class="low">New to QodeX? <a href="/register" id="alt">Create an account</a></p>
+      </form>
+    </div>
+  </div>
+  <div class="auth__art" aria-hidden="true">
+    <svg class="traces" viewBox="0 0 600 800" preserveAspectRatio="xMidYMid slice"><g fill="none" stroke="#df8244" stroke-width="3" stroke-linecap="round" opacity=".55"><path d="M60 120h180l60 60v220l60 60h180"/><path d="M60 160h160l60 60v220l60 60h200"/><path d="M60 200h140l60 60v220l60 60h220"/><path d="M60 240h120l60 60v220l60 60h240"/></g><g fill="#ffb076"><circle cx="60" cy="120" r="7"/><circle cx="60" cy="160" r="7"/><circle cx="60" cy="200" r="7"/><circle cx="60" cy="240" r="7"/></g><g fill="none" stroke="#2ce5e5" stroke-width="2" opacity=".4"><path d="M100 700h400"/><path d="M100 720h400"/></g></svg>
+    <blockquote>"Placement is intent. Copper is physics. Evidence beats trust."<cite>— the QodeX engineering manifesto</cite></blockquote>
+  </div>
+</div>

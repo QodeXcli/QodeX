@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="80%" cy="0%" r="80%"><stop offset="0" stop-color="#df8244" stop-opacity=".35"/><stop offset="1" stop-color="#08090a" stop-opacity="0"/></radialGradient>
+    <linearGradient id="t" x1="0" x2="1"><stop offset="0" stop-color="#ffb076"/><stop offset=".6" stop-color="#df8244"/><stop offset="1" stop-color="#2ce5e5"/></linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#08090a"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <g fill="none" stroke="#df8244" stroke-width="6" stroke-linecap="round" opacity=".5">
+    <path d="M700 160h180l60 60v200l60 60h200"/><path d="M700 200h160l60 60v200l60 60h220"/><path d="M700 240h140l60 60v200l60 60h240"/>
+  </g>
+  <text x="80" y="250" font-family="Geist, Inter, Arial, sans-serif" font-size="92" font-weight="800" fill="#f9f9fb">Intent in.</text>
+  <text x="80" y="360" font-family="Geist, Inter, Arial, sans-serif" font-size="92" font-weight="800" fill="url(#t)">Evidence out.</text>
+  <text x="80" y="450" font-family="Geist Mono, monospace" font-size="30" fill="#9da3ae">Autonomous KiCad PCB routing · DFM polish · 3D Studio</text>
+  <text x="80" y="540" font-family="Geist, Inter, Arial, sans-serif" font-size="36" font-weight="700" fill="#f9f9fb">QodeX <tspan fill="#ffb076">PCB</tspan></text>
+</svg>

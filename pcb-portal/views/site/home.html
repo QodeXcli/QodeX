@@ -1,0 +1,189 @@
+<!--meta {
+  "title": "QodeX PCB — Autonomous KiCad PCB routing & DFM polishing",
+  "description": "Upload a placed KiCad board and get it back routed, impedance-matched and DFM-polished, with a 3D model, fabrication outputs and an evidence dossier. Transparent USD pricing, pay by card or PayPal.",
+  "script": "home",
+  "nav": "home",
+  "jsonLd": {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "{{baseUrl}}/#org",
+        "name": "{{companyName}}",
+        "url": "{{baseUrl}}/",
+        "logo": "{{baseUrl}}/favicon.svg"
+      },
+      {
+        "@type": "Service",
+        "name": "{{siteName}} — autonomous PCB routing",
+        "serviceType": "Printed circuit board routing and DFM review",
+        "provider": { "@id": "{{baseUrl}}/#org" },
+        "areaServed": "Worldwide",
+        "offers": { "@type": "Offer", "priceCurrency": "USD", "url": "{{baseUrl}}/pricing" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": "{{siteName}} 3D Studio",
+        "applicationCategory": "DesignApplication",
+        "operatingSystem": "Web browser",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "featureList": ["KiCad .kicad_pcb 3D viewer", "Net highlighting", "Layer explode", "Measurement", "glTF / STL / OBJ / VRML viewer"]
+      }
+    ]
+  }
+} -->
+<section class="hero">
+  <div class="container hero__grid">
+    <div>
+      <span class="eyebrow">Autonomous PCB routing · KiCad native</span>
+      <h1>Intent in.<br /><span class="grad">Evidence out.</span></h1>
+      <p class="lead">Send us a placed KiCad board. It comes back routed, impedance-matched and DFM-polished — with a lossless <code>.kicad_pcb</code>, a 3D model, fab outputs and a signed-off evidence dossier. You never leave KiCad.</p>
+      <div class="row hero__cta">
+        <a class="btn btn--primary btn--lg" href="/portal/new">Start an order</a>
+        <a class="btn btn--lg" href="/studio">Open the 3D Studio</a>
+      </div>
+      <div class="hero__proof">
+        <span>Lossless KiCad round-trip</span>
+        <span>Your files never train models</span>
+        <span>USD pricing · card or PayPal</span>
+      </div>
+    </div>
+    <div class="hero__stage">
+      <div id="hero-viewer" style="position:absolute;inset:0"></div>
+      <span class="hero__badge">Live render · click Inspect, then any trace</span>
+    </div>
+  </div>
+</section>
+
+<section class="section--tight" style="padding-top:8px">
+  <div class="container">
+    <dl class="telemetry" id="telemetry" aria-label="Demo board telemetry">
+      <div><dt>Nets resolved</dt><dd data-k="nets">—</dd></div>
+      <div><dt>Pads</dt><dd data-k="pads">—</dd></div>
+      <div><dt>Vias placed</dt><dd data-k="vias">—</dd></div>
+      <div><dt>Copper routed</dt><dd data-k="length">—<small>mm</small></dd></div>
+    </dl>
+    <p class="low" style="margin-top:10px">Telemetry of the demo board above, computed live in your browser from its <code>.kicad_pcb</code>.</p>
+  </div>
+</section>
+
+<section class="section" id="how">
+  <div class="container">
+    <div class="section__head">
+      <span class="eyebrow">The pipeline</span>
+      <h2>Four stages. No black box.</h2>
+      <p class="lead">Every stage is logged against your order, so you can see what happened to your board and why.</p>
+    </div>
+    <div class="pipeline">
+      <div class="pipeline__step"><span class="pipeline__tag">01 · PARSE</span><h3>Lossless intake</h3><p>Your board is parsed into a comment-preserving S-expression tree. Placement, locked items, 3D model paths and custom metadata are carried through untouched.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">02 · CLASSIFY</span><h3>Constraint extraction</h3><p>Net classes, differential pairs, length groups and impedance targets are read from your project and bound to the chosen fab's capability table.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">03 · ROUTE</span><h3>Topological routing</h3><p>BGA escape, then constrained groups, then everything else — solved on the topology first and committed to geometry last, with return paths as a constraint.</p></div>
+      <div class="pipeline__step"><span class="pipeline__tag">04 · POLISH</span><h3>DFM polish & dossier</h3><p>Acid traps removed, teardrops added, slivers and annular rings checked. You get the board plus a report of every rule it passed.</p></div>
+    </div>
+    <p style="margin-top:22px"><a class="link-arrow" href="/how-it-works">Read the full technical walkthrough</a></p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container split--even split">
+    <div>
+      <span class="eyebrow">DFM polish</span>
+      <h2>The difference is in the corners.</h2>
+      <p class="lead">Drag the handle. On the left, a typical auto-routed fan-out: right angles, acute acid traps and bare pad entries. On the right, the same nets after the QodeX polish pass.</p>
+      <ul class="checklist" style="margin-top:22px">
+        <li>No 90° corners — mitred or arced bends only</li>
+        <li>Acute angles below 90° eliminated (acid-trap free)</li>
+        <li>Teardrops on every pad and via entry</li>
+        <li>Ground stitching next to every layer change</li>
+      </ul>
+    </div>
+    <div>
+      <div class="compare" id="compare" role="slider" aria-label="Before and after comparison" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0">
+        <canvas id="compare-before"></canvas>
+        <div class="compare__after" id="compare-after"><canvas id="compare-after-canvas"></canvas></div>
+        <div class="compare__handle" id="compare-handle"></div>
+        <span class="compare__label compare__label--before">Before · DRC warnings</span>
+        <span class="compare__label compare__label--after">After · QodeX polish</span>
+      </div>
+      <div class="compare__legend"><span>Acid traps <b id="cmp-traps">7 → 0</b></span><span>90° corners <b>12 → 0</b></span><span>Teardrops <b>0 → 16</b></span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="section__head">
+      <span class="eyebrow">Fab-aware by default</span>
+      <h2>Routed to your fab's rules, not generic ones.</h2>
+      <p class="lead">Pick a fabricator when you order and its capability table becomes a hard constraint for routing and polish.</p>
+    </div>
+    <div class="fab-grid">
+      <div class="fab"><h4>JLCPCB</h4><p>Standard multilayer service</p><dl><dt>Trace / space</dt><dd>0.09 / 0.09 mm</dd><dt>Min via drill</dt><dd>0.15 mm</dd><dt>Annular ring</dt><dd>0.13 mm</dd><dt>Layers</dt><dd>1 – 16</dd></dl></div>
+      <div class="fab"><h4>PCBWay</h4><p>Standard PCB service</p><dl><dt>Trace / space</dt><dd>0.1 / 0.1 mm</dd><dt>Min via drill</dt><dd>0.2 mm</dd><dt>Annular ring</dt><dd>0.15 mm</dd><dt>Layers</dt><dd>1 – 14</dd></dl></div>
+      <div class="fab"><h4>Eurocircuits</h4><p>Pattern class 6</p><dl><dt>Trace / space</dt><dd>0.125 / 0.125 mm</dd><dt>Min via drill</dt><dd>0.25 mm</dd><dt>Annular ring</dt><dd>0.125 mm</dd><dt>Layers</dt><dd>1 – 16</dd></dl></div>
+      <div class="fab"><h4>Sierra Circuits</h4><p>Standard technology</p><dl><dt>Trace / space</dt><dd>0.1 / 0.1 mm</dd><dt>Min via drill</dt><dd>0.2 mm</dd><dt>Annular ring</dt><dd>0.1 mm</dd><dt>Layers</dt><dd>1 – 16+</dd></dl></div>
+    </div>
+    <p class="low" style="margin-top:14px">Indicative standard-service values. The authoritative table for your order is confirmed by our engineers against the fab's current capabilities.</p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container split split--even">
+    <div class="viewer-box" id="studio-teaser" style="height:420px"></div>
+    <div>
+      <span class="eyebrow">3D Studio</span>
+      <h2>Inspect every net before it hits copper.</h2>
+      <p class="lead">The same viewer that ships with every order. Open any <code>.kicad_pcb</code>, GLB, STL, OBJ or VRML file — nothing leaves your browser.</p>
+      <div class="grid grid--2" style="margin-top:24px">
+        <div><h4>Net highlighting</h4><p class="muted">Click a pad, via or trace to light up the whole net across every layer, with its routed length.</p></div>
+        <div><h4>Layer explode</h4><p class="muted">Pull the stack apart and fade the solder mask to inspect inner planes.</p></div>
+        <div><h4>Precision measure</h4><p class="muted">Two clicks give distance, ΔX / ΔY and mils — on the board, not the screen.</p></div>
+        <div><h4>Any format</h4><p class="muted">KiCad 5 to 9, glTF, STL, OBJ and KiCad's VRML export.</p></div>
+      </div>
+      <p style="margin-top:20px"><a class="btn btn--primary" href="/studio">Open the Studio</a></p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="section__head">
+      <span class="eyebrow">Use cases</span>
+      <h2>Built for the boards autorouters gave up on.</h2>
+    </div>
+    <div class="grid grid--3">{{{useCaseCards}}}</div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container grid grid--3">
+    <div class="card feature"><div class="feature__icon">IP</div><h3>Your IP stays yours</h3><p>Files are stored privately, served only to your account and our assigned engineer, and are never used to train AI models. A mutual NDA is available on request.</p></div>
+    <div class="card feature"><div class="feature__icon">⌁</div><h3>Offline routing hardware</h3><p>Routing runs on dedicated machines that are not exposed to the internet. Only finished deliverables come back to the portal.</p></div>
+    <div class="card feature"><div class="feature__icon">$</div><h3>Transparent USD pricing</h3><p>The quote is computed from your actual board — layers, area, nets and pads — before you pay. Card, Apple Pay, Google Pay or PayPal.</p></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container container--narrow">
+    <div class="section__head center center">
+      <span class="eyebrow">FAQ</span>
+      <h2>Questions engineers ask first</h2>
+    </div>
+    <details class="faq"><summary>Will you move my components?</summary><p>No. Placement is your design intent. If a constraint cannot be met with the current placement, the dossier tells you exactly which parts and nets are in conflict instead of silently moving anything.</p></details>
+    <details class="faq"><summary>Does the file come back exactly as I sent it?</summary><p>Everything we did not route — comments, formatting, footprints, 3D model paths, custom fields — is preserved byte-for-byte. Git diffs show only the copper we added.</p></details>
+    <details class="faq"><summary>Which KiCad versions are supported?</summary><p>KiCad 6, 7, 8 and 9 boards are routed natively. KiCad 5 boards are accepted and upgraded on intake.</p></details>
+    <details class="faq"><summary>How is the price calculated?</summary><p>From the board itself: service, layer count, area, number of nets and pads, plus options such as controlled impedance or express turnaround. Try the <a href="/pricing">estimator</a>.</p></details>
+    <details class="faq"><summary>How do I pay?</summary><p>All prices are in US dollars. Pay by credit or debit card, Apple Pay or Google Pay through Stripe, or with PayPal. Every payment gets a downloadable receipt.</p></details>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <div class="cta-band">
+      <span class="eyebrow">Ready when your placement is</span>
+      <h2>Upload your board. See the quote in seconds.</h2>
+      <p>Your board is analysed in the browser the moment you drop it — layers, size, nets, pads — and priced before you commit.</p>
+      <div class="row"><a class="btn btn--primary btn--lg" href="/portal/new">Start an order</a><a class="btn btn--lg" href="/pricing">Estimate a price</a></div>
+    </div>
+  </div>
+</section>
