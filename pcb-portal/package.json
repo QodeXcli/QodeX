@@ -2,10 +2,12 @@
   "name": "@qodex/pcb-portal",
   "version": "0.1.0",
   "private": true,
-  "description": "QodeX PCB — customer ordering portal: order intake, online payment (Zarinpal / Stripe), file exchange and in-browser 3D viewer for KiCad & GLB boards. Routing itself runs offline on the QodeX engine.",
+  "description": "QodeX PCB — international website, customer ordering portal, USD payments (Stripe, PayPal), file exchange and in-browser 3D Studio for KiCad and glTF boards. Routing itself runs offline on the QodeX engine.",
   "type": "module",
   "license": "Apache-2.0",
-  "engines": { "node": ">=20.0.0" },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
@@ -15,6 +17,7 @@
   "dependencies": {
     "better-sqlite3": "^11.5.0",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.5.1",
     "multer": "^2.0.2",
     "three": "^0.180.0"
   }

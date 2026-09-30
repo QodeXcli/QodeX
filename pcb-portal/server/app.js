@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ROOT } from './config.js';
 import { openDb, getSetting, setSetting } from './db.js';
-import { csrfGuard, hashPassword, sessionMiddleware } from './auth.js';
+import { csrfGuard, hashPassword, limiter, sessionMiddleware } from './auth.js';
 import { createStorage } from './storage.js';
 import { createPaymentProviders } from './payments/index.js';
 import { createPaymentService } from './payments/service.js';
@@ -99,7 +99,7 @@ export async function createApp(config, deps = {}) {
 
   // Stripe webhook needs the raw body for signature verification, so it is
   // mounted before the JSON parser and outside the CSRF guard.
-  app.post('/api/payments/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
+  app.post('/api/payments/stripe/webhook', limiter({ windowMs: 60e3, limit: 300 }), express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
     const stripe = providers.get('stripe');
     const event = stripe?.parseWebhook(req.body, req.get('stripe-signature'));
     if (!event) return res.status(400).json({ error: 'Invalid signature.' });

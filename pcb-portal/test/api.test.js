@@ -115,6 +115,18 @@ describe('portal API (mock checkout)', () => {
     assert.equal((await c.post('/api/auth/login', { json: { email: 'alice@test.io', password: 'nope-nope' } })).status, 401);
   });
 
+  test('password change always verifies the current password', async () => {
+    const c = client(app.base);
+    await register(c, 'Erin', 'erin@test.io');
+    assert.equal((await c.post('/api/auth/password', { json: { currentPassword: 'wrong-one', newPassword: 'brand-new-pass' } })).status, 400);
+    assert.equal((await c.post('/api/auth/password', { json: { currentPassword: 'Erin-password', newPassword: 'short' } })).status, 400);
+    assert.equal((await c.post('/api/auth/password', { json: { currentPassword: 'Erin-password', newPassword: 'brand-new-pass' } })).status, 200);
+    assert.equal((await c.patch('/api/auth/me', { json: { name: 'Erin B', newPassword: 'sneaky-change' } })).status, 200);
+    assert.equal((await client(app.base).post('/api/auth/login', { json: { email: 'erin@test.io', password: 'brand-new-pass' } })).status, 200, 'profile update must not change the password');
+    const limited = await c.get('/api/auth/me');
+    assert.ok(limited.headers.get('ratelimit') || limited.headers.get('ratelimit-policy'), 'API responses carry rate-limit headers');
+  });
+
   test('portal and admin pages require the right role', async () => {
     const r = await fetch(app.base + '/portal', { redirect: 'manual' });
     assert.equal(r.status, 302);
@@ -358,7 +370,7 @@ test('Stripe verify rejects amount / reference mismatches', async () => {
 });
 
 test('config validation', () => {
-  assert.throws(() => readConfig({ PAYMENT_PROVIDERS: 'zarinpal' }), /Unknown payment provider/);
+  assert.throws(() => readConfig({ PAYMENT_PROVIDERS: 'wire' }), /Unknown payment provider/);
   assert.throws(() => readConfig({ PAYMENT_PROVIDERS: 'stripe' }), /STRIPE_SECRET_KEY/);
   assert.throws(() => readConfig({ PAYMENT_PROVIDERS: 'paypal', PAYPAL_CLIENT_ID: 'x' }), /PAYPAL_CLIENT_SECRET/);
   assert.equal(readConfig({}).currency, 'USD');

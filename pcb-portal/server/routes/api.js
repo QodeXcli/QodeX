@@ -3,7 +3,7 @@ import {
   createSession,
   destroySession,
   hashPassword,
-  rateLimit,
+  limiter,
   requireUser,
   sessionCookie,
   verifyPassword,
@@ -38,8 +38,9 @@ export function apiRouter(ctx) {
   const { db, config, payments } = ctx;
   const r = Router();
   const upload = uploader(ctx);
-  const authLimit = rateLimit({ windowMs: 10 * 60e3, max: 20, bucket: 'auth' });
-  const contactLimit = rateLimit({ windowMs: 60 * 60e3, max: 10, bucket: 'contact' });
+  const authLimit = limiter({ windowMs: 10 * 60e3, limit: 20 });
+  const contactLimit = limiter({ windowMs: 60 * 60e3, limit: 10 });
+  r.use(limiter({ windowMs: 5 * 60e3, limit: 1000 }));
 
   const userDTO = (u) => u && { id: u.id, email: u.email, name: u.name, phone: u.phone, company: u.company, country: u.country, role: u.role };
   const setCookie = (res, s) => res.setHeader('Set-Cookie', sessionCookie(s.token, { secure: config.secureCookies, expires: s.expires }));
@@ -103,7 +104,7 @@ export function apiRouter(ctx) {
 
   r.get('/auth/me', (req, res) => res.json({ user: userDTO(req.user) }));
 
-  r.patch('/auth/me', requireUser, asyncH(async (req, res) => {
+  r.patch('/auth/me', requireUser, (req, res) => {
     const b = req.body || {};
     const name = cleanText(b.name ?? req.user.name, 120);
     if (name.length < 2) throw new HttpError(400, 'Enter your name.');
@@ -114,16 +115,20 @@ export function apiRouter(ctx) {
       cleanText(b.country ?? req.user.country, 60) || null,
       req.user.id,
     );
-    if (b.newPassword) {
-      const u = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
-      if (!(await verifyPassword(String(b.currentPassword ?? ''), u.password_hash))) throw new HttpError(400, 'Current password is incorrect.');
-      if (String(b.newPassword).length < 8) throw new HttpError(400, 'New password must be at least 8 characters.');
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(String(b.newPassword)), req.user.id);
-      // sign out every other session
-      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(req.user.id);
-      setCookie(res, createSession(db, req.user.id));
-    }
     res.json({ user: userDTO(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) });
+  });
+
+  r.post('/auth/password', requireUser, authLimit, asyncH(async (req, res) => {
+    const current = String(req.body?.currentPassword ?? '');
+    const next = String(req.body?.newPassword ?? '');
+    const u = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    if (!(await verifyPassword(current, u.password_hash))) throw new HttpError(400, 'Current password is incorrect.');
+    if (next.length < 8) throw new HttpError(400, 'New password must be at least 8 characters.');
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(next), req.user.id);
+    // sign out every other session
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(req.user.id);
+    setCookie(res, createSession(db, req.user.id));
+    res.json({ ok: true });
   }));
 
   // ── public: quote estimator + contact ──

@@ -18,7 +18,7 @@ profile.addEventListener('submit', async (e) => {
 pw.addEventListener('submit', async (e) => {
   e.preventDefault();
   try {
-    await api('/auth/me', { method: 'PATCH', body: Object.fromEntries(new FormData(pw)) });
+    await api('/auth/password', { method: 'POST', body: Object.fromEntries(new FormData(pw)) });
     pw.reset();
     toast('Password changed. Other sessions were signed out.');
   } catch (err) {

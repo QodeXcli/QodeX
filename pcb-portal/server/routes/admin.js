@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin } from '../auth.js';
+import { limiter, requireAdmin } from '../auth.js';
 import { getSetting, logEvent, setSetting } from '../db.js';
 import { defaultPricing, validatePricing } from '../pricing.js';
 import { HttpError, STATUS_LABELS, asyncH, cleanText, cleanupTemp, orderDTO, orderDetail, storeUploads, uploader } from './shared.js';
@@ -13,7 +13,7 @@ export function adminRouter(ctx) {
   const { db, config } = ctx;
   const r = Router();
   const upload = uploader(ctx, 30);
-  r.use(requireAdmin);
+  r.use(limiter({ windowMs: 5 * 60e3, limit: 1000 }), requireAdmin);
 
   const findOrder = (code) => {
     const o = db.prepare(`${ORDER_JOIN} WHERE o.code = ?`).get(String(code));

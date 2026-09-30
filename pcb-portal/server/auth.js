@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { rateLimit as expressRateLimit } from 'express-rate-limit';
 
 const scrypt = promisify(scryptCb);
 export const SESSION_COOKIE = 'qx_sid';
@@ -32,20 +33,19 @@ export function destroySession(db, token) {
   if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
 }
 
-export function parseCookies(header) {
-  const out = {};
+/** Read one cookie by name (no generic parsing into an object keyed by user input). */
+export function readCookie(header, name) {
   for (const part of String(header || '').split(';')) {
     const i = part.indexOf('=');
-    if (i < 0) continue;
-    const k = part.slice(0, i).trim();
-    if (!k) continue;
+    if (i < 0 || part.slice(0, i).trim() !== name) continue;
+    const raw = part.slice(i + 1).trim();
     try {
-      out[k] = decodeURIComponent(part.slice(i + 1).trim());
+      return decodeURIComponent(raw);
     } catch {
-      out[k] = part.slice(i + 1).trim();
+      return raw;
     }
   }
-  return out;
+  return null;
 }
 
 export function sessionCookie(token, { secure, expires }) {
@@ -69,7 +69,7 @@ export function sessionMiddleware(db) {
       purge.run();
       lastPurge = Date.now();
     }
-    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
     req.sessionToken = token || null;
     req.user = null;
     if (token) {
@@ -105,18 +105,13 @@ export function csrfGuard(req, res, next) {
   next();
 }
 
-/** Tiny fixed-window rate limiter keyed by IP + bucket. */
-export function rateLimit({ windowMs, max, bucket }) {
-  const hits = new Map();
-  return (req, res, next) => {
-    const now = Date.now();
-    const key = `${bucket}:${req.ip}`;
-    let h = hits.get(key);
-    if (!h || now - h.start > windowMs) h = { start: now, count: 0 };
-    h.count++;
-    hits.set(key, h);
-    if (hits.size > 10000) for (const [k, v] of hits) if (now - v.start > windowMs) hits.delete(k);
-    if (h.count > max) return res.status(429).json({ error: 'Too many requests. Please try again in a few minutes.' });
-    next();
-  };
+/** Rate limiter (express-rate-limit) with a JSON error body. */
+export function limiter({ windowMs, limit }) {
+  return expressRateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests. Please try again in a few minutes.' },
+  });
 }
