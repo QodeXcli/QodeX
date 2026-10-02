@@ -8,6 +8,11 @@
  * Each entry has its own next_run_at so the tick loop is O(due) rather than
  * O(all). Wall-clock changes (DST, manual time changes) re-compute next_run_at
  * on the next save.
+ *
+ * Entries have a `kind`: 'prompt' (default) runs `qodex --print <prompt> --yes`;
+ * 'mission' starts a detached, resumable mission with the prompt as its goal
+ * (a routine like "every morning, check X and report"). The column is added to
+ * older DBs by a PRAGMA migration.
  */
 import type Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,11 +21,15 @@ import { QODEX_SESSION_DB } from '../config/defaults.js';
 import { parseCron, nextAfter } from './cron.js';
 import { logger } from '../utils/logger.js';
 
+export type ScheduleKind = 'prompt' | 'mission';
+
 export interface ScheduleEntry {
   id: string;
   name: string;
   cron: string;
   prompt: string;
+  /** 'prompt' = headless one-shot run; 'mission' = start a background mission. */
+  kind: ScheduleKind;
   cwd: string;
   model?: string;
   allowed_tools?: string;     // JSON-encoded array, or null for "all tools"
@@ -84,6 +93,20 @@ export class ScheduleStore {
   constructor(dbPath: string = QODEX_SESSION_DB) {
     this.db = openDatabase(dbPath);
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Idempotent column migrations for DBs created by older versions. */
+  private migrate(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(schedules)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'kind')) {
+      try {
+        this.db.exec(`ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'`);
+      } catch (e: any) {
+        // A concurrent process migrated first.
+        if (!/duplicate column/i.test(String(e?.message))) throw e;
+      }
+    }
   }
 
   add(input: {
@@ -93,15 +116,18 @@ export class ScheduleStore {
     cwd: string;
     model?: string;
     allowedTools?: string[];
+    /** Default 'prompt'. 'mission' starts a background mission each run. */
+    kind?: ScheduleKind;
   }): ScheduleEntry {
     const parsed = parseCron(input.cron); // throws on invalid
     const next = nextAfter(parsed, new Date());
     const id = uuidv4();
     const allowed = input.allowedTools && input.allowedTools.length > 0 ? JSON.stringify(input.allowedTools) : null;
+    const kind: ScheduleKind = input.kind === 'mission' ? 'mission' : 'prompt';
     this.db.prepare(`
-      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null);
+      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null, kind);
     return this.get(id)!;
   }
 
