@@ -34,6 +34,14 @@ final class RateLimiter {
 		'reports.get'                    => array( 2.0, 15 ),
 		'orders.list'                    => array( 0.0167, 20 ),
 		'listings.patch'                 => array( 5.0, 5 ),
+		// v4.0 — Seller Suite (rates from the SP-API usage-plan docs).
+		'reports.document'               => array( 0.0167, 15 ),
+		'orders.items'                   => array( 0.5, 30 ),
+		'finances.events'                => array( 0.5, 30 ),
+		'listings.get'                   => array( 5.0, 10 ),
+		'catalog.search'                 => array( 2.0, 2 ),
+		'fees.estimate'                  => array( 1.0, 2 ),
+		'solicitations'                  => array( 1.0, 5 ),
 	);
 
 	public function __construct( private CacheManager $cache ) {}

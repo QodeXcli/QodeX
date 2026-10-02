@@ -35,6 +35,10 @@ final class SettingsRepository {
 		'openai_api_key',
 		'anthropic_api_key',
 		'ollama_auth_token',
+		// v4.0 — Amazon Ads API (Seller Suite PPC).
+		'ads_client_id',
+		'ads_client_secret',
+		'ads_refresh_token',
 	);
 
 	private ?array $cache = null;

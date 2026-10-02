@@ -53,6 +53,7 @@ use SevenGum\Commerce\Repricer\RepricerEngine;
 use SevenGum\Commerce\Repricer\RepricerModule;
 use SevenGum\Commerce\Security\Encryption;
 use SevenGum\Commerce\Security\PIIManager\PIIManager;
+use SevenGum\Commerce\Suite\SuiteModule;
 use SevenGum\Commerce\Widget\WidgetModule;
 
 defined( 'ABSPATH' ) || exit;
@@ -267,6 +268,7 @@ final class Plugin {
 				HeadlessAPI::class,
 				WidgetModule::class,
 				RESTModule::class,
+				SuiteModule::class,
 				AdminModule::class,
 			)
 		);

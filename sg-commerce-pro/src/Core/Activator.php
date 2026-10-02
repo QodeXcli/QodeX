@@ -34,6 +34,11 @@ final class Activator {
 		self::seed_carton_templates();
 		self::schedule_cron();
 
+		// v4.0 — Amazon Seller Suite tables + schedules.
+		require_once SG_COMMERCE_DIR . 'src/Suite/SuiteSchema.php';
+		\SevenGum\Commerce\Suite\SuiteSchema::install();
+		\SevenGum\Commerce\Suite\SuiteModule::schedule();
+
 		if ( ! get_option( 'sg_commerce_installed_at' ) ) {
 			update_option( 'sg_commerce_installed_at', time(), false );
 		}
@@ -51,6 +56,9 @@ final class Activator {
 			'sg_commerce_mcf_refresh',
 			'sg_commerce_pii_purge',
 			'sg_commerce_sqs_poll',
+			'sg_suite_tick',
+			'sg_suite_hourly',
+			'sg_suite_daily',
 		);
 		foreach ( $hooks as $hook ) {
 			wp_clear_scheduled_hook( $hook );

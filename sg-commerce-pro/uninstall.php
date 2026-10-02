@@ -27,7 +27,12 @@ function sg_commerce_uninstall_one_site(): void {
 		"{$wpdb->prefix}sg_comparisons",
 		"{$wpdb->prefix}sg_injection_rules",
 		"{$wpdb->prefix}sg_settlements",
+		"{$wpdb->prefix}sg_inbound_plans",
+		"{$wpdb->prefix}sg_product_ean",
 	);
+	// v4.0 — every Amazon Seller Suite table shares the sg_suite_ prefix.
+	$suite_tables = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'sg_suite_' ) . '%' ) );
+	$tables       = array_merge( $tables, (array) $suite_tables );
 	foreach ( $tables as $t ) {
 		$wpdb->query( "DROP TABLE IF EXISTS {$t}" );
 	}
@@ -53,10 +58,17 @@ function sg_commerce_uninstall_one_site(): void {
 		'openai_api_key',
 		'anthropic_api_key',
 		'ollama_auth_token',
+		'ads_client_id',
+		'ads_client_secret',
+		'ads_refresh_token',
 	);
 	foreach ( $secret_keys as $sk ) {
 		delete_option( 'sg_commerce_secret_' . $sk );
 	}
+
+	// Suite options (cursors, job status, demo flag, schema version).
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( 'sg_suite_' ) . '%' ) );
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( '_transient_sg_suite_' ) . '%', $wpdb->esc_like( '_transient_timeout_sg_suite_' ) . '%' ) );
 
 	// Transients.
 	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_sg_commerce/%' OR option_name LIKE '_transient_timeout_sg_commerce/%'" );
@@ -73,9 +85,15 @@ function sg_commerce_uninstall_one_site(): void {
 		'sg_commerce_sqs_poll',
 		'sg_commerce_ai_describe',
 		'sg_commerce_ai_translate',
+		'sg_suite_tick',
+		'sg_suite_hourly',
+		'sg_suite_daily',
 	);
 	foreach ( $crons as $hook ) {
 		wp_clear_scheduled_hook( $hook );
+	}
+	if ( function_exists( 'as_unschedule_all_actions' ) ) {
+		as_unschedule_all_actions( '', array(), 'sg_commerce' );
 	}
 
 	// Log directory.
