@@ -1,0 +1,212 @@
+/*
+ * Seven Gum Compare — mobile-first comparison table.
+ *
+ * Strategy: emit BOTH the desktop <table> and the mobile .sg-compare__cards
+ * in the HTML. Hide one or the other via media query. Keeps JS out of the
+ * layout entirely — pure CSS.
+ *
+ * Breakpoint: 768px.
+ */
+.sg-compare {
+	font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	color: #1a1a1a;
+	margin: 28px 0;
+	box-sizing: border-box;
+}
+.sg-compare *, .sg-compare *::before, .sg-compare *::after { box-sizing: border-box; }
+
+.sg-compare__title {
+	font-size: 22px;
+	font-weight: 700;
+	margin: 0 0 16px;
+	color: #0a0a0a;
+	letter-spacing: -0.01em;
+}
+
+.sg-compare--error {
+	padding: 14px 18px;
+	background: #fef2f2;
+	border: 1px solid #fecaca;
+	color: #991b1b;
+	border-radius: 8px;
+	font-size: 14px;
+}
+
+/* By default, show cards, hide table. Desktop media query inverts this. */
+.sg-compare__table-wrap { display: none; }
+.sg-compare__cards      { display: grid; gap: 16px; }
+
+/* ---------------- MOBILE CARDS ---------------- */
+.sg-compare__card {
+	background: #fff;
+	border: 1px solid #e5e7eb;
+	border-radius: 14px;
+	padding: 20px;
+	box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+.sg-compare__card-image {
+	margin: -4px 0 14px;
+	text-align: center;
+}
+.sg-compare__card-image img {
+	max-width: 140px;
+	height: auto;
+	border-radius: 10px;
+}
+.sg-compare__card-title {
+	margin: 0 0 12px;
+	font-size: 18px;
+	font-weight: 700;
+	color: #0a0a0a;
+	line-height: 1.25;
+}
+.sg-compare__dl {
+	margin: 0 0 16px;
+	padding: 0;
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 10px;
+}
+.sg-compare__dl dt {
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: #6b7280;
+	margin: 0 0 2px;
+}
+.sg-compare__dl dd {
+	margin: 0 0 0;
+	font-size: 14px;
+	color: #1a1a1a;
+	line-height: 1.45;
+}
+.sg-compare__cta {
+	display: block;
+	padding: 12px 16px;
+	background: #0a0a0a;
+	color: #fff !important;
+	text-decoration: none;
+	text-align: center;
+	border-radius: 10px;
+	font-size: 14px;
+	font-weight: 600;
+	transition: background 0.2s ease;
+}
+.sg-compare__cta:hover { background: #262626; color: #fff !important; }
+
+/* ---------------- DESKTOP TABLE ---------------- */
+@media (min-width: 768px) {
+	.sg-compare__table-wrap {
+		display: block;
+		overflow-x: auto;
+		border-radius: 14px;
+		border: 1px solid #e5e7eb;
+		background: #fff;
+		box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+	}
+	.sg-compare__cards { display: none; }
+
+	.sg-compare__table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 14px;
+	}
+	.sg-compare__table th,
+	.sg-compare__table td {
+		padding: 14px 16px;
+		text-align: left;
+		vertical-align: middle;
+		border-bottom: 1px solid #f3f4f6;
+	}
+	.sg-compare__table tr:last-child td,
+	.sg-compare__table tr:last-child th { border-bottom: 0; }
+	.sg-compare__table thead th {
+		background: #fafafa;
+		border-bottom: 1px solid #e5e7eb;
+		font-weight: 600;
+	}
+	.sg-compare__table tbody th {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: #6b7280;
+		font-weight: 700;
+		background: #fafafa;
+		width: 140px;
+	}
+	.sg-compare__col-head {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+		text-align: center;
+	}
+	.sg-compare__col-head img {
+		max-width: 80px;
+		height: auto;
+		border-radius: 8px;
+	}
+	.sg-compare__col-head strong {
+		font-size: 14px;
+		font-weight: 700;
+		color: #0a0a0a;
+		line-height: 1.3;
+	}
+}
+
+/* Shared — works in both layouts */
+.sg-compare__price {
+	font-size: 16px;
+	font-weight: 700;
+	color: #0a0a0a;
+}
+.sg-compare__price small {
+	font-size: 11px;
+	font-weight: 500;
+	color: #6b7280;
+	margin-left: 2px;
+}
+.sg-compare__badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	white-space: nowrap;
+}
+.sg-compare__badge--ok  { background: rgba(22, 163, 74, 0.12); color: #16a34a; }
+.sg-compare__badge--out { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+
+.sg-compare__cta-small {
+	display: inline-block;
+	padding: 6px 12px;
+	background: #0a0a0a;
+	color: #fff !important;
+	text-decoration: none;
+	border-radius: 6px;
+	font-size: 12.5px;
+	font-weight: 600;
+}
+.sg-compare__cta-small:hover { background: #262626; color: #fff !important; }
+
+/* Injected link styles (from ContentInjector) */
+.sg-injected-link,
+.sg-injected-tooltip {
+	color: #0a0a0a;
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	text-underline-offset: 3px;
+	text-decoration-color: rgba(10,10,10,0.35);
+}
+.sg-injected-link:hover,
+.sg-injected-tooltip:hover {
+	text-decoration-style: solid;
+	text-decoration-color: #0a0a0a;
+}
+.sg-injected-widget {
+	margin: 12px 0;
+}
