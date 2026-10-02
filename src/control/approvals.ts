@@ -203,6 +203,14 @@ export class ApprovalBroker {
     return true;
   }
 
+  /** Withdraw a pending approval, answering it with its safe option (or 'no'). */
+  cancel(id: string, by = 'cancel'): boolean {
+    const e = this.entries.get(id);
+    if (!e || e.done) return false;
+    this.finish(id, { answer: safeOption(e.p.options) ?? 'no', by });
+    return true;
+  }
+
   private finish(id: string, result: ApprovalResult): void {
     const e = this.entries.get(id);
     if (!e || e.done) return;

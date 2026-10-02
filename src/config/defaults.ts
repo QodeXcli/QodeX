@@ -1,5 +1,8 @@
 import * as os from 'os';
 import * as path from 'path';
+import type {
+  BrowserConfig, DesktopConfig, SentinelConfig, MissionsConfig, ControlConfig, TelegramConfig,
+} from './agent-config.js';
 
 /**
  * Resolve the user's home directory robustly.
@@ -462,6 +465,23 @@ export interface QodexConfig {
       name?: string;
     }>;
   };
+  /**
+   * Agent platform sections — all optional; defaults are resolved in code by
+   * src/config/agent-config.ts (resolveBrowserConfig, resolveSentinelConfig, ...)
+   * so `qx setup` never freezes them into the user's YAML.
+   */
+  /** Dedicated QodeX Browser (persistent profile, headed/headless, CDP attach). */
+  browser?: Partial<Omit<BrowserConfig, 'viewport'>> & { viewport?: Partial<BrowserConfig['viewport']> };
+  /** Cross-platform desktop control (computer_use_* tools). */
+  desktop?: Partial<DesktopConfig>;
+  /** Sentinel guard for purchases, payments, sending, credentials, blocked domains. */
+  sentinel?: Partial<SentinelConfig>;
+  /** Long-running background missions. */
+  missions?: Partial<MissionsConfig>;
+  /** Web control center (live browser view, takeover, approvals). */
+  control?: Partial<ControlConfig>;
+  /** Telegram channel (approvals + missions from your phone). */
+  telegram?: Partial<TelegramConfig>;
 }
 
 export const DEFAULT_CONFIG: QodexConfig = {

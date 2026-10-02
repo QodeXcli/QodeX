@@ -40,6 +40,8 @@ import { Welcome } from './prompts/welcome.js';
 import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
+import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
+import { forwardAgentEvent } from '../control/forward.js';
 
 type HistoryItem =
   | { type: 'user'; text: string; id: string }
@@ -260,6 +262,12 @@ export function App(props: AppProps): React.ReactElement {
     if ((key.ctrl && _input === 'c') || key.escape) {
       if (busy && abortRef.current) {
         abortRef.current.abort();
+        // A tool may be blocked on a terminal approval; answer it "no" so the
+        // queue doesn't stay stuck behind a prompt for a run that was stopped.
+        const broker = getApprovalBroker();
+        for (const p of broker.pending()) {
+          if (p.source === 'terminal') broker.cancel(p.id, 'user-stop');
+        }
         setHistory(h => [...h, { type: 'system', text: 'Stopped by user. You can type a new instruction now.', id: nextId() }]);
         return;
       }
@@ -291,13 +299,33 @@ export function App(props: AppProps): React.ReactElement {
   // Surface the active session id so the launcher can print a resume hint on exit.
   useEffect(() => { props.onSessionActive?.(sessionId); }, [sessionId]);
 
-  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+  // A human is at this terminal: Sentinel-critical actions may be approved here.
+  useEffect(() => {
+    setInteractiveHuman(true);
+    return () => setInteractiveHuman(false);
+  }, []);
+
+  // The terminal prompt itself. It is driven by the ApprovalBroker (below), which
+  // queues prompts FIFO — the single pendingPrompt slot used to be clobbered by
+  // concurrent askUser calls — and aborts this prompt when another channel (the
+  // control center or Telegram) answers first.
+  const localAsk = useCallback((prompt: string, options: string[], signal?: AbortSignal): Promise<string> => {
     return new Promise<string>(resolve => {
       const diff = pendingDiffRef.current;
       pendingDiffRef.current = null;
-      setPendingPrompt({ prompt, options, resolve, diff: diff ?? undefined });
+      const entry: PendingPrompt = { prompt, options, resolve, diff: diff ?? undefined };
+      setPendingPrompt(entry);
+      signal?.addEventListener('abort', () => {
+        setPendingPrompt(cur => (cur === entry ? null : cur));
+      }, { once: true });
     });
   }, []);
+
+  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+    return getApprovalBroker()
+      .request({ prompt, options, source: 'terminal' }, (p, o, signal) => localAsk(p, o, signal))
+      .then(r => r.answer);
+  }, [localAsk]);
 
   const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string }) => {
     if (!agentRef.current) return;
@@ -411,6 +439,7 @@ export function App(props: AppProps): React.ReactElement {
         },
       })) {
         if (ac.signal.aborted) break;
+        forwardAgentEvent(sessionId, event);
         switch (event.type) {
           case 'text_delta':
             accumulated += event.data.delta ?? '';

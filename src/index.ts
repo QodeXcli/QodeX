@@ -83,7 +83,9 @@ async function bootstrap(): Promise<{
   setActiveConfig(config);
   const router = new ModelRouter(config);
   const registry = new ToolRegistry();
-  const permissions = new PermissionEngine(config);
+  // Resolve read-only status from the live registry (not a hardcoded list), so new
+  // read-only tools are auto-allowed without having to be listed twice.
+  const permissions = new PermissionEngine(config, (n) => registry.get(n));
 
   // Code graph — project-local SQLite
   const qodexProjectDir = path.join(process.cwd(), '.qodex');
@@ -129,6 +131,13 @@ async function bootstrap(): Promise<{
     try {
       const m = getMCPManager();
       if (m) await m.stopAll();
+    } catch {}
+    // Close the dedicated browser (persistent profile data stays on disk) without
+    // letting a hung Chromium block exit.
+    try {
+      const { peekBrowserManager } = await import('./tools/browser/types.js');
+      const mgr = peekBrowserManager();
+      if (mgr) await Promise.race([mgr.close(), new Promise(r => setTimeout(r, 3000))]);
     } catch {}
     process.exit(0);
   };

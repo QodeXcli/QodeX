@@ -306,6 +306,17 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /schedule                      List scheduled tasks (add/rm/install via shell: \`qodex schedule …\`)
     /mcp-build <name> [desc]       Guided 4-stage scaffold of a new MCP server
 
+  Agent platform — your own browser, desktop, missions
+    /browser [status|open [url]|headed|headless|close|profile <name>]
+                                   The dedicated QodeX Browser (persistent logins)
+    /control [stop|--lan|--tunnel] Web control center: live browser view, take over, approve
+    /takeover [on|off]             Pause the agent's browser and drive it yourself
+    /approvals                     List pending approvals (answer: /approve <id> | /deny <id>)
+    /missions                      Background missions (start: /mission <goal>)
+    /mission <goal>                Start a long-running mission that keeps working in the background
+    /workflows                     Recorded workflows (learn by demonstration, replay)
+    /sentinel                      Sentinel guard status + recent decisions
+
   Coming in v0.5.1
     /compact           Summarise older history with the active model`,
       };
@@ -520,7 +531,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         'Dev server': [],
         'Background jobs': [],
         'Vision': [],
-        'Computer use (macOS)': [],
+        'Computer use (desktop)': [],
+        'Workflows': [],
+        'Missions': [],
+        'Vault': [],
         'Database': [],
         'WordPress': [],
         'Memory': [],
@@ -533,7 +547,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         if (n.startsWith('browser_')) categories['Browser']!.push(t);
         else if (n.startsWith('dev_server_')) categories['Dev server']!.push(t);
         else if (n.startsWith('background_job_')) categories['Background jobs']!.push(t);
-        else if (n.startsWith('computer_use_')) categories['Computer use (macOS)']!.push(t);
+        else if (n.startsWith('computer_use_')) categories['Computer use (desktop)']!.push(t);
+        else if (n.startsWith('workflow_')) categories['Workflows']!.push(t);
+        else if (n.startsWith('mission_')) categories['Missions']!.push(t);
+        else if (n.startsWith('vault_')) categories['Vault']!.push(t);
         else if (n.startsWith('git_') || n === 'smart_diff') categories['Git']!.push(t);
         else if (n.startsWith('code_graph_') || n === 'semantic_search') categories['Code graph']!.push(t);
         else if (['project_overview', 'analyze_impact', 'find_dead_code', 'safe_rename', 'safe_delete_file', 'review_my_changes', 'explain_codebase', 'suggest_improvements'].includes(n)) categories['Analysis & Safety']!.push(t);
