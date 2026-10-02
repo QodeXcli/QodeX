@@ -28,7 +28,11 @@ import { filterSchemasByRelevance } from './tool-relevance.js';
 import { evaluateCompletion } from './completion-gate.js';
 import { buildSkillsSystemBlock, suggestSkillForPrompt, getSkill, listSkills } from '../skills/registry.js';
 import { suggestUninstalledSkill } from '../skills/skill-sources.js';
-import { getBuiltinRolePrompt } from '../llm/prompts/role-prompts.js';
+import { getBuiltinRolePrompt, builtinRoleAllowedTools, OPERATOR_ROLES } from '../llm/prompts/role-prompts.js';
+import { classifyTaskForPrompt, type PromptTaskClass } from './task-classifier.js';
+import { getApprovalBroker } from '../control/approvals.js';
+import { resolveSentinelConfig } from '../config/agent-config.js';
+import type { SubAgentRunOptions, SubAgentResult, SubAgentBudgetOverride } from '../tools/builtin/task.js';
 import type { Message, ToolCall } from '../session/store.js';
 import { getSessionStore } from '../session/store.js';
 import { ToolRegistry, expandToolPatterns, type ToolExecutionMode } from '../tools/registry.js';
@@ -36,7 +40,11 @@ import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import { BudgetTracker } from './budget.js';
-import { transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction } from './recovery.js';
+import {
+  transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction,
+  isGateExemptTool, isStateDependentTool, resultHash, resolveToolTimeoutSeconds,
+  readLoopAbortMessage, readLoopSummarizeMessage, stuckLoopMessage,
+} from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
@@ -92,6 +100,63 @@ export interface AgentOptions {
   maxIterationsOverride?: number;
   /** Per-session reasoning effort (set via /effort). undefined = model default. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Per-run budget override applied to this run's BudgetTracker (missions, browser /
+   * computer sub-agents). Each field replaces the config value; 0 = unlimited for that
+   * dimension; omitted fields keep config.budget.
+   */
+  budgetOverride?: SubAgentBudgetOverride;
+  /** Pin this run to a resolved provider/model (sub-agents use it; wins over explicitModel). */
+  modelOverride?: { provider: string; model: string };
+}
+
+/** Effective budget limits for a run: config.budget with an optional per-run override. PURE. */
+export function resolveRunBudget(
+  budget: { perTaskMaxTokens: number; perTaskLimitUsd: number; perTaskMaxWallSeconds: number },
+  override?: SubAgentBudgetOverride,
+): { maxTokens: number; maxCostUsd: number; maxWallSeconds: number } {
+  const pick = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
+  return {
+    maxTokens: pick(override?.maxTokens, budget.perTaskMaxTokens),
+    maxCostUsd: pick(override?.maxCostUsd, budget.perTaskLimitUsd),
+    maxWallSeconds: pick(override?.maxWallSeconds, budget.perTaskMaxWallSeconds),
+  };
+}
+
+/**
+ * Default budget for the long, interactive operator roles (browser/computer): 30 minutes
+ * of wall clock, no token cap (a page snapshot per step burns tokens fast — the cost cap
+ * still guards spend), and the configured per-task USD cap. PURE.
+ */
+export function operatorRoleBudget(perTaskLimitUsd: number): Required<SubAgentBudgetOverride> {
+  return { maxWallSeconds: 1800, maxTokens: 0, maxCostUsd: perTaskLimitUsd };
+}
+
+/** Agent tools that would spawn a nested sub-agent from inside a sub-agent. */
+const NESTED_AGENT_TOOLS = ['browser_agent', 'computer_use_agent'];
+
+/**
+ * askUser for a run with no human at the terminal (a sub-agent spawned outside any
+ * interactive run). Routed through the ApprovalBroker with no local asker: when a remote
+ * channel (control center / Telegram / mission queue) is attached, the prompt goes there
+ * and times out to the safe answer after `timeoutSec`; with no channel the broker answers
+ * the safe option ("no"/deny) immediately instead of hanging. Aborts resolve safe too.
+ */
+export function unattendedAskUser(source: string, timeoutSec: number, signal?: AbortSignal): AgentOptions['askUser'] {
+  return async (prompt: string, options: string[] = ['yes', 'no']) => {
+    const broker = getApprovalBroker();
+    const timeoutMs = broker.hasRemoteChannel() && timeoutSec > 0 ? timeoutSec * 1000 : undefined;
+    const r = await broker.request({ prompt, options, source, timeoutMs, signal });
+    return r.answer;
+  };
+}
+
+/** Copy of `o` without undefined fields (so a spread never clobbers a default with undefined). */
+function definedOnly<T extends object>(o: T | undefined): Partial<T> {
+  const out: Partial<T> = {};
+  if (!o) return out;
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) (out as any)[k] = v;
+  return out;
 }
 
 export class AgentLoop {
@@ -148,6 +213,10 @@ export class AgentLoop {
   private contextWindowExplicit = false;
   /** Within-turn cache for read-only tool calls. Cleared each iteration. */
   private toolCache: import('../utils/tool-cache.js').ToolResultCache | null = null;
+  /** The askUser of the most recent run() on this instance. Sub-agents spawned by this
+   *  agent (task / fanout / gather / browser_agent …) inherit it, so their permission
+   *  prompts reach the same human or remote approval channel. */
+  private lastAskUser: AgentOptions['askUser'] | undefined;
 
   constructor(opts: {
     router: ModelRouter;
@@ -197,6 +266,14 @@ export class AgentLoop {
     }
   }
 
+  /** This run's BudgetTracker: config.budget / defaults.maxIterations with an optional
+   *  per-run override (0 = unlimited for that dimension). */
+  private makeBudget(override?: SubAgentBudgetOverride): BudgetTracker {
+    if (!override) return BudgetTracker.fromConfig(this.config);
+    const b = resolveRunBudget(this.config.budget, override);
+    return new BudgetTracker(b.maxTokens, b.maxCostUsd, b.maxWallSeconds, this.config.defaults.maxIterations);
+  }
+
   /** Public read accessor for slash commands to operate on snapshots. */
   getSnapshotService(): SnapshotService | undefined {
     return this.snapshotService;
@@ -237,36 +314,31 @@ export class AgentLoop {
   }
 
   /**
-   * Run a sub-agent inline. Used by the `task` tool.
+   * Run a sub-agent inline. Used by `task`, `fanout`, `gather`, `orchestrate`, background
+   * sub-agent jobs and the browser/computer agent tools (all via the SubAgentRunner).
    *
-   * Architecture: sub-agent gets a fresh AgentLoop with the same router/registry/perms
-   * but a new session id and an isolated message history. Tools run in 'subagent' mode
-   * (task and present_plan filtered). We drain the event stream and collect just the
-   * final text + tool-call count.
+   * Architecture: every sub-agent runs on a FRESH AgentLoop with the same router /
+   * registry / permissions / config / cwd, a new session id and an isolated message
+   * history — so parallel sub-agents never share per-run state (plan/completion gates,
+   * read cache, steer queue, shipped-tool set) with each other or with the parent. Tools
+   * run in 'subagent' mode (task/gather/orchestrate/fanout/present_plan filtered); a
+   * built-in or configured role narrows the tool set further. We drain the event stream
+   * and collect just the final text + tool-call count.
    *
-   * The sub-agent's events ARE persisted to the session store under its sub-session id —
-   * so `qx sessions` will list it as a child, debuggable independently. We do NOT
-   * pipe sub-agent UI events to the parent's UI; the parent just sees the eventual
-   * tool result.
+   * The sub-agent's turns ARE persisted under its sub-session id (a sessions row is
+   * ensured first — without it the first recordTurn hit the messages→sessions foreign key
+   * and every sub-agent run failed). We do NOT pipe sub-agent UI events to the parent's
+   * UI; the parent just sees the eventual tool result.
    */
-  async runSubagent(
-    prompt: string,
-    opts: {
-      maxIterations: number;
-      signal?: AbortSignal;
-      sessionId: string;
-      modelOverride?: string;
-      /** Role name — drives model selection, system prompt, tool restriction. Default 'subagent'. */
-      role?: string;
-    },
-  ): Promise<{ finalText: string; toolCallsRun: number; ok: boolean; error?: string; modelUsed?: string }> {
+  async runSubagent(prompt: string, opts: SubAgentRunOptions): Promise<SubAgentResult> {
     let finalText = '';
     let toolCallsRun = 0;
     let errMsg: string | undefined;
     let ok = true;
     let modelUsed: string | undefined;
+    const role = opts.role ?? 'subagent';
+    let sessionReady = false;
     try {
-      const role = opts.role ?? 'subagent';
       // Resolve which model this sub-agent should use, applying the precedence rules:
       // explicit (opts.modelOverride) > session override > config.roles.<role> > config.roles.subagent > parent default.
       const resolved = resolveRole(role, this.config, opts.modelOverride);
@@ -279,64 +351,100 @@ export class AgentLoop {
         sessionId: opts.sessionId,
       });
 
-      // Role-specific tool restriction (allow-list). Built-in policy:
-      //   - vision role: only vision_analyze + read-only browser/file/web tools
-      //   - subagent role: everything except `task` (no recursion) — handled by mode=subagent
-      const roleConfig = (this.config as any).roles?.[role] as { allowedTools?: string[] } | undefined;
-      let allowedTools = roleConfig?.allowedTools;
-      if (!allowedTools && role === 'vision') {
-        // Sensible default for vision role: it should ANALYZE images, not refactor code.
-        // Keep it focused — read-only inspection + the vision tool.
-        allowedTools = [
-          'vision_analyze',
-          'read_file', 'ls', 'glob', 'grep',
-          'browser_navigate', 'browser_screenshot', 'browser_get_text',
-          'browser_console', 'browser_wait_for', 'browser_close',
-          'web_fetch',
-        ];
-      } else if (!allowedTools && role === 'scout') {
-        // Scout role: read-only reconnaissance for the `gather` tool. Collects data/
-        // context for the parent to decide on — must NEVER mutate. Restricted to
-        // read-only inspection tools (any missing one just degrades gracefully).
-        allowedTools = [
-          'read_file', 'ls', 'glob', 'grep', 'semantic_search',
-          'project_overview', 'explain_codebase', 'data_flow', 'analyze_impact', 'find_dead_code',
-          'git_status', 'git_diff', 'git_log',
-          'db_schema', 'db_query', 'openapi_digest', 'backend_routemap',
-          'web_search', 'web_fetch', 'media_probe',
-          'project_recall', 'recall',
-        ];
-      }
+      // Role-specific tool restriction (allow-list): config.roles.<role>.allowedTools wins,
+      // else the built-in list for vision / scout / browser / computer, else every
+      // sub-agent tool (mode=subagent already removes the recursion tools).
+      const allowedTools = this.subagentAllowedTools(role);
+
+      // The sub-session needs a real `sessions` row before the first recordTurn.
+      getSessionStore().ensureSession(opts.sessionId, this.effectiveCwd ?? this.cwd, modelUsed);
+      sessionReady = true;
+
+      // Approvals: the caller's asker (task passes ctx.askUser) > the parent run's asker >
+      // an unattended brokered asker (remote channels may answer; times out to "deny").
+      const askUser = opts.askUser
+        ?? this.lastAskUser
+        ?? unattendedAskUser(`subagent:${role}`, resolveSentinelConfig(this.config).remoteApprovalTimeoutSec, opts.signal);
+
+      // Operator roles (browser/computer) run long observe→act→verify loops: give them a
+      // 30-minute wall clock and no token cap by default (explicit overrides still win).
+      const budgetOverride: SubAgentBudgetOverride | undefined = OPERATOR_ROLES.has(role)
+        ? { ...operatorRoleBudget(this.config.budget?.perTaskLimitUsd ?? 0), ...definedOnly(opts.budgetOverride) }
+        : opts.budgetOverride;
+
+      const child = this.spawnChild();
 
       // Build a fresh message stack — sub-agent has NO prior context. The system
-      // prompt is selected per-role; built-ins (subagent, vision) have crafted defaults.
-      // Custom roles can override via config.roles.<name>.systemPrompt.
+      // prompt is selected per-role; built-ins (vision, browser, computer, …) have crafted
+      // defaults. Custom roles can override via config.roles.<name>.systemPrompt.
       //
       // CRITICAL: we pass `allowedTools` so the system prompt lists ONLY the tools the
       // sub-agent can actually call. Small/quantized models will hallucinate they don't
       // have web_search if it isn't named in prose — see Sub-Agent persona fix.
-      const initialMessages = await this.buildInitialMessages(prompt, 'subagent', resolved.model, role, allowedTools);
+      const initialMessages = await child.buildInitialMessages(prompt, 'subagent', resolved.model, role, allowedTools);
 
-      for await (const event of this.run(initialMessages, opts.sessionId, {
-        mode: { mode: 'subagent', allowedTools },
+      const maxIterationsOverride = typeof opts.maxIterations === 'number' && Number.isFinite(opts.maxIterations)
+        ? Math.max(0, Math.floor(opts.maxIterations))
+        : undefined;
+
+      for await (const event of child.run(initialMessages, opts.sessionId, {
+        // Nested agent tools are hidden from sub-agents (no sub-agent → agent-tool → sub-agent chains).
+        mode: { mode: 'subagent', allowedTools, blockedTools: [...NESTED_AGENT_TOOLS] },
         signal: opts.signal,
-        maxIterations: opts.maxIterations,
+        askUser,
+        maxIterationsOverride,
         modelOverride: { provider: resolved.provider, model: resolved.model },
-      } as any)) {
+        budgetOverride,
+      })) {
         if (event.type === 'tool_call_start') toolCallsRun += 1;
         if (event.type === 'final') {
           finalText = (event.data as any)?.content ?? '';
         }
         if (event.type === 'error') {
           ok = false;
-          errMsg = (event.data as any)?.error ?? 'unknown';
+          errMsg = (event.data as any)?.message ?? (event.data as any)?.error ?? 'unknown';
         }
       }
     } catch (e: any) {
       ok = false;
-      errMsg = e.message ?? String(e);
+      errMsg = e?.message ?? String(e);
+    }
+    if (sessionReady) {
+      try {
+        if (ok) getSessionStore().markStatus(opts.sessionId, 'completed');
+        else if (opts.signal?.aborted) getSessionStore().markStatus(opts.sessionId, 'cancelled');
+      } catch { /* status is cosmetic — never fail the run over it */ }
     }
     return { finalText, toolCallsRun, ok, error: errMsg, modelUsed };
+  }
+
+  /** Tool allow-list for a sub-agent role (config wins over the built-in lists). */
+  private subagentAllowedTools(role: string): string[] | undefined {
+    const roleConfig = (this.config as any).roles?.[role] as { allowedTools?: unknown } | undefined;
+    if (Array.isArray(roleConfig?.allowedTools)) {
+      return roleConfig!.allowedTools.filter((n): n is string => typeof n === 'string');
+    }
+    return builtinRoleAllowedTools(role, this.registry.list().map(t => t.name));
+  }
+
+  /** A fresh AgentLoop sharing this one's collaborators (router, registry, permissions,
+   *  config, cwd + attached dir) but none of its per-run state. */
+  private spawnChild(): AgentLoop {
+    const child = new AgentLoop({
+      router: this.router,
+      registry: this.registry,
+      permissions: this.permissions,
+      config: this.config,
+      cwd: this.cwd,
+    });
+    child.effectiveCwd = this.effectiveCwd;
+    // Reuse the once-per-session LM Studio context probe instead of re-fetching per child.
+    child.liveCtxWindows = this.liveCtxWindows;
+    child.liveCtxFetched = this.liveCtxFetched;
+    // A general sub-agent starts from the tools its parent already surfaced (a COPY —
+    // the child's own gating can only add to it, never to the parent's set).
+    child.sessionToolNames = new Set(this.sessionToolNames);
+    return child;
   }
 
   /** Build the initial system message with full context. */
@@ -423,7 +531,7 @@ export class AgentLoop {
       // role is purposefully focused. We still re-state QodeX identity AND the EXACT
       // available tools — small local models (Qwen 6-bit on LM Studio) lose identity
       // and tool awareness when relying only on the role prompt body.
-      sysPrompt = `You are **QodeX**, a local-first agentic coding CLI. When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
+      sysPrompt = `You are **QodeX**, a local-first autonomous agent (coding, browser, desktop). When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
         `${customSysPromptOverride}\n\n` +
         (trellis?.specBlock ? `${trellis.specBlock}\n\n` : '') +
         `Working directory: ${this.cwd}\n` +
@@ -434,7 +542,7 @@ export class AgentLoop {
       // Provider-level full override (power user). Replace the prompt BODY but keep
       // identity + tool awareness — small models lose both without it (same safety
       // the role-override path applies above).
-      sysPrompt = `You are **QodeX**, a local-first agentic coding CLI. When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek/Llama). The guidance below is your operating brief:\n\n` +
+      sysPrompt = `You are **QodeX**, a local-first autonomous agent (coding, browser, desktop). When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek/Llama). The guidance below is your operating brief:\n\n` +
         `${providerPromptCfg.override}\n\n` +
         `Working directory: ${this.cwd}\n` +
         `Git branch: ${gitBranch ?? '(none)'}\n` +
@@ -655,6 +763,12 @@ export class AgentLoop {
     options: AgentOptions,
   ): AsyncGenerator<AgentEvent> {
     const mode = options.mode ?? { mode: 'normal' };
+    // Sub-agents spawned during (or after) this run inherit this asker.
+    if (typeof options.askUser === 'function') this.lastAskUser = options.askUser;
+    // An explicit allow-list (role sub-agent, custom command `allowed-tools`) is a hard
+    // restriction: relevance gating is skipped (it would hide role tools) and calls to
+    // tools outside the list are refused in executeToolCall.
+    const explicitAllowList = Array.isArray(mode.allowedTools);
 
     // ── Tool diet (perf): config `tools.disabled` + AUTO PROFILE ──
     // Two layers, user always wins:
@@ -729,13 +843,19 @@ export class AgentLoop {
         (mode as any).blockedTools = [...baseBlocked, 'task'];
       }
     }
-    const budget = BudgetTracker.fromConfig(this.config);
+    const budget = this.makeBudget(options.budgetOverride);
     if (options.maxIterationsOverride !== undefined) {
       budget.setMaxIterations(options.maxIterationsOverride);
     }
     const journal = getJournal();
     const sessionStore = getSessionStore();
     const recentCalls: Array<{ name: string; argsHash: string }> = [];
+    // Cumulative count of each (tool|argsHash) across the WHOLE run. Catches the "restart"
+    // loop the sliding window misses: when the codebase is larger than the context window,
+    // the model loses its place and re-reads the same files sweep after sweep. Each sweep is
+    // longer than the recent-calls window, so only a run-wide tally spots the repetition.
+    // (State-dependent tools are counted per name|args|resultHash — see afterResult.)
+    const callCounts = new Map<string, number>();
     // Sliding window of recent ERROR results, to catch a "guessing" loop where the model keeps
     // hitting the same kind of error (e.g. FILE_NOT_FOUND) with different args each time.
     const recentErrors: Array<{ name: string; code: string }> = [];
@@ -744,9 +864,35 @@ export class AgentLoop {
       // nothing ("Vite not found", "command not found"). The model loops on these because they look
       // like success; counting them lets detectErrorLoop break the thrash. Threshold (3) guards
       // against one-off futile results from legitimate probes.
-      if (!r.isError && !looksFutile(r.content)) return;
+      // Browser/desktop results are page/screen TEXT ("404 Not Found", "item not found in
+      // stock" …): only their hard errors count, never their content.
+      if (!r.isError && (isStateDependentTool(name) || !looksFutile(r.content))) return;
       recentErrors.push({ name, code: errorCodeOf(r.content) });
       if (recentErrors.length > 8) recentErrors.shift();
+    };
+    // Loop-guard bookkeeping for state-dependent tools (browser_*/computer_use_*): they enter
+    // the sliding window and the run-wide tally only AFTER they ran, keyed by name + args +
+    // a hash of their RESULT. Repeated identical calls whose results change (scroll →
+    // snapshot through a long page) are progress, not a loop; a truly identical call+result
+    // repeat still trips the same thresholds — checked right after execution (see
+    // checkStatefulLoops below) since the result is what decides.
+    const pendingStateful = new Map<ToolCall, { base: string; argsHash: string; readOnly: boolean }>();
+    let statefulRan = false;
+    let statefulMaxRepeat = 0;
+    let statefulMaxTool = '';
+    const afterResult = (tc: ToolCall, r: { content: string; isError?: boolean }) => {
+      noteResult(tc.function.name, r);
+      const p = pendingStateful.get(tc);
+      if (!p) return;
+      pendingStateful.delete(tc);
+      statefulRan = true;
+      const h = resultHash(r.content);
+      recentCalls.push({ name: tc.function.name, argsHash: `${p.argsHash}:${h}` });
+      if (recentCalls.length > 10) recentCalls.shift();
+      const key = `${p.base}|${h}`;
+      const n = (callCounts.get(key) ?? 0) + 1;
+      callCounts.set(key, n);
+      if (p.readOnly && n > statefulMaxRepeat) { statefulMaxRepeat = n; statefulMaxTool = tc.function.name; }
     };
     // Tracks consecutive failures/no-results from the SAME tool, REGARDLESS of args.
     // Catches a pattern the stuck-loop detector misses: the model varies the query
@@ -755,12 +901,6 @@ export class AgentLoop {
     // After N consecutive empty results from one tool, we inject a system note
     // telling the model to stop retrying and report the limitation to the user.
     const consecutiveFailures: { tool: string | null; count: number } = { tool: null, count: 0 };
-
-    // Cumulative count of each (tool|argsHash) across the WHOLE run. Catches the "restart"
-    // loop the sliding window misses: when the codebase is larger than the context window,
-    // the model loses its place and re-reads the same files sweep after sweep. Each sweep is
-    // longer than the recent-calls window, so only a run-wide tally spots the repetition.
-    const callCounts = new Map<string, number>();
     // When set, the next dispatch sends NO tools, forcing the model to answer in plain text
     // (used to break a stuck read loop by making it summarize what it already found).
     let forceTextOnly = false;
@@ -1042,7 +1182,7 @@ export class AgentLoop {
       const allMessagesRaw = messages.concat(newMessages);
       // Sub-agent invocations pin their resolved model via options.modelOverride.
       // This takes precedence over options.explicitModel (which is the parent's /model slash command).
-      const pinnedModel = (options as any).modelOverride?.model ?? options.explicitModel;
+      const pinnedModel = options.modelOverride?.model ?? options.explicitModel;
       const route = this.router.route(
         taskClass,
         this.estimateTokens(allMessagesRaw),
@@ -1074,7 +1214,9 @@ export class AgentLoop {
       // without losing capability — registry.execute() can still run any tool the
       // model names, gating only affects what it SEES. Off-switch: discipline.toolGating: false.
       let schemasForMode = schemasForModeAll;
-      if ((this.config as any).discipline?.toolGating !== false && mode.mode !== 'plan') {
+      // Skipped for an explicit allow-list: the list IS the tool set (gating used to hide a
+      // browser/computer role's own tools when the sub-agent prompt lacked family keywords).
+      if ((this.config as any).discipline?.toolGating !== false && mode.mode !== 'plan' && !explicitAllowList) {
         const signal = allMessagesRaw
           .filter(m => m.role === 'user' || m.role === 'assistant')
           .slice(-6)
@@ -1601,33 +1743,58 @@ export class AgentLoop {
       // Sliding window (detectStuckLoop) catches tight loops. The cumulative tally below
       // catches the "restart" loop: a sweep re-reading many files is longer than the window,
       // but a file re-read across several sweeps shows up in its run-wide count.
+      // State-dependent tools (browser_*/computer_use_*) are recorded after they run, with
+      // their result hash (afterResult); everything else is keyed by name + args, as before.
       let maxReadRepeat = 0;
+      let maxReadTool = '';
+      pendingStateful.clear();
+      statefulRan = false;
+      statefulMaxRepeat = 0;
+      statefulMaxTool = '';
       for (const tc of toolCalls) {
-        const argsHash = crypto.createHash('md5').update(tc.function.arguments).digest('hex').slice(0, 8);
-        const key = `${tc.function.name}|${argsHash}`;
-        recentCalls.push({ name: tc.function.name, argsHash });
+        const name = tc.function.name;
+        const argsHash = crypto.createHash('md5').update(tc.function.arguments ?? '').digest('hex').slice(0, 8);
+        const base = `${name}|${argsHash}`;
+        if (isStateDependentTool(name)) {
+          pendingStateful.set(tc, { base, argsHash, readOnly: this.registry.isReadOnly(name) });
+          continue;
+        }
+        recentCalls.push({ name, argsHash });
         if (recentCalls.length > 10) recentCalls.shift();
-        const n = (callCounts.get(key) ?? 0) + 1;
-        callCounts.set(key, n);
-        if (this.registry.isReadOnly(tc.function.name) && n > maxReadRepeat) maxReadRepeat = n;
+        const n = (callCounts.get(base) ?? 0) + 1;
+        callCounts.set(base, n);
+        if (this.registry.isReadOnly(name) && n > maxReadRepeat) { maxReadRepeat = n; maxReadTool = name; }
       }
 
+      // When a guard fires, this response's tool calls are NOT executed. Each still gets a
+      // tool result (strict providers reject an assistant tool_call without one) explaining
+      // that it was skipped; the nudge follows as a separate message.
+      const skipToolCalls = (reason: string): Message[] => {
+        pendingStateful.clear();
+        const skipped: Message[] = toolCalls.map(tc => ({
+          role: 'tool' as const,
+          tool_call_id: tc.id,
+          name: tc.function.name,
+          content: `[LOOP_GUARD] Not executed — ${reason}. Read the system note that follows before calling tools again.`,
+        }));
+        for (const m of skipped) newMessages.push(m);
+        sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        return skipped;
+      };
       const readAction = readLoopAction(maxReadRepeat);
 
       // Hard cap: re-read the same file 5+ times and ignored the nudge — its context can't
       // hold the codebase, so it restarts forever. End cleanly with a message the user can
       // act on, instead of spinning until the iteration budget (or the model server) gives out.
       if (readAction === 'abort') {
-        const ctx = route.modelInfo.contextWindow.toLocaleString();
-        const msg =
-          `I got stuck re-reading the same files. This codebase is larger than the model's context ` +
-          `window (${ctx} tokens), so I keep losing my place and starting over. To finish this, either ` +
-          `narrow the task (e.g. “find bugs in src/pages/CartPage.jsx”) or use a model with a larger ` +
-          `context window (~/.qodex/config.yaml → providers.*.extraModels[].contextWindow).`;
+        for (const m of skipToolCalls('repeated identical call')) {
+          yield { type: 'tool_result', data: { id: m.tool_call_id, name: m.name, result: m.content, isError: true } };
+        }
+        const msg = readLoopAbortMessage(maxReadTool, maxReadRepeat, route.modelInfo.contextWindow);
         const m: Message = { role: 'assistant', content: msg };
         newMessages.push(m);
         sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
-        logger.warn('Aborting run: read-loop hard cap hit', { maxReadRepeat, model: route.model });
+        logger.warn('Aborting run: read-loop hard cap hit', { maxReadRepeat, tool: maxReadTool, model: route.model });
         yield { type: 'final', data: { content: msg, usage: budget.getUsage() } };
         return;
       }
@@ -1635,13 +1802,10 @@ export class AgentLoop {
       // Re-read the same file 3+ times → the model restarted instead of continuing. Force it
       // to stop and report: disable tools next turn so it must summarize in plain text.
       if (readAction === 'summarize') {
-        const stopMsg: Message = {
-          role: 'user',
-          content:
-            `[SYSTEM] You have re-read the same file ${maxReadRepeat} times — a sign your context was ` +
-            `compacted and you restarted instead of continuing. STOP calling tools. In your NEXT message, ` +
-            `list the bugs/issues you have ALREADY found, in plain text. Tools are disabled for that message.`,
-        };
+        for (const m of skipToolCalls('repeated identical call')) {
+          yield { type: 'tool_result', data: { id: m.tool_call_id, name: m.name, result: m.content, isError: true } };
+        }
+        const stopMsg: Message = { role: 'user', content: readLoopSummarizeMessage(maxReadTool, maxReadRepeat) };
         newMessages.push(stopMsg);
         sessionStore.recordTurn(sessionId, [stopMsg], { input: 0, output: 0, costUsd: 0 });
         forceTextOnly = true;
@@ -1652,20 +1816,10 @@ export class AgentLoop {
       if (detectStuckLoop(recentCalls)) {
         // What were they stuck on? Inspect the repeated call to give targeted advice.
         const last = recentCalls[recentCalls.length - 1]!;
-        let advice = '';
-        if (last.name === 'read_file') {
-          advice = ' You are re-reading files you already examined — a sign your context was compacted and you restarted the task instead of continuing it. Do NOT start over. Based on what you have ALREADY read, report your findings now (e.g. the bugs you found) in your reply. If you need more detail on ONE specific thing, use grep with a precise pattern rather than re-reading whole files.';
-        } else if (last.name === 'edit_symbol') {
-          advice = ' edit_symbol is failing repeatedly. Switch to edit_text or write_file for the same change. Don\'t retry edit_symbol on this file.';
-        } else if (last.name === 'project_overview') {
-          advice = ' project_overview failed. SKIP it for now and use ls + read_file on specific files instead.';
-        } else {
-          advice = ' Try a fundamentally different approach (different tool, different file, different angle).';
+        for (const m of skipToolCalls('the same call sequence keeps repeating')) {
+          yield { type: 'tool_result', data: { id: m.tool_call_id, name: m.name, result: m.content, isError: true } };
         }
-        const stuckMsg: Message = {
-          role: 'user',
-          content: `[SYSTEM] You've called \`${last.name}\` with the same arguments 3+ times in a row. This isn't working.${advice} If you genuinely can't proceed, explain to the user IN ONE SENTENCE what's blocking you and stop. Do not apologize repeatedly. Do not loop.`,
-        };
+        const stuckMsg: Message = { role: 'user', content: stuckLoopMessage(last.name) };
         newMessages.push(stuckMsg);
         sessionStore.recordTurn(sessionId, [stuckMsg], { input: 0, output: 0, costUsd: 0 });
         // CRITICAL: also clear recentCalls so the model gets one clean shot after the advice
@@ -1673,20 +1827,19 @@ export class AgentLoop {
         continue;
       }
 
-      // Error-guessing loop: same tool, same error kind, different args each time (e.g. reading
-      // Header.tsx / App.tsx / Navbar.jsx — all FILE_NOT_FOUND — on a .jsx project). detectStuckLoop
-      // misses this because the args differ. Nudge the model to STOP guessing and learn the real paths.
       // Scope guard: if the user never asked to run/install/test and the model is now starting a
       // dev server or installing packages on its own, nudge it once to finish the edits and ask
       // first. Advisory only (doesn't skip execution); the soft-failure loop detector is the real
-      // circuit-breaker if the model ignores this and starts thrashing.
+      // circuit-breaker if the model ignores this and starts thrashing. The note is appended
+      // AFTER this turn's tool results (a message between a tool_call and its result is invalid).
+      let deferredNote: Message | null = null;
       if (!userAskedExecution && !scopeNudged) {
         const wandering = toolCalls.find(tc =>
           isExecutionAction(tc.function.name, tc.function.arguments ?? ''),
         );
         if (wandering) {
           scopeNudged = true;
-          const smsg: Message = {
+          deferredNote = {
             role: 'user',
             content:
               '[SYSTEM] The user asked you to write/redesign code, not to run a dev server or install ' +
@@ -1694,11 +1847,12 @@ export class AgentLoop {
               'summary. Do NOT start dev servers, install dependencies, or debug the environment unless ' +
               'the user explicitly asks — those steps are out of scope and waste time.',
           };
-          newMessages.push(smsg);
-          sessionStore.recordTurn(sessionId, [smsg], { input: 0, output: 0, costUsd: 0 });
         }
       }
 
+      // Error-guessing loop: same tool, same error kind, different args each time (e.g. reading
+      // Header.tsx / App.tsx / Navbar.jsx — all FILE_NOT_FOUND — on a .jsx project). detectStuckLoop
+      // misses this because the args differ. Nudge the model to STOP guessing and learn the real paths.
       const errLoop = detectErrorLoop(recentErrors);
       if (errLoop) {
         let advice = ' Change approach instead of repeating the same kind of call.';
@@ -1708,11 +1862,16 @@ export class AgentLoop {
             'names — this project likely uses different extensions than you assume (e.g. .jsx, not .tsx). ' +
             'Run `glob` or `ls` to get exact paths, then read those. Do not keep trying filename variations.';
         }
+        for (const m of skipToolCalls(`\`${errLoop.name}\` keeps failing with ${errLoop.code}`)) {
+          yield { type: 'tool_result', data: { id: m.tool_call_id, name: m.name, result: m.content, isError: true } };
+        }
         const msg: Message = {
           role: 'user',
           content:
             `[SYSTEM] \`${errLoop.name}\` has returned ${errLoop.code} ${errLoop.count} times with different ` +
-            `arguments.${advice} If you genuinely can't proceed, say so in ONE sentence and stop. Do not loop.`,
+            `arguments.${advice} If you genuinely can't proceed, say so in ONE sentence and stop. Do not loop.` +
+            // One user message, never two in a row (strict providers reject that).
+            (deferredNote ? `\n\n${deferredNote.content}` : ''),
         };
         newMessages.push(msg);
         sessionStore.recordTurn(sessionId, [msg], { input: 0, output: 0, costUsd: 0 });
@@ -1740,7 +1899,7 @@ export class AgentLoop {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
-          noteResult(tc.function.name, r);
+          afterResult(tc, r);
           // Emit any UI events captured during execution
           for (const ev of r.uiEvents) {
             yield { type: 'tool_ui', data: ev };
@@ -1769,7 +1928,7 @@ export class AgentLoop {
           const tc = batch[0]!;
           const r = await this.executeToolCall(tc, txn, sessionId, options);
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
-          noteResult(tc.function.name, r);
+          afterResult(tc, r);
           for (const ev of r.uiEvents) {
             yield { type: 'tool_ui', data: ev };
           }
@@ -1789,7 +1948,7 @@ export class AgentLoop {
             const tc = batch[i]!;
             const r = results[i]!;
             yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
-            noteResult(tc.function.name, r);
+            afterResult(tc, r);
             for (const ev of r.uiEvents) yield { type: 'tool_ui', data: ev };
             toolMessages.push({
               role: 'tool',
@@ -1846,6 +2005,9 @@ export class AgentLoop {
       // Add tool results to message history
       for (const m of toolMessages) newMessages.push(m);
       sessionStore.recordTurn(sessionId, toolMessages, { input: 0, output: 0, costUsd: 0 });
+      // System notes for after this turn's results (one combined user message at most).
+      const postToolNotes: string[] = [];
+      if (deferredNote && typeof deferredNote.content === 'string') postToolNotes.push(deferredNote.content);
 
       // Consecutive-failure detection — same tool returning empty / error multiple
       // times in a row, even if args differ each time. This catches the pattern of
@@ -1867,18 +2029,14 @@ export class AgentLoop {
           consecutiveFailures.count = 1;
         }
         if (consecutiveFailures.count >= 3) {
-          const note: Message = {
-            role: 'user',
-            content:
-              `[SYSTEM] The \`${thisTool}\` tool has returned empty results / errors ` +
-              `${consecutiveFailures.count} times in a row this turn. The underlying service ` +
-              `is unavailable or has no data for the query. STOP retrying. Either: ` +
-              `(1) tell the user the tool can't reach the data and ask what to do, or ` +
-              `(2) answer from your own knowledge if you can. Do not call ${thisTool} again ` +
-              `for this user request.`,
-          };
-          newMessages.push(note);
-          sessionStore.recordTurn(sessionId, [note], { input: 0, output: 0, costUsd: 0 });
+          postToolNotes.push(
+            `[SYSTEM] The \`${thisTool}\` tool has returned empty results / errors ` +
+            `${consecutiveFailures.count} times in a row this turn. The underlying service ` +
+            `is unavailable or has no data for the query. STOP retrying. Either: ` +
+            `(1) tell the user the tool can't reach the data and ask what to do, or ` +
+            `(2) answer from your own knowledge if you can. Do not call ${thisTool} again ` +
+            `for this user request.`,
+          );
           logger.warn('Consecutive-failure circuit-breaker tripped', {
             tool: thisTool,
             consecutiveFailures: consecutiveFailures.count,
@@ -1891,6 +2049,37 @@ export class AgentLoop {
         // Any success / different tool resets the streak.
         consecutiveFailures.tool = null;
         consecutiveFailures.count = 0;
+      }
+
+      // ── Loop guards for state-dependent tools (browser_*/computer_use_*) ──
+      // Their window entries / run-wide counts carry the actual result hash, so only now —
+      // after they ran — can we tell a truly identical call+result repeat from progress.
+      // Same thresholds as the pre-execution guards; nothing is skipped (the calls ran).
+      if (statefulRan) {
+        const stateAction = readLoopAction(statefulMaxRepeat);
+        if (stateAction === 'abort') {
+          const msg = readLoopAbortMessage(statefulMaxTool, statefulMaxRepeat, route.modelInfo.contextWindow);
+          const m: Message = { role: 'assistant', content: msg };
+          newMessages.push(m);
+          sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
+          logger.warn('Aborting run: identical observation repeated', { count: statefulMaxRepeat, tool: statefulMaxTool, model: route.model });
+          yield { type: 'final', data: { content: msg, usage: budget.getUsage() } };
+          return;
+        }
+        if (stateAction === 'summarize') {
+          postToolNotes.push(readLoopSummarizeMessage(statefulMaxTool, statefulMaxRepeat));
+          forceTextOnly = true;
+          recentCalls.length = 0;
+        } else if (detectStuckLoop(recentCalls)) {
+          postToolNotes.push(stuckLoopMessage(recentCalls[recentCalls.length - 1]!.name));
+          recentCalls.length = 0;
+        }
+      }
+
+      if (postToolNotes.length > 0) {
+        const note: Message = { role: 'user', content: postToolNotes.join('\n\n') };
+        newMessages.push(note);
+        sessionStore.recordTurn(sessionId, [note], { input: 0, output: 0, costUsd: 0 });
       }
 
       yield { type: 'iteration_done', data: { iteration: budget.getUsage().iterations } };
@@ -1915,6 +2104,31 @@ export class AgentLoop {
       };
     }
 
+    // ─── Explicit allow-list (role sub-agents, custom commands with allowed-tools) ───
+    // Relevance gating only hides tools; an allow-list is a restriction the user/role set
+    // on purpose (a read-only scout must never write, a browser operator has no shell), so
+    // a call outside it is refused here instead of silently running. Aliases resolve to
+    // their canonical tool first (bash → shell).
+    const allowList = options.mode?.allowedTools;
+    if (Array.isArray(allowList)) {
+      const canonical = this.registry.get(tc.function.name)?.name ?? tc.function.name;
+      const allowed = allowList.some(entry => {
+        if (typeof entry !== 'string' || !entry) return false;
+        if (entry.endsWith('*')) return canonical.startsWith(entry.slice(0, -1)); // "browser_*"
+        return entry === tc.function.name || entry === canonical
+          || (this.registry.get(entry)?.name ?? entry) === canonical; // alias in the list ("bash")
+      });
+      if (!allowed) {
+        const shown = allowList.length > 0 ? allowList.slice(0, 40).join(', ') + (allowList.length > 40 ? ', …' : '') : '(none)';
+        return {
+          content: `[TOOL_NOT_ALLOWED] '${tc.function.name}' is not available in this run. ` +
+            `Allowed tools: ${shown}. Use one of these, or report back what you could not do.`,
+          isError: true,
+          uiEvents,
+        };
+      }
+    }
+
     // Per-tool abort controller. We compose two sources of abort:
     //   1. Outer agent signal (user pressed Ctrl+C) → cascades to inner
     //   2. Per-tool timeout → also triggers inner abort
@@ -1931,17 +2145,35 @@ export class AgentLoop {
       }
     }
 
-    const timeoutSec = this.config.budget.toolTimeoutSeconds ?? 300;
-    const timeoutMs = timeoutSec * 1000;
+    // Per-tool timeout: the tool's own `timeoutSeconds` (0 = none — e.g. an autonomous
+    // browser sub-agent with its own wall-clock budget; n = max(global, n)), else the
+    // global budget.toolTimeoutSeconds (default 300s).
+    const timeoutSec = resolveToolTimeoutSeconds(
+      this.config.budget?.toolTimeoutSeconds,
+      this.registry.get(tc.function.name)?.timeoutSeconds,
+    );
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // With no timeout, the race is settled by the tool itself — or by cancellation: a
+    // no-timeout tool that ignores ctx.signal must still not hang the loop after Ctrl+C.
+    let onToolAbort: (() => void) | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
+      if (timeoutSec <= 0) {
+        onToolAbort = () => {
+          const err: any = new Error(`Tool '${tc.function.name}' was cancelled`);
+          err.code = 'CANCELLED';
+          reject(err);
+        };
+        if (toolAbort.signal.aborted) onToolAbort();
+        else toolAbort.signal.addEventListener('abort', onToolAbort, { once: true });
+        return;
+      }
       timeoutHandle = setTimeout(() => {
         // CRITICAL: abort the tool's inner signal so spawn'd processes actually die.
         toolAbort.abort('TOOL_TIMEOUT');
         const err: any = new Error(`Tool '${tc.function.name}' exceeded ${timeoutSec}s timeout`);
         err.code = 'TOOL_TIMEOUT';
         reject(err);
-      }, timeoutMs);
+      }, timeoutSec * 1000);
     });
 
     const ctx: ToolContext = {
@@ -2017,10 +2249,11 @@ export class AgentLoop {
       if (this.planGateComplex && tool && !tool.isReadOnly) {
         if (isPlanningToolCall(tc.function.name, args)) {
           this.planGateSatisfied = true; // good — the model is planning; let it through
-        } else if (tc.function.name.startsWith('artifact_')) {
+        } else if (isGateExemptTool(tc.function.name)) {
           // Artifact tools produce a standalone deliverable (a page/component the user keeps),
-          // not a refactor of the project codebase — the architecture-plan discipline doesn't
-          // apply, and gating them just derails the create→preview→review flow. Let them through.
+          // and browser_/computer_use_/workflow_/mission_/vault_ tools act on the agent's own
+          // computer — none is a refactor of the project codebase, so the architecture-plan
+          // discipline doesn't apply and gating them just derails the flow. Let them through.
         } else if (!this.planGateSatisfied && !this.planGateFired) {
           this.planGateFired = true; // fire at most once per run
           logger.info('Pre-flight gate: requiring a plan before the first build action', { tool: tc.function.name });
@@ -2065,7 +2298,9 @@ export class AgentLoop {
       // whole turn — exactly what the user wants if "make the change" went sideways.
       //
       // This is the safety net Hamed asked for: every mutation has a back button.
-      if (this.snapshotService && !this.turnSnapshotTaken) {
+      // Browser/desktop/workflow/mission/vault actions don't touch the working tree — a git
+      // snapshot before them is pure overhead (and would be spent before the real edit).
+      if (this.snapshotService && !this.turnSnapshotTaken && !isGateExemptTool(tc.function.name)) {
         const isMutating = tool && !tool.isReadOnly;
         if (isMutating) {
           try {
@@ -2158,6 +2393,7 @@ export class AgentLoop {
       return { content: transformError(e, tc), isError: true, uiEvents };
     } finally {
       clearTimeout(timeoutHandle);
+      if (onToolAbort) toolAbort.signal.removeEventListener('abort', onToolAbort);
       if (options.signal && !options.signal.aborted) {
         options.signal.removeEventListener('abort', cascadeAbort);
       }
@@ -2234,36 +2470,13 @@ export class AgentLoop {
   /**
    * Classify the user's request for the purpose of system-prompt addendum.
    * Different from classifyTask (which is for router model selection); this
-   * picks ONE of refactor/debug/feature/review/explain/general based on the
-   * user's verbs and structure.
+   * picks ONE prompt task class (refactor/debug/feature/review/explain/frontend/
+   * backend/analysis/web/desktop/general). The rules live in the pure, table-tested
+   * classifyTaskForPrompt (./task-classifier.ts).
    */
-  private classifyForPrompt(initial: Message[]): 'refactor' | 'debug' | 'feature' | 'review' | 'explain' | 'frontend' | 'backend' | 'analysis' | 'general' {
+  private classifyForPrompt(initial: Message[]): PromptTaskClass {
     const userMsg = initial.find(m => m.role === 'user')?.content ?? '';
-    const text = String(userMsg).toLowerCase();
-    // Backend / Django signals — checked FIRST so "design the Django models" classifies as backend, not frontend.
-    // Persian terms are matched WITHOUT \b — JS word boundaries don't fire around non-ASCII letters.
-    if (/\b(django|drf|django ?rest|serializer|viewset|queryset|orm|migration|makemigrations|models?\.py|celery|wsgi|asgi|manage\.py|backend|back ?end|api ?endpoint|rest ?api)\b/.test(text)
-      || /(جنگو|بک‌?اند|بک ?اند|بکند|سمت ?سرور|پایگاه ?داده|دیتابیس)/.test(text)) {
-      return 'backend';
-    }
-    // Frontend signals — strongest match (overrides feature/refactor when explicit).
-    if (/\b(design|redesign|ui|ux|frontend|landing(?: ?page)?|hero(?: section)?|component|style|theme|layout|animation|three\.?js|react three|r3f|page|button|navbar|header|footer|card|modal|dropdown|form ?design|color|palette|tailwind|shadcn|figma|wireframe|prototype|mockup|polish|aesthetic|beautiful|elegant|modern|minimalist|gradient|glassmorphism|neumorphism|skeuomorphic|3d|scene|webgl|shader|seo|json-?ld|structured ?data|schema\.?org|rich ?results|open ?graph|sitemap)\b/.test(text)
-      || /(دیزاین|طراحی|زیبا|فرانت|قشنگ|مدرن|گرادیان|ظاهر|رابط ?کاربری|سایت|وب ?سایت)/.test(text)) {
-      return 'frontend';
-    }
-    // Highest-signal first
-    if (/\b(refactor|restructure|clean ?up|simplify|extract|inline|rename|move|consolidate|deduplicate|untangle)\b/.test(text)) return 'refactor';
-    if (/\b(debug|fix|error|exception|crash|broken|bug|broke|stuck|hang|throwing|undefined|null|fail|regression|نمی‌?کار|نمیکار|خراب|باگ|اشکال|درست(?: نمی| نمی))\b/.test(text)) return 'debug';
-    if (/\b(review|critique|audit|inspect|code ?review|smell|improve|quality|بررسی)\b/.test(text)) return 'review';
-    if (/\b(explain|describe|what does|how does|walk through|understand|چطور|چگونه|توضیح)\b/.test(text)) return 'explain';
-    // Analytical / decision / business tasks — NOT coding. Checked before `feature` so
-    // "build a business plan" / "develop a strategy" classify as analysis, not a build task.
-    if (/\b(trade-?offs?|business ?plan|pros and cons|cost[- ]benefit|swot|feasibility|go-to-market|value proposition|market analysis|competitive analysis|monetiz|decision matrix|which (?:option |one )?(?:is )?better|compare\b[\s\S]*\b(?:vs|versus)\b|evaluate (?:the )?options|weigh (?:the )?(?:options|pros)|should (?:i|we) (?:use|choose|pick|go with)|strategy|analy[sz]e|analysis)\b/.test(text)
-      || /(تحلیل|بیزینس ?پلن|طرح ?کسب|کسب ?و ?کار|استراتژی|مقایسه|مزایا و معایب|سود و زیان|گزینه|ارزیابی|امکان ?سنجی|تصمیم|بازار)/.test(text)) {
-      return 'analysis';
-    }
-    if (/\b(add|build|implement|create|new feature|develop|integrate|بساز|اضافه|پیاده ?سازی|ایجاد)\b/.test(text)) return 'feature';
-    return 'general';
+    return classifyTaskForPrompt(String(userMsg));
   }
 
   /** Drop oldest turn groups when context exceeds budget. Preserves tool_call/tool_result coupling. */

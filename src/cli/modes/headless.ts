@@ -1,4 +1,13 @@
-import { AgentLoop } from '../../agent/loop.js';
+/**
+ * Headless (`qodex --print`) driver: runs one agent task without the TUI and streams
+ * plain text or NDJSON (`--json`) to stdout. Scheduled runs and scripts use it.
+ *
+ * Approvals here are UNATTENDED: no human sits at this process's terminal. Every
+ * askUser prompt is answered by a fixed policy (`headlessAnswer`): deny by default,
+ * approve only with `--yes`. Sentinel-critical actions never reach this asker — they
+ * need a real human on a remote channel (control center / Telegram) or are refused.
+ */
+import { AgentLoop, setActiveAgent, getActiveAgent } from '../../agent/loop.js';
 import type { ModelRouter } from '../../llm/router.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { PermissionEngine } from '../../security/permissions.js';
@@ -7,6 +16,25 @@ import { getSessionStore } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 import { StreamDisplayFilter } from '../../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from './final-dedupe.js';
+import { getApprovalBroker, isApproval, safeOption, setInteractiveHuman } from '../../control/approvals.js';
+import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.js';
+
+/**
+ * The unattended answer to an approval prompt. PURE.
+ *
+ *   - without --yes: the safe option (the first option starting with n / deny / reject /
+ *     cancel / …), else 'no'. (The old code fell back to options[0], so the edit-approval
+ *     prompt ['accept','edit','continue','reject'] was silently ACCEPTED while logging "denied".)
+ *   - with --yes: the first approving option (starting with y / accept / approve / allow),
+ *     else options[0].
+ */
+export function headlessAnswer(options: string[] | undefined, autoYes: boolean): string {
+  const opts = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
+  if (autoYes) {
+    return opts.find(o => /^(y|accept|approve|allow)/i.test(String(o).trim())) ?? opts[0]!;
+  }
+  return safeOption(opts) ?? 'no';
+}
 
 export interface HeadlessOptions {
   cwd: string;
@@ -80,6 +108,10 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     cwd: opts.cwd,
   });
 
+  // Unattended process: no human at this terminal (Sentinel reads this to decide that
+  // critical actions must go to a remote channel or be refused).
+  setInteractiveHuman(false);
+
   if (!initialMessages) {
     initialMessages = await agent.buildInitialMessages(
       effectivePrompt,
@@ -110,20 +142,44 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // all). Recreated per iteration so state never leaks across turns.
   let display = new StreamDisplayFilter();
 
-  const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    if (opts.autoApproveAll) {
-      const yes = options.find(o => o.toLowerCase().startsWith('y'));
-      if (yes) return yes;
-    }
-    // In headless without auto-approve, deny by default
+  // The fixed unattended policy (see headlessAnswer). Approvals under --yes stay quiet in
+  // text mode (as before); denials are always reported so the user knows why a step failed.
+  const policyAsk = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+    const answer = headlessAnswer(options, !!opts.autoApproveAll);
+    const approved = isApproval(answer, options);
     if (opts.json) {
-      process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, denied: true }) + '\n');
-    } else {
+      process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, answer, denied: !approved }) + '\n');
+    } else if (!approved) {
       console.error(`Permission request: ${prompt} → auto-denied in headless mode (use --yes to auto-approve)`);
     }
-    const no = options.find(o => o.toLowerCase().startsWith('n'));
-    return no ?? options[0]!;
+    return answer;
   };
+  // Brokered semantics: when a remote approval channel (control center / Telegram) lives
+  // in this process, the prompt also goes through the ApprovalBroker so it is published
+  // (bus + channels) and audited; the local policy answers it.
+  const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+    const broker = getApprovalBroker();
+    if (broker.hasRemoteChannel()) {
+      const r = await broker.request({ prompt, options, source: 'headless' }, (p, o) => policyAsk(p, o));
+      return r.answer;
+    }
+    return policyAsk(prompt, options);
+  };
+
+  // SIGTERM (scheduler hard-kill, `kill`, a supervising process) cancels the run cleanly:
+  // the loop sees the abort, rolls back the pending transaction and stops. SIGINT is
+  // deliberately NOT handled here — any SIGINT listener would disable Ctrl+C exit.
+  const runAbort = new AbortController();
+  const onSigterm = () => { if (!runAbort.signal.aborted) runAbort.abort('SIGTERM'); };
+  process.once('SIGTERM', onSigterm);
+
+  // Sub-agents (task / fanout / gather / orchestrate / browser_agent / background jobs)
+  // were disabled in --print because only the TUI registered a runner. Register one for
+  // this run, and publish the agent so remote steering (control center) reaches it.
+  // Both are unpublished in the finally below.
+  const subAgentRunner = (p: string, o: Parameters<AgentLoop['runSubagent']>[1]) => agent.runSubagent(p, o);
+  setSubAgentRunner(subAgentRunner);
+  setActiveAgent(agent);
 
   try {
     for await (const event of agent.run(initialMessages, sessionId, {
@@ -132,6 +188,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
         ? { mode: modeOverride, allowedTools: allowedToolsOverride }
         : { mode: modeOverride },
       askUser,
+      signal: runAbort.signal,
     })) {
       if (opts.json) {
         process.stdout.write(JSON.stringify({ type: event.type, ...event.data }) + '\n');
@@ -185,6 +242,11 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     logger.error('Headless run failed', { err: e.message });
     console.error('Fatal:', e.message);
     return 1;
+  } finally {
+    process.removeListener('SIGTERM', onSigterm);
+    // Unpublish only what we published (a host may have swapped in its own since).
+    if (getSubAgentRunner() === subAgentRunner) setSubAgentRunner(null);
+    if (getActiveAgent() === agent) setActiveAgent(null);
   }
 
   // Desktop notification for long autonomous runs (e.g. `qodex --print … --yes`

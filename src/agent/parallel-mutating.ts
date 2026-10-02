@@ -3,8 +3,9 @@
  *
  * Two mutations are parallel-safe iff:
  *   1. They touch disjoint file paths, AND
- *   2. Neither is a "global" tool (bash, code_run — these may have any side
- *      effect, never parallelize), AND
+ *   2. Neither is a "global" tool (shell, code_run — these may have any side
+ *      effect, never parallelize; and every browser_ / computer_use_ / mission_ /
+ *      vault_ call, which share one live browser tab / desktop / store), AND
  *   3. Neither is a "broad" tool (multi_file_edit, safe_rename, safe_delete
  *      — these touch many files we can't enumerate cheaply).
  *
@@ -29,8 +30,22 @@
 
 import type { ToolCall } from '../llm/types.js';
 
-const GLOBAL_TOOLS = new Set(['bash', 'code_run', 'auto_fix', 'computer_use_screenshot', 'computer_use_click', 'computer_use_type', 'computer_use_key', 'http_request', 'db_query', 'browser_navigate', 'browser_click', 'browser_fill', 'browser_evaluate', 'dev_server_start', 'dev_server_stop', 'dev_server_restart']);
+// `shell` is the canonical name (`bash` is only an alias the registry resolves; both are
+// listed so a raw alias in a tool call is still treated as global).
+const GLOBAL_TOOLS = new Set(['shell', 'bash', 'code_run', 'auto_fix', 'http_request', 'db_query', 'dev_server_start', 'dev_server_stop', 'workflow_run']);
+/**
+ * Tool families that drive ONE shared live resource (the browser's active tab, the
+ * desktop's mouse/keyboard, the vault, the mission DB). Their order is semantic — a
+ * click must land before the type that follows it — and they don't take path args the
+ * disjointness check could reason about, so every call in these families runs solo.
+ */
+const GLOBAL_PREFIXES = ['browser_', 'computer_use_', 'mission_', 'vault_'];
 const BROAD_TOOLS = new Set(['multi_file_edit', 'safe_rename', 'safe_delete_file']);
+
+/** True when a tool call must run alone (never batched with other mutations). PURE. */
+export function isSoloTool(name: string): boolean {
+  return GLOBAL_TOOLS.has(name) || BROAD_TOOLS.has(name) || GLOBAL_PREFIXES.some(p => name.startsWith(p));
+}
 
 function extractPaths(args: any): string[] | null {
   if (!args || typeof args !== 'object') return null;
@@ -65,8 +80,8 @@ export function groupMutatingForParallel(calls: ToolCall[]): ToolCall[][] {
 
   for (const tc of calls) {
     const name = tc.function.name;
-    // Globals and broad always solo
-    if (GLOBAL_TOOLS.has(name) || BROAD_TOOLS.has(name)) {
+    // Globals, platform families (browser/desktop/missions/vault) and broad tools always solo
+    if (isSoloTool(name)) {
       if (currentBatch.length > 0) {
         batches.push(currentBatch);
         currentBatch = [];
