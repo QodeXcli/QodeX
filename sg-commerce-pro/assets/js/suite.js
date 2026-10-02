@@ -48,7 +48,6 @@
 				var v = attrs[k];
 				if (v === null || v === undefined || v === false) { return; }
 				if (k === 'class') { el.className = v; }
-				else if (k === 'html') { el.innerHTML = v; }
 				else if (k === 'style' && typeof v === 'object') { Object.assign(el.style, v); }
 				else if (k.indexOf('on') === 0 && typeof v === 'function') { el.addEventListener(k.slice(2), v); }
 				else if (v === true) { el.setAttribute(k, ''); }
@@ -61,7 +60,15 @@
 	function add(el, c) {
 		if (c === null || c === undefined || c === false) { return; }
 		if (Array.isArray(c)) { c.forEach(function (x) { add(el, x); }); return; }
-		el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+		if (typeof c !== 'object') { el.appendChild(document.createTextNode(String(c))); return; } // text, never markup
+		if (c instanceof Node) { el.appendChild(c); }
+	}
+	/** Return the element of `allowed` equal to `value` (a fresh, trusted string), else `fallback`. */
+	function pick(allowed, value, fallback) {
+		for (var i = 0; i < allowed.length; i++) {
+			if (allowed[i] === value) { return allowed[i]; }
+		}
+		return fallback;
 	}
 	function clear(el) { while (el.firstChild) { el.removeChild(el.firstChild); } return el; }
 
@@ -79,7 +86,6 @@
 	function pct(v, d) { if (v === null || v === undefined || v === '') { return '—'; } return num(v).toFixed(d === undefined ? 1 : d) + '%'; }
 	function signed(v, fn) { var s = (fn || money)(v); return num(v) > 0 ? '+' + s : s; }
 	function tone(v) { return num(v) > 0 ? 'pos' : (num(v) < 0 ? 'neg' : ''); }
-	function esc(s) { return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 	function shortDate(d) { if (!d) { return '—'; } var x = new Date(String(d).replace(' ', 'T') + (String(d).length <= 10 ? 'T00:00:00' : '')); return isNaN(x) ? d : x.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); }
 	function dateTime(d) { if (!d) { return '—'; } var x = new Date(String(d).replace(' ', 'T') + 'Z'); return isNaN(x) ? d : x.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 	function ymd(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
@@ -138,7 +144,8 @@
 	var toasts = h('div', { class: 'sgs-toasts' });
 	document.body.appendChild(toasts);
 	function toast(msg, kind) {
-		var t = h('div', { class: 'sgs-toast ' + (kind || '') }, msg);
+		var t = h('div', { class: 'sgs-toast ' + (kind || '') });
+		t.textContent = String(msg); // message text is never parsed as markup
 		toasts.appendChild(t);
 		setTimeout(function () { t.remove(); }, kind === 'bad' ? 7000 : 3500);
 	}
@@ -549,13 +556,14 @@
 	function route() {
 		var hash = (window.location.hash || '').replace(/^#\/?/, '');
 		var name = hash.split('?')[0];
-		var page = PAGES[name] ? name : '';
+		var page = pick(Object.keys(PAGES), name, '');
+		var render = PAGES[page];
 		drawNav(page);
 		clear(headerSlot).appendChild(header());
 		banners();
 		clear(main).appendChild(loading());
 		var my = ++token;
-		Promise.resolve().then(function () { return PAGES[page](); }).then(function (node) {
+		Promise.resolve().then(function () { return render(); }).then(function (node) {
 			if (my !== token) { return; }
 			// Pages may refresh connection/demo/unread state — redraw the chrome for the CURRENT route only.
 			drawNav(page);
@@ -891,7 +899,8 @@
 				clear(wrap);
 				wrap.appendChild(pageHead('PPC Manager', 'Sponsored Products automation: rule-based bid optimisation to your target ACoS, search-term harvesting, negative keywords and budget pacing — always reviewable before it touches Amazon.', [rangeBar(draw)]));
 				add(wrap, [info, k, ch, h('div', null, seg([['optimizer', 'Optimizer' + (o.planned ? ' (' + o.planned + ')' : '')], ['campaigns', 'Campaigns'], ['targets', 'Keywords & targets'], ['terms', 'Search terms'], ['history', 'Change log']], tab, setTab)), body]);
-				var view = { optimizer: optimizer, campaigns: campaigns, targets: targets, terms: terms, history: historyView }[tab] || optimizer;
+				var views = { optimizer: optimizer, campaigns: campaigns, targets: targets, terms: terms, history: historyView };
+				var view = views[pick(Object.keys(views), tab, 'optimizer')];
 				view().then(function (n) { clear(body).appendChild(n); }, function (e) { clear(body).appendChild(failure(e)); });
 			}, function (e) { clear(wrap).appendChild(failure(e)); });
 		}
@@ -1144,7 +1153,7 @@
 			});
 			return h('div', { class: 'sgs-stack' }, pageHead('Hijackers & Buy Box', 'Instant alerts when a new seller jumps on your listing, when you lose the Buy Box, or when a competitor slashes price — with Keepa-style history.'), k, hij, t);
 		});
-	}
+	};
 
 	function monitorDrawer(r) {
 		var dr = drawer(r.asin + (+r.is_mine ? ' (yours)' : ''), loading(), [h('a', { class: 'btn sm', href: amazonUrl(r.asin), target: '_blank', rel: 'noopener' }, 'View on Amazon')]);
