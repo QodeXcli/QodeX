@@ -102,7 +102,7 @@ final class SuiteModule implements Module {
 		$c->singleton( ReviewRequester::class, static fn( Container $c ) => new ReviewRequester( $c->get( AmazonClient::class ), $c->get( SuiteSettings::class ), $c->get( Logger::class ) ) );
 		$c->singleton( ReimbursementAuditor::class, static fn() => new ReimbursementAuditor() );
 		$c->singleton( ProductResearch::class, static fn( Container $c ) => new ProductResearch( $c->get( AmazonClient::class ) ) );
-		$c->singleton( DemoSeeder::class, static fn( Container $c ) => new DemoSeeder( $c->get( ReimbursementAuditor::class ) ) );
+		$c->singleton( DemoSeeder::class, static fn( Container $c ) => new DemoSeeder( $c->get( ReimbursementAuditor::class ), $c->get( AdsSync::class ) ) );
 		$c->singleton( SuiteController::class, static fn( Container $c ) => new SuiteController( $c ) );
 	}
 

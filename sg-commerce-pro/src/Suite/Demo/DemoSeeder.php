@@ -15,6 +15,7 @@ declare( strict_types = 1 );
 
 namespace SevenGum\Commerce\Suite\Demo;
 
+use SevenGum\Commerce\Automation\AlertDispatcher;
 use SevenGum\Commerce\Suite\Ads\AdsSync;
 use SevenGum\Commerce\Suite\Listings\ListingAuditor;
 use SevenGum\Commerce\Suite\Reimbursements\ReimbursementAuditor;
@@ -33,7 +34,10 @@ final class DemoSeeder {
 	private string $today;
 	private int $seq = 0;
 
-	public function __construct( private ReimbursementAuditor $auditor ) {}
+	public function __construct(
+		private ReimbursementAuditor $auditor,
+		private AdsSync $ads,
+	) {}
 
 	public static function active(): bool {
 		return (bool) get_option( self::OPTION, false );
@@ -70,6 +74,11 @@ final class DemoSeeder {
 		Db::exec( 'UPDATE {t:reimb_cases} SET is_demo = 1 WHERE id > %d', array( $max_case ) );
 		$counts['reimb_cases'] = (int) Db::var( 'SELECT COUNT(*) FROM {t:reimb_cases} WHERE is_demo = 1' );
 
+		$counts['alerts'] = $this->alerts();
+
+		// Build a PPC plan so the Optimizer has reviewable recommendations straight away.
+		$counts['ppc_actions'] = array_sum( $this->ads->optimize( $this->today ) );
+
 		update_option( self::OPTION, 1, false );
 		return $counts;
 	}
@@ -89,7 +98,18 @@ final class DemoSeeder {
 			$wpdb->query( "DELETE FROM {$wpdb->prefix}sg_price_history WHERE product_id IN ({$in})" ); // phpcs:ignore
 			$wpdb->query( "DELETE FROM {$wpdb->prefix}sg_products WHERE id IN ({$in})" ); // phpcs:ignore
 		}
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->prefix}sg_alerts WHERE context LIKE %s", '%' . $wpdb->esc_like( '"demo":true' ) . '%' ) ); // phpcs:ignore
 		delete_option( self::OPTION );
+	}
+
+	private function alerts(): int {
+		$ctx = array( 'demo' => true, 'market' => $this->market );
+		AlertDispatcher::create( 'critical', 'suite_hijacker', 'New seller on your ASIN B0DEMO0006: A3HIJACK9DEMO (FBM @ 4.49)', 'A seller that was not on this listing before is now offering it. If you are brand-registered, verify authenticity and file a Report a Violation case; consider a test buy.', $ctx );
+		AlertDispatcher::create( 'warning', 'suite_buybox', 'Buy Box lost on B0DEMO0006 to A3HIJACK9DEMO', 'Winning price now 4.49.', $ctx );
+		AlertDispatcher::create( 'warning', 'suite_feedback', 'Negative seller feedback (1★) on a recent order', 'Never received my order.', $ctx );
+		AlertDispatcher::create( 'warning', 'suite_listing', 'Listing content changed: DEMO-P1-STRAWBERRY (B0DEMO0005)', 'Title, bullets, description or images differ from the last audit. If you did not make this change, check for a catalog contribution from Amazon or another seller.', $ctx );
+		AlertDispatcher::create( 'info', 'suite_competitor', 'Competitor B0COMP0002 dropped price 18% (15.99 → 13.11)', '', $ctx );
+		return 5;
 	}
 
 	/* ------------------------------------------------------------------ */

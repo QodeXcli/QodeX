@@ -66,6 +66,10 @@ function sg_commerce_uninstall_one_site(): void {
 		delete_option( 'sg_commerce_secret_' . $sk );
 	}
 
+	// Catch-all: any other core option added over time (carton templates, sandbox flag,
+	// notices, API-key flashes…) shares the sg_commerce_ prefix.
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( 'sg_commerce_' ) . '%' ) );
+
 	// Suite options (cursors, job status, demo flag, schema version).
 	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( 'sg_suite_' ) . '%' ) );
 	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( '_transient_sg_suite_' ) . '%', $wpdb->esc_like( '_transient_timeout_sg_suite_' ) . '%' ) );

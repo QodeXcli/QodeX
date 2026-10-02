@@ -15,7 +15,8 @@
  *   stockout_date   = today + fulfillable / velocity
  *   reorder_by      = stockout_date − lead_time − safety_days
  *
- * Status: out_of_stock | critical | reorder_now | reorder_soon | healthy | overstock | no_sales
+ * Status: out_of_stock | critical | stockout_risk | reorder_now | reorder_soon | healthy | overstock | no_sales
+ *   (stockout_risk = enough total supply, but sellable units run out before inbound is received)
  *
  * `plan()` is pure — `build()` gathers the inputs from the database.
  *
@@ -137,7 +138,8 @@ final class RestockPlanner {
 				$qty    = 0;
 			} elseif ( 0 === $fulfillable && 0 === $supply ) {
 				$status = 'out_of_stock';
-			} elseif ( $cover < $lead ) {
+			} elseif ( $cover <= $lead ) {
+				// Runs out before (or exactly when) a PO placed today would arrive.
 				$status = 'critical';
 			} elseif ( $supply <= $reorder_point ) {
 				$status = 'reorder_now';
@@ -150,6 +152,12 @@ final class RestockPlanner {
 			}
 			if ( 0 === $fulfillable && $velocity > 0 && 'out_of_stock' !== $status ) {
 				$status = 'out_of_stock';
+			}
+			// Total supply looks fine but sellable units run out before inbound stock is likely
+			// to be received (FBA check-in typically takes 1–2 weeks) → a stock-out gap.
+			if ( in_array( $status, array( 'healthy', 'reorder_soon', 'overstock' ), true ) && null !== $days_fulfillable
+				&& $days_fulfillable < 10 && (int) $in['inbound'] > 0 ) {
+				$status = 'stockout_risk';
 			}
 
 			$lost = 'out_of_stock' === $status ? $velocity * (float) $in['price'] : 0.0;
@@ -177,7 +185,7 @@ final class RestockPlanner {
 				'lost_sales_day' => round( $lost, 2 ),
 			);
 			$summary['skus']++;
-			if ( in_array( $status, array( 'critical', 'reorder_now' ), true ) || ( 'out_of_stock' === $status && $velocity > 0 ) ) {
+			if ( in_array( $status, array( 'critical', 'reorder_now', 'stockout_risk' ), true ) || ( 'out_of_stock' === $status && $velocity > 0 ) ) {
 				$summary['reorder']++;
 			}
 			if ( 'out_of_stock' === $status ) {
@@ -190,7 +198,7 @@ final class RestockPlanner {
 			$summary['order_value'] += $qty * (float) $in['unit_cost'];
 			$summary['lost_sales_per_day'] += $lost;
 		}
-		$rank = array( 'out_of_stock' => 0, 'critical' => 1, 'reorder_now' => 2, 'reorder_soon' => 3, 'overstock' => 4, 'healthy' => 5, 'no_sales' => 6 );
+		$rank = array( 'out_of_stock' => 0, 'critical' => 1, 'stockout_risk' => 2, 'reorder_now' => 3, 'reorder_soon' => 4, 'overstock' => 5, 'healthy' => 6, 'no_sales' => 7 );
 		usort( $rows, static fn( $a, $b ) => array( $rank[ $a['status'] ], $a['days_of_cover'] ?? PHP_INT_MAX ) <=> array( $rank[ $b['status'] ], $b['days_of_cover'] ?? PHP_INT_MAX ) );
 		$summary['order_value']        = round( $summary['order_value'], 2 );
 		$summary['lost_sales_per_day'] = round( $summary['lost_sales_per_day'], 2 );

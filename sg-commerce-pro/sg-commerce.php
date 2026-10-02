@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Seven Gum Commerce Pro
  * Plugin URI:        https://sevengum.com/commerce
- * Description:       Enterprise Amazon SP-API + AI commerce engine. Inventory sync, AI copywriting, automated repricing, competitor monitoring, profit analytics, multi-marketplace support.
- * Version:           3.3.1
+ * Description:       Enterprise Amazon SP-API + AI commerce engine with the Amazon Seller Suite: real net profit & P&L, PPC automation, restock planning, hijacker & Buy Box alerts, review requests, reimbursement finder, keyword tracking, listing optimizer and product research.
+ * Version:           4.0.0
  * Requires at least: 6.4
  * Requires PHP:      8.1
  * Author:            Seven Gum Engineering
@@ -52,7 +52,7 @@ defined( 'ABSPATH' ) || exit;
 /* -------------------------------------------------------------------------
  * Constants — all guarded to prevent redeclaration conflicts.
  * ------------------------------------------------------------------------- */
-defined( 'SG_COMMERCE_VERSION' )    || define( 'SG_COMMERCE_VERSION', '3.3.1' );
+defined( 'SG_COMMERCE_VERSION' )    || define( 'SG_COMMERCE_VERSION', '4.0.0' );
 defined( 'SG_COMMERCE_DB_VERSION' ) || define( 'SG_COMMERCE_DB_VERSION', 6 );
 defined( 'SG_COMMERCE_FILE' )       || define( 'SG_COMMERCE_FILE', __FILE__ );
 defined( 'SG_COMMERCE_DIR' )        || define( 'SG_COMMERCE_DIR', plugin_dir_path( __FILE__ ) );

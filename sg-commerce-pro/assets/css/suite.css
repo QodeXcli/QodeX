@@ -1,0 +1,240 @@
+/*
+ * Amazon Seller Suite — app styles. Everything is scoped under .sgs so the
+ * rest of wp-admin is untouched.
+ */
+
+.sgs-wrap { margin: 0 20px 0 0; }
+.sgs {
+	--ink: #0f172a;
+	--ink-2: #334155;
+	--muted: #64748b;
+	--faint: #94a3b8;
+	--line: #e2e8f0;
+	--line-2: #cbd5e1;
+	--bg: #f1f5f9;
+	--card: #ffffff;
+	--accent: #0f172a;
+	--blue: #2563eb;
+	--blue-bg: #dbeafe;
+	--green: #059669;
+	--green-bg: #d1fae5;
+	--amber: #b45309;
+	--amber-bg: #fef3c7;
+	--red: #dc2626;
+	--red-bg: #fee2e2;
+	--violet: #7c3aed;
+	--violet-bg: #ede9fe;
+	--radius: 12px;
+	--shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 1px 3px rgba(15, 23, 42, .06);
+	color: var(--ink);
+	font-size: 13.5px;
+	line-height: 1.5;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	font-variant-numeric: tabular-nums;
+	max-width: 1480px;
+	padding-bottom: 60px;
+}
+.sgs *, .sgs *::before, .sgs *::after { box-sizing: border-box; }
+.sgs a { color: var(--blue); text-decoration: none; }
+.sgs a:hover { text-decoration: underline; }
+.sgs h2, .sgs h3, .sgs h4 { color: var(--ink); margin: 0; letter-spacing: -.01em; }
+.sgs h2 { font-size: 18px; font-weight: 650; }
+.sgs h3 { font-size: 14.5px; font-weight: 650; }
+.sgs p { margin: 0; }
+.sgs code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+.sgs-boot { display: flex; gap: 10px; align-items: center; padding: 60px; color: var(--muted); }
+.sgs-spinner { width: 18px; height: 18px; border: 2px solid var(--line-2); border-top-color: var(--ink); border-radius: 50%; animation: sgs-spin .7s linear infinite; display: inline-block; }
+@keyframes sgs-spin { to { transform: rotate(360deg); } }
+
+/* Header */
+.sgs-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0 12px; flex-wrap: wrap; }
+.sgs-brand { display: flex; align-items: center; gap: 12px; }
+.sgs-logo { width: 36px; height: 36px; border-radius: 10px; background: var(--ink); color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 17px; }
+.sgs-brand h1 { font-size: 20px; font-weight: 700; margin: 0; padding: 0; line-height: 1.2; color: var(--ink); }
+.sgs-brand small { display: block; color: var(--muted); font-size: 12px; }
+.sgs-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sgs-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--bg); color: var(--ink-2); white-space: nowrap; }
+.sgs-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.sgs-pill.ok .dot { background: var(--green); }
+.sgs-pill.warn .dot { background: #f59e0b; }
+.sgs-pill.bad .dot { background: var(--red); }
+
+/* Nav */
+.sgs-nav { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; scrollbar-width: thin; }
+.sgs-nav a { padding: 10px 12px; color: var(--muted); font-weight: 600; font-size: 13px; border-bottom: 2px solid transparent; white-space: nowrap; text-decoration: none !important; }
+.sgs-nav a:hover { color: var(--ink); }
+.sgs-nav a.on { color: var(--ink); border-bottom-color: var(--ink); }
+.sgs-nav a .badge { background: var(--red); color: #fff; border-radius: 999px; padding: 0 6px; font-size: 10.5px; margin-left: 4px; }
+
+/* Banners */
+.sgs-banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 12px 16px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; flex-wrap: wrap; }
+.sgs-banner.demo { background: var(--violet-bg); color: #4c1d95; }
+.sgs-banner.info { background: var(--blue-bg); color: #1e3a8a; }
+.sgs-banner.warn { background: var(--amber-bg); color: #78350f; }
+.sgs-banner.bad { background: var(--red-bg); color: #7f1d1d; }
+
+/* Layout */
+.sgs-page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.sgs-page-head p { color: var(--muted); margin-top: 2px; max-width: 760px; }
+.sgs-grid { display: grid; gap: 14px; }
+.sgs-grid.k5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.sgs-grid.k4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.sgs-grid.k3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sgs-grid.k2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sgs-grid.k21 { grid-template-columns: 2fr 1fr; }
+.sgs-grid.k12 { grid-template-columns: 1fr 2fr; }
+@media (max-width: 1280px) { .sgs-grid.k5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .sgs-grid.k4, .sgs-grid.k3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sgs-grid.k21, .sgs-grid.k12, .sgs-grid.k2 { grid-template-columns: 1fr; } }
+@media (max-width: 700px) { .sgs-grid.k5, .sgs-grid.k4, .sgs-grid.k3 { grid-template-columns: 1fr; } }
+.sgs-stack > * + * { margin-top: 14px; }
+
+.sgs-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; min-width: 0; }
+.sgs-card.flush { padding: 0; }
+.sgs-card.flush > .sgs-card-head { padding: 14px 18px 10px; }
+.sgs-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.sgs-card-head p { color: var(--muted); font-size: 12.5px; }
+
+/* KPI tiles */
+.sgs-kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
+.sgs-kpi .lbl { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.sgs-kpi .val { font-size: 22px; font-weight: 700; margin-top: 4px; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sgs-kpi .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.sgs-kpi.tone-green .val { color: var(--green); }
+.sgs-kpi.tone-red .val { color: var(--red); }
+.sgs-kpi.tone-amber .val { color: var(--amber); }
+.sgs-period { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); }
+.sgs-period .head { display: flex; justify-content: space-between; align-items: baseline; }
+.sgs-period .head b { font-size: 13px; }
+.sgs-period .head span { color: var(--muted); font-size: 11.5px; }
+.sgs-period .big { font-size: 22px; font-weight: 700; margin: 6px 0 2px; letter-spacing: -.02em; }
+.sgs-period dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin: 8px 0 0; font-size: 12.5px; }
+.sgs-period dt { color: var(--muted); }
+.sgs-period dd { margin: 0; text-align: right; font-weight: 600; }
+.sgs-period.hl { background: var(--ink); color: #fff; border-color: var(--ink); }
+.sgs-period.hl .head span, .sgs-period.hl dt { color: #cbd5e1; }
+.sgs-period.hl .head b { color: #fff; }
+.delta { font-size: 11.5px; font-weight: 700; padding: 1px 6px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
+.delta.up { background: var(--green-bg); color: var(--green); }
+.delta.down { background: var(--red-bg); color: var(--red); }
+
+/* Buttons & forms */
+.sgs .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); background: #fff; color: var(--ink); padding: 6px 12px; border-radius: 8px; font-weight: 600; font-size: 12.5px; cursor: pointer; line-height: 1.4; white-space: nowrap; }
+.sgs .btn:hover { border-color: var(--ink-2); }
+.sgs .btn.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+.sgs .btn.primary:hover { background: #1e293b; }
+.sgs .btn.green { background: var(--green); border-color: var(--green); color: #fff; }
+.sgs .btn.danger { color: var(--red); border-color: #fecaca; }
+.sgs .btn.ghost { border-color: transparent; background: transparent; }
+.sgs .btn.sm { padding: 3px 8px; font-size: 12px; }
+.sgs .btn[disabled] { opacity: .5; cursor: not-allowed; }
+.sgs .btns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.sgs input[type=text], .sgs input[type=number], .sgs input[type=date], .sgs input[type=email], .sgs input[type=password], .sgs select, .sgs textarea {
+	border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 9px; font-size: 13px; background: #fff; color: var(--ink); min-height: 32px; max-width: 100%;
+}
+.sgs input:focus, .sgs select:focus, .sgs textarea:focus { outline: 2px solid var(--blue-bg); border-color: var(--blue); box-shadow: none; }
+.sgs textarea { width: 100%; min-height: 80px; font-family: inherit; }
+.sgs .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sgs .field label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.sgs .field small { color: var(--muted); font-size: 11.5px; }
+.sgs .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 16px; }
+.sgs .check { display: flex; gap: 8px; align-items: center; font-weight: 600; font-size: 12.5px; }
+.sgs .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; background: #fff; }
+.sgs .seg button { border: 0; background: transparent; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; border-right: 1px solid var(--line); }
+.sgs .seg button:last-child { border-right: 0; }
+.sgs .seg button.on { background: var(--ink); color: #fff; }
+
+/* Tables */
+.sgs-table-tools { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 0 18px 10px; flex-wrap: wrap; }
+.sgs-table-tools input[type=text] { min-width: 220px; }
+.sgs-table-wrap { overflow-x: auto; }
+.sgs table.t { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+.sgs table.t th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; padding: 8px 10px; border-bottom: 1px solid var(--line); background: #f8fafc; white-space: nowrap; position: sticky; top: 0; cursor: pointer; user-select: none; }
+.sgs table.t th.r, .sgs table.t td.r { text-align: right; }
+.sgs table.t th.c, .sgs table.t td.c { text-align: center; }
+.sgs table.t th .arrow { color: var(--ink); margin-left: 3px; }
+.sgs table.t td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+.sgs table.t tr:hover td { background: #f8fafc; }
+.sgs table.t tr.click { cursor: pointer; }
+.sgs table.t tfoot td { font-weight: 700; background: #f8fafc; border-top: 1px solid var(--line); }
+.sgs table.t .title { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.sgs table.t .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.sgs .pos { color: var(--green); }
+.sgs .neg { color: var(--red); }
+.sgs .muted { color: var(--muted); }
+.sgs .small { font-size: 12px; }
+.sgs-pager { display: flex; gap: 6px; justify-content: flex-end; align-items: center; padding: 10px 18px; color: var(--muted); font-size: 12px; }
+.sgs-empty { padding: 36px 18px; text-align: center; color: var(--muted); }
+.sgs-empty b { display: block; color: var(--ink); font-size: 14px; margin-bottom: 4px; }
+
+/* Badges */
+.sgs .b { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; white-space: nowrap; background: var(--bg); color: var(--ink-2); }
+.sgs .b.green { background: var(--green-bg); color: #065f46; }
+.sgs .b.red { background: var(--red-bg); color: #991b1b; }
+.sgs .b.amber { background: var(--amber-bg); color: #92400e; }
+.sgs .b.blue { background: var(--blue-bg); color: #1e40af; }
+.sgs .b.violet { background: var(--violet-bg); color: #5b21b6; }
+.sgs .b.dark { background: var(--ink); color: #fff; }
+.sgs .grade { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; font-weight: 800; color: #fff; }
+.sgs .grade.A { background: var(--green); } .sgs .grade.B { background: #16a34a; } .sgs .grade.C { background: #d97706; } .sgs .grade.D { background: #ea580c; } .sgs .grade.F { background: var(--red); }
+
+/* Bars & meters */
+.sgs .meter { height: 6px; background: var(--bg); border-radius: 999px; overflow: hidden; min-width: 60px; }
+.sgs .meter i { display: block; height: 100%; background: var(--ink); border-radius: 999px; }
+.sgs .meter.green i { background: var(--green); } .sgs .meter.amber i { background: #f59e0b; } .sgs .meter.red i { background: var(--red); }
+.sgs .wf { display: grid; grid-template-columns: 130px 1fr 110px; gap: 6px 10px; align-items: center; font-size: 12.8px; }
+.sgs .wf .bar { height: 14px; border-radius: 4px; background: var(--bg); position: relative; }
+.sgs .wf .bar i { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.sgs .wf .v { text-align: right; font-weight: 600; }
+.sgs .wf .total { font-weight: 800; }
+
+/* Charts */
+.sgs-chart { position: relative; width: 100%; }
+.sgs-chart svg { display: block; width: 100%; overflow: visible; }
+.sgs-chart .axis text { fill: var(--faint); font-size: 10.5px; }
+.sgs-chart .grid line { stroke: #eef2f7; }
+.sgs-chart .tip { position: absolute; pointer-events: none; background: var(--ink); color: #fff; padding: 7px 10px; border-radius: 8px; font-size: 12px; box-shadow: 0 6px 16px rgba(0,0,0,.18); white-space: nowrap; z-index: 5; transform: translate(-50%, -110%); }
+.sgs-chart .tip b { display: block; margin-bottom: 2px; }
+.sgs-chart .tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+.sgs-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.sgs-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.sgs .spark { display: inline-block; vertical-align: middle; }
+
+/* Lists */
+.sgs .list { list-style: none; margin: 0; padding: 0; }
+.sgs .list li { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid #f1f5f9; align-items: center; }
+.sgs .list li:last-child { border-bottom: 0; }
+.sgs .action-card { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; text-decoration: none !important; color: var(--ink) !important; }
+.sgs .action-card:hover { border-color: var(--ink-2); }
+.sgs .action-card .ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-size: 16px; flex: 0 0 34px; }
+.sgs .action-card b { display: block; font-size: 13px; }
+.sgs .action-card span { color: var(--muted); font-size: 12px; }
+.sgs .ic.red { background: var(--red-bg); } .sgs .ic.amber { background: var(--amber-bg); } .sgs .ic.green { background: var(--green-bg); } .sgs .ic.blue { background: var(--blue-bg); } .sgs .ic.violet { background: var(--violet-bg); }
+
+/* Drawer & modal */
+.sgs-drawer-bg { position: fixed; inset: 0; background: rgba(15, 23, 42, .35); z-index: 99990; }
+.sgs-drawer { position: fixed; top: 32px; right: 0; bottom: 0; width: min(760px, 96vw); background: #fff; z-index: 99991; box-shadow: -10px 0 30px rgba(0,0,0,.15); display: flex; flex-direction: column; }
+.sgs-drawer header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); gap: 10px; }
+.sgs-drawer .body { overflow-y: auto; padding: 18px 20px 40px; flex: 1; }
+.sgs-drawer .body > * + * { margin-top: 14px; }
+@media (max-width: 782px) { .sgs-drawer { top: 46px; } }
+
+/* Toast */
+.sgs-toasts { position: fixed; right: 20px; bottom: 20px; z-index: 99999; display: flex; flex-direction: column; gap: 8px; }
+.sgs-toast { background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 10px; box-shadow: 0 8px 20px rgba(0,0,0,.2); font-size: 13px; max-width: 420px; animation: sgs-in .2s ease; }
+.sgs-toast.bad { background: var(--red); }
+.sgs-toast.ok { background: var(--green); }
+@keyframes sgs-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Findings */
+.sgs .finding { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 12.8px; }
+.sgs .finding:last-child { border-bottom: 0; }
+.sgs .pre { white-space: pre-wrap; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 12.5px; font-family: inherit; }
+.sgs .kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 12px; font-size: 12.8px; }
+.sgs .kv dt { color: var(--muted); }
+.sgs .kv dd { margin: 0; word-break: break-word; }
+.sgs .skeleton { background: linear-gradient(90deg, #eef2f7 25%, #f8fafc 50%, #eef2f7 75%); background-size: 200% 100%; animation: sgs-sk 1.2s infinite; border-radius: 10px; min-height: 90px; }
+@keyframes sgs-sk { to { background-position: -200% 0; } }
+.sgs .help { color: var(--muted); font-size: 12px; }
+.sgs .divider { height: 1px; background: var(--line); margin: 14px 0; }
+.sgs img.thumb { width: 40px; height: 40px; object-fit: contain; border-radius: 6px; background: #fff; border: 1px solid var(--line); }

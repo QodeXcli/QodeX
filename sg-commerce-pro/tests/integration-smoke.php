@@ -140,6 +140,11 @@ $res = rest_do_request( new WP_REST_Request( 'GET', '/sg-commerce/v1/suite/overv
 $assert( in_array( $res->get_status(), array( 401, 403 ), true ), 'anonymous rejected' );
 wp_set_current_user( $admins[0]->ID );
 
+// Remove the keywords this test added (they are not demo-flagged).
+\SevenGum\Commerce\Suite\Support\Db::exec( 'DELETE FROM {t:keywords} WHERE keyword LIKE %s', array( 'test keyword%' ) );
+$al = $call( 'GET', '/alerts' );
+$assert( count( $al['rows'] ?? array() ) >= 5, 'demo alerts seeded' );
+
 $call( 'DELETE', '/demo' );
 global $wpdb;
 $left = 0;
@@ -150,6 +155,7 @@ foreach ( \SevenGum\Commerce\Suite\SuiteSchema::TABLES as $t ) {
 	$left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . \SevenGum\Commerce\Suite\SuiteSchema::table( $t ) . ' WHERE is_demo = 1' );
 }
 $left += (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}sg_products WHERE sku LIKE 'DEMO-%'" );
+$left += (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}sg_alerts WHERE context LIKE '%\"demo\":true%'" );
 $assert( 0 === $left, "demo fully cleared (left={$left})" );
 
 echo $fail ? "\nFAILED: {$fail}\n" : "\nALL OK\n";

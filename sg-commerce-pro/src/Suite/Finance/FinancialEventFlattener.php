@@ -155,8 +155,10 @@ final class FinancialEventFlattener {
 	}
 
 	public static function adjustment_category( string $type ): string {
-		$t = strtolower( $type );
-		if ( str_contains( $t, 'reimbursement' ) || str_contains( $t, 'reversalreimbursement' ) || str_contains( $t, 'warehousedamage' ) || str_contains( $t, 'warehouselost' ) ) {
+		// Amazon mixes styles: "FBAInventoryReimbursement", "WAREHOUSE_DAMAGE", "MISSING_FROM_INBOUND".
+		$t = (string) preg_replace( '/[^a-z]/', '', strtolower( $type ) );
+		if ( str_contains( $t, 'reimbursement' ) || str_contains( $t, 'warehousedamage' ) || str_contains( $t, 'warehouselost' )
+			|| str_contains( $t, 'missingfrominbound' ) || str_contains( $t, 'compensatedclawback' ) || str_contains( $t, 'freereplacementrefund' ) ) {
 			return 'reimbursement';
 		}
 		if ( str_contains( $t, 'storage' ) || str_contains( $t, 'fee' ) || str_contains( $t, 'postage' ) ) {
