@@ -828,6 +828,7 @@ const SCRIPT = String.raw`
     if (hold.down && hold.id === e.pointerId) {
       e.preventDefault();
       try { screen.setPointerCapture(e.pointerId); } catch (x) {}
+      try { screen.focus({ preventScroll: true }); } catch (x) {} // keys go to the page, as after a click
       flushType();
     }
     relayHold(evs);
