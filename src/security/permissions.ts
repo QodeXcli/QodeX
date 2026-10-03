@@ -1,7 +1,10 @@
+import * as path from 'path';
 import type { QodexConfig } from '../config/defaults.js';
 import type { Tool } from '../tools/base.js';
-import { assessCommand, canGrantAlways, matchDenyRule, normalizeCommand } from './command-risk.js';
+import { assessAnalysis, canGrantAlways, matchDenyRule, matchesAtCommandPosition, normalizeCommand } from './command-risk.js';
 import { compileAllowRules, matchAllowRule, type AllowMatcher } from './allow-rules.js';
+import { analyzeShell, isNeutralSegment, type ShellAnalysis } from './shell-analyze.js';
+import { autonomousDecision, editPathDecision, isCommandTool, isFileEditTool, workspaceRoots, type AutoPolicyContext } from './autonomy.js';
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
@@ -18,7 +21,24 @@ export type PermissionVia =
   | 'command-grant'
   | 'allow-rule'
   | 'read-only'
+  /** Auto mode: the autonomous policy (src/security/autonomy.ts) allowed it. */
+  | 'auto-policy'
+  /** Auto mode: the policy asks a human (outside-project destructive, remote, system-level). */
+  | 'auto-policy-ask'
   | 'ask';
+
+/** evaluate() plus the words a prompt shows. */
+export interface PermissionExplanation {
+  decision: PermissionDecision;
+  via: PermissionVia;
+  /** Why it asks (or denies), in words — shown in the prompt and the audit trail. */
+  reason?: string;
+  /**
+   * Whether an "always yes" answer can stop this prompt. "always yes" switches the session
+   * to auto mode, so it is offered only when the auto policy would run this without asking.
+   */
+  canAlways: boolean;
+}
 
 /**
  * How permission prompts are answered this session. Cycle with Shift+Tab.
@@ -83,7 +103,12 @@ export interface PermissionRequest {
   tool: string;
   operation: string;        // e.g., shell command, file path
   description?: string;     // human-readable summary
+  /** Working directory of the call (tools pass ctx.cwd). Relative paths and `cd` resolve
+   *  against it, and it is the project root auto mode trusts. Defaults to process.cwd(). */
+  cwd?: string;
 }
+
+type Decided = { decision: PermissionDecision; via: PermissionVia; reason?: string };
 
 export class PermissionEngine {
   private allowPatterns: RegExp[];
@@ -94,13 +119,15 @@ export class PermissionEngine {
   /** Exact normalized commands the user granted "always". Replaces the old first-word
    *  prefix patterns, which over-granted an entire command family. */
   private commandGrants = new Set<string>();
-  /** User deny rules — checked before everything, including auto-approve/yolo. */
+  /** User deny rules — checked before everything, including auto mode. */
   private denyRules: string[] = [];
   private alwaysAllowPatterns: RegExp[] = [];
   private sessionToolAllows = new Set<string>();
   private toolReadOnlyCache = new Map<string, boolean>();
   /** Literal /regex allow-list from `execution.allow` — same rank as autoApprove. */
   private executionAllow: AllowMatcher[];
+  /** Extra workspace roots for auto mode (user config `approval.extraRoots`). */
+  private extraRoots: string[];
   /** Optional hook (audit log). Never required; a throw here is swallowed. */
   onDecision?: (req: PermissionRequest, decision: PermissionDecision, via: PermissionVia) => void;
 
@@ -114,6 +141,8 @@ export class PermissionEngine {
     this.alwaysAskPatterns = (config.security.alwaysAsk ?? []).map(p => new RegExp(p));
     this.denyRules = [...(config.security.denyRules ?? [])];
     this.executionAllow = compileAllowRules((config as any).execution?.allow);
+    const extra = (config as any).approval?.extraRoots;
+    this.extraRoots = Array.isArray(extra) ? extra.filter((r: unknown): r is string => typeof r === 'string') : [];
   }
 
   /**
@@ -127,85 +156,155 @@ export class PermissionEngine {
   }
 
   /** Same as evaluate, plus the reason — for tests and the audit trail. */
-  evaluateDetailed(req: PermissionRequest): { decision: PermissionDecision; via: PermissionVia } {
+  evaluateDetailed(req: PermissionRequest): { decision: PermissionDecision; via: PermissionVia; reason?: string } {
     const r = this.decide(req);
     try { this.onDecision?.(req, r.decision, r.via); } catch { /* */ }
     return r;
   }
 
-  private decide(req: PermissionRequest): { decision: PermissionDecision; via: PermissionVia } {
-    // User deny rules outrank everything, including /auto and yolo — that is the point of
+  /**
+   * What a prompt needs to know about a request: the decision, WHY, and whether "always yes"
+   * could stop this prompt. Does not fire the audit hook (the caller already evaluated).
+   */
+  explain(req: PermissionRequest): PermissionExplanation {
+    const r = this.decide(req);
+    return { ...r, canAlways: r.decision === 'ask' && this.autoWouldAllow(req) };
+  }
+
+  /** Workspace roots for a request: its cwd, `approval.extraRoots` and the temp dir. */
+  policyContext(req: { cwd?: string }): AutoPolicyContext {
+    const cwd = path.resolve(req.cwd || process.cwd());
+    return { cwd, roots: workspaceRoots(cwd, this.extraRoots) };
+  }
+
+  /** Would the autonomous policy run this without asking? */
+  private autoWouldAllow(req: PermissionRequest): boolean {
+    if (this.isReadOnlyTool(req.tool)) return true;
+    try {
+      return autonomousDecision(req, this.policyContext(req)).decision === 'allow';
+    } catch {
+      return false;
+    }
+  }
+
+  private decide(req: PermissionRequest): Decided {
+    // User deny rules outrank everything, including auto mode — that is the point of
     // being able to write one.
-    if (this.denyRules.length && matchDenyRule(req.operation, this.denyRules)) {
-      return { decision: 'deny', via: 'deny-rule' };
+    if (this.denyRules.length) {
+      const rule = matchDenyRule(req.operation, this.denyRules);
+      if (rule) return { decision: 'deny', via: 'deny-rule', reason: `matches your deny rule "${rule}"` };
     }
 
-    // Hard deny patterns next — even auto-approve mode can't bypass these.
+    // Hard deny patterns next — no mode can bypass these.
     for (const p of this.denyPatterns) {
-      if (p.test(req.operation)) return { decision: 'deny', via: 'deny-pattern' };
+      if (p.test(req.operation)) return { decision: 'deny', via: 'deny-pattern', reason: `matches security.autoReject (${p.source})` };
     }
 
-    // Irreversible commands are confirmed EVERY time. No standing grant, no session
-    // auto-approve, no yolo: rollback cannot undo `rm -rf` or a force push, so a blanket
-    // yes must never reach one. Read-only tools are exempt (their operand is a path).
-    const irreversible =
-      !this.isReadOnlyTool(req.tool) && assessCommand(req.operation).tier === 'irreversible';
-    if (irreversible) {
-      const k = `${req.tool}:${req.operation}`;
-      if (this.sessionDenies.has(k)) return { decision: 'deny', via: 'session-pair' };
-      return { decision: 'ask', via: 'irreversible' };
+    const key = `${req.tool}:${req.operation}`;
+    const commandTool = isCommandTool(req.tool);
+
+    // Auto mode: the autonomous policy decides (src/security/autonomy.ts). It asks only for
+    // destructive actions outside the project, remote-destructive / publish / deploy, and
+    // system-level commands. No grant ("always yes", a session allow) can switch those off:
+    // they are exactly the cases the user wants to see. Sentinel-critical actions never come
+    // through here — Sentinel asks a human for them in every mode.
+    if (_approvalMode === 'auto') {
+      if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair', reason: 'you declined this for the session' };
+      if (this.isReadOnlyTool(req.tool)) return { decision: 'allow', via: 'read-only' };
+      const v = autonomousDecision(req, this.policyContext(req));
+      if (v.decision === 'ask') return { decision: 'ask', via: 'auto-policy-ask', reason: v.reason ?? 'auto mode asks a human for this' };
+      if (v.decision === 'deny') return { decision: 'deny', via: 'auto-policy', reason: v.reason ?? 'blocked by the auto-mode policy' };
+      return { decision: 'allow', via: 'auto-policy' };
     }
 
-    // always yes (Shift+Tab / picker): skip the hub for ordinary work AND always-ask
-    // (sudo, brew, …). Hard-deny and irreversible already returned above.
-    if (_approvalMode === 'auto') return { decision: 'allow', via: 'mode-always' };
-
-    // Always-ask patterns — system-mutating commands. These OVERRIDE `auto` (accept
-    // edits) and autoApprove regexes, but not `always yes`. The escape hatch is a
-    // per-command grant this session, or switching to always yes.
-    const isAlwaysAsk = this.alwaysAskPatterns.some(p => p.test(req.operation));
-    if (isAlwaysAsk) {
-      const key = `${req.tool}:${req.operation}`;
-      if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair' };
-      if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
-      if (this.commandGrants.has(normalizeCommand(req.operation))) return { decision: 'allow', via: 'command-grant' };
-      if (this.alwaysAllowPatterns.some(p => p.test(req.operation))) return { decision: 'allow', via: 'allow-rule' };
-      return { decision: 'ask', via: 'always-ask' };
+    // manual / edits. Command-only rules (irreversible tier, always-ask patterns, per-segment
+    // allow rules) run ONLY for command-executing tools, and by command position — never on
+    // an edit path (`src/shutdown.ts`), an MCP tool name or a mission goal.
+    let analysis: ShellAnalysis | null = null;
+    let pctx: AutoPolicyContext | null = null;
+    const ctx = () => (pctx ??= this.policyContext(req));
+    if (commandTool) {
+      analysis = analyzeShell(req.operation, ctx());
+      // Irreversible commands are confirmed EVERY time. No standing grant, no session
+      // allow: rollback cannot undo `rm -rf` or a force push.
+      const risk = assessAnalysis(analysis);
+      if (risk.tier === 'irreversible') {
+        if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair', reason: 'you declined this for the session' };
+        return { decision: 'ask', via: 'irreversible', reason: `${risk.reason} (irreversible — confirmed every time)` };
+      }
+      // Always-ask patterns — system-mutating commands. These OVERRIDE `edits` and the
+      // allow rules. The escape hatch is a per-command grant this session, or auto mode.
+      if (this.alwaysAskPatterns.some(p => matchesAtCommandPosition(p, analysis!))) {
+        if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair' };
+        if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
+        if (this.commandGrants.has(normalizeCommand(req.operation))) return { decision: 'allow', via: 'command-grant' };
+        if (this.legacyAllows(analysis)) return { decision: 'allow', via: 'allow-rule' };
+        return { decision: 'ask', via: 'always-ask', reason: 'system-changing command (security.alwaysAsk)' };
+      }
     }
 
-    if (_approvalMode === 'edits' && isAutoEditTool(req.tool)) return { decision: 'allow', via: 'mode-auto-edit' };
+    // edits (accept-edits): file edits inside the project run. Outside the project they ask
+    // — this mode must never be looser than auto.
+    let editReason: string | undefined;
+    if (_approvalMode === 'edits' && isAutoEditTool(req.tool)) {
+      const v = editPathDecision(req.operation, ctx());
+      if (v.decision === 'allow') return { decision: 'allow', via: 'mode-auto-edit' };
+      editReason = `${v.reason} — edits mode only accepts edits inside the project`;
+    }
 
     // "Allow this tool for the whole session" — from gradient picker
     if (this.sessionToolAllows.has(req.tool)) return { decision: 'allow', via: 'session-tool' };
 
-    // Session-level deny
-    const key = `${req.tool}:${req.operation}`;
-    if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair' };
+    // Session-level pair
+    if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair', reason: 'you declined this for the session' };
     if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
 
     // Exact-command grants from a previous "always" answer.
     if (this.commandGrants.has(normalizeCommand(req.operation))) return { decision: 'allow', via: 'command-grant' };
 
-    // Legacy pattern grants (kept for any caller still adding them).
-    for (const p of this.alwaysAllowPatterns) {
-      if (p.test(req.operation)) return { decision: 'allow', via: 'allow-rule' };
+    // Allow rules: auto-approve regexes, execution.allow literals and legacy grants. For a
+    // command, EVERY segment must match one (`ls && git push` is not `ls`), and nothing may
+    // write outside the project (`echo hi > ~/.bashrc` is not `echo`).
+    if (analysis ? this.segmentsAllowed(analysis) : this.ruleAllows(req.operation)) {
+      return { decision: 'allow', via: 'allow-rule' };
     }
-
-    // Auto-approve regex + execution.allow literals — same rank, hub is never asked.
-    if (this.allowPatterns.some(p => p.test(req.operation))) return { decision: 'allow', via: 'allow-rule' };
-    if (matchAllowRule(req.operation, this.executionAllow)) return { decision: 'allow', via: 'allow-rule' };
 
     // For pure read tools: always allow
     if (this.isReadOnlyTool(req.tool)) return { decision: 'allow', via: 'read-only' };
 
-    return { decision: 'ask', via: 'ask' };
+    const mode = _approvalMode;
+    const reason = editReason
+      ?? (commandTool ? `${mode} mode asks before shell commands that are not on your allow list`
+        : isFileEditTool(req.tool) ? `${mode} mode asks before file edits` : undefined);
+    return reason ? { decision: 'ask', via: 'ask', reason } : { decision: 'ask', via: 'ask' };
+  }
+
+  /** One text against every allow source (autoApprove regex, execution.allow, legacy grants). */
+  private ruleAllows(text: string): boolean {
+    return this.allowPatterns.some(p => p.test(text))
+      || matchAllowRule(text, this.executionAllow)
+      || this.alwaysAllowPatterns.some(p => p.test(text));
+  }
+
+  private legacyAllows(a: ShellAnalysis): boolean {
+    if (!this.alwaysAllowPatterns.length || a.parseError || a.outsideWrites.length) return false;
+    const segs = a.segments.filter(s => !isNeutralSegment(s));
+    return segs.length > 0 && segs.every(s => this.alwaysAllowPatterns.some(p => p.test(s.ruleText)));
+  }
+
+  /** Every executed segment matches an allow rule and nothing writes outside the project. */
+  private segmentsAllowed(a: ShellAnalysis): boolean {
+    if (a.parseError || a.outsideWrites.length) return false;
+    const segs = a.segments.filter(s => !isNeutralSegment(s));
+    if (!segs.length) return false;
+    return segs.every(s => this.ruleAllows(s.ruleText));
   }
 
   /**
    * Persist a decision. Scopes:
    *   - 'once'        — just for this call (no-op here; caller acts)
    *   - 'session'     — until QodeX restart, for THIS exact tool:operation pair
-   *   - 'pattern'     — until QodeX restart, for anything matching the command prefix
+   *   - 'pattern'     — until QodeX restart, for this exact (normalized) command
    *   - 'tool'        — until QodeX restart, ALL invocations of this tool name
    */
   rememberDecision(req: PermissionRequest, decision: 'allow' | 'deny', scope: 'once' | 'session' | 'pattern' | 'tool'): void {
@@ -219,10 +318,12 @@ export class PermissionEngine {
       // `^rm( |$)` from `rm -rf /tmp/x`, which auto-approved `rm -rf /`. That is the one
       // failure mode rollback cannot undo — the journal covers file writes, not shell
       // commands — so "always" now means "this command", nothing broader.
-      if (canGrantAlways(req.operation).allowed) {
+      // Irreversible commands get NO standing grant (they are asked every time), and neither
+      // does anything auto mode itself would ask about (outside the project, remote,
+      // system-level): "always yes" must never turn those into silent yeses.
+      if (canGrantAlways(req.operation).allowed && this.autoWouldAllow(req)) {
         this.commandGrants.add(normalizeCommand(req.operation));
       }
-      // Irreversible commands deliberately get NO standing grant: they are asked every time.
     } else if (scope === 'tool' && decision === 'allow') {
       this.sessionToolAllows.add(req.tool);
     }

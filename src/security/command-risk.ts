@@ -12,13 +12,16 @@
  *
  * Two rules replace it:
  *   1. A grant binds to the EXACT normalized command, not to a family.
- *   2. Irreversible commands can never hold a standing grant at all — they are confirmed
- *      every time, including under auto-approve/yolo.
+ *   2. Irreversible commands can never hold a standing grant at all — in manual/edits mode
+ *      they are confirmed every time. (Auto mode has its own policy, src/security/autonomy.ts:
+ *      irreversible-but-inside-the-project runs; outside / remote / system asks.)
  *
  * Normalization is deliberately conservative: it collapses whitespace and strips quoting so
  * cosmetic variants share a grant, but it NEVER discards an argument. `rm -rf /tmp/x` and
  * `rm -rf /` must never normalize to the same key — the tests assert exactly that.
  */
+
+import { analyzeShell, isNeutralSegment, type ExecSegment, type ShellAnalysis } from './shell-analyze.js';
 
 export type RiskTier =
   | 'safe'          // read-only: ls, cat, git status
@@ -33,83 +36,99 @@ export interface RiskAssessment {
   neverBlanket: boolean;
 }
 
-/**
- * Irreversible patterns. Each entry explains itself, because the message the user sees when
- * we refuse a blanket grant IS this reason.
- */
-const IRREVERSIBLE: { re: RegExp; reason: string }[] = [
-  // Short flags (`-rf`, `-r -f`) AND GNU long flags. `rm --recursive --force /tmp`
-  // used to miss this rule, rank as merely mutating, and slip through always-yes.
-  { re: /\brm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+|--(?:recursive|force)\b\s*)+/, reason: 'recursive/forced delete' },
-  { re: /\brmdir\s+\/(\s|$)/, reason: 'removing a root directory' },
-  { re: /\bgit\s+push\b.*(--force|-f)\b/, reason: 'force push rewrites remote history' },
-  { re: /\bgit\s+reset\s+--hard\b/, reason: 'discards uncommitted work irrecoverably' },
-  { re: /\bgit\s+clean\b.*-[a-zA-Z]*f/, reason: 'deletes untracked files' },
-  { re: /\bgit\s+(filter-branch|filter-repo)\b/, reason: 'rewrites history' },
-  { re: /\bdd\s+(if|of)=/, reason: 'raw disk write' },
-  { re: /\bmkfs(\.|\s)/, reason: 'formats a filesystem' },
-  { re: /\b(shutdown|reboot|halt)\b/, reason: 'takes the machine down' },
-  { re: /\bDROP\s+(TABLE|DATABASE|SCHEMA)\b/i, reason: 'destroys database objects' },
-  { re: /\bTRUNCATE\s+TABLE\b/i, reason: 'empties a table' },
-  { re: /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b/, reason: 'executes code downloaded from the network' },
-  { re: /\bchmod\s+(-[a-zA-Z]*R[a-zA-Z]*\s+)?[0-7]*777\s+\/(\s|$)/, reason: 'world-writable root' },
-  { re: /\b(chown|chmod)\s+-[a-zA-Z]*R[a-zA-Z]*\s+\/(\s|$)/, reason: 'recursive permission change on /' },
-  { re: /\bnpm\s+(publish|unpublish)\b/, reason: 'publishes to a public registry' },
-  { re: /\b(kubectl|helm)\s+delete\b/, reason: 'deletes cluster resources' },
-  { re: /\bterraform\s+(destroy|apply)\b/, reason: 'changes real infrastructure' },
-  { re: /\baws\s+.*\b(delete|terminate)-/, reason: 'deletes cloud resources' },
-  { re: /:\s*\(\s*\)\s*\{.*\}\s*;\s*:/, reason: 'fork bomb' },
-  { re: />\s*\/dev\/(sd|nvme|disk)/, reason: 'writes directly to a block device' },
-];
 
-/** Commands that change state but are recoverable — no blanket ban, still not "safe". */
+/*
+ * Irreversible commands are found by the shell analyzer (src/security/shell-analyze.ts) at
+ * COMMAND POSITION — executable, subcommand and flags — in every segment of a chain:
+ * recursive/forced deletes, force pushes (incl. `+refspec`, `--delete`, `:branch`,
+ * `--mirror`, global flags like `git -c x push -f`), `git reset --hard` / `clean -f` /
+ * `checkout -- .`, `find -delete`, raw disk writes, mkfs, shutdown, DROP/TRUNCATE, dropdb,
+ * redis FLUSHALL, registry publishes (npm/cargo/twine/gem/docker push…), cluster and cloud
+ * deletes, terraform apply/destroy, downloaded code piped to a shell. A file called
+ * `shutdown.ts` or a commit message saying "drop table" is not one of them.
+ */
+
+/** Commands that change state but are recoverable — no blanket ban, still not "safe". Anchored at command position. */
 const MUTATING: RegExp[] = [
-  /\b(npm|pnpm|yarn|bun)\s+(install|add|remove|update|ci)\b/,
-  /\bpip3?\s+(install|uninstall)\b/,
-  /\bgit\s+(commit|push|merge|rebase|checkout|switch|stash|apply|cherry-pick|revert|tag)\b/,
-  /\b(mv|cp|mkdir|touch|ln)\b/,
-  /\brm\b/,                      // a plain rm without -rf is still a delete
-  /\b(docker|podman)\s+(run|rm|rmi|build|compose)\b/,
-  /\bsudo\b/,
-  /\bmake\b/,
-  /\b(systemctl|launchctl|service)\b/,
-  /\b(chmod|chown)\b/,
-  /\b(brew|apt|apt-get|yum|dnf|pacman)\s+(install|remove|upgrade)\b/,
+  /^(npm|pnpm|yarn|bun)\s+(install|i|add|remove|uninstall|update|ci)\b/,
+  /^pip3?\s+(install|uninstall)\b/,
+  /^git\s+(commit|push|merge|rebase|checkout|switch|stash|apply|cherry-pick|revert|tag|reset|clean|rm|mv|pull)\b/,
+  /^(mv|cp|mkdir|touch|ln|install|rsync|scp|tee|truncate|dd)\b/,
+  /^(rm|rmdir|unlink)\b/,                      // a plain rm without -rf is still a delete
+  /^(docker|podman)\s+(run|rm|rmi|build|compose|push)\b/,
+  /^(sudo|doas|su)\b/,
+  /^make\b/,
+  /^(systemctl|launchctl|service)\b/,
+  /^(chmod|chown|chgrp)\b/,
+  /^(brew|apt|apt-get|yum|dnf|pacman)\s+(install|remove|upgrade|uninstall|reinstall)\b/,
 ];
 
-/** Read-only commands worth recognising so we do not nag about them. */
+/** Read-only commands worth recognising so we do not nag about them. Anchored at command position. */
 const SAFE: RegExp[] = [
-  /^\s*(ls|pwd|cat|head|tail|wc|file|stat|which|type|echo|date|whoami|env|printenv)\b/,
-  /^\s*git\s+(status|log|diff|show|branch|remote|describe|rev-parse|blame)\b/,
-  /^\s*(grep|rg|find|fd|ag)\b/,
-  /^\s*(npm|pnpm|yarn|bun)\s+(test|run\s+test|ls|list|view|outdated)\b/,
-  /^\s*(node|python3?|tsx?)\s+--version\b/,
-  /^\s*(docker|kubectl)\s+(ps|logs|images|get)\b/,
+  /^(ls|pwd|cat|head|tail|wc|file|stat|which|type|echo|date|whoami|env|printenv)\b/,
+  /^git\s+(status|log|diff|show|branch|remote|describe|rev-parse|blame)\b/,
+  /^(grep|rg|find|fd|ag)\b/,
+  /^(npm|pnpm|yarn|bun)\s+(test|run\s+test|ls|list|view|outdated)\b/,
+  /^(node|python3?|tsx?)\s+--version\b/,
+  /^(docker|kubectl)\s+(ps|logs|images|get)\b/,
 ];
 
 /**
- * Classify a command. PURE.
- *
- * Order matters: irreversible wins over mutating wins over safe, because a command can match
- * several sets (`git push --force` is both a git write and a history rewrite) and the most
- * dangerous reading must be the one that governs.
+ * The text of a segment seen from each command position (the executable, and the command
+ * after each wrapper like sudo/env/nohup). Command-position patterns match at index 0 of a
+ * view. PURE.
  */
-export function assessCommand(command: string): RiskAssessment {
-  const cmd = (command ?? '').trim();
-  if (!cmd) return { tier: 'safe', reason: 'empty command', neverBlanket: false };
+export function commandViews(seg: ExecSegment): string[] {
+  const views = seg.cmdOffsets.map(o => seg.text.slice(o)).filter(Boolean);
+  return views.length ? views : [seg.ruleText];
+}
 
-  for (const { re, reason } of IRREVERSIBLE) {
-    if (re.test(cmd)) return { tier: 'irreversible', reason, neverBlanket: true };
+/** Does `re` match at a command position of any segment (never inside an argument)? PURE. */
+export function matchesAtCommandPosition(re: RegExp, a: ShellAnalysis): boolean {
+  for (const seg of a.segments) {
+    for (const view of commandViews(seg)) {
+      re.lastIndex = 0;
+      const m = re.exec(view);
+      if (m && m.index === 0) return true;
+    }
   }
-  for (const re of MUTATING) {
-    if (re.test(cmd)) return { tier: 'mutating', reason: 'changes state on disk or remotely', neverBlanket: false };
+  return false;
+}
+
+/** Tier of an analyzed command (see assessCommand). PURE. */
+export function assessAnalysis(a: ShellAnalysis): RiskAssessment {
+  const irr = a.findings.find(f => f.irreversible);
+  if (irr) return { tier: 'irreversible', reason: irr.reason, neverBlanket: true };
+  if (a.parseError) return { tier: 'mutating', reason: `could not be parsed (${a.parseError}) — treated as state-changing`, neverBlanket: false };
+  if (a.findings.length || a.outsideWrites.length) return { tier: 'mutating', reason: a.findings[0]?.reason ?? 'writes outside the project', neverBlanket: false };
+  let allSafe = true;
+  for (const seg of a.segments) {
+    if (isNeutralSegment(seg)) continue;
+    const views = commandViews(seg);
+    if (views.some(v => MUTATING.some(re => re.test(v)))) {
+      return { tier: 'mutating', reason: 'changes state on disk or remotely', neverBlanket: false };
+    }
+    if (!views.some(v => SAFE.some(re => re.test(v)))) allSafe = false;
   }
-  for (const re of SAFE) {
-    if (re.test(cmd)) return { tier: 'safe', reason: 'read-only', neverBlanket: false };
-  }
+  if (allSafe) return { tier: 'safe', reason: 'read-only', neverBlanket: false };
   // Unrecognised: treat as mutating. Assuming an unknown command is harmless is the wrong
   // default for something running unattended.
   return { tier: 'mutating', reason: 'unrecognised command — treated as state-changing', neverBlanket: false };
+}
+
+/**
+ * Classify a command. PURE apart from realpath of existing paths.
+ *
+ * Order matters: irreversible wins over mutating wins over safe, because a command can match
+ * several sets (`git push --force` is both a git write and a history rewrite) and the most
+ * dangerous reading must be the one that governs. Every segment counts: `ls && rm -rf x` is
+ * irreversible.
+ */
+export function assessCommand(command: string, ctx: { cwd?: string; roots?: readonly string[] } = {}): RiskAssessment {
+  const cmd = (command ?? '').trim();
+  if (!cmd) return { tier: 'safe', reason: 'empty command', neverBlanket: false };
+  const cwd = ctx.cwd ?? process.cwd();
+  return assessAnalysis(analyzeShell(cmd, { cwd, roots: ctx.roots ?? [cwd] }));
 }
 
 /**

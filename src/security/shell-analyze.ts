@@ -715,6 +715,7 @@ class Analyzer {
             for (; j < expr.length && expr[j]!.v !== ';' && expr[j]!.v !== '+'; j++) inner.push(expr[j]!);
             i = j;
             if (!inner.length) continue;
+            if (/^(rm|unlink|shred|rmdir|srm)$/.test(baseName(inner[0]!.v))) this.add('local-destructive', `find ${t} ${baseName(inner[0]!.v)} deletes every match`, true, false);
             const items = starts.map(s => childOf(s));
             const argv = inner.map(x => (x.v.includes('{}') ? { ...x, v: x.v.split('{}').join(items[0]!.v), alts: items.map(it => x.v.split('{}').join(it.v)), dyn: x.dyn || items.some(it => it.dyn), off: null } : { ...x, off: null }));
             this.exec(argv, st, null, null);
