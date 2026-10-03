@@ -48,16 +48,41 @@ interface Ctx {
 /**
  * Read a line without echoing it (raw TTY). When stdin is not a TTY (piped),
  * reads the first line of stdin instead: `echo "$TOKEN" | qodex telegram setup`.
+ * The piped case returns as soon as a newline arrives — waiting for EOF would
+ * hang forever on a pipe that is never closed (supervisors, IDE terminals).
  */
-export async function readHiddenLine(prompt: string): Promise<string> {
-  const stdin = process.stdin as NodeJS.ReadStream;
+export async function readHiddenLine(
+  prompt: string,
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+): Promise<string> {
+  const stdin = input as NodeJS.ReadStream;
   if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
-    const chunks: Buffer[] = [];
-    for await (const c of stdin) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)));
-    return Buffer.concat(chunks).toString('utf-8').split(/\r?\n/)[0] ?? '';
+    return new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const firstLine = () => Buffer.concat(chunks).toString('utf-8').split(/\r?\n/)[0] ?? '';
+      const done = (fn: () => void) => {
+        stdin.removeListener('data', onData);
+        stdin.removeListener('end', onEnd);
+        stdin.removeListener('error', onError);
+        stdin.pause();
+        fn();
+      };
+      function onData(c: string | Buffer) {
+        const b = Buffer.isBuffer(c) ? c : Buffer.from(String(c));
+        chunks.push(b);
+        if (b.includes(0x0a)) done(() => resolve(firstLine()));
+      }
+      function onEnd() { done(() => resolve(firstLine())); }
+      function onError(err: Error) { done(() => reject(err)); }
+      stdin.on('data', onData);
+      stdin.once('end', onEnd);
+      stdin.once('error', onError);
+      stdin.resume();
+    });
   }
   return new Promise<string>((resolve, reject) => {
-    process.stdout.write(prompt);
+    output.write(prompt);
     let buf = '';
     const wasRaw = stdin.isRaw;
     stdin.setRawMode(true);
@@ -67,7 +92,7 @@ export async function readHiddenLine(prompt: string): Promise<string> {
       stdin.removeListener('data', onData);
       try { stdin.setRawMode(wasRaw); } catch { /* ignore */ }
       stdin.pause();
-      process.stdout.write('\n');
+      output.write('\n');
       fn();
     };
     function onData(chunk: string | Buffer) {
