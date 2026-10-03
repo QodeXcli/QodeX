@@ -16,7 +16,8 @@ import { pickWorkingCwd } from '../session/handoff.js';
 import { StreamDisplayFilter } from '../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from '../cli/modes/final-dedupe.js';
 import { logger } from '../utils/logger.js';
-import { headlessAskChoice } from '../cli/modes/headless-ask.js';
+import { isAutonomousMode } from '../security/permissions.js';
+import { autonomousPermissions } from '../sentinel/auto-mode.js';
 import type { AgentRunner, TurnSink, RunnerStatus, ArtifactCard } from './types.js';
 import { SessionMap } from './session-map.js';
 import { botLane, getOperatorHub } from '../operator/hub.js';
@@ -32,7 +33,7 @@ export interface RunnerDeps {
 export class QodexAgentRunner implements AgentRunner {
   private map = new SessionMap();
   private modelByKey = new Map<string, string>();   // per-conversation model override (/model)
-  private autoByKey = new Map<string, boolean>();    // per-conversation auto-approve (/auto)
+  private autoByKey = new Map<string, boolean>();    // per-conversation auto mode (/auto)
   constructor(private deps: RunnerDeps) {}
 
   async reset(convKey: string): Promise<void> {
@@ -54,7 +55,24 @@ export class QodexAgentRunner implements AgentRunner {
 
   async status(convKey: string): Promise<RunnerStatus> {
     const sessionId = (await this.map.get(convKey)) ?? undefined;
-    return { model: this.modelFor(convKey), cwd: this.cwdFor(sessionId), sessionId, auto: this.autoByKey.get(convKey) ?? false };
+    return { model: this.modelFor(convKey), cwd: this.cwdFor(sessionId), sessionId, auto: this.isAuto(convKey) };
+  }
+
+  /** Does this conversation run in auto mode (its own /auto on, or the whole process)? */
+  isAuto(convKey: string): boolean {
+    return (this.autoByKey.get(convKey) ?? false) || isAutonomousMode();
+  }
+
+  /**
+   * The permission engine a turn of this conversation runs with. In auto mode it is the
+   * autonomous policy for the conversation's project (src/sentinel/auto-mode.ts
+   * autonomousPermissions): ordinary work runs without asking, and Sentinel / MCP /
+   * mission_start apply their auto-mode rules — only for THIS chat, never the others.
+   */
+  permissionsFor(convKey: string, cwd: string): PermissionEngine {
+    if (!(this.autoByKey.get(convKey) ?? false)) return this.deps.permissions;
+    const extra = (this.deps.config as { approval?: { extraRoots?: unknown } }).approval?.extraRoots;
+    return autonomousPermissions(this.deps.permissions, cwd, Array.isArray(extra) ? extra.filter((r): r is string => typeof r === 'string') : []);
   }
 
   async setModel(convKey: string, model: string): Promise<string> {
@@ -108,7 +126,7 @@ export class QodexAgentRunner implements AgentRunner {
     const agent = new AgentLoop({
       router: this.deps.router,
       registry: this.deps.registry,
-      permissions: this.deps.permissions,
+      permissions: this.permissionsFor(convKey, cwd),
       config,
       cwd,
     });
@@ -124,20 +142,7 @@ export class QodexAgentRunner implements AgentRunner {
     const sid: string = sessionId!; // always set by the branch above
     store.recordTurn(sid, [{ role: 'user', content: userText }], { input: 0, output: 0, costUsd: 0 });
 
-    // /auto on → pick a one-shot affirm (accept/yes), never "always yes". The old regex
-    // matched `always yes` on edit options first, which flipped process-wide yolo.
-    // No clear affirm → still ask, so we never silently green-light something ambiguous.
-    const auto = this.autoByKey.get(convKey) ?? false;
-    const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-      if (auto) {
-        const { choice, denied } = headlessAskChoice(options, true);
-        if (!denied) return choice;
-      }
-      return getOperatorHub().requestApproval('bot', prompt, options, {
-        lane: botLane(convKey),
-        origin: convKey,
-      });
-    };
+    const askUser = botAskUser(convKey);
 
     const display = new StreamDisplayFilter();
     let streamed = '';
@@ -196,6 +201,23 @@ export class QodexAgentRunner implements AgentRunner {
     logger.info('bot turn complete', { convKey, sessionId, chars: streamed.length });
     return streamed;
   }
+}
+
+/**
+ * The chat's askUser: the prompt becomes buttons in the conversation and waits for the
+ * person. It is NEVER answered automatically — not even under `/auto on`. In auto mode
+ * the autonomous policy already ran everything ordinary without asking, so whatever
+ * still arrives here is what auto mode keeps for a human: Sentinel-critical actions
+ * (purchases, payments, passwords, sending messages — isSentinelPrompt), remote deletes
+ * and destructive actions outside the project (isAutoModeAskPrompt / the engine's asks).
+ * The old `/auto` auto-answer approved those too (the bot claims an interactive human,
+ * so Sentinel routed critical prompts here).
+ */
+export function botAskUser(convKey: string): (prompt: string, options?: string[]) => Promise<string> {
+  return (prompt: string, options: string[] = ['yes', 'no']) => getOperatorHub().requestApproval('bot', prompt, options, {
+    lane: botLane(convKey),
+    origin: convKey,
+  });
 }
 
 /** Compact relative time for the /sessions list ("just now", "12m ago", "3d ago"). */

@@ -21,8 +21,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { isAutonomousMode } from '../security/permissions.js';
-import { isInsideRoots, workspaceRoots } from '../security/autonomy.js';
+import { isAutonomousMode, type PermissionEngine, type PermissionRequest } from '../security/permissions.js';
+import { autonomousDecision, isInsideRoots, workspaceRoots } from '../security/autonomy.js';
 import { isPrivateHost } from './policy.js';
 import type { ActionClassification } from './types.js';
 
@@ -38,6 +38,33 @@ const autonomousEngines = new WeakSet<object>();
 export function markAutonomousPermissions<T extends object>(engine: T): T {
   autonomousEngines.add(engine);
   return engine;
+}
+
+/**
+ * A per-conversation permission engine that runs the autonomous 'auto' policy on top of
+ * `base` while the process-wide mode stays what it is (the chat bot's `/auto on`):
+ *   - whatever `base` decides without asking stands — deny rules and hard-deny patterns
+ *     refuse, read-only tools / allow rules / grants run;
+ *   - what `base` would ask about is decided by autonomousDecision() (src/security/
+ *     autonomy.ts) for this conversation's workspace roots: allow, or ask a human.
+ * Sentinel, the MCP wrapper and mission_start see it as autonomous (isAutonomousContext),
+ * so their auto-mode rules apply too; Sentinel-critical never goes through the engine.
+ * Grants written through it (rememberDecision) land on `base`.
+ */
+export function autonomousPermissions(base: PermissionEngine, cwd: string, extraRoots: readonly string[] = []): PermissionEngine {
+  const where = rootsFor(cwd, extraRoots);
+  const engine = Object.create(base) as PermissionEngine;
+  const detailed = (req: PermissionRequest): ReturnType<PermissionEngine['evaluateDetailed']> => {
+    const d = base.evaluateDetailed(req);
+    // The process already runs the autonomous policy, or base decided without asking.
+    if (d.decision !== 'ask' || isAutonomousMode()) return d;
+    let v: 'allow' | 'ask' | 'deny';
+    try { v = autonomousDecision({ tool: req.tool, operation: req.operation }, where).decision; } catch { v = 'ask'; }
+    return { decision: v, via: d.via };
+  };
+  engine.evaluateDetailed = detailed;
+  engine.evaluate = (req: PermissionRequest) => detailed(req).decision;
+  return markAutonomousPermissions(engine);
 }
 
 /** Is this call running under the autonomous 'auto' approval policy? */
