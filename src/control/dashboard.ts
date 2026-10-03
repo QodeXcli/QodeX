@@ -314,10 +314,17 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;padding:0 16px 22px
  * US-layout keys. Shortcuts on a non-Latin layout (Persian Ctrl+A arrives as "ش")
  * are sent by PHYSICAL key (e.code, e.g. "ControlOrMeta+KeyA"), which Playwright
  * accepts and which matches what the user pressed.
+ *
+ * qxEnqueueInput(queue, ev, max?) adds an input event to the not-yet-sent queue,
+ * coalescing so a slow link never builds a backlog: consecutive pointer moves
+ * collapse to the latest, a move right before a click (or a positioned scroll) is
+ * dropped, scrolls at the same point and consecutive typing merge, and the queue is
+ * bounded (oldest move dropped first, then the oldest event).
  */
 export const DASHBOARD_INPUT_HELPERS = String.raw`
 var QX_MODIFIER_KEYS = ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'FnLock', 'OS', 'Hyper', 'Super', 'Symbol', 'SymbolLock'];
 var QX_PHYSICAL_KEY = /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash|IntlBackslash)$/;
+var QX_MAX_DELTA = 100000;
 function qxKeyAction(e) {
   var key = e && typeof e.key === 'string' ? e.key : '';
   if (!key || e.isComposing || key === 'Unidentified' || key === 'Dead' || key === 'Process') return null;
@@ -344,6 +351,34 @@ function qxKeyAction(e) {
   if (e.shiftKey && (!single || ctrlOrMeta || alt)) parts.push('Shift');
   parts.push(name);
   return { kind: 'key', key: parts.join('+') };
+}
+function qxClampDelta(v) { return Math.max(-QX_MAX_DELTA, Math.min(QX_MAX_DELTA, Math.round(v))); }
+function qxEnqueueInput(queue, ev, max) {
+  var cap = max > 0 ? max : 200;
+  var last = queue.length ? queue[queue.length - 1] : null;
+  if (ev.type === 'move') {
+    if (last && last.type === 'move') { queue[queue.length - 1] = ev; return queue; }
+  } else if (ev.type === 'click' || (ev.type === 'scroll' && typeof ev.x === 'number')) {
+    while (queue.length && queue[queue.length - 1].type === 'move') queue.pop();
+    last = queue.length ? queue[queue.length - 1] : null;
+  }
+  if (ev.type === 'scroll') {
+    ev.dx = qxClampDelta(ev.dx || 0); ev.dy = qxClampDelta(ev.dy || 0);
+    if (last && last.type === 'scroll' && last.x === ev.x && last.y === ev.y && last.frameWidth === ev.frameWidth && last.frameHeight === ev.frameHeight) {
+      last.dx = qxClampDelta(last.dx + ev.dx); last.dy = qxClampDelta(last.dy + ev.dy);
+      return queue;
+    }
+  } else if (ev.type === 'type' && last && last.type === 'type' && (last.text + ev.text).length <= 10000) {
+    last.text = last.text + ev.text;
+    return queue;
+  }
+  queue.push(ev);
+  while (queue.length > cap) {
+    var drop = -1;
+    for (var i = 0; i < queue.length - 1; i++) if (queue[i].type === 'move') { drop = i; break; }
+    queue.splice(drop >= 0 ? drop : 0, 1);
+  }
+  return queue;
 }
 `;
 
@@ -467,6 +502,7 @@ const SCRIPT = String.raw`
     btn.className = 'btn ' + (state.takeover ? 'danger' : 'primary');
     var ids = ['url', 'goBtn', 'backBtn', 'fwdBtn', 'reloadBtn', 'typeBox', 'typeSend', 'enterBtn'];
     for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = !state.takeover;
+    if (!state.takeover && inputQueue) { inputQueue.length = 0; typeBuf = ''; }
     renderOverlay();
   }
   $('takeBtn').addEventListener('click', function () {
@@ -526,14 +562,24 @@ const SCRIPT = String.raw`
   });
 
   // ── human input (only while the human holds control) ───────────────────────
-  var inputChain = Promise.resolve();
+  // One request in flight at a time; everything else waits in a coalescing queue
+  // (qxEnqueueInput), so a slow phone/tunnel link never builds a backlog of moves.
+  var inputQueue = [], inputBusy = false;
   function liveMsg(text, isErr) { var m = $('liveMsg'); m.textContent = text || ''; m.classList.toggle('err', !!isErr); }
   function sendInput(ev) {
     if (!state.takeover) return;
-    inputChain = inputChain.then(function () { return api('POST', '/api/input', ev); }).then(function () { liveMsg(''); }).catch(function (e) {
+    qxEnqueueInput(inputQueue, ev);
+    pumpInput();
+  }
+  function pumpInput() {
+    if (inputBusy || !inputQueue.length) return;
+    if (!state.takeover) { inputQueue.length = 0; return; }
+    var ev = inputQueue.shift();
+    inputBusy = true;
+    api('POST', '/api/input', ev).then(function () { liveMsg(''); }).catch(function (e) {
       liveMsg(errText(e), true);
-      if (e && e.status === 409) refreshState();
-    });
+      if (e && e.status === 409) { inputQueue.length = 0; refreshState(); }
+    }).then(function () { inputBusy = false; pumpInput(); });
   }
   var frameImg = $('frame'), screen = $('screen');
   function framePoint(e) {

@@ -141,8 +141,9 @@ describe('qodex control command', () => {
 type KeyAction = null | { kind: 'paste' } | { kind: 'text'; text: string } | { kind: 'key'; key: string };
 interface Helpers {
   qxKeyAction: (e: Record<string, unknown>) => KeyAction;
+  qxEnqueueInput: (q: Array<Record<string, unknown>>, ev: Record<string, unknown>, max?: number) => Array<Record<string, unknown>>;
 }
-const helpers = new Function(`${DASHBOARD_INPUT_HELPERS}\nreturn { qxKeyAction: qxKeyAction };`)() as Helpers;
+const helpers = new Function(`${DASHBOARD_INPUT_HELPERS}\nreturn { qxKeyAction: qxKeyAction, qxEnqueueInput: qxEnqueueInput };`)() as Helpers;
 
 function key(k: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const altGraph = !!extra.altGraph;
@@ -202,5 +203,59 @@ describe('dashboard keyboard mapping', () => {
       expect(helpers.qxKeyAction(key(k))).toBeNull();
     }
     expect(helpers.qxKeyAction(key('a', { isComposing: true }))).toBeNull();
+  });
+});
+
+describe('dashboard input queue', () => {
+  const mv = (x: number) => ({ type: 'move', x, y: 1, frameWidth: 100, frameHeight: 100 });
+
+  it('coalesces pointer moves so a slow link never builds a backlog', () => {
+    const q: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 50; i++) helpers.qxEnqueueInput(q, mv(i));
+    expect(q).toEqual([mv(49)]);
+    helpers.qxEnqueueInput(q, { type: 'key', key: 'Enter' });
+    helpers.qxEnqueueInput(q, mv(3));
+    helpers.qxEnqueueInput(q, mv(4));
+    expect(q).toEqual([mv(49), { type: 'key', key: 'Enter' }, mv(4)]);
+  });
+
+  it('drops a pending move right before a click (the click carries its own position)', () => {
+    const q: Array<Record<string, unknown>> = [];
+    helpers.qxEnqueueInput(q, mv(1));
+    helpers.qxEnqueueInput(q, { type: 'click', x: 5, y: 5, frameWidth: 100, frameHeight: 100 });
+    expect(q).toEqual([{ type: 'click', x: 5, y: 5, frameWidth: 100, frameHeight: 100 }]);
+  });
+
+  it('merges consecutive scrolls at the same point and consecutive typing', () => {
+    const q: Array<Record<string, unknown>> = [];
+    helpers.qxEnqueueInput(q, { type: 'scroll', dx: 0, dy: 100, x: 5, y: 5, frameWidth: 100, frameHeight: 100 });
+    helpers.qxEnqueueInput(q, { type: 'scroll', dx: 10, dy: 50, x: 5, y: 5, frameWidth: 100, frameHeight: 100 });
+    helpers.qxEnqueueInput(q, { type: 'type', text: 'سل' });
+    helpers.qxEnqueueInput(q, { type: 'type', text: 'ام' });
+    expect(q).toEqual([
+      { type: 'scroll', dx: 10, dy: 150, x: 5, y: 5, frameWidth: 100, frameHeight: 100 },
+      { type: 'type', text: 'سلام' },
+    ]);
+    // Scroll deltas stay inside the server's accepted range.
+    for (let i = 0; i < 20; i++) helpers.qxEnqueueInput(q, { type: 'scroll', dx: 0, dy: 90_000 });
+    const last = q[q.length - 1] as { dy: number };
+    expect(last.dy).toBeLessThanOrEqual(100_000);
+    // Typing merges only up to the server's 10000-character limit.
+    const t: Array<Record<string, unknown>> = [];
+    helpers.qxEnqueueInput(t, { type: 'type', text: 'a'.repeat(6000) });
+    helpers.qxEnqueueInput(t, { type: 'type', text: 'b'.repeat(6000) });
+    expect(t.map(e => (e.text as string).length)).toEqual([6000, 6000]);
+  });
+
+  it('is bounded: drops the oldest pointer move first, then the oldest event', () => {
+    const q: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 10; i++) helpers.qxEnqueueInput(q, { type: 'key', key: `F${i + 1}` }, 5);
+    expect(q.map(e => e.key)).toEqual(['F6', 'F7', 'F8', 'F9', 'F10']);
+    const q2: Array<Record<string, unknown>> = [];
+    helpers.qxEnqueueInput(q2, { type: 'key', key: 'F1' }, 3);
+    helpers.qxEnqueueInput(q2, mv(1), 3);
+    helpers.qxEnqueueInput(q2, { type: 'key', key: 'F2' }, 3);
+    helpers.qxEnqueueInput(q2, { type: 'key', key: 'F3' }, 3);
+    expect(q2.map(e => e.type === 'move' ? 'move' : e.key)).toEqual(['F1', 'F2', 'F3']);
   });
 });

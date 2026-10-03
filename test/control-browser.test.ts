@@ -356,6 +356,39 @@ describe('control center dashboard in a real browser', () => {
     await handBack(page);
   }, 60_000);
 
+  it.skipIf(!chromiumPath)('does not build an input backlog behind pointer moves on a slow link', async () => {
+    fake.inputs = [];
+    const original = fake.dispatchInput;
+    const dispatched: Array<{ type: string; at: number }> = [];
+    fake.dispatchInput = async (ev: HumanInputEvent) => {
+      await new Promise(r => setTimeout(r, 300)); // a slow phone / tunnel round-trip
+      dispatched.push({ type: ev.type, at: Date.now() });
+      fake.inputs.push(ev);
+    };
+    try {
+      const page = await openDashboardAndTakeOver();
+      // ~2s of hovering over the live frame (the page throttles moves to one per 120ms).
+      await page.evaluate(`new Promise(function (done) {
+        var img = document.getElementById('frame'), r = img.getBoundingClientRect(), i = 0;
+        var t = setInterval(function () {
+          i++;
+          img.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 10 + i * 5, clientY: r.top + 20 + i * 3 }));
+          if (i >= 16) { clearInterval(t); done(); }
+        }, 130);
+      })`);
+      const t0 = Date.now();
+      await page.locator('#frame').click({ position: { x: 30, y: 30 } });
+      expect(await waitUntil(() => dispatched.some(d => d.type === 'click'), 8000)).toBe(true);
+      const clickAt = dispatched.find(d => d.type === 'click')!.at;
+      // Without coalescing the click waits behind every queued move (~3s here).
+      expect(clickAt - t0).toBeLessThan(1500);
+      expect(dispatched.filter(d => d.type === 'move').length).toBeLessThanOrEqual(9);
+      await handBack(page);
+    } finally {
+      fake.dispatchInput = original;
+    }
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('masks secrets in forwarded bus events but never puts a masked URL into the URL bar', async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const pageErrors: string[] = [];
