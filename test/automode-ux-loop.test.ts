@@ -248,6 +248,43 @@ describe('prompts carry what they are about (AskMeta)', () => {
   });
 });
 
+describe('a final answer that only asks the user something', () => {
+  const ASKING = 'I can store it in Postgres or SQLite.\n\nShould I proceed with SQLite?';
+
+  it('auto: the model is told to decide and continue — once per run', async () => {
+    P.setApprovalMode('auto');
+    const r = await runAgent({ tools: [], script: () => ({ text: ASKING }) });
+    expect(r.provider.requests).toHaveLength(2); // one nudge, then the run ends even if it asks again
+    const last = r.provider.requests[1]!.messages.at(-1)!;
+    expect(last.role).toBe('user');
+    expect(String(last.content)).toContain('[AUTONOMOUS_MODE]');
+    expect(r.asks).toEqual([]);
+  });
+
+  it('manual: the question ends the turn as before', async () => {
+    const r = await runAgent({ tools: [], script: () => ({ text: ASKING }) });
+    expect(r.provider.requests).toHaveLength(1);
+  });
+
+  it('auto: the "Next: …?" follow-up offer of a finished task is not nudged', async () => {
+    P.setApprovalMode('auto');
+    const r = await runAgent({ tools: [], script: () => ({ text: 'Added the logout button.\n\nNext: want me to run the tests?' }) });
+    expect(r.provider.requests).toHaveLength(1);
+  });
+
+  it('endsWithQuestionToUser', async () => {
+    const { endsWithQuestionToUser } = await import('../src/agent/autonomy-nudge.js');
+    expect(endsWithQuestionToUser(ASKING)).toBe(true);
+    expect(endsWithQuestionToUser('Which database do you want me to use?')).toBe(true);
+    expect(endsWithQuestionToUser('ادامه بدهم؟')).toBe(true);
+    expect(endsWithQuestionToUser('Done. All 12 tests pass.')).toBe(false);
+    expect(endsWithQuestionToUser('**Next:** should I add tests?')).toBe(false);
+    expect(endsWithQuestionToUser('Why did it fail? The cache key was stale — fixed in cache.ts.')).toBe(false);
+    expect(endsWithQuestionToUser('```\nshould I?\n```\nDone.')).toBe(false);
+    expect(endsWithQuestionToUser('What is 2+2?')).toBe(false);
+  });
+});
+
 describe('sub-agents inherit the session mode', () => {
   it('auto: a sub-agent question is answered by the auto policy, not by the unattended "no"', async () => {
     P.setApprovalMode('auto');

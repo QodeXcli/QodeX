@@ -43,6 +43,7 @@ import { resolveRuntime } from '../runtime/exec.js';
 import { getApprovalMode, isAutonomousMode, type PermissionEngine } from '../security/permissions.js';
 import type { AskMeta, AskUserFn } from './ask-meta.js';
 import { approvalModeNote, conversationSaysAutonomous } from './approval-note.js';
+import { AUTONOMY_NUDGE, endsWithQuestionToUser } from './autonomy-nudge.js';
 import { BudgetTracker } from './budget.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import {
@@ -1494,6 +1495,8 @@ export class AgentLoop {
     let statefulRan = false;
     let statefulMaxRepeat = 0;
     let statefulMaxTool = '';
+    // Auto mode nudges a question-only final answer at most once per run.
+    let autonomyNudged = false;
     // Plans presented this iteration (present_plan); auto mode approves them in-run.
     const presentedPlans: Array<{ plan: unknown; autoApproved: boolean }> = [];
     const afterResult = (tc: ToolCall, r: { content: string; isError?: boolean; metadata?: Record<string, unknown> }) => {
@@ -2448,6 +2451,15 @@ export class AgentLoop {
           });
           forceToolChoice = true; // next attempt: make the server emit a tool call, not more prose
           continue; // loop back and try again with the corrective message
+        }
+
+        // ── Auto mode: "Should I proceed?" as the final answer would end the run waiting
+        // for a reply nobody gives. Once per run, tell the model to decide and go on.
+        if (isAutonomousMode() && !autonomyNudged && endsWithQuestionToUser(safeContent)) {
+          autonomyNudged = true;
+          logger.info('Auto mode: final answer asked the user a question — nudging the model to decide');
+          newMessages.push({ role: 'user', content: AUTONOMY_NUDGE });
+          continue;
         }
 
         // ── Auto-verify gate ──
