@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderDashboard, DASHBOARD_STRINGS } from '../src/control/dashboard.js';
+import { renderDashboard, DASHBOARD_STRINGS, DASHBOARD_INPUT_HELPERS } from '../src/control/dashboard.js';
 import { describeControlCenter, type ControlCenterInfo } from '../src/control/server.js';
 import { buildControlCommand, controlOptionsFromCli } from '../src/control/command.js';
 
@@ -133,5 +133,74 @@ describe('qodex control command', () => {
     expect(controlOptionsFromCli({ port: '70000' }).ok).toBe(false);
     expect(controlOptionsFromCli({ lang: 'de' }).ok).toBe(false);
     expect(controlOptionsFromCli({ host: 'a b' }).ok).toBe(false);
+  });
+});
+
+// ── page-side input helpers (the same source string the page embeds) ─────────
+
+type KeyAction = null | { kind: 'paste' } | { kind: 'text'; text: string } | { kind: 'key'; key: string };
+interface Helpers {
+  qxKeyAction: (e: Record<string, unknown>) => KeyAction;
+}
+const helpers = new Function(`${DASHBOARD_INPUT_HELPERS}\nreturn { qxKeyAction: qxKeyAction };`)() as Helpers;
+
+function key(k: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const altGraph = !!extra.altGraph;
+  return { key: k, code: '', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, isComposing: false, getModifierState: (m: string) => m === 'AltGraph' && altGraph, ...extra };
+}
+
+describe('dashboard keyboard mapping', () => {
+  it('embeds the helpers in the page script', () => {
+    expect(renderDashboard({ lang: 'en' })).toContain('function qxKeyAction(e)');
+  });
+
+  it('types printable characters of any script (incl. emoji and ZWNJ) as text', () => {
+    expect(helpers.qxKeyAction(key('a'))).toEqual({ kind: 'text', text: 'a' });
+    expect(helpers.qxKeyAction(key('A', { shiftKey: true }))).toEqual({ kind: 'text', text: 'A' });
+    expect(helpers.qxKeyAction(key('ش', { code: 'KeyA' }))).toEqual({ kind: 'text', text: 'ش' });
+    expect(helpers.qxKeyAction(key('\u200c', { shiftKey: true, code: 'Space' }))).toEqual({ kind: 'text', text: '\u200c' });
+    expect(helpers.qxKeyAction(key(' ', { code: 'Space' }))).toEqual({ kind: 'text', text: ' ' });
+    // A surrogate pair is ONE character — Playwright's keyboard.press('😀') would throw.
+    expect(helpers.qxKeyAction(key('😀'))).toEqual({ kind: 'text', text: '😀' });
+  });
+
+  it('types AltGr / macOS Option compositions instead of sending unknown key names', () => {
+    // Windows AltGr reports ctrlKey+altKey; the AltGraph modifier state tells them apart.
+    expect(helpers.qxKeyAction(key('@', { ctrlKey: true, altKey: true, altGraph: true, code: 'KeyQ' }))).toEqual({ kind: 'text', text: '@' });
+    expect(helpers.qxKeyAction(key('™', { altKey: true, code: 'Digit2' }))).toEqual({ kind: 'text', text: '™' });
+    expect(helpers.qxKeyAction(key('å', { altKey: true, code: 'KeyA' }))).toEqual({ kind: 'text', text: 'å' });
+    // German Mac layout: Option+L is "@" (ASCII) — still typed, not "Alt+@".
+    expect(helpers.qxKeyAction(key('@', { altKey: true, code: 'KeyL' }))).toEqual({ kind: 'text', text: '@' });
+    // A plain Alt+letter is still a shortcut.
+    expect(helpers.qxKeyAction(key('f', { altKey: true, code: 'KeyF' }))).toEqual({ kind: 'key', key: 'Alt+f' });
+  });
+
+  it('maps Ctrl/Cmd shortcuts on non-Latin layouts (Persian) to the physical key', () => {
+    expect(helpers.qxKeyAction(key('ش', { ctrlKey: true, code: 'KeyA' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+KeyA' });
+    expect(helpers.qxKeyAction(key('ز', { metaKey: true, code: 'KeyC' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+KeyC' });
+    expect(helpers.qxKeyAction(key('۱', { ctrlKey: true, code: 'Digit1' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+Digit1' });
+    expect(helpers.qxKeyAction(key('ش', { ctrlKey: true, shiftKey: true, code: 'KeyA' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+Shift+KeyA' });
+    // Unknown physical key on a non-Latin layout → nothing (instead of a key Playwright rejects).
+    expect(helpers.qxKeyAction(key('ش', { ctrlKey: true, code: '' }))).toBeNull();
+    // Latin layouts keep readable names.
+    expect(helpers.qxKeyAction(key('a', { ctrlKey: true, code: 'KeyA' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+a' });
+    expect(helpers.qxKeyAction(key('A', { ctrlKey: true, shiftKey: true, code: 'KeyA' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+Shift+A' });
+    expect(helpers.qxKeyAction(key(' ', { ctrlKey: true, code: 'Space' }))).toEqual({ kind: 'key', key: 'ControlOrMeta+Space' });
+  });
+
+  it('leaves Ctrl/Cmd+V to the native paste event on every layout', () => {
+    expect(helpers.qxKeyAction(key('v', { ctrlKey: true, code: 'KeyV' }))).toEqual({ kind: 'paste' });
+    expect(helpers.qxKeyAction(key('ر', { ctrlKey: true, code: 'KeyV' }))).toEqual({ kind: 'paste' });
+    expect(helpers.qxKeyAction(key('v', { metaKey: true, code: 'KeyV' }))).toEqual({ kind: 'paste' });
+  });
+
+  it('sends named keys with their modifiers and ignores modifier-only / dead keys', () => {
+    expect(helpers.qxKeyAction(key('Enter', { code: 'Enter' }))).toEqual({ kind: 'key', key: 'Enter' });
+    expect(helpers.qxKeyAction(key('Tab', { shiftKey: true, code: 'Tab' }))).toEqual({ kind: 'key', key: 'Shift+Tab' });
+    expect(helpers.qxKeyAction(key('ArrowLeft', { altKey: true, code: 'ArrowLeft' }))).toEqual({ kind: 'key', key: 'Alt+ArrowLeft' });
+    for (const k of ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'Dead', 'Unidentified', 'Process', '']) {
+      expect(helpers.qxKeyAction(key(k))).toBeNull();
+    }
+    expect(helpers.qxKeyAction(key('a', { isComposing: true }))).toBeNull();
   });
 });

@@ -302,9 +302,55 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;padding:0 16px 22px
 @media (max-width:900px){main{display:flex;flex-direction:column;align-items:stretch;padding:10px}#side{display:contents}#approvalsPanel{order:1}#livePanel{order:2}#steerPanel{order:3}#missionsPanel{order:4}#activityPanel{order:5}header{padding:10px}#activityList{max-height:300px}}
 `;
 
+/**
+ * Page-side input helpers as plain ES5 source. The page script embeds this exact
+ * string, and the unit tests evaluate it with `new Function`, so both run the same
+ * code (no DOM needed — the functions only look at the event fields they're given).
+ *
+ * qxKeyAction(keydownEvent) → null (ignore) | {kind:'paste'} (let the native paste
+ * event carry the text) | {kind:'text', text} | {kind:'key', key: <Playwright key>}.
+ * Rules: one user-perceived character (any script, emoji, ZWNJ, AltGr / macOS
+ * Option compositions) is typed as text — Playwright's keyboard.press() only knows
+ * US-layout keys. Shortcuts on a non-Latin layout (Persian Ctrl+A arrives as "ش")
+ * are sent by PHYSICAL key (e.code, e.g. "ControlOrMeta+KeyA"), which Playwright
+ * accepts and which matches what the user pressed.
+ */
+export const DASHBOARD_INPUT_HELPERS = String.raw`
+var QX_MODIFIER_KEYS = ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'FnLock', 'OS', 'Hyper', 'Super', 'Symbol', 'SymbolLock'];
+var QX_PHYSICAL_KEY = /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash|IntlBackslash)$/;
+function qxKeyAction(e) {
+  var key = e && typeof e.key === 'string' ? e.key : '';
+  if (!key || e.isComposing || key === 'Unidentified' || key === 'Dead' || key === 'Process') return null;
+  if (QX_MODIFIER_KEYS.indexOf(key) >= 0) return null;
+  var code = typeof e.code === 'string' ? e.code : '';
+  var altGr = false;
+  try { altGr = !!(e.getModifierState && e.getModifierState('AltGraph')); } catch (x) { altGr = false; }
+  // Windows reports AltGr as Ctrl+Alt: those characters are typed, not shortcuts.
+  var ctrlOrMeta = !!(e.ctrlKey || e.metaKey) && !altGr;
+  var alt = !!e.altKey && !altGr;
+  var single = Array.from(key).length === 1;
+  if (ctrlOrMeta && !alt && (code === 'KeyV' || key === 'v' || key === 'V')) return { kind: 'paste' };
+  if (single && !ctrlOrMeta && (!alt || !/^[A-Za-z0-9]$/.test(key))) return { kind: 'text', text: key };
+  var name;
+  if (key === ' ') name = 'Space';
+  else if (single) {
+    if (/^[\x21-\x7e]$/.test(key)) name = e.shiftKey ? key : key.toLowerCase();
+    else if (QX_PHYSICAL_KEY.test(code)) name = code;
+    else return null;
+  } else name = key;
+  var parts = [];
+  if (ctrlOrMeta) parts.push('ControlOrMeta');
+  if (alt) parts.push('Alt');
+  if (e.shiftKey && (!single || ctrlOrMeta || alt)) parts.push('Shift');
+  parts.push(name);
+  return { kind: 'key', key: parts.join('+') };
+}
+`;
+
 const SCRIPT = String.raw`
 (function () {
   'use strict';
+` + DASHBOARD_INPUT_HELPERS + String.raw`
   var boot = {};
   try { boot = JSON.parse(document.getElementById('qx-boot').textContent || '{}'); } catch (e) { boot = {}; }
   var STR = boot.strings || { en: {} };
@@ -559,37 +605,22 @@ const SCRIPT = String.raw`
     if (!wheel.timer) wheel.timer = setTimeout(flushWheel, 80);
   }, { passive: false });
 
-  // Keyboard: printable characters are batched into one "type" event; everything
-  // else becomes a Playwright key name ("Enter", "ControlOrMeta+a", "Shift+Tab").
+  // Keyboard: characters are batched into one "type" event; everything else becomes
+  // a Playwright key name ("Enter", "ControlOrMeta+a", "Shift+Tab") — see qxKeyAction.
   var typeBuf = '', typeTimer = null;
   function flushType() { clearTimeout(typeTimer); typeTimer = null; if (typeBuf) { var s = typeBuf; typeBuf = ''; sendInput({ type: 'type', text: s }); } }
   screen.addEventListener('keydown', function (e) {
-    if (!state.takeover || e.isComposing) return;
-    var key = e.key;
-    if (!key || key === 'Unidentified' || key === 'Dead') return;
-    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'OS'].indexOf(key) >= 0) return;
-    var mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.altKey && key.toLowerCase() === 'v') return; // let the paste event carry the text
-    // One CHARACTER (code points, so emoji count as one) that the keyboard composed:
-    // plain keys, AltGr layouts (reported as Ctrl+Alt) and macOS Option characters
-    // (non-ASCII with Alt) are text; Alt+ASCII letter stays a shortcut (accesskeys).
-    var single = Array.from(key).length === 1;
-    var altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
-    if (single && (altGr || (!mod && (!e.altKey || key.charCodeAt(0) > 127)))) {
-      e.preventDefault();
-      typeBuf += key;
+    if (!state.takeover) return;
+    var a = qxKeyAction(e);
+    if (!a || a.kind === 'paste') return; // paste: the 'paste' event below carries the text
+    e.preventDefault();
+    if (a.kind === 'text') {
+      typeBuf += a.text;
       clearTimeout(typeTimer); typeTimer = setTimeout(flushType, 120);
       return;
     }
-    e.preventDefault();
     flushType();
-    var parts = [];
-    if (mod) parts.push('ControlOrMeta');
-    if (e.altKey) parts.push('Alt');
-    if (e.shiftKey && (key.length > 1 || mod || e.altKey)) parts.push('Shift');
-    var name = key === ' ' ? 'Space' : (key.length === 1 && !e.shiftKey ? key.toLowerCase() : key);
-    parts.push(name);
-    sendInput({ type: 'key', key: parts.join('+') });
+    sendInput({ type: 'key', key: a.key });
   });
   screen.addEventListener('paste', function (e) {
     if (!state.takeover) return;

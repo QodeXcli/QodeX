@@ -297,6 +297,65 @@ describe('control center dashboard in a real browser', () => {
     await page.close();
   }, 60_000);
 
+  async function openDashboardAndTakeOver(): Promise<any> {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    await page.locator('#frame:not(.hidden)').waitFor({ timeout: 10_000 });
+    await page.locator('#takeBtn').click();
+    await page.locator('body.takeover').waitFor({ timeout: 10_000 });
+    expect(await waitUntil(() => fake.takeover)).toBe(true);
+    return page;
+  }
+
+  async function handBack(page: any): Promise<void> {
+    await page.locator('#takeBtn').click();
+    expect(await waitUntil(() => !fake.takeover)).toBe(true);
+    await page.close();
+  }
+
+  it.skipIf(!chromiumPath)('sends Persian-layout shortcuts, emoji and AltGr characters as input real Playwright accepts', async () => {
+    fake.inputs = [];
+    const page = await openDashboardAndTakeOver();
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    // Synthetic key events as a Persian keyboard produces them (layout switching isn't
+    // scriptable in headless Chromium): Ctrl+A → key "ش" on the physical KeyA.
+    await page.evaluate(`(function () {
+      var s = document.getElementById('screen');
+      s.focus();
+      var evs = [
+        { key: 'ش', code: 'KeyA', ctrlKey: true },
+        { key: '😀', code: '' },
+        { key: '@', code: 'KeyQ', ctrlKey: true, altKey: true, modifierAltGraph: true },
+        { key: 'Enter', code: 'Enter' }
+      ];
+      evs.forEach(function (o) { o.bubbles = true; o.cancelable = true; s.dispatchEvent(new KeyboardEvent('keydown', o)); });
+    })()`);
+    expect(await waitUntil(() => fake.inputs.some(e => e.type === 'key' && e.key === 'Enter'))).toBe(true);
+    expect(fake.inputs).toEqual([
+      { type: 'key', key: 'ControlOrMeta+KeyA' },
+      { type: 'type', text: '😀@' },
+      { type: 'key', key: 'Enter' },
+    ]);
+
+    // Replay exactly what the manager received on a real page: every key must be one
+    // Playwright knows, and ControlOrMeta+KeyA must really select all.
+    const target = await browser.newPage();
+    await target.setContent('<input id="i" value="hello world">');
+    await target.focus('#i');
+    await target.keyboard.press((fake.inputs[0] as { key: string }).key);
+    expect(await target.evaluate('[document.getElementById("i").selectionStart, document.getElementById("i").selectionEnd]')).toEqual([0, 11]);
+    await target.keyboard.type((fake.inputs[1] as { text: string }).text);
+    await target.keyboard.press((fake.inputs[2] as { key: string }).key);
+    expect(await target.evaluate('document.getElementById("i").value')).toBe('😀@');
+    await target.close();
+
+    expect(pageErrors).toEqual([]);
+    await handBack(page);
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('masks secrets in forwarded bus events but never puts a masked URL into the URL bar', async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const pageErrors: string[] = [];
