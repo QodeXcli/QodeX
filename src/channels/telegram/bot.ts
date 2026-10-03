@@ -1067,9 +1067,9 @@ export class TelegramBot {
           if (!this.delivered.has(p.id)) await this.deliverBrokerApproval(p);
         }
       }
-      if (this.missions) {
+      if (this.missions && this.running) {
         await this.pollMissionApprovals();
-        if (this.missions.eventsSince && this.notifyEnabled) await this.pollMissionEvents();
+        if (this.missions.eventsSince && this.notifyEnabled && this.running) await this.pollMissionEvents();
       }
       if (this.lastTickError) {
         this.lastTickError = null;

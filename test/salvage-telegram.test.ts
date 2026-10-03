@@ -379,6 +379,50 @@ describe('salvage: bot', () => {
     expect(broker.hasRemoteChannel()).toBe(false);
   });
 
+  it('B6b: a tick interrupted by stop() sends nothing afterwards', async () => {
+    await pairChat();
+    let calls = 0;
+    let gateAt = -1;
+    let release: (() => void) | null = null;
+    class SlowPairing extends TelegramPairingStore {
+      override async listChats() {
+        if (++calls === gateAt) await new Promise<void>((r) => { release = r; });
+        return super.listChats();
+      }
+    }
+    const base = tg.fetch;
+    let failCard = true;
+    tg.fetch = async (url, init) => {
+      if (failCard && url.endsWith('/sendMessage') && JSON.parse(String(init?.body)).reply_markup) {
+        failCard = false; // the first card fails → a retry is due on the next tick
+        return new Response('<html>502</html>', { status: 502, statusText: 'Bad Gateway' });
+      }
+      return base(url, init);
+    };
+    let feed = false;
+    const missions = fakeMissions({
+      async eventsSince(after: number | null) {
+        if (after === null || !feed) return { events: [], cursor: 0 };
+        return { events: [{ id: 1, missionId: 'm_done', type: 'completed', data: {} }], cursor: 1 };
+      },
+    });
+    missions.approvals = [{ id: 'ma_1', missionId: 'm_1', prompt: 'Pay?', options: ['yes', 'no'] }];
+    let skew = 0;
+    const b = await startBot({ pairing: new SlowPairing({ file: path.join(dir, 'telegram.json') }), missions, tickMs: 60_000, now: () => Date.now() + skew });
+    expect(failCard).toBe(false);
+    feed = true;
+    skew += 61_000;
+    gateAt = calls + 2; // refreshChannel, then the retry's lookup → held while we stop
+    const t = b.tick();
+    await waitUntil(() => release !== null);
+    const before = tg.sent().length;
+    await b.stop();
+    release!();
+    await t;
+    await new Promise((res) => setTimeout(res, 30));
+    expect(tg.sent().length).toBe(before); // no retried card, no mission notice from a stopped bot
+  });
+
   it('B7: tells already-paired chats when a new chat pairs', async () => {
     await pairChat();
     await startBot();
