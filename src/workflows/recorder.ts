@@ -1557,7 +1557,10 @@ export class WorkflowRecorder {
     if (!ctx) return;
     let pages: any[] = [];
     try { pages = ctx.pages(); } catch { pages = []; }
-    const expr = `(() => { const f = window[${JSON.stringify('__qxRecFlush_' + captureTag(this.nonce))}]; if (typeof f === 'function') f(); return true; })()`;
+    // The tag is 16 hex chars (a sha256 prefix): checked, then used as a plain identifier.
+    const tag = captureTag(this.nonce);
+    if (!/^[0-9a-f]{16}$/.test(tag)) return;
+    const expr = `(() => { const f = window.__qxRecFlush_${tag}; if (typeof f === 'function') f(); return true; })()`;
     const calls: Array<Promise<unknown>> = [];
     for (const page of pages) {
       let frames: any[] = [];

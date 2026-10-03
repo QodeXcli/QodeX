@@ -33,9 +33,6 @@ import {
   type FillTarget, type PreparedField,
 } from './fill.js';
 import { BrowserLoginTool } from './login.js';
-import { resolveBrowserConfig } from '../config/agent-config.js';
-import { getActiveConfig } from '../config/loader.js';
-import { totp, totpRemainingSeconds } from './totp.js';
 import {
   getSecretRequestBroker, vaultFindByOrigin, deriveEntryName, displayHost, originUrl, scrubSecretError,
 } from './requests.js';

@@ -44,7 +44,11 @@
 6. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
    (echo matching); the mail watcher missed mail that arrived between a check and the IDLE wait,
    and `stop()` could wait out the IDLE timeout; Telegram `/unpair` confirmed before dropping the
-   approval channel; challenge detection stringified the page-title promise.
+   approval channel; challenge detection stringified the page-title promise; the terminal's
+   secure login prompt could put keys typed right after Enter into the previous field (a false
+   "passwords do not match"), and now also takes a pasted password ending in Enter; the Wayland
+   backend measured the screen through a predictable file in the shared temp dir; `/mod new`
+   had a second, unreachable implementation.
 
 ## Unreleased — standing goals, emergency stop, /learn, monitors
 

@@ -373,6 +373,6 @@ async function vaultOp(r: SecretRouteRequest, op: 'add' | 'rotate' | 'edit' | 'r
     const msg = scrubSecretError(e, typed);
     fail(r.res, statusOf(msg), msg);
   } finally {
-    typed = [];
+    typed.length = 0; // drop the typed values with the request
   }
 }

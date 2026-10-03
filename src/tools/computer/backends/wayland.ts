@@ -291,13 +291,14 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
       } catch { /* fall through */ }
     }
     if (sizeCache && Date.now() - sizeCache.at < 60_000) return sizeCache.size;
-    // Measure with a throwaway screenshot.
-    const tmp = path.join(os.tmpdir(), `qodex-wl-size-${process.pid}-${Date.now()}.png`);
+    // Measure with a throwaway screenshot, in a private (0700) directory: a predictable
+    // name in the shared temp dir could be pre-created as a symlink by another user.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qodex-wl-size-'));
     try {
-      const shot = await this.screenshot({ path: tmp });
+      const shot = await this.screenshot({ path: path.join(dir, 'size.png') });
       return { width: shot.width, height: shot.height };
     } finally {
-      await fs.rm(tmp, { force: true }).catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 

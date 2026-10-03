@@ -1208,7 +1208,7 @@ export function App(props: AppProps): React.ReactElement {
               placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}
-              active={!pendingPrompt && !mods.snap.focus && !mods.snap.chord}
+              active={!mods.snap.focus && !mods.snap.chord}
               busy={busy}
               historyRef={promptHistoryRef}
               extraSlashNames={[...slashAliasMap().keys()]}

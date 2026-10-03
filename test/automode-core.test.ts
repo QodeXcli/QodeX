@@ -149,7 +149,7 @@ describe('autonomousDecision — shell commands (cwd /work/proj)', () => {
     expect(shell('npm publish').reason).toMatch(/publish/);
     expect(shell('rm -rf ..').reason).toMatch(/parent of the project/);
     expect(shell('ssh host "rm -rf /var/www/app"').reason).toMatch(/^on host: /);
-    expect(shell('psql -h db.prod.example.com -c "DROP TABLE users"').reason).toMatch(/db\.prod\.example\.com/);
+    expect(shell('psql -h db.prod.example.com -c "DROP TABLE users"').reason).toContain('db.prod.example.com');
   });
 
   it('a Sentinel operation on a command tool is a Sentinel operation, not a command line', () => {
@@ -179,7 +179,7 @@ describe('autonomousDecision — file edits and Sentinel operations', () => {
 
   it('Sentinel delete/account on a remote host asks; locally or other categories run', () => {
     const s = (operation: string) => autonomousDecision({ tool: 'browser_click', operation }, ctx);
-    expect(s('sentinel:delete github.com browser_click')).toMatchObject({ decision: 'ask', reason: expect.stringMatching(/github\.com/) });
+    expect(s('sentinel:delete github.com browser_click')).toMatchObject({ decision: 'ask', reason: expect.stringContaining('github.com') });
     expect(s('sentinel:account accounts.google.com browser_click').decision).toBe('ask');
     expect(s('sentinel:delete - mcp:linear:delete_issue').decision).toBe('ask');
     expect(s('sentinel:delete localhost browser_click').decision).toBe('allow');

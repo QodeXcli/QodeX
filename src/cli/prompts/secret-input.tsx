@@ -16,7 +16,6 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
 import {
   getSecretRequestBroker,
   type PendingSecretRequest,
@@ -55,33 +54,38 @@ export function SecretInputForm({ request, onSubmit, onCancel, focus = true }: S
   const [text, setText] = useState(request.usernameHint ?? '');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  // The current field and its text are mirrored in refs, and every key goes through them:
+  // Ink attaches key handlers in a deferred effect, so a key typed right after Enter can
+  // reach the handler of the previous render — it must still land in the CURRENT field
+  // (with a per-field input component it landed in the previous one: a fast "pw⏎pw⏎"
+  // became a false "passwords do not match").
+  const idxRef = useRef(0);
+  const textRef = useRef(request.usernameHint ?? '');
+  const savingRef = useRef(false);
   // Entered values live in a ref (not rendered) and are dropped right after submit.
   const values = useRef<Partial<Record<Step, string>>>({});
   const step = steps[idx]!;
 
-  useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === 'c')) {
-      values.current = {};
-      onCancel();
-    }
-  }, { isActive: !saving && focus });
-
-  const goTo = (s: Step) => { setIdx(steps.indexOf(s)); setText(''); };
+  const setField = (i: number, t: string): void => { idxRef.current = i; textRef.current = t; setIdx(i); setText(t); };
+  const setValue = (t: string): void => { textRef.current = t; setText(t); };
+  const setBusy = (b: boolean): void => { savingRef.current = b; setSaving(b); };
 
   const submitField = (raw: string): void => {
-    const v = step === 'username' || step === 'totp' ? raw.trim() : raw.replace(/[\r\n]+$/, '');
-    if (step === 'password' && !v) { setError('The password is empty.'); return; }
-    if (step === 'repeat' && v !== values.current.password) {
+    const at = idxRef.current;
+    const cur = steps[at]!;
+    const v = cur === 'username' || cur === 'totp' ? raw.trim() : raw;
+    if (cur === 'password' && !v) { setError('The password is empty.'); return; }
+    if (cur === 'repeat' && v !== values.current.password) {
       values.current.password = '';
       setError('The two passwords do not match — type it again.');
-      goTo('password');
+      setField(steps.indexOf('password'), '');
       return;
     }
-    values.current[step] = v;
+    values.current[cur] = v;
     setError('');
-    if (idx < steps.length - 1) { setIdx(idx + 1); setText(''); return; }
-    setSaving(true);
-    setText('');
+    if (at < steps.length - 1) { setField(at + 1, ''); return; }
+    setBusy(true);
+    setValue('');
     const answer: SecretAnswer = {
       username: values.current.username || undefined,
       password: values.current.password,
@@ -89,11 +93,33 @@ export function SecretInputForm({ request, onSubmit, onCancel, focus = true }: S
     };
     void onSubmit(answer).then(out => {
       if (out.ok) { values.current = {}; return; }
-      setSaving(false);
+      setBusy(false);
       setError(out.error);
-      if (/TOTP/.test(out.error) && steps.includes('totp')) { values.current.totp = ''; goTo('totp'); }
-    }, () => { setSaving(false); setError('Could not save — try again or press Esc.'); });
+      if (/TOTP/.test(out.error) && steps.includes('totp')) { values.current.totp = ''; setField(steps.indexOf('totp'), ''); }
+    }, () => { setBusy(false); setError('Could not save — try again or press Esc.'); });
   };
+
+  useInput((input, key) => {
+    if (savingRef.current) return;
+    if (key.escape || (key.ctrl && input === 'c')) {
+      values.current = {};
+      onCancel();
+      return;
+    }
+    if (key.return) { submitField(textRef.current); return; }
+    if (key.backspace || key.delete) { setValue(textRef.current.slice(0, -1)); return; }
+    if (key.ctrl || key.meta || key.tab || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow || key.pageUp || key.pageDown) return;
+    if (!input) return;
+    // A pasted value may end in (or contain) Enter: type each line, Enter between them.
+    const lines = input.split(/\r\n|\r|\n/);
+    lines.forEach((line, i) => {
+      if (savingRef.current) return;
+      if (i > 0) submitField(textRef.current);
+      // eslint-disable-next-line no-control-regex
+      const clean = line.replace(/[\u0000-\u001f\u007f]/g, '');
+      if (clean && !savingRef.current) setValue(textRef.current + clean);
+    });
+  }, { isActive: focus });
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1} marginY={1}>
@@ -112,7 +138,8 @@ export function SecretInputForm({ request, onSubmit, onCancel, focus = true }: S
         : (
           <Box>
             <Text color="cyan">{LABELS[step]}: </Text>
-            <TextInput value={text} onChange={setText} onSubmit={submitField} mask={step === 'username' ? undefined : '•'} focus={!saving && focus} />
+            <Text>{step === 'username' ? text : '•'.repeat(text.length)}</Text>
+            {focus ? <Text inverse> </Text> : null}
           </Box>
         )}
       {error ? <Text color="red">{error}</Text> : null}

@@ -62,9 +62,11 @@ let activeLog: boolean[];
 
 function mount(props: { blocked?: boolean } = {}) {
   activeLog = [];
+  // debug: every frame is written in full. Without it Ink, under CI=true (is-in-ci), keeps
+  // frames to itself until unmount and the screen checks below would see nothing.
   app = render(
     React.createElement(SecretPromptHost, { broker, blocked: props.blocked, onActiveChange: (a: boolean) => activeLog.push(a) }),
-    { stdout: stdout as any, stdin: stdin as any, stderr: stdout as any, exitOnCtrlC: false, patchConsole: false, debug: false },
+    { stdout: stdout as any, stdin: stdin as any, stderr: stdout as any, exitOnCtrlC: false, patchConsole: false, debug: true },
   );
 }
 
@@ -125,6 +127,33 @@ describe('terminal secret prompt', { timeout: 20_000 }, () => {
     expect(stdout.out).not.toContain(SECRET);
     expect(stdout.out).not.toContain(SECRET.slice(0, 6));
     await waitFor(() => activeLog.at(-1) === false, 'keyboard released');
+  });
+
+  it('type-ahead: keys typed right after Enter land in the next field (no false mismatch)', async () => {
+    mount();
+    await tick();
+    const done = broker.request({ entryName: 'fast', origins: ['fast.example'], fields: ['password'], reason: 'x', usernameHint: 'me' });
+    await waitFor(() => activeLog.includes(true), 'keyboard ownership');
+    await tick();
+    // No pause at all: every key arrives before React has re-attached any key handler.
+    for (const k of ['\r', SECRET, '\r', SECRET, '\r']) stdin.type(k);
+    expect(await done).toMatchObject({ ok: true, code: 'saved' });
+    const e = (await vault.get('fast'))!;
+    expect([e.username, e.secret]).toEqual(['me', SECRET]);
+    expect(plain(stdout.out)).not.toContain('do not match');
+  });
+
+  it('a pasted password that ends in Enter moves on (and is never shown)', async () => {
+    mount();
+    await tick();
+    const done = broker.request({ entryName: 'paste', origins: ['paste.example'], fields: ['password'], reason: 'x' });
+    await waitFor(() => activeLog.includes(true), 'keyboard ownership');
+    await key('\r');
+    await key(SECRET + '\r');
+    await key(SECRET + '\n');
+    expect(await done).toMatchObject({ ok: true });
+    expect((await vault.get('paste'))!.secret).toBe(SECRET);
+    expect(stdout.out).not.toContain(SECRET);
   });
 
   it('Esc cancels the request (the tool reports a decline) and nothing is stored', async () => {

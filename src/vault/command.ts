@@ -274,10 +274,19 @@ export function buildVaultCommand(deps: { vault?: () => Vault; io?: Partial<Vaul
         const onConflict = String(opts.onConflict ?? 'skip').toLowerCase();
         if (!['skip', 'replace', 'rename'].includes(onConflict)) throw new Error('[VAULT_INVALID] --on-conflict must be skip, replace or rename');
         const abs = path.resolve(file);
-        let st;
-        try { st = await fs.stat(abs); } catch { throw new Error(`[VAULT_IMPORT_INVALID] cannot read ${abs}`); }
-        if (!st.isFile() || st.size > MAX_IMPORT_BYTES) throw new Error('[VAULT_IMPORT_INVALID] not a CSV export file (missing, a directory, or larger than 20 MB)');
-        const plan = planImport(await fs.readFile(abs, 'utf-8'), format as ImportFormat | 'auto');
+        // One handle for the checks and the read: the file checked is the file imported.
+        let fh;
+        try { fh = await fs.open(abs, 'r'); } catch { throw new Error(`[VAULT_IMPORT_INVALID] cannot read ${abs}`); }
+        let csv: string;
+        try {
+          const st = await fh.stat();
+          if (!st.isFile() || st.size > MAX_IMPORT_BYTES) throw new Error('[VAULT_IMPORT_INVALID] not a CSV export file (missing, a directory, or larger than 20 MB)');
+          csv = await fh.readFile('utf-8');
+          if (Buffer.byteLength(csv, 'utf-8') > MAX_IMPORT_BYTES) throw new Error('[VAULT_IMPORT_INVALID] not a CSV export file (larger than 20 MB)');
+        } finally {
+          await fh.close().catch(() => {});
+        }
+        const plan = planImport(csv, format as ImportFormat | 'auto');
         const r = await vault().addMany(plan.entries, { onConflict: onConflict as ImportConflict, dryRun: !!opts.dryRun });
         const skipped = Object.entries(plan.skipped).filter(([, n]) => n > 0)
           .map(([why, n]) => `${n} ${({ 'app-or-no-url': 'app / no web address', 'insecure-http': 'plain http (not https)', 'no-password': 'without a password', 'not-a-login': 'not logins', invalid: 'invalid' } as Record<string, string>)[why] ?? why}`);

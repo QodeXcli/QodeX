@@ -102,7 +102,9 @@ describe.skipIf(!chromium)('QodeX browser (real Chromium)', () => {
       if (url.pathname === '/popup') { res.setHeader('content-type', 'text/html'); res.end('<title>Popup Window</title><h1>I am the popup</h1>'); return; }
       if (url.pathname === '/submitted') {
         res.setHeader('content-type', 'text/html');
-        res.end(`<title>Submitted</title><h1>Got ${url.searchParams.get('q') ?? url.searchParams.get('email') ?? ''}</h1>`);
+        const got = String(url.searchParams.get('q') ?? url.searchParams.get('email') ?? '')
+          .replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+        res.end(`<title>Submitted</title><h1>Got ${got}</h1>`);
         return;
       }
       if (url.pathname === '/file.txt') {

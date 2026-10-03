@@ -639,27 +639,6 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       return { handled: true, message: await reloadModsSlash() };
     }
 
-    case 'mod': {
-      // /mod new <what the mod should do> — QodeX writes it (create-mod skill). The write to
-      // ~/.qodex/mods asks you first: mods dirs are agent instruction files.
-      const sub = (args[0] ?? '').toLowerCase();
-      const description = args.slice(1).join(' ').trim();
-      if (sub !== 'new' || !description) {
-        return { handled: true, message: 'Usage: /mod new <what the mod should do>   (list them with /mods)' };
-      }
-      const spec = getSkill('create-mod');
-      const ask = `Write a QodeX mod that does this: ${description}\n\nPut it in ~/.qodex/mods/<a short name>/ (mod.json + register.js), check it with \`qodex mod validate <dir>\`, then tell me to run /reload-mods.`;
-      return {
-        handled: true,
-        action: {
-          type: 'submit_prompt',
-          prompt: spec ? buildSkillRunPrompt(spec.name, spec.body, ask) : `${ask}\nSee docs/MODS.md for the events and the $ API.`,
-          commandName: '/mod new',
-          rawInput: trimmed,
-        },
-      };
-    }
-
     case 'plan': {
       return {
         handled: true,

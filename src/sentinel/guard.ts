@@ -432,7 +432,7 @@ export class Sentinel implements SentinelGuard {
   private async standingMailGrant(toolName: string, ctx: ToolContext, cls: PolicyClassification, mail: MailSendResolution | null): Promise<MailGrantCheck> {
     try {
       if (!mail) return { allowed: false, offer: null };
-      let perm: 'allow' | 'ask' | 'deny' = 'ask';
+      let perm: 'allow' | 'ask' | 'deny';
       try { perm = ctx?.permissions ? ctx.permissions.evaluate({ tool: toolName, operation: this.operation(toolName, cls), description: cls.reason }) : 'ask'; } catch { perm = 'ask'; }
       if (perm === 'deny') return { allowed: false, offer: null };
       const store = this.grants();

@@ -338,7 +338,7 @@ describe.skipIf(!haveChromium)('dashboard secret form in a real browser', () => 
       await page.fill('#vaUser', 'alice@example.com');
       await page.fill('#vaPass', SECRET);
       await page.click('#vaultAddForm button[type=submit]');
-      await page.waitForFunction(() => /shop\.example\.com/.test(String((globalThis as any).document.getElementById('vaultList').textContent)), undefined, { timeout: 10_000 });
+      await page.waitForFunction(() => String((globalThis as any).document.getElementById('vaultList').textContent).includes('shop.example.com'), undefined, { timeout: 10_000 });
       expect(await page.textContent('#vaultList')).toContain('al***@example.com');
       expect(await page.inputValue('#vaPass')).toBe('');
       expect((await vault.get('shop'))).toMatchObject({ secret: SECRET, username: 'alice@example.com' });

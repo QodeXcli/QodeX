@@ -155,9 +155,17 @@ export function createModApi(plugin: { name: string; root: string }, host: ModHo
       read: (p: string) => call(async () => {
         if (host.fs?.read) return host.fs.read(p);
         const file = abs(p);
-        const st = await fs.stat(file);
-        if (st.size > MOD_LIMITS.fsFileBytes) throw new Error(`$.fs.read: ${file} is larger than ${MOD_LIMITS.fsFileBytes} bytes`);
-        return fs.readFile(file, 'utf-8');
+        // One handle for the size check and the read: the file checked is the file read.
+        const fh = await fs.open(file, 'r');
+        try {
+          const st = await fh.stat();
+          if (st.size > MOD_LIMITS.fsFileBytes) throw new Error(`$.fs.read: ${file} is larger than ${MOD_LIMITS.fsFileBytes} bytes`);
+          const text = await fh.readFile('utf-8');
+          if (Buffer.byteLength(text, 'utf-8') > MOD_LIMITS.fsFileBytes) throw new Error(`$.fs.read: ${file} is larger than ${MOD_LIMITS.fsFileBytes} bytes`);
+          return text;
+        } finally {
+          await fh.close().catch(() => {});
+        }
       }),
       write: (p: string, text: string) => call(async () => {
         if (host.fs?.write) return host.fs.write(p, text);

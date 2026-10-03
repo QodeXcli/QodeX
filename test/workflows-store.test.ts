@@ -175,9 +175,11 @@ describe('WorkflowStore', () => {
 
   it('writes files private (0600) and as pretty JSON', async () => {
     const { file } = await store.save(sample());
-    const st = await fs.stat(file);
+    const fh = await fs.open(file, 'r');
+    const st = await fh.stat();
+    const text = await fh.readFile('utf-8');
+    await fh.close();
     if (process.platform !== 'win32') expect(st.mode & 0o777).toBe(0o600);
-    const text = await fs.readFile(file, 'utf-8');
     expect(text).toContain('\n  "name": "shop-search"');
   });
 

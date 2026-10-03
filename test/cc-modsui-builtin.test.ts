@@ -182,7 +182,7 @@ describe('built-in mod dirs', () => {
     ]);
     for (const n of names) {
       const src = fs.readFileSync(path.join(BUILTIN, n, 'register.js'), 'utf8');
-      expect(src, n).not.toMatch(/^\s*import\s|require\(|process\.env|globalThis/m);
+      expect(src, n).not.toMatch(/(?:^\s*import\s)|require\(|process\.env|globalThis/m);
       const calls = [...src.matchAll(/\$\.([a-z]+)\.([a-zA-Z]+)/g)].map(m => `${m[1]}.${m[2]}`);
       expect(calls.length, n).toBeGreaterThan(0);
       for (const c of calls) expect(allowed.has(c), `${n} calls $.${c}`).toBe(true);
