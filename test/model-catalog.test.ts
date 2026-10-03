@@ -96,6 +96,14 @@ describe('catalog ordering — specific patterns must precede general ones', () 
     ['llama3.3', 'llama'],
     ['mistral-large', 'mistral'],
     ['claude-opus-4', 'claude'],
+    ['claude-opus-5-5', 'claude-opus-5'],
+    ['claude-sonnet-5-5', 'claude-sonnet-5'],
+    ['claude-opus-5', 'claude'],
+    ['claude-sonnet-5', 'claude'],
+    ['claude-fable-5', 'claude'],
+    ['claude-haiku-4-5', 'claude-haiku-4'],
+    ['claude-opus-4-8', 'claude-opus-4'],
+    ['claude-sonnet-4-6', 'claude-sonnet-4'],
     ['kimi-k2', 'kimi'],
   ];
   const patterns = catalogPatterns();
@@ -113,6 +121,8 @@ describe('catalog ordering — specific patterns must precede general ones', () 
   it('matches the most specific pattern, not merely the first plausible one', () => {
     expect(lookupCatalog('qwen3-coder:30b')?.matched).toBe('qwen3-coder');
     expect(lookupCatalog('gpt-4o-mini')?.matched).toBe('gpt-4o-mini');
+    expect(lookupCatalog('claude-opus-5-5')?.matched).toBe('claude-opus-5-5');
+    expect(lookupCatalog('claude-sonnet-5-5')?.matched).toBe('claude-sonnet-5-5');
   });
 });
 

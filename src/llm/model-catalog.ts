@@ -55,6 +55,25 @@ export interface ResolvedCapability extends ModelCapability {
  */
 const CATALOG: { pattern: string; cap: ModelCapability }[] = [
   // ── Anthropic ──
+  // Current generation, from Anthropic's model table as of 2026-10 (first-party API prices;
+  // Bedrock / Vertex bill separately). Every id below must precede the generic 'claude' and its
+  // own shorter sibling ('claude-opus-5-5' before 'claude-opus-5'), or the 5.5 ids would be
+  // priced as their predecessor.
+  { pattern: 'claude-opus-5-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 4, outputCostPerMillion: 20 } },
+  { pattern: 'claude-opus-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 5, outputCostPerMillion: 25 } },
+  { pattern: 'claude-sonnet-5-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 2, outputCostPerMillion: 10 } },
+  { pattern: 'claude-sonnet-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 2, outputCostPerMillion: 10 } },
+  // Fable 5.1 / 5 (and Mythos, the same model for Project Glasswing): the model table lists a
+  // 1M window (also the default) and 128K output — a stated figure, not a guess.
+  { pattern: 'claude-fable-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 10, outputCostPerMillion: 50 } },
+  { pattern: 'claude-mythos-5', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 10, outputCostPerMillion: 50 } },
+  // Opus 4.6–4.8 dropped to $5/$25 with a 1M window; the generic 'claude-opus-4' row below
+  // still prices Opus 4 / 4.1 correctly.
+  { pattern: 'claude-opus-4-8', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 5, outputCostPerMillion: 25 } },
+  { pattern: 'claude-opus-4-7', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 5, outputCostPerMillion: 25 } },
+  { pattern: 'claude-opus-4-6', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 5, outputCostPerMillion: 25 } },
+  { pattern: 'claude-sonnet-4-6', cap: { contextWindow: 1_000_000, maxOutput: 128_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 3, outputCostPerMillion: 15 } },
+  { pattern: 'claude-haiku-4-5', cap: { contextWindow: 200_000, maxOutput: 64_000, supportsToolCalls: true, vision: true, inputCostPerMillion: 1, outputCostPerMillion: 5 } },
   { pattern: 'claude-opus-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 15, outputCostPerMillion: 75 } },
   { pattern: 'claude-sonnet-4', cap: { contextWindow: 200_000, maxOutput: 64_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 3, outputCostPerMillion: 15 } },
   { pattern: 'claude-haiku-4', cap: { contextWindow: 200_000, maxOutput: 32_000, supportsToolCalls: true, vision: true , inputCostPerMillion: 1, outputCostPerMillion: 5 } },
@@ -267,4 +286,29 @@ export function resolveCapability(
 /** Every pattern in the catalog — for `qodex models` output and tests. PURE. */
 export function catalogPatterns(): string[] {
   return CATALOG.map(e => e.pattern);
+}
+
+/**
+ * Short names for the current Claude models — `/model sonnet`, `qodex -m opus`. Each points at
+ * the LATEST id of its line, so the alias keeps meaning "the current Sonnet" as models ship
+ * (update the target here, nothing else). Haiku stays on 4.5: it is still the current Haiku.
+ */
+export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-4-5',
+  fable: 'claude-fable-5-1',
+});
+
+/**
+ * Expand a model alias to its id; undefined when `input` is not an alias. Case-insensitive,
+ * and a provider prefix is kept (`anthropic/sonnet` → `anthropic/claude-sonnet-5-5`) so a
+ * qualified pick still routes to the provider the user named. PURE.
+ */
+export function resolveModelAlias(input: string): string | undefined {
+  const raw = (input ?? '').trim();
+  const slash = raw.lastIndexOf('/');
+  const prefix = slash >= 0 ? raw.slice(0, slash + 1) : '';
+  const target = MODEL_ALIASES[raw.slice(slash + 1).toLowerCase()];
+  return target ? prefix + target : undefined;
 }

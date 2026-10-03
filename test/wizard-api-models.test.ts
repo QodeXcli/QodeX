@@ -26,9 +26,10 @@ describe('buildModelChoices — configured-API model merge (setup wizard)', () =
   it('still lists the built-in cloud options after the API models', () => {
     const choices = buildModelChoices(HW, [], [{ provider: 'glm', id: 'glm-5.2' }]);
     const values = choices.map(c => c.value);
-    expect(values).toContain('claude-sonnet-4-6');
-    // API model comes before the built-in cloud trio
-    expect(values.indexOf('glm/glm-5.2')).toBeLessThan(values.indexOf('claude-sonnet-4-6'));
+    expect(values).toContain('claude-opus-5-5');
+    expect(values).toContain('claude-sonnet-5-5');
+    // API model comes before the built-in cloud options
+    expect(values.indexOf('glm/glm-5.2')).toBeLessThan(values.indexOf('claude-opus-5-5'));
   });
 
   it('dedupes a repeated provider/id', () => {

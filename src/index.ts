@@ -221,7 +221,7 @@ program
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
   .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
   .option('--strict-budget', 'Budget caps stop the run at once: no wrap-up allowance to leave the work consistent (headless -p)')
-  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
+  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-opus-5-5, gpt-4o; aliases: opus, sonnet, haiku, fable)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
@@ -1545,6 +1545,25 @@ program
       console.log(`\nApply it with:  qodex speculative --apply`);
     }
     process.exit(0);
+  });
+
+program
+  .command('checkup [check]')
+  .description('Opt-in checks that only report: `prompt-audit` audits instruction files, skills, commands and mods (no check = list)')
+  .option('--no-model', 'Skip the model rewrite pass (deterministic findings only)')
+  .action(async (check: string | undefined, opts: { model?: boolean }) => {
+    const { describeChecks, runPromptAuditCheck } = await import('./checkup/index.js');
+    if (!check) { console.log(describeChecks('qodex checkup')); return; }
+    if (check !== 'prompt-audit') {
+      console.error(`Unknown check: ${check}\n\n${describeChecks('qodex checkup')}`);
+      process.exit(1);
+    }
+    const { summarizeAudit } = await import('./checkup/prompt-audit.js');
+    const { loadConfig } = await import('./config/loader.js');
+    const config = await loadConfig(process.cwd()).catch(() => undefined);
+    // commander turns --no-model into `model: false`.
+    const result = await runPromptAuditCheck(process.cwd(), { noModel: opts.model === false, config });
+    console.log(summarizeAudit(result));
   });
 
 program
