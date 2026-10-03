@@ -18,14 +18,15 @@
 export type WordPart =
   /** Literal text. `quoted` = came from quotes or an escape (never a glob). */
   | { t: 'lit'; v: string; quoted: boolean }
-  /** `$NAME` / `${NAME}` / `${NAME:-x}` (op/arg kept raw). Positional/special params use their symbol. */
-  | { t: 'var'; name: string; quoted: boolean; op?: string }
+  /** `$NAME` / `${NAME}` / `${NAME:-x}` (op/arg kept raw). Positional/special params use their symbol.
+   *  `nested`: command substitutions inside the operand (`${x:-$(cmd)}`) — they RUN. */
+  | { t: 'var'; name: string; quoted: boolean; op?: string; nested?: ParsedScript[] }
   /** `$( … )` or backticks — a nested script that RUNS. */
   | { t: 'sub'; body: ParsedScript }
   /** `<( … )` / `>( … )` — a nested script that runs; the word is a /dev/fd path. */
   | { t: 'proc'; body: ParsedScript }
-  /** `$(( … ))` — arithmetic, no command. */
-  | { t: 'arith' }
+  /** `$(( … ))` — arithmetic; `nested` holds command substitutions inside it (they RUN). */
+  | { t: 'arith'; nested?: ParsedScript[] }
   /** Unquoted `~` / `~user` at the start of a word. */
   | { t: 'tilde'; user: string };
 
@@ -143,8 +144,18 @@ class Parser {
       if (c === '|') { i++; sep = '|'; continue; }
       if (c === '&' && src[i + 1] !== '>') { i++; sep = '&'; continue; }
       if (c === '(' && src[i + 1] === '(') {
-        // `(( arithmetic ))` command — no executable.
-        i = this.skipArith(i + 2);
+        // `(( arithmetic ))` command — no executable, but `$( )` inside it runs: keep it as
+        // a command whose only word is the arithmetic (so the substitutions are analyzed).
+        const start = i;
+        const end = this.skipArith(i + 2);
+        const nested = this.substitutionsIn(src.slice(i + 2, Math.max(i + 2, end - 2)));
+        script.commands.push({
+          words: [{ parts: [{ t: 'arith', ...(nested.length ? { nested } : {}) }], start, end }],
+          redirects: [], start, end, sep, opens, closes: 0,
+        });
+        sep = '';
+        opens = 0;
+        i = end;
         continue;
       }
       if (c === '(') { i++; opens++; groupDepth++; continue; }
@@ -365,7 +376,9 @@ class Parser {
     }
     const n = src[i + 1];
     if (n === '(' && src[i + 2] === '(') {
-      return { part: { t: 'arith' }, end: this.skipArith(i + 3) };
+      const end = this.skipArith(i + 3);
+      const nested = this.substitutionsIn(src.slice(i + 3, Math.max(i + 3, end - 2)));
+      return { part: { t: 'arith', ...(nested.length ? { nested } : {}) }, end };
     }
     if (n === '(') {
       const r = new Parser(src, this.depth + 1).parseList(i + 2, true);
@@ -379,11 +392,26 @@ class Parser {
       const m = /^([#!]?)([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])(.*)$/s.exec(inner);
       const name = m ? m[2]! : inner;
       const op = m && (m[1] || m[3]) ? `${m[1]}${m[3] ? m[3].slice(0, 2) : ''}` : undefined;
-      return { part: { t: 'var', name, quoted, ...(op ? { op } : {}) }, end: j < 0 ? src.length : j + 1 };
+      const nested = op || !m ? this.substitutionsIn(m ? m[3]! : inner) : [];
+      return { part: { t: 'var', name, quoted, ...(op ? { op } : {}), ...(nested.length ? { nested } : {}) }, end: j < 0 ? src.length : j + 1 };
     }
     const m = /^([A-Za-z_][A-Za-z0-9_]*|[0-9]|[@*#?$!-])/.exec(src.slice(i + 1));
     if (m) return { part: { t: 'var', name: m[1]!, quoted }, end: i + 1 + m[1]!.length };
     return null;
+  }
+
+  /** Command substitutions (`$( )`, backticks) anywhere in `text` — they run. */
+  private substitutionsIn(text: string): ParsedScript[] {
+    if (!/\$\(|`/.test(text) || this.depth > MAX_DEPTH) return [];
+    const out: ParsedScript[] = [];
+    const collect = (parts: WordPart[]) => {
+      for (const p of parts) {
+        if (p.t === 'sub' || p.t === 'proc') out.push(p.body);
+        else if ((p.t === 'var' || p.t === 'arith') && p.nested) out.push(...p.nested);
+      }
+    };
+    collect(new Parser(text, this.depth + 1).parseDoubleQuoted(0, null).parts);
+    return out;
   }
 
   /** Skip `(( … ))` / `$(( … ))` content; `i` is just inside the opening parens. */

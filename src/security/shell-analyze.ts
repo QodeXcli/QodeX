@@ -227,9 +227,15 @@ class Analyzer {
     const lead = script.src.slice(c.start).length - script.src.slice(c.start).trimStart().length;
     const base = c.start + lead;
     // Nested scripts in words and here-doc bodies run before the command itself.
-    for (const w of c.words) for (const p of w.parts) if (p.t === 'sub' || p.t === 'proc') this.nested(p.body, st);
+    const walkParts = (w: Word) => {
+      for (const p of w.parts) {
+        if (p.t === 'sub' || p.t === 'proc') this.nested(p.body, st);
+        else if ((p.t === 'var' || p.t === 'arith') && p.nested) for (const b of p.nested) this.nested(b, st);
+      }
+    };
+    for (const w of c.words) walkParts(w);
     for (const rd of c.redirects) {
-      if (rd.target) for (const p of rd.target.parts) if (p.t === 'sub' || p.t === 'proc') this.nested(p.body, st);
+      if (rd.target) walkParts(rd.target);
       for (const s of rd.heredoc?.subs ?? []) this.nested(s, st);
     }
     const assigns: { name: string; val: Val }[] = [];
@@ -262,8 +268,16 @@ class Analyzer {
       for (const o of outs) for (const v of vals) { if (next.length < 32) next.push(o + v); }
       outs = next;
     };
-    for (const p of w.parts) {
-      if (p.t === 'lit') push([p.v]);
+    for (let pi = 0; pi < w.parts.length; pi++) {
+      const p = w.parts[pi]!;
+      if (p.t === 'lit') {
+        // Brace expansion on unquoted text (`{~/a,b}` → `~/a b`; a tilde produced at the
+        // start of an alternative expands too, as in bash).
+        if (!p.quoted && /\{[^{}]*,[^{}]*\}/.test(p.v)) {
+          const alts = braceExpand(p.v).map(s => (pi === 0 && (s === '~' || s.startsWith('~/')) ? home + s.slice(1) : s));
+          push(alts);
+        } else push([p.v]);
+      }
       else if (p.t === 'tilde') push([p.user ? path.join(path.dirname(home), p.user) : home]);
       else if (p.t === 'var') {
         const vals = p.op && /^[#!]/.test(p.op) ? null : this.lookupVar(p.name, st, home);
@@ -1257,9 +1271,12 @@ class Analyzer {
       const dir = prefix.slice(0, slash) || '/';
       if (!path.isAbsolute(dir) && !cwd) return null;
       const abs = path.resolve(cwd ?? '/', dir);
-      // Only "clearly outside" when the known directory is outside AND not a parent of a root.
+      // "Clearly outside" when the known directory is outside the roots, or a strict parent
+      // of one (`rm -rf ~/$name`, `"$HOME/$x"`): a name picked at run time directly under
+      // $HOME is far more likely to be anything but this project. Under the project root or
+      // inside it (`$PWD/$x`, `build/$x`) it stays unknown.
       const cls = this.classOf(abs);
-      return cls === 'outside' ? path.join(abs, '__dynamic__') : null;
+      return cls === 'outside' || cls === 'ancestor' ? path.join(abs, '__dynamic__') : null;
     }
     if (!path.isAbsolute(s) && !cwd) return null;
     return path.resolve(cwd ?? '/', s);
@@ -1321,6 +1338,34 @@ interface Resolved {
 }
 
 // ── argv helpers ─────────────────────────────────────────────────────────────
+
+/** Bash brace expansion of comma lists (`a{b,c}d` → abd acd), at most 32 results. PURE. */
+function braceExpand(s: string, depth = 0): string[] {
+  if (depth > 4) return [s];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let d = 0;
+    const commas: number[] = [];
+    let j = i;
+    for (; j < s.length; j++) {
+      if (s[j] === '{') d++;
+      else if (s[j] === '}') { d--; if (d === 0) break; }
+      else if (s[j] === ',' && d === 1) commas.push(j);
+    }
+    if (j >= s.length || !commas.length) continue;
+    const pre = s.slice(0, i);
+    const post = s.slice(j + 1);
+    const bounds = [i, ...commas, j];
+    const out: string[] = [];
+    for (let k = 0; k < bounds.length - 1 && out.length < 32; k++) {
+      for (const e of braceExpand(pre + s.slice(bounds[k]! + 1, bounds[k + 1]) + post, depth + 1)) {
+        if (out.length < 32) out.push(e);
+      }
+    }
+    return out;
+  }
+  return [s];
+}
 
 function baseName(p: string): string {
   const s = p.replace(/\/+$/, '');

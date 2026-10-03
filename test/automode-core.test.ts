@@ -41,7 +41,8 @@ const ALLOW: string[] = [
   'cat <<EOF > notes.md\nrm -rf ~/x\nEOF', 'dd if=/dev/zero of=disk.img bs=1M count=1',
   // unknowable values are not "clearly outside"
   'rm -rf "$BUILD_DIR"', 'rm -rf $(cat list.txt)', 'cd "$WORK" && rm -rf out','rm -rf "$(pwd)/dist"',
-  'xargs rm -rf < list.txt', '$CMD build', 'bash -c "$SCRIPT"', 'git worktree remove wt', "trap 'rm -rf build' EXIT",
+  'xargs rm -rf < list.txt', '$CMD build', 'rm -rf "$PWD/$X"', 'rm -rf build/$X', 'rm -rf /work/proj/$X', 'echo ${X:-default}',
+  'echo $((1 + 2))', 'rm -rf {build,dist}', "awk '{print $1,$2}' f.txt", 'bash -c "$SCRIPT"', 'git worktree remove wt', "trap 'rm -rf build' EXIT",
   // words that only LOOK dangerous (not in command position)
   'echo "shutdown -h now" > notes.txt', 'grep -rn "rm -rf /" src', 'git commit -m "drop table users; shutdown; reboot"',
   'cat shutdown.ts', 'grep -c "sudo" README.md', 'echo git push --force', 'npm run reboot-docs',
@@ -85,7 +86,9 @@ const ASK: string[] = [
   'python3 -c "import shutil; shutil.rmtree(\'/etc/x\')"', 'node -e "require(\'fs\').rmSync(\'/var/data\', {recursive: true})"',
   'python3 -c "import os; os.system(\'rm -rf ~/x\')"', '$(echo rm) -rf ~/x', '"$CMD" /etc/passwd', "trap 'rm -rf ~/x' EXIT",
   'node -e "require(\'child_process\').execSync(\'rm -rf ~/x\')"', "perl -e 'unlink glob(\"~/x/*\")'", 'git worktree remove ../wt',
-  'tar -czf - . | ssh host "tar -xzf - -C /srv"', 'cp -r src ~', '\\rm -rf ~/x', '"rm" -rf ~/x', "r''m -rf ~/x", 'exec > ~/log 2>&1',
+  'tar -czf - . | ssh host "tar -xzf - -C /srv"', 'cp -r src ~', 'echo ${X:-$(rm -rf ~/x)}', 'echo $(( $(rm -rf ~/x) + 1 ))',
+  '(( n = $(rm -rf ~/x) ))', 'rm -rf {~/x,build}', 'rm -rf ~/{a,b}', 'for f in $(ls ~); do rm -rf ~/$f; done', 'rm -rf "$HOME/$X"',
+  'rm -rf ~/"$X"','\\rm -rf ~/x', '"rm" -rf ~/x', "r''m -rf ~/x", 'exec > ~/log 2>&1',
   // remote history rewrite / remote deletes
   'git push --force', 'git push -f origin main', 'git push origin +main','git push origin :old-branch',
   'git push --delete origin old', 'git push origin --delete old', 'git push -d origin x', 'git push --mirror', 'git push --force-with-lease',
