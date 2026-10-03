@@ -10,7 +10,11 @@
  *   - Wayland screen_info notes that ydotool types through the active
  *     keyboard layout (ASCII comes out wrong under a Persian layout);
  *   - the Windows paste script restores the old clipboard in a `finally`
- *     (with ErrorActionPreference Stop a throwing SendWait skipped it).
+ *     (with ErrorActionPreference Stop a throwing SendWait skipped it);
+ *   - Sentinel judges computer_use_open of code-running targets critical:
+ *     RCE-prone protocol handlers (ms-msdt, search-ms, its:, ...), commands
+ *     that act when merely launched (poweroff, logoff, ...) and more
+ *     executable file types (.tool, .run, .msc, .appref-ms, ...).
  * Fakes only (setDesktopExec) — no real input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -21,6 +25,8 @@ import { setDesktopExec, type ExecOptions, type ExecResult } from '../src/tools/
 import { X11Backend, WaylandBackend, WindowsBackend, type BackendDeps } from '../src/tools/computer/backends/index.js';
 import { pickTextMime } from '../src/tools/computer/backends/wayland.js';
 import { decodePowerShellStdin } from '../src/tools/computer/backends/windows.js';
+import { classifyAction } from '../src/sentinel/policy.js';
+import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
 
 interface Call { cmd: string; args: string[]; opts?: ExecOptions }
 type Responder = (c: Call) => Partial<ExecResult> | void | Promise<Partial<ExecResult> | void>;
@@ -181,6 +187,58 @@ describe('windows: the paste script restores the old clipboard even when the pas
     expect(at("SendWait('^v')", setText)).toBeLessThan(fin);
     for (const restore of ['SetText($oldText)', 'SetImage($oldImage)', 'SetFileDropList($oldFiles)', '[System.Windows.Forms.Clipboard]::Clear()']) {
       expect(at(restore, setText), restore).toBeGreaterThan(fin);
+    }
+  });
+});
+
+describe('Sentinel: computer_use_open targets that run code are critical', () => {
+  const open = (target: string) => classifyAction('computer_use_open', { target }, { config: { ...DEFAULT_SENTINEL_CONFIG } });
+  const expectCritical = (target: string) => {
+    const c = open(target);
+    expect(c.risk, target).toBe('critical');
+    expect(c.category, target).toBe('other');
+    expect(c.block, target).toBeUndefined(); // a human can still allow it
+  };
+
+  it('protocol handlers with a code-execution history (Follina ms-msdt, search-ms, CHM its:/mk:, ...) — not just high', () => {
+    for (const target of [
+      'ms-msdt:/id PCWDiagnostic /skip force /param "IT_BrowseForFile=x"', 'MS-MSDT:/id x',
+      'search-ms:query=invoice&crumb=location:\\\\evil.example\\share', 'search:query=x',
+      'ms-officecmd:{"id":3}', 'ms-appinstaller:?source=https://evil.example/x.appinstaller', 'ms-cxh-full://0',
+      'its:C:\\x.chm::/a.htm', 'ms-its:C:\\x.chm::/a.htm', 'mk:@MSITStore:C:\\x.chm::/a.htm', 'hcp://services/search?query=x',
+    ]) expectCritical(target);
+    // other protocol handlers keep their (high) desktop review; web pages stay medium
+    expect(open('ms-settings:privacy')).toMatchObject({ category: 'desktop', risk: 'high' });
+    expect(open('steam://run/10')).toMatchObject({ category: 'desktop', risk: 'high' });
+    expect(open('https://example.com/search?q=x')).toMatchObject({ category: 'desktop', risk: 'medium' });
+  });
+
+  it('power / session / kill / privilege commands launched by name or path', () => {
+    for (const target of [
+      'poweroff', 'reboot', 'shutdown', 'logoff', 'LOGOFF.EXE', 'tsdiscon', 'gnome-session-quit', 'xkill', 'pkexec',
+      '/sbin/poweroff', 'C:\\Windows\\System32\\shutdown.exe', 'file:///usr/sbin/reboot',
+    ]) expectCritical(target);
+    for (const target of ['Calculator', 'firefox', 'gnome-calculator', 'notepad', 'Visual Studio Code', '/tmp/notes.txt']) {
+      expect(open(target)).toMatchObject({ category: 'desktop', risk: 'medium' });
+    }
+  });
+
+  it('more file types the default handler executes', () => {
+    for (const target of [
+      '~/Downloads/x.tool', '/tmp/x.terminal', 'a.workflow', 'b.action', '/tmp/NVIDIA-Linux-x86_64.run', 'setup.bin',
+      'evil.bash', 'x.zsh', 'x.fish', 'm.psm1', 'p.wsh', 'patch.msp', 'app.application', 'app.appref-ms',
+      'x.settingcontent-ms', 'x.msc', 'x.inf', 'x.scf', 'x.gadget', 'file:///tmp/x.tool',
+    ]) expectCritical(target);
+  });
+
+  it('on Windows .pyw / .pl / .rb / .url run as well; elsewhere a .pl is just a file', () => {
+    expect(open('/tmp/a.pl').risk).not.toBe('critical');
+    const real = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      for (const target of ['C:\\x\\a.pyw', 'C:\\x\\a.pl', 'C:\\x\\a.rb', 'C:\\Users\\me\\Desktop\\invoice.url']) expectCritical(target);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: real });
     }
   });
 });

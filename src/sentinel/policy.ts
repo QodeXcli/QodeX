@@ -1351,15 +1351,50 @@ function desktopSelfChange(toolName: string, text: string): PolicyClassification
   };
 }
 
-/** Opening these with the system handler (Start-Process / open / xdg-open) runs them as programs. */
-const PROGRAM_EXT_RE = /\.(?:exe|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|msi|com|scr|pif|cpl|lnk|reg|command|app|sh|desktop|jar|py|appimage)$/i;
+/**
+ * Opening these with the system handler (Start-Process / open / xdg-open) runs them as programs:
+ * Windows executables, installers, scripts and shell-command files (.wsh, .scf, .settingcontent-ms,
+ * ClickOnce .application / .appref-ms, .msc snap-ins), macOS Terminal / Automator files
+ * (.command, .tool, .terminal, .workflow, .action), Linux launchers and self-running installers.
+ */
+const PROGRAM_EXT_RE = /\.(?:exe|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|msi|msp|com|scr|pif|cpl|lnk|reg|inf|scf|msc|gadget|application|appref-ms|settingcontent-ms|command|tool|terminal|workflow|action|app|sh|bash|zsh|csh|ksh|fish|run|bin|desktop|jar|py|appimage)$/i;
+/** Script / shortcut types Windows also runs on open (Python launcher, Perl / Ruby, .url Internet Shortcuts). */
+const WINDOWS_PROGRAM_EXT_RE = /\.(?:pyw|pl|rb|url)$/i;
 
-/** Does opening this local path / name run it as a program? PURE. */
+/** Does opening this local path / name run it as a program? PURE (given the platform). */
 function opensProgram(p: string): boolean {
   const s = String(p ?? '').trim().replace(/[\\/]+$/, ''); // "Foo.app/" is the bundle itself
-  if (!PROGRAM_EXT_RE.test(s)) return false;
+  if (!PROGRAM_EXT_RE.test(s) && !(process.platform === 'win32' && WINDOWS_PROGRAM_EXT_RE.test(s))) return false;
   // "example.com" without a path is a web site, not a DOS program.
   return !/\.com$/i.test(s) || /[\\/]/.test(s);
+}
+
+/**
+ * Protocol handlers with a history of code execution when a link is merely opened:
+ * Follina's ms-msdt, search-ms / search, ms-officecmd, ms-appinstaller, ms-cxh, the CHM
+ * viewers (its:, ms-its:, mk:) and Help Center (hcp:).
+ */
+const CODE_EXEC_SCHEMES = new Set([
+  'ms-msdt', 'search-ms', 'search', 'ms-officecmd', 'ms-appinstaller', 'ms-cxh', 'ms-cxh-full', 'its', 'ms-its', 'mk', 'hcp',
+]);
+
+/**
+ * Commands that power off, log out, kill, wipe or escalate privileges as soon as they are
+ * LAUNCHED (`poweroff`, `logoff`, `gnome-session-quit` need no arguments) — what
+ * computer_use_open does with an app name. Lower-case, no extension.
+ */
+const SYSTEM_COMMANDS = new Set([
+  'shutdown', 'poweroff', 'reboot', 'halt', 'init', 'telinit', 'systemctl', 'loginctl', 'logoff', 'logout', 'tsdiscon',
+  'gnome-session-quit', 'xfce4-session-logout', 'cinnamon-session-quit', 'lxqt-leave',
+  'kill', 'killall', 'pkill', 'taskkill', 'xkill', 'rm', 'rmdir', 'del', 'erase', 'format', 'diskpart', 'dd', 'mkfs',
+  'shred', 'wipefs', 'sudo', 'su', 'doas', 'pkexec', 'runas', 'rundll32', 'regsvr32', 'mshta', 'wscript', 'cscript',
+  'bcdedit', 'vssadmin', 'cipher', 'wmic', 'reg', 'schtasks', 'crontab', 'launchctl', 'osascript',
+]);
+
+/** The system command a local path / app name launches, or null. PURE. */
+function systemCommand(p: string): string | null {
+  const base = (String(p ?? '').trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.exe$/, '');
+  return SYSTEM_COMMANDS.has(base) ? base : null;
 }
 
 function textPreview(text: string, mask: boolean): string {
@@ -1578,6 +1613,10 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
           local = parseTarget(target)?.url?.pathname ?? target.replace(/^file:/i, '');
           try { local = decodeURIComponent(local); } catch { /* keep */ }
           if (process.platform === 'win32') local = local.replace(/^\/([a-z]:)/i, '$1');
+        } else if (hasScheme && CODE_EXEC_SCHEMES.has(scheme)) {
+          // Fixed critical, like a program: these handlers have run attacker code from a mere link.
+          return make('other', 'critical', `open ${shown} with the app registered for ${scheme}:`,
+            `${scheme}: links have been used to run code on this kind of system (protocol-handler exploits such as Follina)`, `${scheme}:`);
         } else if (hasScheme && scheme !== 'http' && scheme !== 'https') {
           return make('desktop', riskFor('desktop', cfg, { base: 'high' }), `open ${shown} with the app registered for ${scheme}:`,
             `${scheme}: links launch whatever app handles them (settings, installers, other protocol handlers)`, nav.domain || `${scheme}:`);
@@ -1591,6 +1630,11 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
         // Fixed critical: Start-Process / open / xdg-open RUN it — code execution that /auto and
         // --yes never wave through (sentinel.autoApprove: [other] opts out).
         return make('other', 'critical', `run ${shown} on your computer`, 'opening a program or script with its system handler executes it, like a shell command');
+      }
+      const command = systemCommand(local);
+      if (command) {
+        // An app name is launched as a command: `poweroff` / `logoff` act without arguments.
+        return make('other', 'critical', `run ${shown} on your computer`, `"${command}" is a system command (power, session, kill, delete or privileges) that acts as soon as it is launched`);
       }
       return make('desktop', riskFor('desktop', cfg), `open ${shown} on your computer`, 'launching an app or file on your computer');
     }
