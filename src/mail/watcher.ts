@@ -139,7 +139,8 @@ export async function openMailServiceSource(account: string, service: MailServic
           out.push({
             uid: m.uid, id: m.id, messageId: m.messageId,
             from: formatAddress(m.from[0]), to: m.to.map(formatAddress).filter(Boolean), cc: m.cc.map(formatAddress).filter(Boolean),
-            subject: m.subject ?? '', text: m.text ?? '', date: m.date,
+            // Like mail_read: an email quoting the account's own password never carries it further.
+            subject: service.scrub(m.subject ?? ''), text: service.scrub(m.text ?? ''), date: m.date,
             attachments: m.attachments.filter(a => !a.inline).map(a => ({ name: a.filename, size: a.size })),
             ...(m.headers ? { headers: { ...m.headers } } : {}),
           });

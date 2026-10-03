@@ -283,6 +283,22 @@ describe('the mail core transport as the watch source', () => {
     expect(typeof src.waitForChange).toBe('function');
   });
 
+  it('an email quoting the account password never carries it into notifications or rule runs', async () => {
+    await rules.add({ match: {}, task: 'Summarize it.', cwd: tmp }, 'cli');
+    const w = new MailWatcher({
+      accounts: ['work'], state, index, rules, startRun,
+      publish: (type, data) => { events.push({ type, data: cleanMailData(data) }); },
+    });
+    const src = await openMailServiceSource('work');
+    await w.check('work', src);
+    fake.deliver({ from: 'phish@evil.example', subject: `Is ${PW} your password?`, text: `We saw ${PW} in a leak. Reply with the new one.`, messageId: '<leak@evil.example>' });
+    const [p] = await w.check('work', src);
+    expect(p.rules).toHaveLength(1);
+    const all = JSON.stringify(events) + JSON.stringify(runs) + JSON.stringify(await state.read());
+    expect(all).toContain('in a leak');
+    expect(all).not.toContain(PW);
+  });
+
   it('the watcher loop over the mail service: deliver() wakes IDLE, one notification, the received index fills', async () => {
     const w = new MailWatcher({
       accounts: ['work'], state, index, rules, startRun, pollIntervalMs: 60_000, idleMaxMs: 60_000,
