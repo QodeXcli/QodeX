@@ -622,17 +622,14 @@ export class Sentinel implements SentinelGuard {
       clearSentinelApproval(ctx, toolName);
       const verdict = this.decide(toolName, cls, ctx, cfg, a);
       let d = verdict.decision;
-      if (d.action === 'allow') {
-        this.report(cfg, toolName, a, ctx, cls, 'allow', verdict.via);
-        // The human's earlier "always" for this category + domain answers for this call too.
-        if (verdict.via === 'session') recordSentinelApproval(ctx, toolName);
-        return this.allow(ctx, toolName, grant);
-      }
       // A standing mail-reply grant the human created answers for an in-scope reply (also
-      // when no human is around — that is what it is for). Never past a policy block or a deny rule.
+      // when no human is around — that is what it is for — and under sentinel.autoApprove:
+      // [send], whose allow mail_send's own human gate does not take). Never past a policy
+      // block or a deny rule.
       let criticalOptions = CRITICAL_OPTIONS;
       let replyOffer: ReplyOffer | null = null;
-      if (toolName === MAIL_SEND_TOOL && !cls.block && cls.category === 'send' && verdict.via !== 'permission') {
+      if (toolName === MAIL_SEND_TOOL && !cls.block && cls.category === 'send' && verdict.via !== 'permission'
+        && (d.action !== 'allow' || verdict.via === 'auto-approve')) {
         const g = await this.standingMailGrant(toolName, ctx, cls, mail ?? null);
         if (g.allowed) {
           this.report(cfg, toolName, a, ctx, cls, 'allow', 'grant', `grant:${g.grantId} (${g.used}/${g.cap} today)`, 'standing-grant');
@@ -652,6 +649,12 @@ export class Sentinel implements SentinelGuard {
           }
           d = { ...d, prompt: beforeQuestion(d.prompt, lines) };
         }
+      }
+      if (d.action === 'allow') {
+        this.report(cfg, toolName, a, ctx, cls, 'allow', verdict.via);
+        // The human's earlier "always" for this category + domain answers for this call too.
+        if (verdict.via === 'session') recordSentinelApproval(ctx, toolName);
+        return this.allow(ctx, toolName, grant);
       }
       if (d.action === 'deny') {
         this.report(cfg, toolName, a, ctx, cls, 'deny', verdict.via);

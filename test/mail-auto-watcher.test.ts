@@ -302,9 +302,11 @@ describe('the mail core transport as the watch source', () => {
 
   it('transport errors are reported once, scrubbed of the password (every encoding), and the loop retries', async () => {
     fake.failWith = new Error(`LOGIN failed for me@work.example with password ${PW} (AUTH PLAIN ${Buffer.from(`\0me@work.example\0${PW}`).toString('base64')})`);
+    const log: string[] = [];
     const w = new MailWatcher({
       accounts: ['work'], state, index, rules, startRun, pollIntervalMs: 1000, backoff: { initialMs: 50, maxMs: 50 },
       publish: (type, data) => { events.push({ type, data: cleanMailData(data) }); },
+      onLog: (line) => { log.push(line); }, // the daemon's watch.log / the foreground terminal
     });
     await w.start();
     await waitFor(() => events.some(e => e.type === 'watch-error'));
@@ -312,8 +314,9 @@ describe('the mail core transport as the watch source', () => {
     await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX, 5000);
     await w.stop();
     expect(events.filter(e => e.type === 'watch-error')).toHaveLength(1);
-    const all = JSON.stringify(events) + JSON.stringify(await state.read());
+    const all = JSON.stringify(events) + JSON.stringify(await state.read()) + JSON.stringify(log);
     expect(all).toContain('LOGIN failed');
+    expect(log.some(l => l.includes('LOGIN failed'))).toBe(true);
     expect(all).not.toContain(PW);
     expect(all).not.toContain(Buffer.from(PW).toString('base64'));
     expect(all).not.toContain(Buffer.from(`\0me@work.example\0${PW}`).toString('base64'));

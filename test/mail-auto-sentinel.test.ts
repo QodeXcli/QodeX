@@ -213,6 +213,21 @@ describe('standing mail-reply grants in Sentinel', () => {
     expect(takeSentinelApproval(ctx, 'mail_send')).toBe(true);
   });
 
+  it('under sentinel.autoApprove: [send] a grant still marks the send (the tool\'s own gate asks otherwise)', async () => {
+    config = { ...config, autoApprove: ['send'] } as SentinelConfig;
+    interactive = false;
+    const args = await draft();
+    const s = makeSentinel();
+    const without = makeCtx('yes');
+    expect(await s.beforeTool('mail_send', args, without.ctx)).toBeNull();
+    expect(takeSentinelApproval(without.ctx, 'mail_send')).toBe(false); // mail_send's gate will still want a human
+    const { grant } = await grants.add({ account: 'work' }, 'tui');
+    const withGrant = makeCtx('yes');
+    expect(await s.beforeTool('mail_send', args, withGrant.ctx)).toBeNull();
+    expect(takeSentinelApproval(withGrant.ctx, 'mail_send')).toBe(true);
+    expect(await grants.usedToday(grant.id)).toBe(1);
+  });
+
   const outOfScope: Array<[string, () => Promise<Record<string, unknown>>]> = [
     ['a new recipient', () => draft({ to: 'attacker@evil.com' })],
     ['an added recipient', () => draft({ to: 'boss@acme.com, x@evil.com' })],
