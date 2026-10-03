@@ -50,6 +50,8 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'unlimited', description: 'Remove the iteration cap this session' },
   { name: 'iterations', args: '<n>', description: 'Set iteration cap (0 = none)' },
   { name: 'network', description: 'Diagnose connectivity' },
+  { name: 'checkup', args: '[prompt-audit [--no-model]]', description: 'Audit instruction files, skills, commands (writes a report + patch)' },
+  { name: 'doctor', args: '[prompt-audit [--no-model]]', description: 'Same as /checkup' },
   { name: 'commands', description: 'List custom slash commands' },
   { name: 'exit', description: 'Quit QodeX' },
 ];

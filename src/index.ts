@@ -1542,6 +1542,25 @@ program
   });
 
 program
+  .command('checkup [check]')
+  .description('Opt-in checks that only report: `prompt-audit` audits instruction files, skills, commands and mods (no check = list)')
+  .option('--no-model', 'Skip the model rewrite pass (deterministic findings only)')
+  .action(async (check: string | undefined, opts: { model?: boolean }) => {
+    const { describeChecks, runPromptAuditCheck } = await import('./checkup/index.js');
+    if (!check) { console.log(describeChecks('qodex checkup')); return; }
+    if (check !== 'prompt-audit') {
+      console.error(`Unknown check: ${check}\n\n${describeChecks('qodex checkup')}`);
+      process.exit(1);
+    }
+    const { summarizeAudit } = await import('./checkup/prompt-audit.js');
+    const { loadConfig } = await import('./config/loader.js');
+    const config = await loadConfig(process.cwd()).catch(() => undefined);
+    // commander turns --no-model into `model: false`.
+    const result = await runPromptAuditCheck(process.cwd(), { noModel: opts.model === false, config });
+    console.log(summarizeAudit(result));
+  });
+
+program
   .command('doctor')
   .description('Check environment health (providers, Ollama, grammars, MCP, DB writability)')
   .action(async () => {

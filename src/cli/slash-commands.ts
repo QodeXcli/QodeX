@@ -322,6 +322,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /auto [manual|edits|auto]  Approval mode (or Shift+Tab; also /mode). on=auto, off=manual
     /status            Approval mode, strict mode, session and model at a glance
     /network           Diagnose internet + local backend connectivity
+    /checkup [prompt-audit [--no-model]]  Audit instructions/skills/commands → PROMPT_AUDIT.md + patch (also /doctor)
     /tools [--all]     List all registered tools by category
     /memory            Show / manage persisted project facts
     /strict on|off     Production-safety mode (plan + analyze before changes)
@@ -755,6 +756,26 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       lines.push('');
       lines.push(`(tip: /tools --all for full descriptions)`);
       return { handled: true, message: lines.join('\n') };
+    }
+
+    case 'checkup':
+    case 'doctor': {
+      // /checkup lists the checks; /checkup prompt-audit [--no-model] (also /doctor prompt-audit)
+      // reads the prompt surface and writes PROMPT_AUDIT.md + prompt-audit.patch — applies nothing.
+      const { describeChecks, runPromptAuditCheck } = await import('../checkup/index.js');
+      const [check, ...rest] = args;
+      if (!check) {
+        return {
+          handled: true,
+          message: describeChecks(`/${cmd}`) + (cmd === 'doctor' ? '\n\n(`qodex doctor` in a shell diagnoses the install itself.)' : ''),
+        };
+      }
+      if (check !== 'prompt-audit') {
+        return { handled: true, message: `Unknown check: ${check}\n\n${describeChecks(`/${cmd}`)}` };
+      }
+      const { summarizeAudit } = await import('../checkup/prompt-audit.js');
+      const result = await runPromptAuditCheck(cwd, { noModel: rest.includes('--no-model'), config });
+      return { handled: true, message: summarizeAudit(result) };
     }
 
     case 'model': {
