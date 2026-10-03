@@ -71,6 +71,8 @@ import {
   HANDOFF_TOKEN_RE,
   type HandoffOutcome,
 } from './handoff.js';
+import { handleSecretRoute, isSecretRoute } from './secret-routes.js';
+import { getSecretRequestBroker } from '../vault/requests.js';
 import { logger } from '../utils/logger.js';
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -1238,6 +1240,10 @@ async function shutdown(rt: Running, o: ShutdownOptions): Promise<void> {
  * public link, `title`/`lang`/`onSteer` are updated in place.
  */
 export function startControlCenter(opts: ControlCenterOptions = {}): Promise<ControlCenterInfo> {
+  // While a control center runs, its secure form can take a vault_request_login.
+  getSecretRequestBroker().setSurfaceProbe('control', () => current !== null);
+  // Takeover lives here: offer to save a login the human types in the live view.
+  void import('../vault/capture.js').then(m => m.installLoginCapture()).catch(() => {});
   return serialize(async () => {
     if (current) {
       const rt = current;
@@ -1716,6 +1722,9 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
 
   // 4. Routes. A hand-off link opens its hand-off's live view and nothing else.
   if (auth.via === 'handoff') return handleHandoffScoped(rt, req, res, auth.handoffId, path, method, isRead);
+  // 3b. Secret entry + vault panel: own module, stricter rules (full token only,
+  //     loopback/https only, sealed over tunnels; bodies never logged).
+  if (isSecretRoute(path)) return handleSecretRoute({ req, res, path, query, method, authVia: auth.via });
   const handoffMatch = path.match(/^\/api\/handoff\/([^/]+)$/);
   if (handoffMatch) {
     if (method !== 'POST') { if (!isRead) drainAndIgnore(req); sendError(res, 405, '[METHOD_NOT_ALLOWED] Use POST.', { Allow: 'POST' }); return; }

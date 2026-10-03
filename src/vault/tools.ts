@@ -33,6 +33,12 @@ import {
   type FillTarget, type PreparedField,
 } from './fill.js';
 import { BrowserLoginTool } from './login.js';
+import { resolveBrowserConfig } from '../config/agent-config.js';
+import { getActiveConfig } from '../config/loader.js';
+import { totp, totpRemainingSeconds } from './totp.js';
+import {
+  getSecretRequestBroker, vaultFindByOrigin, deriveEntryName, displayHost, originUrl, scrubSecretError,
+} from './requests.js';
 
 const FillSecretArgs = z.object({
   secret: z.string().min(1).describe('Vault entry name (from vault_list) — never the value.'),
@@ -375,6 +381,89 @@ export class VaultListTool extends Tool<z.infer<typeof VaultListArgs>> {
   }
 }
 
+// Kept terse: every tool schema is re-sent on each request (tool-token budget).
+const RequestLoginArgs = z.object({
+  site: z.string().min(1),
+  reason: z.string().min(1),
+  name: z.string().optional(),
+  username_hint: z.string().optional(),
+  want_totp: z.boolean().optional(),
+});
+type RequestLoginArgsT = z.infer<typeof RequestLoginArgs>;
 
-/** Every vault tool class, for the registry (browser_login lives in login.ts). */
-export const VAULT_TOOL_CLASSES = [BrowserFillSecretTool, VaultListTool, BrowserLoginTool, VaultGenerateAndFillTool] as const;
+/**
+ * vault_request_login — the human types a login into QodeX's own secure input (the
+ * TUI's masked prompt or the control center's secret form, src/vault/requests.ts);
+ * it goes straight into the vault. The agent only learns the entry name.
+ */
+export class VaultRequestLoginTool extends Tool<RequestLoginArgsT> {
+  name = 'vault_request_login';
+  description = 'User types a site login into QodeX\'s secure prompt; saved to the vault, never shown to you. Then browser_fill_secret.';
+  argsSchema = RequestLoginArgs;
+  isReadOnly = false;
+  isDestructive = false;
+  /** Waits for a human (the broker has its own 10-minute limit; ctx.signal stops it). */
+  timeoutSeconds = 0;
+
+  async execute(args: RequestLoginArgsT, ctx: ToolContext): Promise<ToolResult> {
+    const o = normalizeOrigin(args.site);
+    if (!o) {
+      return { content: `[VAULT_INVALID] "${String(args.site).slice(0, 80)}" is not a usable site — use a host like github.com (https; http only for localhost).`, isError: true };
+    }
+    const origin = formatOrigin(o);
+    const shown = displayHost(o.host);
+    const vault = getVault();
+    let name = args.name?.trim();
+    try {
+      if (!name) {
+        const same = await vaultFindByOrigin(vault, originUrl(origin));
+        const hint = args.username_hint?.trim().toLowerCase();
+        name = (same.find(e => hint && e.username?.toLowerCase() === hint) ?? same[0])?.name
+          ?? deriveEntryName(o.host, args.username_hint, await vault.names());
+      }
+    } catch (e: any) {
+      return { content: `[VAULT_ERROR] ${scrubSecretError(e, [])}`, isError: true };
+    }
+    // A page that talks the agent into asking for ANOTHER site's login shows up here.
+    let warning: string | undefined;
+    try {
+      const mgr = peekBrowserManager();
+      const url = mgr?.isRunning() ? mgr.activeUrl() : '';
+      if (/^https?:/i.test(url) && !matchOrigin(url, [origin]).ok) warning = `The agent's browser is on ${displayHost(hostOf(url))}, not ${shown}.`;
+    } catch { /* no browser */ }
+
+    ctx.emit?.({ type: 'progress', message: `Waiting for the user to type the login for ${shown} into the secure prompt…` });
+    const r = await getSecretRequestBroker().request({
+      entryName: name,
+      origins: [origin],
+      fields: args.want_totp ? ['password', 'totp'] : ['password'],
+      reason: args.reason,
+      usernameHint: args.username_hint,
+      warning,
+      signal: ctx.signal,
+    });
+    const add = `qodex vault add ${/\s/.test(name) ? `"${name}"` : name} --origin ${origin} [--username <u>] [--totp]`;
+    switch (r.code) {
+      case 'saved': {
+        const s = r.summary!;
+        return {
+          content: `✓ The user ${s.updated ? 'updated' : 'saved'} the login for ${shown} as vault entry "${s.name}" (fields: ${s.fields.join(', ')}). The values never enter this conversation — fill them with browser_fill_secret {secret: "${s.name}", field, ref}.`,
+          metadata: { vault: { entry: s.name, origins: s.origins, fields: s.fields, by: r.by } },
+        };
+      }
+      case 'cancelled':
+        return { content: `[SECRET_REQUEST_CANCELLED] The user declined to enter the login for ${shown}. Don't ask again unless they ask; continue without it or tell them what is blocked.`, isError: true };
+      case 'timeout':
+        return { content: `[SECRET_REQUEST_TIMEOUT] Nobody entered the login for ${shown} in time. Tell the user; they can add it later with: ${add}`, isError: true };
+      case 'aborted':
+        return { content: '[CANCELLED] vault_request_login was cancelled.', isError: true };
+      case 'no-surface':
+        return { content: `[NO_SECURE_INPUT] There is no terminal UI or control center to type a password into. Ask the user to run: ${add}  (never ask for the password in chat).`, isError: true };
+      default:
+        return { content: `[SECRET_REQUEST_${r.code.toUpperCase().replace(/-/g, '_')}] ${r.message ?? 'The request could not be made.'}`, isError: true };
+    }
+  }
+}
+
+/** Every vault tool class, for the registry. */
+export const VAULT_TOOL_CLASSES = [BrowserFillSecretTool, VaultListTool, BrowserLoginTool, VaultGenerateAndFillTool, VaultRequestLoginTool] as const;

@@ -24,6 +24,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { SECRET_DASHBOARD_CSS, SECRET_DASHBOARD_SCRIPT, SECRET_DASHBOARD_STRINGS, secretPanelsHtml } from './secret-dashboard.js';
 
 export type DashboardLang = 'en' | 'fa';
 
@@ -277,6 +278,9 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
 
 /** Same shape as src/control/handoff.ts HANDOFF_ID_RE (kept local: the page script tests it too). */
 const HANDOFF_BOOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+// Secret entry + vault panel strings (src/control/secret-dashboard.ts).
+Object.assign(DASHBOARD_STRINGS.en, SECRET_DASHBOARD_STRINGS.en);
+Object.assign(DASHBOARD_STRINGS.fa, SECRET_DASHBOARD_STRINGS.fa);
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
@@ -1320,6 +1324,7 @@ const SCRIPT = String.raw`
   refreshState();
   setInterval(function () { if (!document.hidden) { refreshState(); if (hasAction('missions.approvals')) refreshMissions(); } }, 5000);
   setInterval(function () { if (HO && !ho.ended && !document.hidden) refreshState(); }, 1500);
+` + SECRET_DASHBOARD_SCRIPT + String.raw`
 })();
 `;
 
@@ -1345,6 +1350,7 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
     ? { id: opts.handoff.id, scoped: !!opts.handoff.scoped }
     : null;
   const boot = { lang, title: customTitle || null, strings: DASHBOARD_STRINGS, handoff: ho };
+  const secretPanels = secretPanelsHtml(tx);
 
   return `<!doctype html>
 <html lang="${lang}" dir="${lang === 'fa' ? 'rtl' : 'ltr'}">
@@ -1356,7 +1362,7 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
 <meta name="theme-color" content="#0b0f14">
 <link rel="icon" href="data:,">
 <title>${escapeHtml(title)}</title>
-<style>${CSS}</style>
+<style>${CSS}${SECRET_DASHBOARD_CSS}</style>
 </head>
 <body>
 <header>
@@ -1408,6 +1414,7 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
     <div id="liveMsg" class="msg" role="status"></div>
   </section>
   <div id="side">
+  ${secretPanels.requests}
   <section id="approvalsPanel" class="panel">
     <h2 data-i18n="approvals">${tx('approvals')}</h2>
     <div id="approvalList"><div class="empty">${tx('noApprovals')}</div></div>
@@ -1421,6 +1428,7 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
     <h2 data-i18n="missions">${tx('missions')}</h2>
     <div id="missionList"></div>
   </section>
+  ${secretPanels.vault}
   </div>
   <section id="activityPanel" class="panel">
     <h2 data-i18n="activity">${tx('activity')}</h2>

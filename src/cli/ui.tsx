@@ -41,6 +41,7 @@ import { isAlwaysYesAnswer } from '../security/permissions.js';
 import { isRedundantAssistantText, dedupeSelfRepeatedText } from './modes/final-dedupe.js';
 import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
+import { SecretPromptHost } from './prompts/secret-input.js';
 import { ThinkingPanel } from './prompts/thinking-panel.js';
 import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
@@ -166,6 +167,12 @@ export function App(props: AppProps): React.ReactElement {
   const dockOpenRef = useRef(false);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
+  // The masked login prompt (vault_request_login) owns the keyboard while it is open:
+  // the chat input is hidden and the shortcuts below stand aside (Esc cancels the
+  // request, not the run), so no keystroke of a password reaches the chat or its history.
+  const [secretActive, setSecretActive] = useState(false);
+  const secretActiveRef = useRef(false);
+  secretActiveRef.current = secretActive;
   const [sessionId, setSessionId] = useState<string>(() => {
     const store = getSessionStore();
     if (props.resumeSessionId) {
@@ -425,6 +432,7 @@ export function App(props: AppProps): React.ReactElement {
 
   // Ctrl+C handler
   useInput((_input, key) => {
+    if (secretActiveRef.current) return; // the secure login prompt has the keyboard
     // Any keypress other than a confirming Ctrl+C disarms the exit prompt — so if you
     // armed it then went back to work, you won't quit on the next stray press.
     if (exitArmed && !(key.ctrl && _input === 'c')) {
@@ -626,6 +634,15 @@ export function App(props: AppProps): React.ReactElement {
   useEffect(() => {
     setInteractiveHuman(true);
     return () => setInteractiveHuman(false);
+  }, []);
+
+  // Save-login capture (src/vault/capture.ts): a login the human types during a
+  // control-center takeover is offered for the vault here too ("Save the login for
+  // <host> (user <masked>)?" — never the secret).
+  useEffect(() => {
+    void import('../vault/capture.js')
+      .then(m => m.installLoginCapture({ localAsk: (p, o, signal) => getOperatorHub().requestApproval('main', p, o, { signal }) }))
+      .catch(() => {});
   }, []);
 
   // Terminal approvals are shown by the operator hub (FIFO per lane). They also go
@@ -1132,6 +1149,8 @@ export function App(props: AppProps): React.ReactElement {
 
       <SideRunDock lanes={lanes} expanded={dockOpen} width={cols} />
 
+      <SecretPromptHost blocked={!!pendingPrompt} onActiveChange={setSecretActive} />
+
       {pendingPrompt && (
         <Box flexDirection="column">
           {pendingPrompt.diff && (
@@ -1167,7 +1186,7 @@ export function App(props: AppProps): React.ReactElement {
         </Box>
       )}
 
-      {!pendingPrompt && (
+      {!pendingPrompt && !secretActive && (
         <Box flexDirection="column" marginTop={1}>
           <ModsToasts snap={mods.snap} width={cols} />
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}

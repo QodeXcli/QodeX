@@ -134,20 +134,24 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
       /\bplace (an|the|my) order\b/, /\border (online|from|on|via)\b/, /\bcart\b/, /\bon amazon\b/,
     ],
   },
-  // The credential vault and the tools that sign in with it, for password-manager / 2FA
-  // requests that name no site yet ("log me in with my saved password"). Keyed on the
-  // user's OWN credentials, never on a bare "password" (that is usually code: hashing,
-  // reset endpoints); the browser family above already brings them for any login job.
+  // The credential vault and the tools that sign in / store logins with it, for
+  // password-manager / 2FA requests that name no site yet ("log me in with my saved
+  // password", "save my GitHub password", «رمز عبور سایت … رو ذخیره کن»). Keyed on the
+  // user's OWN credentials or a SITE's password, never on a bare "password" (that is
+  // usually code: hashing, reset endpoints); the browser family above already brings
+  // these tools for any login job.
   {
     members: ['vault_', 'browser_login', 'browser_fill_secret'],
     keywords: [
       'vault', 'password manager', 'saved password', 'stored password', 'saved login', 'my password',
       'password for my', 'my credentials', 'login credentials', 'log me in', 'sign me in', 'sign me up',
-      'one-time code', '2fa code', 'two-factor code', 'authenticator app', 'authenticator code',
+      'one-time code', '2fa code', 'two-factor code', 'authenticator app', 'authenticator code', 'totp',
       'گاوصندوق', 'رمزم', 'رمز عبورم', 'پسوردم', 'گذرواژه‌ام', 'رمز ذخیره', 'پسورد ذخیره',
+      'رمز سایت', 'رمز عبور سایت', 'پسورد سایت', 'گذرواژه سایت',
       'کد دو مرحله', 'تایید دو مرحله', 'تأیید دو مرحله', 'ورود دو مرحله', 'کد یکبار مصرف',
       'لاگینم کن', 'وارد حسابم', 'وارد اکانتم',
     ],
+    patterns: [/\b(save|store|remember|keep|add|update|change|rotate)\b[^.\n]{0,40}\bmy\b[^.\n]{0,30}\b(passwords?|logins?|credentials?)\b/],
   },
   {
     members: ['computer_use_'],
