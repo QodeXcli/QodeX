@@ -291,6 +291,12 @@ function recordToProtos(rec: RawRecord, warnings: string[]): Proto[] {
     case 'fill_secret': {
       const t = targetOf(rec);
       const field: VaultField = (['username', 'password', 'totp'] as const).find(f => f === a.field) ?? 'password';
+      if (!t.selector && !t.ref) {
+        // browser_login / auto-detected fills: the field's autocomplete token is a stable selector.
+        const ac = (rec.element?.autocomplete ?? '').toLowerCase().split(/\s+/)
+          .find(x => ['username', 'email', 'current-password', 'one-time-code'].includes(x));
+        if (ac) t.selector = `input[autocomplete~="${ac}"]`;
+      }
       if (!hasTarget(t)) {
         // browser_fill_secret without ref/selector auto-detected the login field;
         // keep the login step replayable for the fields that can be found generically.

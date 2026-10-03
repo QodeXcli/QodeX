@@ -30,7 +30,7 @@ const ERROR_PREFIX_RE = /^\s*\[(ACCESS_DENIED|SYNTAX_REJECTED|MULTI_EDIT_REJECTE
 // success once ("no file edit succeeded this session").
 
 /** Exact tools whose success is evidence of a performed real-world action. */
-const ACTION_TOOLS = new Set(['workflow_run', 'mission_start', 'browser_fill_secret', 'browser_agent', 'computer_use_agent']);
+const ACTION_TOOLS = new Set(['workflow_run', 'mission_start', 'browser_fill_secret', 'browser_login', 'vault_generate_and_fill', 'browser_agent', 'computer_use_agent']);
 /** browser_* tools that only OBSERVE (their success is not evidence of an action). */
 const BROWSER_OBSERVE_ONLY = new Set([
   'browser_snapshot', 'browser_screenshot', 'browser_get_text', 'browser_extract', 'browser_console',

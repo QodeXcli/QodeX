@@ -297,6 +297,20 @@ describe('recorder: vault fills that auto-detected their field', () => {
     expect(workflow.params.find(p => p.name === 'password')).toMatchObject({ secret: true, vaultField: 'password', default: 'vault:acme' });
     expect(warnings.join('\n')).toMatch(/vault username fill with no target/);
   });
+
+  it('browser_login fills become steps on the fields\' autocomplete tokens', () => {
+    const { workflow, warnings } = buildWorkflowFromRecords([
+      act('browser_navigate', { url: 'https://acme.example/login' }),
+      act('browser_fill_secret', { secret: 'acme', field: 'username', value: '***' }, { tag: 'input', name: 'Email', autocomplete: 'section-a username' }),
+      act('browser_fill_secret', { secret: 'acme', field: 'password', value: '***' }, { tag: 'input', inputType: 'password', isPassword: true, autocomplete: 'current-password' }),
+    ], { name: 'login', source: 'agent' });
+    expect(workflow.steps.slice(1)).toEqual([
+      expect.objectContaining({ kind: 'fill', selector: 'input[autocomplete~="username"]' }),
+      expect.objectContaining({ kind: 'fill', selector: 'input[autocomplete~="current-password"]', value: '{{password}}' }),
+    ]);
+    expect(warnings.join('\n')).not.toMatch(/vault username fill/);
+    expect(JSON.stringify(workflow)).toContain('vault:acme');
+  });
 });
 
 describe('workflow_run args', () => {

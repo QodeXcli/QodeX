@@ -114,7 +114,11 @@ console.log('— real-world actions (browser / desktop / workflow / mission) are
   check('persian "سفارش رو ثبت کردم" with nothing done is bounced',
     (evaluateCompletion('سفارش رو ثبت کردم', []) ?? '').includes('[COMPLETION_GATE]'));
   check('workflow_run success counts', gatherSessionEvidence([call('workflow_run'), out('workflow_run', 'Replayed 6 steps')]).didSuccessfulAction === true);
-  check('mission_start success counts', gatherSessionEvidence([call('mission_start'), out('mission_start', 'Mission m_1 started')]).didSuccessfulAction === true);
+  check('browser_login / vault_generate_and_fill success counts',
+    gatherSessionEvidence([call('browser_login'), out('browser_login', '✓ Signed in to x.com')]).didSuccessfulAction === true
+    && gatherSessionEvidence([call('vault_generate_and_fill'), out('vault_generate_and_fill', '✓ Generated a 20-character password')]).didSuccessfulAction === true);
+  check('a failed browser_login does NOT count', gatherSessionEvidence([call('browser_login'), out('browser_login', '[LOGIN_FAILED] x.com did not accept')]).didSuccessfulAction === false);
+  check('mission_start success counts',gatherSessionEvidence([call('mission_start'), out('mission_start', 'Mission m_1 started')]).didSuccessfulAction === true);
   check('computer_use_type counts', gatherSessionEvidence([call('computer_use_type'), out('computer_use_type', 'typed')]).didSuccessfulAction === true);
   check('observation (browser_snapshot) does NOT count', gatherSessionEvidence([call('browser_snapshot'), out('browser_snapshot', 'Page: x')]).didSuccessfulAction === false);
   check('failed action ([STALE_REF]) does NOT count', gatherSessionEvidence([call('browser_click'), out('browser_click', '[STALE_REF] e9 not found')]).didSuccessfulAction === false);
