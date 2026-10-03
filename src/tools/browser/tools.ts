@@ -42,6 +42,7 @@ import {
   isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal,
 } from './session.js';
 import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets } from './snapshot.js';
+import { challengeHint, challengeLabel, type ChallengeInfo } from './challenge.js';
 import { QODEX_SCREENSHOTS_DIR } from '../../config/paths.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import { logger } from '../../utils/logger.js';
@@ -133,7 +134,7 @@ export async function waitForHuman(mgr: BrowserManager, ctx: ToolContext): Promi
   await mgr.waitForTakeoverEnd(ctx.signal);
 }
 
-const CODE_RE = /^\[(STALE_REF|PLAYWRIGHT_MISSING|BROWSER_LAUNCH_FAILED|BROWSER_ERROR|ABORTED|HUMAN_TAKEOVER|PARTIAL_LOAD)\]/;
+const CODE_RE = /^\[(STALE_REF|PLAYWRIGHT_MISSING|BROWSER_LAUNCH_FAILED|BROWSER_ERROR|ABORTED|HUMAN_TAKEOVER|PARTIAL_LOAD|CHALLENGE|CHALLENGE_HUMAN_ONLY|CHALLENGE_UNSOLVED)\]/;
 
 /** Map an exception to a model-readable `[CODE] ...` result with a fix hint. */
 export function browserErrorResult(e: unknown, what: string): ToolResult {
@@ -176,21 +177,77 @@ export function notRunningResult(): ToolResult {
   return { content: '[BROWSER_ERROR] The QodeX browser is not open yet — call browser_navigate first.', isError: true };
 }
 
+/** What the challenge gate found after an action: lines for the result + the challenge still up (or null). */
+export interface ChallengeGate {
+  lines: string[];
+  challenge: ChallengeInfo | null;
+  /** The challenge was there and cleared by itself during the auto-wait. */
+  cleared?: ChallengeInfo;
+}
+
+/** `[CHALLENGE] …` line for a challenge that is still up. PURE. */
+export function formatChallengeLine(ch: ChallengeInfo, mode: 'auto' | 'report' | 'off' = 'auto'): string {
+  return `[CHALLENGE] ${challengeHint(ch.vendor, ch.state, ch.host, mode === 'report' ? 'report' : 'auto')}`;
+}
+
 /**
- * Compose an action result: the `✓` line, navigation change, manager notices and
- * (optionally) a compact interactive snapshot of the page after the action.
+ * The CAPTCHA / bot-check check every navigate / action / snapshot result goes through:
+ * detect on the active tab; a check that clears by itself is waited out (up to
+ * browser.challengeAutoWaitSec, honouring ctx.signal, no model calls); anything still up
+ * becomes a `[CHALLENGE]` line telling the model to hand off (browser_request_human) —
+ * never to touch it. browser.challengeHandoff 'off' disables it.
+ */
+export async function challengeGate(mgr: BrowserManager, ctx?: ToolContext, opts: { wait?: boolean } = {}): Promise<ChallengeGate> {
+  const qm = asQodex(mgr);
+  if (!qm || !qm.isRunning() || qm.pendingDialog()) return { lines: [], challenge: null };
+  const cfg = qm.currentConfig();
+  if (cfg.challengeHandoff === 'off') return { lines: [], challenge: null };
+  let ch = await qm.detectChallengeNow();
+  const lines: string[] = [];
+  let cleared: ChallengeInfo | undefined;
+  if (ch && ch.state === 'self-clearing' && opts.wait !== false && cfg.challengeAutoWaitSec > 0) {
+    const label = `${challengeLabel(ch.vendor)}${ch.host ? ` on ${ch.host}` : ''}`;
+    try {
+      ctx?.emit?.({ type: 'progress', message: `Waiting up to ${cfg.challengeAutoWaitSec}s for the ${label} to clear by itself…` });
+    } catch { /* progress is cosmetic */ }
+    const first = ch;
+    const r = await qm.waitForChallenge(undefined, {
+      timeoutMs: cfg.challengeAutoWaitSec * 1000,
+      signal: ctx?.signal,
+      intervalMs: 500,
+      confirmations: 2,
+      until: c => !c || c.state !== 'self-clearing',
+    });
+    ch = r.challenge;
+    if (!ch) {
+      cleared = first;
+      lines.push(`✓ The ${label} cleared by itself after ${Math.max(1, Math.round(r.waitedMs / 1000))}s.`);
+    }
+  }
+  if (ch) lines.push(formatChallengeLine(ch, cfg.challengeHandoff));
+  return { lines, challenge: ch, ...(cleared ? { cleared } : {}) };
+}
+
+/**
+ * Compose an action result: the `✓` line, navigation change, the challenge gate
+ * (auto-wait / `[CHALLENGE]`), manager notices and (optionally) a compact interactive
+ * snapshot of the page after the action. Pass `gate` when the caller already ran it.
  */
 export async function composeActionResult(
   mgr: BrowserManager,
   lines: string[],
   before: { url: string; title?: string } | null,
   wantSnapshot: boolean | undefined,
+  ctx?: ToolContext,
+  gate?: ChallengeGate,
 ): Promise<string> {
   const out = [...lines];
   const qm = asQodex(mgr);
+  const g = gate ?? await challengeGate(mgr, ctx);
   const nowUrl = mgr.activeUrl();
   const nowTitle = qm?.activeTitle() ?? '';
   if (before && nowUrl && nowUrl !== before.url) out.push(`→ Now at: ${nowUrl}${nowTitle ? ` — "${nowTitle}"` : ''}`);
+  out.push(...g.lines);
   for (const n of qm?.drainNotices() ?? []) out.push(`• ${n}`);
   const cfg = qm?.currentConfig();
   const snap = wantSnapshot ?? cfg?.snapshotAfterAction ?? false;
@@ -305,7 +362,7 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
         actor: 'agent',
       });
     }
-    const content = await composeActionResult(mgr, lines, before, spec.snapshot);
+    const content = await composeActionResult(mgr, lines, before, spec.snapshot, ctx);
     return { content, metadata: { url: mgr.activeUrl(), tabs: mgr.tabs().length, target: target ?? undefined } };
   } catch (e) {
     return browserErrorResult(e, spec.tool);
@@ -410,6 +467,8 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
         logger.info('browser_navigate timed out; returning partial state', { url, waitUntil, timeout });
       }
       if (qm) await qm.settle({ timeoutMs: 1500 });
+      // A Cloudflare-style "Just a moment…" is waited out here, before the page is reported.
+      const gate = await challengeGate(mgr, ctx);
       const title = await safeTitleOf(page);
       const finalUrl = safeUrlOf(page) || url;
       mgr.recordAction({ tool: 'browser_navigate', args: { url }, url: finalUrl, title, actor: 'agent' });
@@ -431,16 +490,18 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
         timedOut
           ? `[PARTIAL_LOAD] navigation timed out after ${timeout}ms (waitUntil=${waitUntil}); returning whatever the page has so far. Reason: ${phaseError ?? 'timeout'}`
           : `✓ Loaded ${finalUrl}`,
-        `  HTTP ${status ?? '?'}${status && status >= 400 ? ' (the site returned an error page)' : ''}`,
+        `  HTTP ${status ?? '?'}${status && status >= 400
+          ? gate.challenge ? ' (a CAPTCHA / bot-check page — see [CHALLENGE])' : gate.cleared ? ' (a bot check that has since cleared)' : ' (the site returned an error page)'
+          : ''}`,
         `  Title: ${title || '(none)'}`,
         ...(finalUrl !== url ? [`  Final URL: ${finalUrl} (redirected from ${url})`] : []),
         `  Console: ${bufs?.console.length ?? 0} msg(s)  Errors: ${bufs?.errors.length ?? 0}`,
         ...preNotes,
       ];
-      const content = await composeActionResult(mgr, lines, null, timedOut ? (args.snapshot ?? true) : args.snapshot);
+      const content = await composeActionResult(mgr, lines, null, timedOut ? (args.snapshot ?? true) : args.snapshot, ctx, gate);
       return {
         content: content + htmlSection,
-        metadata: { url: finalUrl, status, title, timedOut, waitUntil },
+        metadata: { url: finalUrl, status, title, timedOut, waitUntil, ...(gate.challenge ? { challenge: { vendor: gate.challenge.vendor, state: gate.challenge.state, host: gate.challenge.host } } : {}) },
       };
     } catch (e) {
       return browserErrorResult(e, 'navigate');

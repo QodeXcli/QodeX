@@ -28,6 +28,7 @@ import { QODEX_BROWSER_DOWNLOADS_DIR } from '../../config/paths.js';
 import {
   asQodex,
   browserErrorResult,
+  challengeGate,
   checkOutputPath,
   composeActionResult,
   describeTarget,
@@ -71,15 +72,17 @@ export class BrowserSnapshotTool extends Tool<z.infer<typeof SnapshotArgs>> {
   untrustedOutput = true;
   argsSchema = SnapshotArgs;
 
-  async execute(args: z.infer<typeof SnapshotArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof SnapshotArgs>, ctx: ToolContext): Promise<ToolResult> {
     try {
       const mgr = await getBrowserManager();
       if (!mgr.isRunning()) return notRunningResult();
       const qm = asQodex(mgr);
       if (!qm) return { content: '[BROWSER_ERROR] snapshots need the QodeX browser manager.', isError: true };
       const max = args.max_chars ?? qm.currentConfig().snapshotMaxChars;
+      // A bot check that clears by itself is waited out before the page is described.
+      const gate = await challengeGate(mgr, ctx);
       const snap = await qm.snapshot({ interactiveOnly: args.interactive_only, selector: args.selector, maxChars: max });
-      const notes = qm.drainNotices().map(n => `• ${n}`);
+      const notes = [...gate.lines, ...qm.drainNotices().map(n => `• ${n}`)];
       return {
         content: [...notes, ...(notes.length ? [''] : []), snap.text].join('\n'),
         metadata: { url: snap.url, title: snap.title, refs: snap.refCount, truncated: snap.truncated, mode: snap.mode },
@@ -611,7 +614,7 @@ export class BrowserTabsTool extends Tool<z.infer<typeof TabsArgs>> {
         await mgr.closeTab(args.index);
         line = `✓ Closed tab [${idx ?? '?'}]`;
       }
-      const content = await composeActionResult(mgr, [line, '', `Tabs (* = active):\n${await list()}`], null, args.snapshot);
+      const content = await composeActionResult(mgr, [line, '', `Tabs (* = active):\n${await list()}`], null, args.snapshot, ctx);
       return { content, metadata: { tabs: mgr.tabs().length } };
     } catch (e) {
       return browserErrorResult(e, `tabs ${args.action}`);
@@ -775,7 +778,7 @@ export class BrowserDialogTool extends Tool<z.infer<typeof DialogArgs>> {
       if (!entry) return { content: '[BROWSER_ERROR] No dialog is waiting for an answer.', isError: true };
       const line = `✓ ${args.action === 'accept' ? 'Accepted' : 'Dismissed'} ${entry.type} "${entry.message.slice(0, 200)}"${args.text !== undefined && args.action === 'accept' ? ` with "${args.text}"` : ''}`;
       await qm.settle();
-      return { content: await composeActionResult(mgr, [line], null, undefined) };
+      return { content: await composeActionResult(mgr, [line], null, undefined, ctx) };
     } catch (e) {
       return browserErrorResult(e, 'dialog');
     }

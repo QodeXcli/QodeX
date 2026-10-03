@@ -51,7 +51,9 @@ import {
   sameChallenge,
   stripQuery,
   challengeLabel,
+  waitForChallengeChange,
   type ChallengeInfo,
+  type WaitForChallengeResult,
 } from './challenge.js';
 import {
   takeSnapshotDetailed,
@@ -513,7 +515,11 @@ async function importPlaywright(): Promise<any> {
   }
 }
 
-/** Modest fingerprint hygiene; never breaks a page (every patch is try/catch'd). */
+/**
+ * Fingerprint patches — applied ONLY when the user explicitly sets browser.stealth: true
+ * (off by default: QodeX does not disguise that it is automated). Never breaks a page
+ * (every patch is try/catch'd).
+ */
 function stealthScript(languages: string[]): string {
   return `(() => {
   try {
@@ -739,9 +745,12 @@ export class QodexBrowserManager implements BrowserManager {
       headless: cfg.headless,
       viewport: { ...cfg.viewport },
       acceptDownloads: true,
-      args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check'],
+      args: ['--no-first-run', '--no-default-browser-check'],
     };
-    if (cfg.stealth) options.ignoreDefaultArgs = ['--enable-automation'];
+    if (cfg.stealth) {
+      (options.args as string[]).unshift('--disable-blink-features=AutomationControlled');
+      options.ignoreDefaultArgs = ['--enable-automation'];
+    }
     if (exe.executablePath) options.executablePath = exe.executablePath;
     else if (exe.channel) options.channel = exe.channel;
     if (cfg.userAgent) options.userAgent = cfg.userAgent;
@@ -901,6 +910,7 @@ export class QodexBrowserManager implements BrowserManager {
         if (frame !== page.mainFrame()) return;
       } catch { return; }
       st.refMode = null;
+      this.events.emit('tab-navigated', st.id);
       getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
     });
     page.on('frameattached', () => { this.scheduleChallengeCheck(st); });
@@ -1233,6 +1243,31 @@ export class QodexBrowserManager implements BrowserManager {
   onChallengeChange(listener: (c: ChallengeChange) => void): () => void {
     this.events.on('challenge', listener);
     return () => { this.events.off('challenge', listener); };
+  }
+
+  /**
+   * Re-detect on a tab (default: active) about every `intervalMs` — and at once on a
+   * navigation or a passive challenge change — until `until` holds on `confirmations`
+   * consecutive checks (default: the challenge is gone), the timeout, or the signal
+   * (rejects `[ABORTED]`). Read-only: it only looks.
+   */
+  async waitForChallenge(
+    page: Page | string | undefined,
+    opts: { timeoutMs: number; signal?: AbortSignal; until?: (c: ChallengeInfo | null) => boolean; confirmations?: number; intervalMs?: number; onCheck?: (c: ChallengeInfo | null | 'unknown') => void },
+  ): Promise<WaitForChallengeResult> {
+    const st = this.tabOf(page);
+    if (!st) return { challenge: null, timedOut: false, waitedMs: 0 };
+    return waitForChallengeChange(st.page, {
+      ...opts,
+      detect: () => (this.tabList.includes(st) ? this.runChallengeCheck(st) : Promise.resolve(null)),
+      wake: cb => {
+        const onChange = (c: ChallengeChange) => { if (c.tab === st.id) cb(); };
+        const onNav = (id: string) => { if (id === st.id) { const t = setTimeout(cb, 300); (t as any).unref?.(); } };
+        this.events.on('challenge', onChange);
+        this.events.on('tab-navigated', onNav);
+        return () => { this.events.off('challenge', onChange); this.events.off('tab-navigated', onNav); };
+      },
+    });
   }
 
   /** The Playwright page of a tab index (null when out of range). */

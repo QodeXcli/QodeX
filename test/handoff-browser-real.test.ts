@@ -214,6 +214,18 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     expect((await mgr.describeSelector('#user'))?.challenge).toBeUndefined();
   }, 30_000);
 
+  it('navigate to a CAPTCHA page reports [CHALLENGE] at once (no auto-wait for needs-human) and never the site key', async () => {
+    const t0 = Date.now();
+    const r = await run(new BrowserNavigateTool(), { url: `${base}/recaptcha` });
+    expect(Date.now() - t0).toBeLessThan(6000);
+    expect(r.content).toContain('[CHALLENGE] reCAPTCHA on 127.0.0.1 needs a human.');
+    expect(r.content).toContain('browser_request_human');
+    expect(r.content).not.toContain(SITEKEY);
+    expect((r.metadata as any).challenge).toEqual({ vendor: 'recaptcha', state: 'needs-human', host: '127.0.0.1' });
+    const s = await run(new BrowserSnapshotTool(), { interactive_only: true });
+    expect(s.content).toContain('[CHALLENGE]');
+  }, 60_000);
+
   it('navigate waits out a self-clearing interstitial without the human', async () => {
     const r = await run(new BrowserNavigateTool(), { url: `${base}/interstitial` });
     expect(r.isError).toBeFalsy();
