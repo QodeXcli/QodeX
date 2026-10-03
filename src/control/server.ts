@@ -256,6 +256,12 @@ export function authenticateRequest(token: string, port: number, req: { url?: st
  * that could be read as another origin (`//evil`, `/\evil`, no leading slash) is
  * replaced by `/` — never an open redirect.
  */
+/** Does `target` stay on this server (a path, not `//host` or a scheme)? PURE. */
+export function isLocalRedirect(target: string): boolean {
+  const base = 'http://qodex-control.invalid';
+  try { return new URL(target, base).origin === base; } catch { return false; }
+}
+
 export function stripTokenFromUrl(raw: string): string {
   const { path, query } = splitUrl(raw);
   const safePath = path.startsWith('/') && !path.startsWith('//') && !path.includes('\\') && !/[\u0000-\u001f\u007f]/.test(path)
@@ -1414,7 +1420,8 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
 
   // 2. `?k=` login: set the cookie and bounce to the same URL without the token.
   if (auth.via === 'query' && isRead) {
-    const target = stripTokenFromUrl(rawUrl);
+    const stripped = stripTokenFromUrl(rawUrl);
+    const target = isLocalRedirect(stripped) ? stripped : '/';
     const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}`;
     if (wantsHtml(req)) {
       // An HTML bounce (not a 302) so the follow-up navigation is initiated by OUR

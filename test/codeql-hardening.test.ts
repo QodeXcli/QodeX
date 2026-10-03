@@ -14,3 +14,20 @@ describe('htmlToPlain — tag stripping is complete', () => {
     expect(htmlToPlain('<b>Hi</b><br>a &lt;b&gt; &amp; "c"')).toBe('Hi\na <b> & "c"');
   });
 });
+
+describe('control center login bounce stays on the server', () => {
+  it('isLocalRedirect accepts paths and refuses other origins', async () => {
+    const { isLocalRedirect, stripTokenFromUrl } = await import('../src/control/server.js');
+    expect(isLocalRedirect('/')).toBe(true);
+    expect(isLocalRedirect('/missions?x=1')).toBe(true);
+    expect(isLocalRedirect('//evil.example/')).toBe(false);
+    expect(isLocalRedirect('/\\evil.example')).toBe(false);
+    expect(isLocalRedirect('https://evil.example/')).toBe(false);
+    expect(isLocalRedirect('javascript:alert(1)')).toBe(false);
+    for (const raw of ['//evil.example/?k=t', '/\\evil.example?k=t', '/ok?k=t&a=1']) {
+      const t = stripTokenFromUrl(raw);
+      expect(isLocalRedirect(t)).toBe(true);
+      expect(t).not.toMatch(/k=t/);
+    }
+  });
+});
