@@ -201,7 +201,10 @@ export class PermissionEngine {
     }
 
     const key = `${req.tool}:${req.operation}`;
-    const commandTool = isCommandTool(req.tool);
+    // Sentinel reviews shell/edit tools too; its `sentinel:<category> …` operation is
+    // neither a command line nor a path.
+    const sentinelOp = (req.operation ?? '').startsWith('sentinel:');
+    const commandTool = isCommandTool(req.tool) && !sentinelOp;
 
     // Auto mode: the autonomous policy decides (src/security/autonomy.ts). It asks only for
     // destructive actions outside the project, remote-destructive / publish / deploy, and
@@ -246,7 +249,7 @@ export class PermissionEngine {
     // edits (accept-edits): file edits inside the project run. Outside the project they ask
     // — this mode must never be looser than auto.
     let editReason: string | undefined;
-    if (_approvalMode === 'edits' && isAutoEditTool(req.tool)) {
+    if (_approvalMode === 'edits' && isAutoEditTool(req.tool) && !sentinelOp) {
       const v = editPathDecision(req.operation, ctx());
       if (v.decision === 'allow') return { decision: 'allow', via: 'mode-auto-edit' };
       editReason = `${v.reason} — edits mode only accepts edits inside the project`;
@@ -275,7 +278,7 @@ export class PermissionEngine {
     const mode = _approvalMode;
     const reason = editReason
       ?? (commandTool ? `${mode} mode asks before shell commands that are not on your allow list`
-        : isFileEditTool(req.tool) ? `${mode} mode asks before file edits` : undefined);
+        : isFileEditTool(req.tool) && !sentinelOp ? `${mode} mode asks before file edits` : undefined);
     return reason ? { decision: 'ask', via: 'ask', reason } : { decision: 'ask', via: 'ask' };
   }
 

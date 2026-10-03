@@ -518,6 +518,20 @@ class Analyzer {
   // ── classification of one effective argv ───────────────────────────────────
 
   private classify(a: Val[], st: State, r: Resolved | null): void {
+    // A command word built at run time (`$(echo rm) -rf ~/x`, `$CMD /etc/x`) is unknowable;
+    // when it is pointed at a path clearly outside the project, ask.
+    if (a[0]!.dyn) {
+      for (const x of a.slice(1)) {
+        if (x.dyn || !/^(~|\/|\.\.)/.test(x.v)) continue;
+        const p = this.resolvePath(x, st.cwd);
+        const cls = p ? this.classOf(p) : 'unknown';
+        if (cls === 'outside' || cls === 'ancestor' || cls === 'device') {
+          this.add('outside', `runs a command built at run time on ${displayPath(p!)} (outside the project)`, false, true);
+          return;
+        }
+      }
+      return;
+    }
     const exe0 = baseName(a[0]!.v);
     const exe = exe0.replace(/\.exe$/i, '');
     const args = a.slice(1);
@@ -733,6 +747,11 @@ class Analyzer {
         return;
       }
       case 'source': case '.': return;
+      case 'trap': {
+        // `trap 'rm -rf ~/x' EXIT` runs its first argument later.
+        if (args[0] && !args[0].dyn && !args[0].v.startsWith('-')) this.nestedText(args[0].v, st);
+        return;
+      }
       default: break;
     }
 
@@ -843,6 +862,13 @@ class Analyzer {
       case 'stash': if (rv[0] === 'drop' || rv[0] === 'clear') local('git stash drop/clear deletes stashed work'); return;
       case 'filter-branch': case 'filter-repo': local('rewrites history'); return;
       case 'rm': if (short('f') || rv.includes('--force')) local('git rm -f deletes uncommitted files'); return;
+      case 'worktree': {
+        if (rv[0] !== 'remove' && rv[0] !== 'rm') return;
+        const target = rest.slice(1).find(x => !x.v.startsWith('-'));
+        if (target) this.checkDelete(target, gcwd, 'removes the worktree');
+        if (rv.includes('--force') || rv.includes('-f')) local('git worktree remove --force deletes uncommitted work');
+        return;
+      }
       default: return;
     }
   }
@@ -865,7 +891,7 @@ class Analyzer {
       const t = args[i]!.v;
       if (t === '--') { i++; break; }
       if (t === '-c' || (/^-[A-Za-z]+$/.test(t) && t.includes('c') && !t.startsWith('--'))) {
-        if (args[i + 1]) this.nestedText(args[i + 1]!.v, st);
+        if (args[i + 1] && !args[i + 1]!.dyn) this.nestedText(args[i + 1]!.v, st);
         return;
       }
       if (t === '-o' || t === '+o' || t === '-O' || t === '+O' || t === '--rcfile' || t === '--init-file') { i++; continue; }

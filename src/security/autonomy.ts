@@ -173,13 +173,15 @@ export function autonomousDecision(
   ctx: AutoPolicyContext,
 ): AutoVerdict {
   const op = req.operation ?? '';
+  // Sentinel's operation string first: it reviews shell/edit tools too, and its
+  // `sentinel:<category> …` operation is not a command line or a path.
+  if (op.startsWith('sentinel:')) return sentinelDecision(op);
   if (isCommandTool(req.tool)) {
     const a = analyzeShell(op, { cwd: ctx.cwd, roots: ctx.roots });
     const asks = a.findings.filter(f => f.autoAsk);
     if (asks.length) return { decision: 'ask', reason: summarize(asks) };
     return { decision: 'allow' };
   }
-  if (op.startsWith('sentinel:')) return sentinelDecision(op);
   if (isFileEditTool(req.tool)) return editPathDecision(op, ctx);
   return { decision: 'allow' };
 }

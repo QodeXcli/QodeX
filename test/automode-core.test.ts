@@ -41,7 +41,7 @@ const ALLOW: string[] = [
   'cat <<EOF > notes.md\nrm -rf ~/x\nEOF', 'dd if=/dev/zero of=disk.img bs=1M count=1',
   // unknowable values are not "clearly outside"
   'rm -rf "$BUILD_DIR"', 'rm -rf $(cat list.txt)', 'cd "$WORK" && rm -rf out','rm -rf "$(pwd)/dist"',
-  'xargs rm -rf < list.txt',
+  'xargs rm -rf < list.txt', '$CMD build', 'bash -c "$SCRIPT"', 'git worktree remove wt', "trap 'rm -rf build' EXIT",
   // words that only LOOK dangerous (not in command position)
   'echo "shutdown -h now" > notes.txt', 'grep -rn "rm -rf /" src', 'git commit -m "drop table users; shutdown; reboot"',
   'cat shutdown.ts', 'grep -c "sudo" README.md', 'echo git push --force', 'npm run reboot-docs',
@@ -83,7 +83,9 @@ const ASK: string[] = [
   // obfuscation we can see through
   `echo ${b64('rm -rf ~/x')} | base64 -d | sh`, `bash <<< "rm -rf ~/x"`, 'bash <<EOF\nrm -rf ~/x\nEOF', "$'\\x72\\x6d' -rf ~/x",
   'python3 -c "import shutil; shutil.rmtree(\'/etc/x\')"', 'node -e "require(\'fs\').rmSync(\'/var/data\', {recursive: true})"',
-  'python3 -c "import os; os.system(\'rm -rf ~/x\')"',
+  'python3 -c "import os; os.system(\'rm -rf ~/x\')"', '$(echo rm) -rf ~/x', '"$CMD" /etc/passwd', "trap 'rm -rf ~/x' EXIT",
+  'node -e "require(\'child_process\').execSync(\'rm -rf ~/x\')"', "perl -e 'unlink glob(\"~/x/*\")'", 'git worktree remove ../wt',
+  'tar -czf - . | ssh host "tar -xzf - -C /srv"', 'cp -r src ~', '\\rm -rf ~/x', '"rm" -rf ~/x', "r''m -rf ~/x", 'exec > ~/log 2>&1',
   // remote history rewrite / remote deletes
   'git push --force', 'git push -f origin main', 'git push origin +main','git push origin :old-branch',
   'git push --delete origin old', 'git push origin --delete old', 'git push -d origin x', 'git push --mirror', 'git push --force-with-lease',
@@ -145,6 +147,11 @@ describe('autonomousDecision — shell commands (cwd /work/proj)', () => {
     expect(shell('rm -rf ..').reason).toMatch(/parent of the project/);
     expect(shell('ssh host "rm -rf /var/www/app"').reason).toMatch(/^on host: /);
     expect(shell('psql -h db.prod.example.com -c "DROP TABLE users"').reason).toMatch(/db\.prod\.example\.com/);
+  });
+
+  it('a Sentinel operation on a command tool is a Sentinel operation, not a command line', () => {
+    expect(autonomousDecision({ tool: 'shell', operation: 'sentinel:delete github.com shell' }, ctx).decision).toBe('ask');
+    expect(autonomousDecision({ tool: 'shell', operation: 'sentinel:other - shell' }, ctx).decision).toBe('allow');
   });
 
   it('non-command tools never get shell parsing (no substring false prompts)', () => {
