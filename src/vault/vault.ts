@@ -26,6 +26,7 @@ import * as path from 'path';
 import { QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../config/paths.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { withLock } from '../utils/file-lock.js';
+import { vaultKeyStore, type VaultKeyStore } from './keystore.js';
 import { parseTotpInput, type TotpAlgorithm } from './totp.js';
 
 export interface VaultEntry {
@@ -42,6 +43,13 @@ export interface VaultEntry {
   totpPeriod?: number;
   totpAlgorithm?: TotpAlgorithm;
   note?: string;
+  /** Where to log in (must be on one of the origins); browser_login starts here. */
+  loginUrl?: string;
+  /** The secret before the last rotation (undo a password change the site rejected). */
+  previousSecret?: string;
+  rotatedAt?: string;
+  /** Last time a tool filled this entry into a page. */
+  lastUsedAt?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -54,6 +62,29 @@ export interface VaultEntryInput {
   /** Base32 seed or otpauth://totp/ URI. */
   totp?: string;
   note?: string;
+  loginUrl?: string;
+}
+
+/**
+ * Merge-patch for `update()`: a field left undefined is kept, `null` removes an optional
+ * field, a value replaces it. Changing `secret` keeps the old one as `previousSecret`.
+ */
+export interface VaultEntryPatch {
+  /** Rename the entry. */
+  name?: string;
+  /** Replace the whole origin list. */
+  origins?: string[];
+  addOrigins?: string[];
+  removeOrigins?: string[];
+  username?: string | null;
+  /** Rotate the secret (the old one is kept as previousSecret). */
+  secret?: string;
+  /** New TOTP seed (base32 / otpauth://), or null to remove 2FA. */
+  totp?: string | null;
+  note?: string | null;
+  loginUrl?: string | null;
+  /** Swap the secret back to previousSecret (undo the last rotation). */
+  restorePrevious?: boolean;
 }
 
 /** What may be shown (CLI) — no secret material. */
@@ -65,9 +96,24 @@ export interface VaultEntrySummary {
   hasUsername: boolean;
   hasSecret: boolean;
   hasTotp: boolean;
+  hasPreviousSecret: boolean;
   note?: string;
+  loginUrl?: string;
+  rotatedAt?: string;
+  lastUsedAt?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export type ImportConflict = 'skip' | 'replace' | 'rename';
+
+export interface AddManyResult {
+  added: string[];
+  replaced: string[];
+  renamed: Array<{ from: string; to: string }>;
+  skipped: string[];
+  /** Inputs that were not valid: index + reason (never a value). */
+  invalid: Array<{ index: number; reason: string }>;
 }
 
 interface VaultEnvelope {
@@ -214,54 +260,101 @@ function newId(): string {
 function summarize(e: VaultEntry): VaultEntrySummary {
   return {
     id: e.id, name: e.name, origins: [...e.origins], username: e.username,
-    hasUsername: !!e.username, hasSecret: !!e.secret, hasTotp: !!e.totp,
-    note: e.note, createdAt: e.createdAt, updatedAt: e.updatedAt,
+    hasUsername: !!e.username, hasSecret: !!e.secret, hasTotp: !!e.totp, hasPreviousSecret: !!e.previousSecret,
+    note: e.note, loginUrl: e.loginUrl, rotatedAt: e.rotatedAt, lastUsedAt: e.lastUsedAt,
+    createdAt: e.createdAt, updatedAt: e.updatedAt,
   };
+}
+
+function normalizeOrigins(list: string[]): string[] {
+  return [...new Set((list ?? []).map(o => {
+    const n = normalizeOrigin(o);
+    if (!n) throw new Error(`[VAULT_INVALID] "${String(o).slice(0, 80)}" is not a usable origin — use a site like github.com or https://accounts.google.com (http only for localhost)`);
+    return formatOrigin(n);
+  }))];
+}
+
+/** A login URL on one of `origins` (https, or http on loopback). Returns the canonical href. */
+function validateLoginUrl(url: string, origins: string[]): string {
+  let u: URL;
+  try { u = new URL(String(url ?? '').trim()); } catch { throw new Error('[VAULT_INVALID] the login URL is not a URL'); }
+  const m = matchOrigin(u.href, origins);
+  if (!m.ok) throw new Error(`[VAULT_INVALID] the login URL must be on one of the entry's sites: ${m.reason}`);
+  return u.href;
+}
+
+function applyTotp(entry: VaultEntry, input: string | null | undefined): void {
+  if (input === undefined) return;
+  delete entry.totp; delete entry.totpDigits; delete entry.totpPeriod; delete entry.totpAlgorithm;
+  if (input === null || !String(input).trim()) return;
+  const t = parseTotpInput(input);
+  entry.totp = t.secret;
+  if (t.digits !== 6) entry.totpDigits = t.digits;
+  if (t.period !== 30) entry.totpPeriod = t.period;
+  if (t.algorithm !== 'sha1') entry.totpAlgorithm = t.algorithm;
+}
+
+type FreshEntry = Omit<VaultEntry, 'id' | 'createdAt'>;
+
+/** Validate an input into a fresh entry (no id/dates yet). Throws [VAULT_INVALID] / TOTP errors. */
+function entryFromInput(input: VaultEntryInput): FreshEntry {
+  const name = validateEntryName(input.name);
+  const origins = normalizeOrigins(input.origins ?? []);
+  if (!origins.length) throw new Error('[VAULT_INVALID] at least one origin (site) is required — the vault only fills a secret on its own sites');
+  const secret = String(input.secret ?? '');
+  if (!secret) throw new Error('[VAULT_INVALID] the secret is empty');
+  const e: FreshEntry = { name, origins, secret };
+  const username = input.username?.trim();
+  if (username) e.username = username;
+  const note = input.note?.trim();
+  if (note) e.note = note;
+  if (input.loginUrl !== undefined && String(input.loginUrl).trim()) e.loginUrl = validateLoginUrl(input.loginUrl, origins);
+  applyTotp(e as VaultEntry, input.totp);
+  return e;
+}
+
+/** `base`, or `base-2`, `base-3`… — the first name not in `taken` (lower-cased). */
+function uniqueName(base: string, taken: Set<string>): string {
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let i = 2; i < 10_000; i++) {
+    const suffix = `-${i}`;
+    const cand = base.slice(0, 64 - suffix.length) + suffix;
+    if (!taken.has(cand.toLowerCase())) return cand;
+  }
+  throw new Error('[VAULT_INVALID] could not find a free entry name');
+}
+
+/** `old` overwritten by `fresh`: same id / creation date, the old secret kept when it changes. */
+function replaced(old: VaultEntry, fresh: FreshEntry, now: string): VaultEntry {
+  const entry: VaultEntry = { id: old.id, ...fresh, createdAt: old.createdAt, updatedAt: now };
+  if (old.secret !== entry.secret) { entry.previousSecret = old.secret; entry.rotatedAt = now; }
+  if (old.lastUsedAt) entry.lastUsedAt = old.lastUsedAt;
+  return entry;
 }
 
 export class Vault {
   readonly file: string;
   readonly keyFile: string;
+  private keystore: VaultKeyStore | null;
 
-  constructor(opts: { file?: string; keyFile?: string } = {}) {
+  constructor(opts: { file?: string; keyFile?: string; keystore?: VaultKeyStore } = {}) {
     this.file = opts.file ?? QODEX_VAULT_FILE;
-    this.keyFile = opts.keyFile ?? QODEX_VAULT_KEY_FILE;
+    this.keyFile = opts.keyFile ?? opts.keystore?.keyFile ?? QODEX_VAULT_KEY_FILE;
+    this.keystore = opts.keystore ?? null;
   }
 
   private async exists(p: string): Promise<boolean> {
     try { await fs.access(p); return true; } catch { return false; }
   }
 
-  /** Read the key; create it (0600) on first use when `create` and no vault exists yet. */
+  /**
+   * The vault key from the shared keystore (key file or OS keychain, see keystore.ts).
+   * A key is minted only on a fresh install when `create` is set; a missing key with an
+   * existing vault (or a keystore record) is `[VAULT_KEY_MISSING]`.
+   */
   private async key(create: boolean): Promise<Buffer | null> {
-    try {
-      const text = (await fs.readFile(this.keyFile, 'utf-8')).trim();
-      const key = Buffer.from(text, 'base64');
-      if (key.length !== 32) throw new Error('[VAULT_KEY_INVALID] the vault key file is damaged (expected 32 bytes of base64)');
-      if (process.platform !== 'win32') {
-        try {
-          const st = await fs.stat(this.keyFile);
-          if ((st.mode & 0o077) !== 0) await fs.chmod(this.keyFile, 0o600);
-        } catch { /* best effort */ }
-      }
-      return key;
-    } catch (e: any) {
-      if (e?.code !== 'ENOENT') throw e;
-    }
-    if (await this.exists(this.file)) {
-      throw new Error(`[VAULT_KEY_MISSING] ${this.file} exists but its key file ${this.keyFile} is missing — restore the key file, or delete the vault to start over`);
-    }
-    if (!create) return null;
-    await fs.mkdir(path.dirname(this.keyFile), { recursive: true, mode: 0o700 });
-    const key = randomBytes(32);
-    try {
-      const fh = await fs.open(this.keyFile, 'wx', 0o600);
-      try { await fh.writeFile(key.toString('base64') + '\n'); await fh.sync(); } finally { await fh.close(); }
-      return key;
-    } catch (e: any) {
-      if (e?.code === 'EEXIST') return this.key(false); // another process won the race
-      throw e;
-    }
+    if (!this.keystore) this.keystore = vaultKeyStore({ keyFile: this.keyFile });
+    return this.keystore.load({ create, guardFiles: [this.file] });
   }
 
   private async load(create = false): Promise<{ entries: VaultEntry[]; key: Buffer | null }> {
@@ -288,45 +381,156 @@ export class Vault {
     return this.file + '.lock';
   }
 
-  /** Add (or with `replace`, overwrite) an entry. Returns its summary. */
+  /**
+   * Add (or with `replace`, overwrite) an entry. Returns its summary. Replacing keeps the
+   * id and creation date, and the old secret as previousSecret when it changes; fields
+   * that are not supplied are dropped (use `update()` to change some fields only).
+   */
   async add(input: VaultEntryInput, opts: { replace?: boolean } = {}): Promise<VaultEntrySummary> {
-    const name = validateEntryName(input.name);
-    const origins = [...new Set((input.origins ?? []).map(o => {
-      const n = normalizeOrigin(o);
-      if (!n) throw new Error(`[VAULT_INVALID] "${o}" is not a usable origin — use a site like github.com or https://accounts.google.com (http only for localhost)`);
-      return formatOrigin(n);
-    }))];
-    if (!origins.length) throw new Error('[VAULT_INVALID] at least one origin (site) is required — the vault only fills a secret on its own sites');
-    const secret = String(input.secret ?? '');
-    if (!secret) throw new Error('[VAULT_INVALID] the secret is empty');
-    let totp: ReturnType<typeof parseTotpInput> | undefined;
-    if (input.totp !== undefined && String(input.totp).trim()) totp = parseTotpInput(input.totp);
-    const username = input.username?.trim() || undefined;
-    const note = input.note?.trim() || undefined;
-
+    const fresh = entryFromInput(input);
     await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     return withLock(this.lockPath(), async () => {
       const { entries, key } = await this.load(true);
       if (!key) throw new Error('[VAULT_KEY_MISSING] could not create the vault key');
-      const idx = entries.findIndex(e => e.name.toLowerCase() === name.toLowerCase());
-      if (idx >= 0 && !opts.replace) throw new Error(`[VAULT_EXISTS] an entry named "${entries[idx].name}" already exists (use --force to replace it)`);
+      const idx = entries.findIndex(e => e.name.toLowerCase() === fresh.name.toLowerCase());
+      if (idx >= 0 && !opts.replace) throw new Error(`[VAULT_EXISTS] an entry named "${entries[idx].name}" already exists (use --force to replace it, or qodex vault edit / rotate to change it)`);
       const now = new Date().toISOString();
-      const entry: VaultEntry = {
-        id: idx >= 0 ? entries[idx].id : newId(),
-        name, origins, username, secret, note,
-        createdAt: idx >= 0 ? entries[idx].createdAt : now,
-        ...(idx >= 0 ? { updatedAt: now } : {}),
-      };
-      if (totp) {
-        entry.totp = totp.secret;
-        if (totp.digits !== 6) entry.totpDigits = totp.digits;
-        if (totp.period !== 30) entry.totpPeriod = totp.period;
-        if (totp.algorithm !== 'sha1') entry.totpAlgorithm = totp.algorithm;
-      }
+      const entry = idx >= 0 ? replaced(entries[idx], fresh, now) : { id: newId(), ...fresh, createdAt: now };
       if (idx >= 0) entries[idx] = entry; else entries.push(entry);
       await this.save(entries, key);
       return summarize(entry);
     });
+  }
+
+  /**
+   * Merge-patch an existing entry (see VaultEntryPatch): change some fields, rotate the
+   * secret or the TOTP seed without losing the rest. `[VAULT_NOT_FOUND]` when absent.
+   */
+  async update(name: string, patch: VaultEntryPatch): Promise<VaultEntrySummary> {
+    const shown = String(name ?? '').slice(0, 64);
+    if (!(await this.exists(this.file))) throw new Error(`[VAULT_NOT_FOUND] no vault entry named "${shown}"`);
+    if (patch.secret !== undefined && !String(patch.secret)) throw new Error('[VAULT_INVALID] the secret is empty');
+    if (patch.secret !== undefined && patch.restorePrevious) throw new Error('[VAULT_INVALID] give a new secret or restore the previous one, not both');
+    return withLock(this.lockPath(), async () => {
+      const { entries, key } = await this.load(false);
+      if (!key) throw new Error('[VAULT_KEY_MISSING] the vault key is missing');
+      const n = String(name ?? '').trim().toLowerCase();
+      const idx = entries.findIndex(e => e.name.toLowerCase() === n);
+      if (idx < 0) throw new Error(`[VAULT_NOT_FOUND] no vault entry named "${shown}"`);
+      const now = new Date().toISOString();
+      const e: VaultEntry = { ...entries[idx], origins: [...entries[idx].origins] };
+
+      if (patch.name !== undefined) {
+        const nn = validateEntryName(patch.name);
+        if (entries.some((x, i) => i !== idx && x.name.toLowerCase() === nn.toLowerCase())) throw new Error(`[VAULT_EXISTS] an entry named "${nn}" already exists`);
+        e.name = nn;
+      }
+      if (patch.origins !== undefined) e.origins = normalizeOrigins(patch.origins);
+      if (patch.addOrigins?.length) e.origins = [...new Set([...e.origins, ...normalizeOrigins(patch.addOrigins)])];
+      if (patch.removeOrigins?.length) {
+        const drop = new Set(normalizeOrigins(patch.removeOrigins));
+        e.origins = e.origins.filter(o => !drop.has(o));
+      }
+      if (!e.origins.length) throw new Error('[VAULT_INVALID] an entry needs at least one origin (site)');
+      if (patch.username !== undefined) e.username = patch.username === null ? undefined : (String(patch.username).trim() || undefined);
+      if (patch.note !== undefined) e.note = patch.note === null ? undefined : (String(patch.note).trim() || undefined);
+      if (patch.loginUrl !== undefined) {
+        e.loginUrl = patch.loginUrl === null || !String(patch.loginUrl).trim() ? undefined : validateLoginUrl(patch.loginUrl, e.origins);
+      }
+      // A login URL that is no longer on one of the sites is dropped, never kept pointing elsewhere.
+      if (e.loginUrl && !matchOrigin(e.loginUrl, e.origins).ok) e.loginUrl = undefined;
+      applyTotp(e, patch.totp);
+      if (patch.restorePrevious) {
+        if (!e.previousSecret) throw new Error(`[VAULT_INVALID] "${e.name}" has no previous secret to restore`);
+        [e.secret, e.previousSecret] = [e.previousSecret, e.secret];
+        e.rotatedAt = now;
+      } else if (patch.secret !== undefined && String(patch.secret) !== e.secret) {
+        e.previousSecret = e.secret;
+        e.secret = String(patch.secret);
+        e.rotatedAt = now;
+      }
+      e.updatedAt = now;
+      const clean = JSON.parse(JSON.stringify(e)) as VaultEntry; // drop undefined fields
+      entries[idx] = clean;
+      await this.save(entries, key);
+      return summarize(clean);
+    });
+  }
+
+  /**
+   * Add many entries under ONE lock and ONE write (an import of 1,000 rows must not
+   * re-encrypt the vault 1,000 times). Invalid inputs are reported by index, never by value.
+   * `dryRun` validates and reports what would happen without writing (or creating a key).
+   */
+  async addMany(inputs: VaultEntryInput[], opts: { onConflict?: ImportConflict; dryRun?: boolean } = {}): Promise<AddManyResult> {
+    const onConflict = opts.onConflict ?? 'skip';
+    const res: AddManyResult = { added: [], replaced: [], renamed: [], skipped: [], invalid: [] };
+    const valid: FreshEntry[] = [];
+    inputs.forEach((input, index) => {
+      try {
+        valid.push(entryFromInput(input));
+      } catch (e: any) {
+        res.invalid.push({ index, reason: String(e?.message ?? e).replace(/^\[[A-Z_]+\]\s*/, '').split('\n')[0].slice(0, 160) });
+      }
+    });
+    const apply = (entries: VaultEntry[]): boolean => {
+      const taken = new Set(entries.map(e => e.name.toLowerCase()));
+      const now = new Date().toISOString();
+      let changed = false;
+      for (const fresh of valid) {
+        const idx = entries.findIndex(e => e.name.toLowerCase() === fresh.name.toLowerCase());
+        if (idx < 0) {
+          entries.push({ id: newId(), ...fresh, createdAt: now });
+          taken.add(fresh.name.toLowerCase());
+          res.added.push(fresh.name);
+        } else if (onConflict === 'skip') {
+          res.skipped.push(fresh.name);
+          continue;
+        } else if (onConflict === 'rename') {
+          const to = uniqueName(fresh.name, taken);
+          entries.push({ id: newId(), ...fresh, name: to, createdAt: now });
+          taken.add(to.toLowerCase());
+          res.renamed.push({ from: fresh.name, to });
+        } else {
+          entries[idx] = replaced(entries[idx], fresh, now);
+          res.replaced.push(fresh.name);
+        }
+        changed = true;
+      }
+      return changed;
+    };
+    if (opts.dryRun) {
+      const { entries } = await this.load(false);
+      apply(entries);
+      return res;
+    }
+    if (!valid.length) return res;
+    await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    return withLock(this.lockPath(), async () => {
+      const { entries, key } = await this.load(true);
+      if (!key) throw new Error('[VAULT_KEY_MISSING] could not create the vault key');
+      if (apply(entries)) await this.save(entries, key);
+      return res;
+    });
+  }
+
+  /** Record that an entry was just used (best effort, at most once a minute per entry). */
+  async touch(name: string): Promise<void> {
+    if (!(await this.exists(this.file))) return;
+    await withLock(this.lockPath(), async () => {
+      const { entries, key } = await this.load(false);
+      const e = entries.find(x => x.name.toLowerCase() === String(name ?? '').trim().toLowerCase());
+      if (!e || !key) return;
+      if (e.lastUsedAt && Date.now() - Date.parse(e.lastUsedAt) < 60_000) return;
+      e.lastUsedAt = new Date().toISOString();
+      await this.save(entries, key);
+    });
+  }
+
+  /** Summaries of the entries that may be filled on `url` (same origin rules as filling). */
+  async findByOrigin(url: string): Promise<VaultEntrySummary[]> {
+    const list = await this.list();
+    return list.filter(e => matchOrigin(url, e.origins).ok);
   }
 
   /** Entries without secret material, sorted by name. */

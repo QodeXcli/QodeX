@@ -42,6 +42,7 @@ import {
   sanitizeName,
 } from '../../config/paths.js';
 import { QODEX_HOME } from '../../config/defaults.js';
+import { VAULT_KEY_ARTIFACTS } from '../../vault/paths.js';
 import { getBus } from '../../control/bus.js';
 import { isInteractiveHuman } from '../../control/approvals.js';
 import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
@@ -301,7 +302,7 @@ export function dedupFilename(suggested: string, taken: (name: string) => boolea
 /** Files that hold QodeX secrets / browser sessions, plus extra protected dirs (e.g. a manager's own profiles dir). */
 function protectedLocations(extraDirs: string[] = []): { files: string[]; dirs: string[] } {
   return {
-    files: [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env')],
+    files: [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env'), ...VAULT_KEY_ARTIFACTS],
     dirs: [QODEX_BROWSER_PROFILES_DIR, ...extraDirs],
   };
 }

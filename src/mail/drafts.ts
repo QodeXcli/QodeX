@@ -15,8 +15,9 @@
 import { randomBytes } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import { getVaultKey } from '../vault/keystore.js';
 import { QODEX_MAIL_DRAFTS_DIR } from './paths.js';
-import { deriveKey, hmac, loadVaultKey, sameMac } from './secrets.js';
+import { deriveKey, hmac, sameMac } from './secrets.js';
 
 export interface DraftReplyInfo {
   /** Tool id of the replied-to message ("<folder>#<uid>"). */
@@ -109,7 +110,8 @@ export class DraftStore {
 
   private async key(): Promise<Buffer> {
     if (this.macKey) return this.macKey;
-    const k = await loadVaultKey({ keyFile: this.keyFile, vaultFile: this.vaultFile, create: true });
+    // The shared vault key loader (key file or OS keychain): never re-mints a lost key.
+    const k = await getVaultKey({ keyFile: this.keyFile, vaultFile: this.vaultFile, create: true, codePrefix: 'MAIL' });
     if (!k) throw new Error('[MAIL_KEY_MISSING] could not load the vault key');
     this.macKey = deriveKey(k, 'qodex-mail-drafts:v1');
     return this.macKey;

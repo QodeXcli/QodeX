@@ -64,7 +64,7 @@ export async function handlePlatformSlash(cmd: string, args: string[], cwd: stri
         const { VAULT_TOOL_CLASSES } = await import('../vault/index.js');
         const List = VAULT_TOOL_CLASSES.find(C => new C().name === 'vault_list')!;
         const r = await new List().execute({} as any, slashCtx(cwd));
-        return ok(`${r.content}\n\nAdd a login (the model never sees it): qodex vault add <name> --origin https://site.example --username you@example.com`);
+        return ok(`${r.content}\n\nAdd a login (the model never sees it): qodex vault add <name> --origin https://site.example --username you@example.com\nChange one: qodex vault edit <name> · new password: qodex vault rotate <name> · import a browser export: qodex vault import <file>`);
       }
       case 'desktop': {
         const { desktopStatusText } = await import('../tools/computer/index.js');

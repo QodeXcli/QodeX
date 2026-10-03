@@ -1,13 +1,16 @@
 /**
  * Vault tools — let the agent log in without ever seeing a password.
  *
- *   vault_list {}                         names + sites + which fields exist
- *   browser_fill_secret {secret, field,   fills username / password / current
- *     ref? | selector?}                   TOTP code straight into a page field
+ *   vault_list {site?}                       names + sites + which fields exist
+ *   browser_fill_secret {secret, field,      fills username / password / current
+ *     ref? | selector?}                      TOTP code straight into a page field
+ *   browser_login {secret, url?, submit?}    whole sign-in in one step (login.ts)
+ *   vault_generate_and_fill {ref?, ...}      new random password → saved for this
+ *                                            site → filled into password + confirm
  *
- * browser_fill_secret is the ONLY consumer of secret values, and it never puts
- * them in a tool result, an error, a progress event or the action record (the
- * recorder sees "***"). Before filling it checks, on the live page:
+ * These are the ONLY consumers of secret values, and they never put them in a tool
+ * result, an error, a progress event or the action record (the recorder sees "***").
+ * Before filling (src/vault/fill.ts) they check, on the live page:
  *   - the active tab's origin is one of the entry's origins (exact host or
  *     subdomain, https unless localhost) — anti-phishing;
  *   - the target element's own document is on an allowed ORIGIN too (a
@@ -17,107 +20,52 @@
  *   - the element is the right kind of field: a password goes only into
  *     <input type=password>, a username / code only into a text-like <input>
  *     (never a textarea or rich editor that would publish it).
- * Sentinel additionally classifies the call as `credential` (high risk).
+ * Sentinel additionally classifies every call as `credential` (high risk).
  */
 
+import { randomInt } from 'crypto';
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../tools/base.js';
-import { getBrowserManager, type BrowserManager } from '../tools/browser/types.js';
-import { resolveBrowserConfig } from '../config/agent-config.js';
-import { getActiveConfig } from '../config/loader.js';
-import { getVault, matchOrigin, type VaultEntry } from './vault.js';
-import { totp, totpRemainingSeconds } from './totp.js';
+import { getBrowserManager, peekBrowserManager, type BrowserManager } from '../tools/browser/types.js';
+import { formatOrigin, getVault, matchOrigin, normalizeOrigin, validateEntryName, type Vault, type VaultEntry } from './vault.js';
+import {
+  ASK_FOR_LOGIN, commitFill, currentTotp, hostOf, inspectField, isPrepared, prepareField, recordFill, scrub, visibleAll,
+  type FillTarget, type PreparedField,
+} from './fill.js';
+import { BrowserLoginTool } from './login.js';
 
 const FillSecretArgs = z.object({
-  secret: z.string().min(1).describe('Name of the vault entry (from vault_list). Only the NAME — the value never enters the conversation.'),
-  field: z.enum(['username', 'password', 'totp']).describe('Which stored value to fill: username, password, or totp (the current one-time code).'),
-  ref: z.string().describe('Target field ref from browser_snapshot (e.g. "e12"). Preferred.').optional(),
-  selector: z.string().describe('Playwright selector for the field, if there is no ref. Omit both to auto-detect the login field.').optional(),
+  secret: z.string().min(1).describe('Vault entry name (from vault_list) — never the value.'),
+  field: z.enum(['username', 'password', 'totp']).describe('username, password, or totp (the current one-time code).'),
+  ref: z.string().describe('Field ref from browser_snapshot (e.g. "e12"). Preferred.').optional(),
+  selector: z.string().describe('Playwright selector if there is no ref. Omit both to auto-detect.').optional(),
 });
 type FillSecretArgsT = z.infer<typeof FillSecretArgs>;
 
-/** Inputs a username or one-time code may go into. */
-const TEXTLIKE = new Set(['', 'text', 'email', 'tel', 'number', 'username']);
-
-/** Auto-detection selectors per field (first visible match wins). */
-const AUTO_SELECTORS: Record<FillSecretArgsT['field'], string[]> = {
-  password: ['input[type="password"]:not([autocomplete="new-password"])', 'input[type="password"]'],
-  username: [
-    'input[autocomplete="username"]', 'input[type="email"]', 'input[autocomplete="email"]',
-    'input[name*="user" i]', 'input[name*="email" i]', 'input[name*="login" i]', 'input[id*="user" i]',
-    'input[id*="email" i]', 'input[id*="login" i]',
-  ],
-  totp: [
-    'input[autocomplete="one-time-code"]', 'input[name*="otp" i]', 'input[name*="totp" i]', 'input[id*="otp" i]',
-    'input[name*="code" i]', 'input[id*="code" i]', 'input[inputmode="numeric"]',
-  ],
-};
-
-interface FieldInfo {
-  tag: string;
-  type: string;
-  contentEditable: boolean;
-  disabled: boolean;
-  readOnly: boolean;
-  href: string;
-  /** Serialized origin of the field's document ('null' when opaque, '' when unknown). */
-  origin: string;
-  name: string;
-  autocomplete: string;
-}
-
-/** Runs in the page. Typed `any` because tsconfig has no DOM lib. */
-const inspectField = (el: any): FieldInfo => ({
-  tag: String(el?.tagName ?? '').toLowerCase(),
-  type: String(el?.getAttribute?.('type') ?? '').toLowerCase(),
-  contentEditable: !!el?.isContentEditable,
-  disabled: !!el?.disabled,
-  readOnly: !!el?.readOnly,
-  href: String(el?.ownerDocument?.location?.href ?? ''),
-  // window.origin: an about:blank / srcdoc frame INHERITS its creator's origin, which
-  // its URL doesn't show ('about:blank'); a sandboxed frame is opaque ('null').
-  origin: String(el?.ownerDocument?.defaultView?.origin ?? ''),
-  name: String(el?.getAttribute?.('aria-label') || el?.getAttribute?.('name') || el?.getAttribute?.('placeholder') || el?.id || ''),
-  autocomplete: String(el?.getAttribute?.('autocomplete') ?? '').toLowerCase(),
-});
-
-/**
- * The URL whose origin decides whether the field's document may receive the
- * secret. The document's ORIGIN wins over its URL: an about:blank child of an ad
- * iframe has URL "about:blank" but the ad's origin. Unknown origins of about:
- * documents are refused rather than guessed from the tab URL.
- */
-function fieldDocumentUrl(info: FieldInfo, pageUrl: string): { url: string } | { refuse: string } {
-  const origin = info.origin.trim();
-  if (origin === 'null') return { refuse: 'the field is in a sandboxed frame with an opaque origin' };
-  if (origin) {
-    return /^https?:\/\/[^/]+$/i.test(origin) ? { url: origin + '/' } : { refuse: `the field's document has the origin "${origin.slice(0, 80)}"` };
+/** Get the browser, refuse when it is closed, wait out a human takeover. */
+async function readyBrowser(tool: string, ctx: ToolContext): Promise<BrowserManager | ToolResult> {
+  let mgr: BrowserManager;
+  try {
+    mgr = await getBrowserManager();
+  } catch (e: any) {
+    return { content: `[BROWSER_ERROR] ${e?.message ?? e}`, isError: true };
   }
-  if (!info.href) return { url: pageUrl };
-  if (info.href.startsWith('about:')) return { refuse: `the field is in an ${info.href.slice(0, 20)} frame of unknown origin` };
-  return { url: info.href };
+  if (!mgr.isRunning()) {
+    return { content: `[BROWSER_ERROR] The browser is not open. Open the page first with browser_navigate, then call ${tool}.`, isError: true };
+  }
+  if (mgr.isTakeover()) ctx.emit?.({ type: 'progress', message: 'Waiting for the human to hand the browser back…' });
+  await mgr.waitForTakeoverEnd(ctx.signal);
+  if (ctx.signal?.aborted) return { content: `[CANCELLED] ${tool} was cancelled.`, isError: true };
+  return mgr;
 }
 
-function hostOf(url: string): string {
-  try { return new URL(url).hostname; } catch { return url || '(no page)'; }
-}
-
-function scrub(message: string, secret: string): string {
-  let m = String(message ?? '');
-  if (secret && secret.length >= 3) m = m.split(secret).join('***');
-  return m.split('\n')[0].slice(0, 300);
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
-  });
+function isManager(x: BrowserManager | ToolResult): x is BrowserManager {
+  return typeof (x as BrowserManager).activeUrl === 'function';
 }
 
 export class BrowserFillSecretTool extends Tool<FillSecretArgsT> {
   name = 'browser_fill_secret';
-  description = 'Fill a login field from the encrypted credential vault — username, password or the current 2FA (TOTP) code — WITHOUT the value ever entering the conversation. Use this instead of asking the user for passwords. Works only when the active tab is one of the entry\'s sites (anti-phishing) and only into the right kind of field (password → password input). Call vault_list to see entry names. Typical login: browser_navigate to the login page → browser_snapshot → browser_fill_secret {secret, field:"username", ref} → {field:"password", ref} → click Sign in → if asked, {field:"totp"}.';
+  description = 'Fill ONE login field from the encrypted vault — username, password or the current 2FA (TOTP) code — without the value ever entering the conversation. Works only on the entry\'s own sites and only into the right kind of field. For a whole sign-in prefer browser_login; entry names come from vault_list.';
   argsSchema = FillSecretArgs;
   isReadOnly = false;
   isDestructive = false;
@@ -134,163 +82,259 @@ export class BrowserFillSecretTool extends Tool<FillSecretArgsT> {
       let names: string[] = [];
       try { names = await vault.names(); } catch { /* ignore */ }
       return {
-        content: `[VAULT_NOT_FOUND] No vault entry named "${args.secret}".${names.length ? ` Available: ${names.join(', ')}.` : ' The vault is empty.'} Ask the user to add it with: qodex vault add <name> --origin <site> [--username <u>] [--totp]`,
+        content: `[VAULT_NOT_FOUND] No vault entry named "${args.secret}".${names.length ? ` Available: ${names.join(', ')}.` : ' The vault is empty.'} ${ASK_FOR_LOGIN}`,
         isError: true,
       };
     }
 
     const stored = { username: entry.username, password: entry.secret, totp: entry.totp }[args.field];
     if (!stored) {
-      return { content: `[VAULT_FIELD_MISSING] Vault entry "${entry.name}" has no ${args.field}. Ask the user to add it (qodex vault add ${entry.name} --force ...).`, isError: true };
+      return { content: `[VAULT_FIELD_MISSING] Vault entry "${entry.name}" has no ${args.field}. Ask the user to add it (qodex vault edit ${entry.name} --username … / qodex vault rotate ${entry.name} --totp).`, isError: true };
     }
-    // The TOTP code is computed right before typing (below); the others are filled as stored.
-    let value: string | undefined = args.field === 'totp' ? undefined : stored;
-    const clean = (m: string) => scrub(scrub(m, stored), value ?? '');
 
-    let mgr: BrowserManager;
-    try {
-      mgr = await getBrowserManager();
-    } catch (e: any) {
-      return { content: `[BROWSER_ERROR] ${e?.message ?? e}`, isError: true };
-    }
-    if (!mgr.isRunning()) {
-      return { content: '[BROWSER_ERROR] The browser is not open. Open the login page first with browser_navigate, then call browser_fill_secret.', isError: true };
-    }
-    if (mgr.isTakeover()) ctx.emit?.({ type: 'progress', message: 'Waiting for the human to hand the browser back…' });
-    await mgr.waitForTakeoverEnd(ctx.signal);
-    if (ctx.signal?.aborted) return { content: '[CANCELLED] browser_fill_secret was cancelled.', isError: true };
+    const ready = await readyBrowser(this.name, ctx);
+    if (!isManager(ready)) return ready;
+    const mgr = ready;
 
     const pageUrl = mgr.activeUrl();
     const pageMatch = matchOrigin(pageUrl, entry.origins);
     if (!pageMatch.ok) {
       return {
-        content: `[VAULT_ORIGIN_MISMATCH] Refusing to fill "${entry.name}": ${pageMatch.reason}. This protects against phishing — only fill a credential on its own site. If this really is the right site, ask the user to add the origin (qodex vault add ${entry.name} --origin <site> --force).`,
+        content: `[VAULT_ORIGIN_MISMATCH] Refusing to fill "${entry.name}": ${pageMatch.reason}. This protects against phishing — only fill a credential on its own site. If this really is the right site, ask the user to add it (qodex vault edit ${entry.name} --add-origin <site>).`,
         isError: true,
       };
     }
+    const secrets = [entry.secret, entry.totp ?? '', entry.previousSecret ?? ''];
+    const fillOpts = { origins: entry.origins, entryName: entry.name, pageUrl, secrets };
+    const prepared = await prepareField(mgr, args.field, { ref: args.ref, selector: args.selector }, fillOpts);
+    if (!isPrepared(prepared)) return prepared;
 
-    const timeout = resolveBrowserConfig(getActiveConfig()).actionTimeoutMs;
-    let loc: any;
-    let target: string;
-    try {
-      if (args.ref || args.selector) {
-        loc = await mgr.locator({ ref: args.ref, selector: args.selector });
-        target = args.ref ? `ref ${args.ref}` : `"${args.selector}"`;
-      } else {
-        const found = await this.autoDetect(mgr, args.field);
-        if (!found) {
-          return { content: `[BROWSER_ERROR] Could not find a visible ${args.field} field on ${hostOf(pageUrl)}. Call browser_snapshot and pass the field's ref.`, isError: true };
-        }
-        loc = found.loc;
-        target = `the ${args.field} field`;
-      }
-    } catch (e: any) {
-      const msg = clean(e?.message ?? String(e));
-      return { content: msg.startsWith('[') ? msg : `[BROWSER_ERROR] ${msg}`, isError: true };
-    }
-
-    // Pin the exact DOM element: a Locator re-resolves on every call, so a redirect
-    // between the checks below and fill() could otherwise land the secret on another
-    // page. An ElementHandle detaches instead (fill then fails safely).
-    let el: any = loc;
-    let info: FieldInfo;
-    try {
-      if (typeof loc.elementHandle === 'function') {
-        el = await loc.elementHandle({ timeout });
-        if (!el) return { content: `[BROWSER_ERROR] ${target} is not on the page any more. Call browser_snapshot again.`, isError: true };
-      }
-      info = await el.evaluate(inspectField);
-    } catch (e: any) {
-      return { content: `[BROWSER_ERROR] Could not inspect the target field: ${clean(e?.message ?? String(e))}`, isError: true };
-    }
-    const release = () => { if (el !== loc) void Promise.resolve(el.dispose?.()).catch(() => {}); };
-    const frame = fieldDocumentUrl(info, pageUrl);
-    const frameMatch = 'refuse' in frame ? { ok: false as const, reason: frame.refuse } : matchOrigin(frame.url, entry.origins);
-    if (!frameMatch.ok) {
-      release();
-      return { content: `[VAULT_ORIGIN_MISMATCH] Refusing to fill "${entry.name}": the field is inside a frame from another site (${frameMatch.reason}).`, isError: true };
-    }
-    const fieldError = this.checkField(args.field, info);
-    if (fieldError) {
-      release();
-      return { content: `[VAULT_FIELD_MISMATCH] ${fieldError} Pick the right field from browser_snapshot.`, isError: true };
-    }
-
+    // The TOTP code is computed right before typing; the others are filled as stored.
+    let value = stored;
     if (args.field === 'totp') {
-      const period = entry.totpPeriod ?? 30;
-      // Don't type a code that expires before the form is submitted.
-      if (totpRemainingSeconds(period) < 3) await sleep(Math.ceil(totpRemainingSeconds(period) * 1000) + 250, ctx.signal);
-      if (ctx.signal?.aborted) { release(); return { content: '[CANCELLED] browser_fill_secret was cancelled.', isError: true }; }
       try {
-        value = totp(entry.totp!, { period, digits: entry.totpDigits ?? 6, algorithm: entry.totpAlgorithm ?? 'sha1' });
+        value = await currentTotp(entry, ctx.signal);
       } catch (e: any) {
-        release();
-        return { content: `[VAULT_ERROR] The stored TOTP seed for "${entry.name}" is invalid: ${e?.message ?? e}`, isError: true };
+        prepared.release();
+        return { content: `[VAULT_ERROR] The stored TOTP seed for "${entry.name}" is invalid: ${scrub(e?.message ?? String(e), entry.totp)}`, isError: true };
       }
+      if (ctx.signal?.aborted) { prepared.release(); return { content: '[CANCELLED] browser_fill_secret was cancelled.', isError: true }; }
     }
-
-    // Last look right before typing: the tab must still be on an allowed site.
-    if (!matchOrigin(mgr.activeUrl(), entry.origins).ok) {
-      release();
-      return { content: `[VAULT_ORIGIN_MISMATCH] The page navigated away from ${hostOf(pageUrl)} before "${entry.name}" could be filled — nothing was typed.`, isError: true };
-    }
-    try {
-      await el.fill(value!, { timeout });
-    } catch (e: any) {
-      return { content: `[BROWSER_ERROR] Could not fill ${target}: ${clean(e?.message ?? String(e))}`, isError: true };
-    } finally {
-      release();
-    }
-
-    try {
-      mgr.recordAction({
-        tool: 'browser_fill_secret',
-        args: { ref: args.ref, selector: args.selector, secret: entry.name, field: args.field, value: '***' },
-        url: pageUrl,
-        actor: 'agent',
-        element: { ref: args.ref, tag: info.tag, inputType: info.type, isPassword: info.type === 'password', name: info.name || undefined, autocomplete: info.autocomplete || undefined, selector: args.selector },
-      });
-    } catch { /* recording is best-effort */ }
+    const err = await commitFill(mgr, prepared, value, { ...fillOpts, secrets: [...secrets, value] });
+    if (err) return err;
+    recordFill(mgr, prepared, { ref: args.ref, selector: args.selector, secret: entry.name, field: args.field }, pageUrl);
+    await vault.touch(entry.name).catch(() => {});
 
     const label = args.field === 'totp' ? 'current one-time code' : args.field;
+    const target = args.ref || args.selector ? prepared.target : `the ${args.field} field`;
     return {
       content: `✓ Filled the ${label} from vault entry "${entry.name}" into ${target} on ${hostOf(pageUrl)} (value hidden — it never enters this conversation).`,
       metadata: { vault: { entry: entry.name, field: args.field, origin: pageMatch.origin } },
     };
   }
+}
 
-  private checkField(field: FillSecretArgsT['field'], info: FieldInfo): string | null {
-    if (info.disabled || info.readOnly) return 'The target field is disabled or read-only.';
-    if (info.tag !== 'input' || info.contentEditable) {
-      return `The target is a <${info.tag || '?'}>${info.contentEditable ? ' (rich editor)' : ''}, not an input field — a secret is only filled into a login input.`;
-    }
-    if (field === 'password' && info.type !== 'password') {
-      return `A password is only filled into a password input; the target is <input type="${info.type || 'text'}">.`;
-    }
-    if (field === 'username' && !TEXTLIKE.has(info.type)) {
-      return `A username goes into a text/email input; the target is <input type="${info.type}">.`;
-    }
-    if (field === 'totp' && !TEXTLIKE.has(info.type) && info.type !== 'password') {
-      return `A one-time code goes into a text/number input; the target is <input type="${info.type}">.`;
-    }
-    return null;
-  }
+// ── vault_generate_and_fill ─────────────────────────────────────────────────
 
-  private async autoDetect(mgr: BrowserManager, field: FillSecretArgsT['field']): Promise<{ loc: any } | null> {
-    const page = await mgr.activePage();
-    for (const sel of AUTO_SELECTORS[field]) {
-      const all = page.locator(sel);
-      const n = Math.min(await all.count().catch(() => 0), 10);
-      for (let i = 0; i < n; i++) {
-        const loc = all.nth(i);
-        if (await loc.isVisible().catch(() => false)) return { loc };
-      }
+const LOWER = 'abcdefghijklmnopqrstuvwxyz';
+const UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const DIGITS = '0123456789';
+/** Symbols nearly every password policy accepts (no quotes, spaces, backslash, < >). */
+const SYMBOLS = '!@#$%&*-_+=?';
+
+/**
+ * A random password (crypto RNG) with at least one lower-case letter, upper-case letter,
+ * digit and symbol, starting with a letter, no character three times in a row — the
+ * rules common sign-up forms check. `length` is clamped to 8-64.
+ */
+export function generatePassword(length = 20): string {
+  const n = Math.max(8, Math.min(64, Math.floor(length)));
+  const all = LOWER + UPPER + DIGITS + SYMBOLS;
+  const pick = (set: string) => set[randomInt(set.length)];
+  for (;;) {
+    const chars = [pick(LOWER), pick(UPPER), pick(DIGITS), pick(SYMBOLS)];
+    while (chars.length < n) chars.push(pick(all));
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = randomInt(i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
     }
-    return null;
+    const firstLetter = chars.findIndex(c => /[A-Za-z]/.test(c));
+    [chars[0], chars[firstLetter]] = [chars[firstLetter], chars[0]];
+    const pw = chars.join('');
+    if (!/(.)\1\1/.test(pw)) return pw;
   }
 }
 
-const VaultListArgs = z.object({});
+const GenerateArgs = z.object({
+  ref: z.string().describe('New-password field ref from browser_snapshot. Omit ref and selector to auto-detect.').optional(),
+  selector: z.string().describe('Selector of that field if there is no ref.').optional(),
+  confirm_ref: z.string().describe('Ref of the "confirm password" field, if any.').optional(),
+  name: z.string().describe('Existing vault entry to rotate; omit to create one named after the site.').optional(),
+  username: z.string().describe('Username / email of the account, stored with it.').optional(),
+  length: z.number().int().min(12).max(64).describe('Password length (default 20).').optional(),
+});
+type GenerateArgsT = z.infer<typeof GenerateArgs>;
+
+/** A free entry name derived from the site's host ("example.com", "example.com-2"). */
+async function nameForHost(vault: Vault, host: string): Promise<string> {
+  const base = host.replace(/[^\p{L}\p{N}._@+-]+/gu, '-').replace(/^[^\p{L}\p{N}]+/u, '').slice(0, 64) || 'site';
+  const taken = new Set((await vault.names()).map(n => n.toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let i = 2; i < 1000; i++) {
+    const cand = `${base.slice(0, 60)}-${i}`;
+    if (!taken.has(cand.toLowerCase())) return cand;
+  }
+  return `${base.slice(0, 50)}-${Date.now().toString(36)}`;
+}
+
+export class VaultGenerateAndFillTool extends Tool<GenerateArgsT> {
+  name = 'vault_generate_and_fill';
+  description = 'For sign-up or password-change forms: create a strong random password, save it in the vault for this site (a new entry, or rotate `name`) and type it into the new-password and confirm fields. The value never enters the conversation. Submit the form yourself afterwards.';
+  argsSchema = GenerateArgs;
+  isReadOnly = false;
+  isDestructive = false;
+
+  async execute(args: GenerateArgsT, ctx: ToolContext): Promise<ToolResult> {
+    const ready = await readyBrowser(this.name, ctx);
+    if (!isManager(ready)) return ready;
+    const mgr = ready;
+    const vault = getVault();
+
+    const pageUrl = mgr.activeUrl();
+    let siteOrigin: string | null = null;
+    try {
+      const n = normalizeOrigin(new URL(pageUrl).origin);
+      if (n) siteOrigin = formatOrigin(n);
+    } catch { siteOrigin = null; }
+    const pageOk = siteOrigin ? matchOrigin(pageUrl, [siteOrigin]) : matchOrigin(pageUrl, []);
+    if (!siteOrigin || !pageOk.ok) {
+      return { content: `[VAULT_ORIGIN_MISMATCH] Refusing to create a password here: ${pageOk.ok ? 'the page has no web origin' : pageOk.reason}. A vault password is only bound to an https site (or http on localhost).`, isError: true };
+    }
+
+    let existing: VaultEntry | null = null;
+    let entryName: string;
+    try {
+      if (args.name) {
+        existing = await vault.get(args.name);
+        if (existing) {
+          const m = matchOrigin(pageUrl, existing.origins);
+          if (!m.ok) return { content: `[VAULT_ORIGIN_MISMATCH] Refusing to rotate "${existing.name}" here: ${m.reason}.`, isError: true };
+        }
+        entryName = existing?.name ?? validateEntryName(args.name);
+      } else {
+        entryName = await nameForHost(vault, normalizeOrigin(siteOrigin)!.host);
+      }
+    } catch (e: any) {
+      return { content: `[VAULT_ERROR] ${String(e?.message ?? e).split('\n')[0].slice(0, 300)}`, isError: true };
+    }
+    const origins = existing ? existing.origins : [siteOrigin];
+    const secrets = existing ? [existing.secret, existing.previousSecret ?? ''] : [];
+    const fillOpts = { origins, entryName, pageUrl, secrets };
+
+    const targets = await this.targets(mgr, args, pageUrl);
+    if ('content' in targets) return targets;
+    const pw = await prepareField(mgr, 'new-password', targets.pw, fillOpts);
+    if (!isPrepared(pw)) return pw;
+    let confirm: PreparedField | null = null;
+    if (targets.confirm) {
+      const c = await prepareField(mgr, 'new-password', targets.confirm, fillOpts);
+      if (!isPrepared(c)) { pw.release(); return c; }
+      confirm = c;
+    }
+    const releaseAll = () => { pw.release(); confirm?.release(); };
+
+    // Respect the field's own limits (a 20-char password typed into maxlength=16 is cut).
+    let length = args.length ?? 20;
+    const max = pw.info.maxLength ?? -1;
+    const min = pw.info.minLength ?? 0;
+    if (max > 0 && max < length) length = max;
+    if (min > length) length = Math.min(64, min);
+    if (length < 8) {
+      releaseAll();
+      return { content: `[VAULT_FIELD_MISMATCH] The password field accepts at most ${max} characters — too short for a safe generated password. Ask the user how to proceed.`, isError: true };
+    }
+    const password = generatePassword(length);
+    const allSecrets = [...secrets, password];
+
+    // Save BEFORE typing: a password that reaches the site is always in the vault.
+    let mode: 'new' | 'rotated';
+    try {
+      if (existing) {
+        await vault.update(existing.name, { secret: password, ...(args.username?.trim() ? { username: args.username } : {}) });
+        mode = 'rotated';
+      } else {
+        await vault.add({ name: entryName, origins, username: args.username, secret: password });
+        mode = 'new';
+      }
+    } catch (e: any) {
+      releaseAll();
+      return { content: `[VAULT_ERROR] ${scrub(e?.message ?? String(e), ...allSecrets)} — nothing was filled.`, isError: true };
+    }
+
+    let err = await commitFill(mgr, pw, password, { ...fillOpts, secrets: allSecrets });
+    if (!err && confirm) err = await commitFill(mgr, confirm, password, { ...fillOpts, secrets: allSecrets });
+    else confirm?.release();
+    if (err) {
+      let undo: string;
+      try {
+        if (mode === 'new') await vault.remove(entryName);
+        else await vault.update(entryName, { restorePrevious: true });
+        undo = mode === 'new' ? ' The new vault entry was removed again.' : ' The vault entry is back on its previous password.';
+      } catch (e: any) {
+        undo = ` Undoing the vault change failed (${scrub(e?.message ?? String(e), ...allSecrets)}) — tell the user to check "${entryName}" (qodex vault list).`;
+      }
+      return { content: err.content + undo, isError: true };
+    }
+    recordFill(mgr, pw, { ref: args.ref, selector: args.selector, secret: entryName, field: 'password' }, pageUrl);
+    if (confirm) recordFill(mgr, confirm, { ref: args.confirm_ref, secret: entryName, field: 'password' }, pageUrl);
+
+    const saved = mode === 'new'
+      ? `saved it as the new vault entry "${entryName}" (site: ${origins.join(', ')})`
+      : `rotated vault entry "${entryName}" (the old password is kept — the user can undo with: qodex vault rotate ${entryName} --undo)`;
+    return {
+      content: `✓ Generated a ${length}-character password, ${saved}, and filled it into ${pw.target}${confirm ? ` and ${confirm.target}` : ''} on ${hostOf(pageUrl)} (value hidden — it never enters this conversation). Submit the form now; if the site rejects the password, tell the user.`,
+      metadata: { vault: { entry: entryName, field: 'password', origin: origins[0], generated: true, mode } },
+    };
+  }
+
+  /** The new-password field (+ confirm): explicit refs, or auto-detected. */
+  private async targets(mgr: BrowserManager, args: GenerateArgsT, pageUrl: string): Promise<{ pw: FillTarget; confirm?: FillTarget } | ToolResult> {
+    if (args.ref || args.selector) {
+      return { pw: { ref: args.ref, selector: args.selector }, confirm: args.confirm_ref ? { ref: args.confirm_ref } : undefined };
+    }
+    let found: any[];
+    try {
+      found = await visibleAll(mgr, 'input[type="password"]');
+    } catch (e: any) {
+      return { content: `[BROWSER_ERROR] ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}`, isError: true };
+    }
+    if (!found.length) {
+      return { content: `[BROWSER_ERROR] No visible password field on ${hostOf(pageUrl)}. Call browser_snapshot and pass the new-password field's ref.`, isError: true };
+    }
+    const ac: string[] = [];
+    for (const loc of found) ac.push(String((await loc.evaluate(inspectField).catch(() => null))?.autocomplete ?? ''));
+    const fresh = found.filter((_, i) => /\bnew-password\b/.test(ac[i]));
+    if (!fresh.length && found.length === 1 && /\bcurrent-password\b/.test(ac[0])) {
+      return { content: '[VAULT_FIELD_MISMATCH] The only password field here is a login field (autocomplete=current-password). vault_generate_and_fill is for sign-up and change-password forms; to log in use browser_login.', isError: true };
+    }
+    // A change-password form has current + new + confirm: the new pair is the last two.
+    const pick = fresh.length ? fresh : found.length >= 3 ? found.slice(-2) : found;
+    return {
+      pw: { loc: pick[0], label: 'the new-password field' },
+      confirm: args.confirm_ref ? { ref: args.confirm_ref } : pick[1] ? { loc: pick[1], label: 'the confirm-password field' } : undefined,
+    };
+  }
+}
+
+const VaultListArgs = z.object({
+  site: z.string().describe('Only entries usable on this site or URL. Omit for all; entries for the active tab are marked.').optional(),
+});
+
+/** "github.com" / "https://github.com/login" → a URL to match origins against. */
+function siteUrl(site: string): string {
+  const s = String(site ?? '').trim();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}/`;
+}
 
 export class VaultListTool extends Tool<z.infer<typeof VaultListArgs>> {
   name = 'vault_list';
@@ -299,7 +343,7 @@ export class VaultListTool extends Tool<z.infer<typeof VaultListArgs>> {
   isReadOnly = true;
   isDestructive = false;
 
-  async execute(_args: z.infer<typeof VaultListArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof VaultListArgs>, _ctx: ToolContext): Promise<ToolResult> {
     let entries;
     try {
       entries = await getVault().list();
@@ -307,17 +351,30 @@ export class VaultListTool extends Tool<z.infer<typeof VaultListArgs>> {
       return { content: `[VAULT_ERROR] ${e?.message ?? e}`, isError: true };
     }
     if (!entries.length) {
-      return { content: 'The vault is empty. The user can add a login with: qodex vault add <name> --origin <site> [--username <u>] [--totp]   (the secret is typed hidden, never through the chat).' };
+      return { content: `The vault is empty. ${ASK_FOR_LOGIN}` };
+    }
+    // Never launches the browser: only an already-open tab is matched.
+    let activeUrl = '';
+    try { activeUrl = peekBrowserManager()?.isRunning() ? peekBrowserManager()!.activeUrl() : ''; } catch { activeUrl = ''; }
+    const all = entries.length;
+    if (args.site?.trim()) {
+      const url = siteUrl(args.site);
+      entries = entries.filter(e => matchOrigin(url, e.origins).ok);
+      if (!entries.length) {
+        return { content: `No vault entry may be used on ${hostOf(url)} (${all} entr${all === 1 ? 'y' : 'ies'} for other sites). ${ASK_FOR_LOGIN}` };
+      }
     }
     const lines = entries.map(e => {
       const fields = [e.hasUsername && 'username', e.hasSecret && 'password', e.hasTotp && 'totp'].filter(Boolean).join(', ');
-      return `- ${e.name} — sites: ${e.origins.join(', ')} — fields: ${fields}`;
+      const here = activeUrl && matchOrigin(activeUrl, e.origins).ok ? ' — ✓ matches the active tab' : '';
+      return `- ${e.name} — sites: ${e.origins.join(', ')} — fields: ${fields}${here}`;
     });
     return {
-      content: `${entries.length} vault entr${entries.length === 1 ? 'y' : 'ies'}:\n${lines.join('\n')}\nUse browser_fill_secret {secret: "<name>", field: "username"|"password"|"totp", ref} while the active tab is on one of the entry's sites.`,
+      content: `${entries.length} vault entr${entries.length === 1 ? 'y' : 'ies'}:\n${lines.join('\n')}\nLog in with browser_login {secret: "<name>"}, or fill one field with browser_fill_secret {secret, field, ref} while the active tab is on one of the entry's sites.`,
     };
   }
 }
 
-/** Every vault tool class, for the registry. */
-export const VAULT_TOOL_CLASSES = [BrowserFillSecretTool, VaultListTool] as const;
+
+/** Every vault tool class, for the registry (browser_login lives in login.ts). */
+export const VAULT_TOOL_CLASSES = [BrowserFillSecretTool, VaultListTool, BrowserLoginTool, VaultGenerateAndFillTool] as const;

@@ -61,6 +61,7 @@ import { QODEX_GRANTS_FILE, QODEX_MAIL_AUTO_DIR } from '../grants/paths.js';
 import type { MailSendResolution } from '../grants/mail-scope.js';
 import { QODEX_MAIL_ACCOUNTS_FILE, QODEX_MAIL_DIR } from '../mail/paths.js';
 import { describeOutgoingMail, formatOutgoingPrompt, summarizeOutgoingMail, type MailSendArgs } from '../mail/outgoing.js';
+import { EXPORT_FILE_TEXT_RE, VAULT_KEY_ARTIFACTS, isPasswordExportFile } from '../vault/paths.js';
 import type { ActionClassification, RiskLevel } from './types.js';
 
 // ── public types ────────────────────────────────────────────────────────────
@@ -694,6 +695,14 @@ export const DEFAULT_PROTECTED_PATHS: ProtectedPaths = {
   configFiles: [QODEX_CONFIG_FILE, path.join(QODEX_HOME, '.env'), QODEX_SESSION_DB],
   configDirs: [QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR],
 };
+// The vault key's other homes (src/vault/paths.ts): the keystore record decides "fresh install"
+// vs "key lost" (editing it could make QodeX mint a second key), and on Windows the DPAPI blob
+// IS the key. Same protection as the key file.
+DEFAULT_PROTECTED_PATHS.files.push(...VAULT_KEY_ARTIFACTS);
+DEFAULT_PROTECTED_PATHS.markers.push(...VAULT_KEY_ARTIFACTS.map(markerFor));
+
+/** A shell command that reads the vault key out of the OS keychain (service "qodex-vault-key"). */
+const KEYCHAIN_ITEM_RE = /qodex-vault-key\b/i;
 
 /** Shell fragments that write/move/delete a file (vs. merely reading it). */
 const SHELL_WRITE_RE = /(?<![<=-])>>?(?!\s*(?:\/dev\/null|&\d))|\btee\b|\bsed\s+(?:-[a-z]*\s+)*-[a-z]*i|\bperl\s+-[a-z]*i|\b(?:mv|cp|rm|truncate|chmod|chown|ln|install|dd)\b|writeFile|\.write\(|open\([^)]*['"][wa]|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item/i;
@@ -730,7 +739,7 @@ const QODEX_SELF_CHANGE_RE = new RegExp([
   String.raw`(?:^|[;&|(\x60\n{]|\$\(|-c\s+["'])\s*`,
   String.raw`(?:(?:sudo|nohup|exec|time|command|env(?:\s+(?:(?:-u|--unset)\s+[^\s-]\S*|-\S+))*|npx(?:\s+-\S+)*|node(?:\s+-\S+)*|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*`,
   String.raw`(?:${QODEX_BIN}${ROOT_OPTS}\s+(?:`,
-  String.raw`vault\s+(?:add|rm|remove)`,
+  String.raw`vault\s+(?:add|rm|remove|edit|rotate|import|key\s+migrate)`,
   String.raw`|setup`,
   String.raw`|config\s+(?:set|edit|reset)`,
   String.raw`|control\b`,
@@ -1216,6 +1225,7 @@ export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'o
     if (isProtectedPath(filePath, ctx.cwd, pp) || textHitsProtectedMarker(rawUrl, pp)) {
       return make('credential', 'critical', `${verb} ${shown}`, 'that is QodeX\'s own secret store (vault / browser profiles) — never readable by the agent', undefined, true);
     }
+    if (isPasswordExportFile(filePath)) return exportBlock(`${verb}`, filePath);
   }
   const host = inner.host;
   if (cfg.allowedDomains.length > 0 && rawUrl.trim().toLowerCase() !== 'about:blank') {
@@ -1275,6 +1285,8 @@ const DESKTOP_GUARDED = new Set([
   'computer_use_scroll', 'computer_use_clipboard', 'computer_use_open', 'computer_use_focus_window',
 ]);
 const OTHER_GUARDED = new Set(['http_request', 'workflow_run', 'mail_send']);
+// Vault tools that sign in / create credentials (src/vault/login.ts, tools.ts).
+for (const t of ['browser_login', 'vault_generate_and_fill']) BROWSER_GUARDED.add(t);
 
 /** Literal name fragments that make any tool (MCP or not) a guarded action. */
 const NAME_KEYWORD_RE = /send_email|send_message|post_|create_payment|transfer|purchase|delete/i;
@@ -1368,6 +1380,13 @@ function protectedBlock(toolName: string, what: string): PolicyClassification {
     undefined, true);
 }
 
+/** A password-manager export (plaintext passwords): only the human imports it. */
+function exportBlock(toolName: string, what: string): PolicyClassification {
+  return make('credential', 'critical', `${toolName} ${oneLine(what, 120)}`,
+    'that is a password-manager export with every password in plain text — only the user imports it (qodex vault import), the agent never reads, sends or opens it',
+    undefined, true);
+}
+
 /** Desktop input that would run a QodeX approval / setup command (typed into a terminal). */
 function desktopSelfChange(toolName: string, text: string): PolicyClassification {
   return {
@@ -1448,6 +1467,8 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     const paths = collectPathArgs(toolName, a);
     const hit = paths.find(p => isProtectedPath(p, ctx.cwd, pp));
     if (hit) return protectedBlock(toolName, hit);
+    const exported = toolName === 'safe_delete_file' ? undefined : paths.find(p => isPasswordExportFile(p));
+    if (exported) return exportBlock(toolName, exported);
     if (TREE_TOOLS.has(toolName)) {
       const tree = paths.find(p => !/^[a-z][a-z0-9+.-]*:\/\//i.test(p) && containsProtected(path.resolve(ctx.cwd || process.cwd(), expandHome(p)), pp));
       if (tree) return protectedBlock(toolName, tree);
@@ -1464,6 +1485,8 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     if (cwdArg && isProtectedPath(cwdArg, ctx.cwd, pp)) return protectedBlock(toolName, cwdArg);
     const runDir = cwdArg ? path.resolve(ctx.cwd || process.cwd(), expandHome(cwdArg)) : ctx.cwd;
     if (textHitsProtectedMarker(cmd, pp, runDir)) return protectedBlock(toolName, cmd);
+    if (KEYCHAIN_ITEM_RE.test(cmd)) return protectedBlock(toolName, cmd);
+    if (EXPORT_FILE_TEXT_RE.test(cmd)) return exportBlock(toolName, cmd);
     // tar / zip / rsync / cp -r / grep -r over ~/.qodex as a whole ships the vault key and profiles too.
     if (BULK_READ_RE.test(cmd) && (QODEX_ROOT_RE.test(cmd) || (!!runDir && containsProtected(runDir, pp)))) return protectedBlock(toolName, cmd);
     const cc = commandHitsControl(cmd, ctx.control);
@@ -1552,6 +1575,7 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       const names = paths.map(p => path.basename(p)).join(', ');
       const summary = `upload ${paths.length} file${paths.length === 1 ? '' : 's'} (${oneLine(names, 100)})${onHost}`;
       if (paths.some(p => isProtectedPath(p, ctx.cwd, pp))) return protectedBlock(toolName, names);
+      if (paths.some(p => isPasswordExportFile(p))) return exportBlock(toolName, names);
       const secret = paths.find(p => isSecretFile(p));
       if (secret) {
         return make('credential', riskFor('credential', cfg, { escalate: !pageLocal }), summary, `${path.basename(secret)} looks like a credentials file`, pageHost || undefined);
@@ -1596,12 +1620,33 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       // Fixed risk: the vault tool itself enforces the entry's origins and the field type.
       return make('credential', 'high', summary, 'filling a stored credential (origin-checked by the vault)', pageHost || undefined);
     }
+    case 'browser_login': {
+      // Same fixed risk as browser_fill_secret: the vault checks the origin before every fill,
+      // refuses a submit button that reads like a purchase / send / delete, and stops after one
+      // failed attempt. A given url is still judged as a navigation (blocked / allowed domains).
+      const raw = str(a.url).trim();
+      const url = raw && !/^[a-z][a-z0-9+.-]*:/i.test(raw) ? `https://${raw}` : raw;
+      if (url) {
+        const nav = classifyNavigation(url, ctx, 'sign in at');
+        if (nav.block) return nav;
+      }
+      const host = (url ? hostOf(url) : '') || pageHost;
+      const summary = `sign in with vault entry "${oneLine(str(a.secret), 60)}"${host ? ` on ${host}` : ''}${a.submit === false ? ' (fill only)' : ''}`;
+      return make('credential', 'high', summary, 'signing in with a stored credential (origin-checked by the vault, one attempt)', host || undefined);
+    }
+    case 'vault_generate_and_fill': {
+      const entry = str(a.name) ? ` for vault entry "${oneLine(str(a.name), 60)}"` : '';
+      const summary = `create and save a new password${entry} and fill it into "${elementLabel(ctx.element, str(a.ref) || str(a.selector) || 'the new-password field')}"${onHost}`;
+      return make('credential', 'high', summary, 'a generated password, saved to the vault for this site before it is filled', pageHost || undefined);
+    }
 
     // ── desktop ────────────────────────────────────────────────────────────
     case 'computer_use_type': {
       const text = str(a.text);
       // Typing `qodex mission approve ...` into a terminal is the agent approving itself.
       if (QODEX_SELF_CHANGE_RE.test(text) || commandHitsControl(text, ctx.control)) return desktopSelfChange(toolName, text);
+      if (KEYCHAIN_ITEM_RE.test(text) || textHitsProtectedMarker(text, pp)) return protectedBlock(toolName, 'a command that reads the vault key');
+      if (EXPORT_FILE_TEXT_RE.test(text)) return exportBlock(toolName, 'a password export');
       const enter = a.submit ? ' + Enter' : '';
       const secrets = detectSecrets(text);
       if (secrets.length) {
@@ -1656,6 +1701,7 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
         }
       }
       if (isProtectedPath(local, ctx.cwd, pp)) return protectedBlock(toolName, shown);
+      if (isPasswordExportFile(local)) return exportBlock(toolName, shown);
       if (opensProgram(local)) {
         // Fixed critical: Start-Process / open / xdg-open RUN it — code execution that /auto and
         // --yes never wave through (sentinel.autoApprove: [other] opts out).

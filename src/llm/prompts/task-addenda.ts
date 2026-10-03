@@ -338,9 +338,10 @@ Rules:
     to \`browser_agent\` with a precise goal so the steps stay out of your context.
   - Goals that should keep running in the background, take a long time, or recur → \`mission_start\`.
   - A recorded workflow that matches the job → \`workflow_run\` (see \`workflow_list\`).
-  - Logins: use the vault (\`vault_list\`, \`browser_fill_secret\`) — never ask the user to paste a
-    password into the chat. No entry? Ask the user to log in once (\`qodex browser open\`) or add one
-    (\`qodex vault add\`).
+  - Logins: \`browser_login\` signs in from the vault (\`vault_list\`; one field: \`browser_fill_secret\`;
+    sign-up / new password: \`vault_generate_and_fill\`) — never ask for a password in the chat. No entry?
+    \`vault_request_login\` if you have it (the user types it privately), else ask them to add one
+    (\`qodex vault add\`) or log in once themselves (\`qodex browser open\`).
   - Purchases, payments, sending/posting and entering credentials are guarded by Sentinel: a human
     must approve. While a prompt is pending, wait. If it is denied, stop — don't retry or work around
     it — and ask the user how to proceed.

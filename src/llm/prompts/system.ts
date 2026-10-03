@@ -583,6 +583,10 @@ export interface ComputerFamilies {
   missions: boolean;
   workflows: boolean;
   vault: boolean;
+  /** browser_login is available (whole sign-in from the vault). */
+  vaultLogin?: boolean;
+  /** vault_request_login is available (the user adds a login privately). */
+  vaultRequest?: boolean;
   /** Any of browser / desktop / missions — the families that enable `# Your Computer`. */
   any: boolean;
 }
@@ -603,6 +607,8 @@ export function detectComputerFamilies(toolNames: string[]): ComputerFamilies {
     missions,
     workflows: has('workflow_'),
     vault: has('vault_') || names.includes('browser_fill_secret'),
+    vaultLogin: names.includes('browser_login'),
+    vaultRequest: names.includes('vault_request_login'),
     any: browser || desktop || missions,
   };
 }
@@ -633,7 +639,9 @@ export function buildComputerSection(f: ComputerFamilies): string {
     lines.push('- **Workflows** (`workflow_record` / `workflow_run`): replay a recorded workflow when one fits (`workflow_list`); record repetitive jobs so they can be replayed.');
   }
   if (f.vault) {
-    lines.push('- **Credentials**: never ask the user to paste a password into the chat — use the vault (`vault_list`, `browser_fill_secret`); the secret is filled without you seeing it.');
+    const use = f.vaultLogin ? 'sign in with `browser_login` (entries: `vault_list`)' : 'use the vault (`vault_list`, `browser_fill_secret`)';
+    const none = f.vaultRequest ? '; none saved? `vault_request_login` lets the user add it privately' : '';
+    lines.push(`- **Credentials**: ${use} — values are filled without you seeing them. Never ask for a password in the chat${none}.`);
   }
   lines.push(
     '- **Sentinel** guards purchases, payments, sending/posting and credentials: a human must approve. While an approval is pending, wait. If it is denied, stop — do not retry or work around it — and ask the user how to proceed.',

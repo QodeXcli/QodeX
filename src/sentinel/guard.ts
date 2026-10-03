@@ -181,7 +181,9 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
-const ELEMENT_TOOLS = new Set(['browser_click', 'browser_fill', 'browser_type', 'browser_press', 'browser_upload', 'browser_fill_secret']);
+const ELEMENT_TOOLS = new Set(['browser_click', 'browser_fill', 'browser_type', 'browser_press', 'browser_upload', 'browser_fill_secret', 'vault_generate_and_fill']);
+/** Tools outside the browser_ family that act on the open page (they get its URL and target too). */
+const PAGE_TOOLS = new Set(['vault_generate_and_fill']);
 
 /** Tools that can reach QodeX's own control center (URL / command arguments). */
 const CONTROL_REACHING_TOOLS = new Set([
@@ -326,7 +328,7 @@ export class Sentinel implements SentinelGuard {
     if (toolName === 'workflow_run' && str(args.name)) {
       out.workflow = await this.loadWorkflow(str(args.name));
     }
-    if (!toolName.startsWith('browser_')) return out;
+    if (!toolName.startsWith('browser_') && !PAGE_TOOLS.has(toolName)) return out;
     const mgr = this.browser();
     let running = false;
     try { running = !!mgr?.isRunning(); } catch { running = false; }

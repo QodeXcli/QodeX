@@ -2,8 +2,9 @@
  * Mail secrets: encryption of the accounts file with the VAULT KEY, a derived key for
  * signing local drafts, and scrubbing of passwords / tokens out of any text.
  *
- * The accounts document is encrypted with the same 256-bit key file the credential vault
- * uses (QODEX_VAULT_KEY_FILE, 0600) but with its own envelope format and AAD, so the
+ * The accounts document is encrypted with the same 256-bit key the credential vault uses
+ * (loaded through the shared getVaultKey: QODEX_VAULT_KEY_FILE or the OS keychain it was
+ * migrated to) but with its own envelope format and AAD, so the
  * accounts file can never be loaded as a vault (browser_fill_secret only ever reads the
  * vault) and the vault can never be loaded as an accounts file.
  *
@@ -14,9 +15,8 @@
  */
 
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'crypto';
-import { promises as fs } from 'fs';
-import * as path from 'path';
 import { QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../config/paths.js';
+import { getVaultKey } from '../vault/keystore.js';
 
 export interface MailEnvelope {
   format: 'qodex-mail-accounts';
@@ -69,46 +69,19 @@ export interface KeyPaths {
   vaultFile?: string;
 }
 
-async function exists(p: string): Promise<boolean> {
-  try { await fs.access(p); return true; } catch { return false; }
-}
-
 /**
- * Read the vault key; with `create`, make it (0600) when neither it nor a vault exists.
- * Mirrors Vault's own key handling so both agree on one key file.
+ * The vault key, from the ONE shared loader the vault uses (src/vault/keystore.ts): the key
+ * file or the OS keychain it was migrated to. With `create`, a key is made only on a fresh
+ * install — never when the vault, a guard file or a keystore record says one existed.
  */
 export async function loadVaultKey(opts: KeyPaths & { create?: boolean; guardFiles?: string[] } = {}): Promise<Buffer | null> {
-  const keyFile = opts.keyFile ?? QODEX_VAULT_KEY_FILE;
-  const vaultFile = opts.vaultFile ?? QODEX_VAULT_FILE;
-  try {
-    const key = Buffer.from((await fs.readFile(keyFile, 'utf-8')).trim(), 'base64');
-    if (key.length !== 32) throw new Error('[MAIL_KEY_INVALID] the vault key file is damaged (expected 32 bytes of base64)');
-    if (process.platform !== 'win32') {
-      try {
-        const st = await fs.stat(keyFile);
-        if ((st.mode & 0o077) !== 0) await fs.chmod(keyFile, 0o600);
-      } catch { /* best effort */ }
-    }
-    return key;
-  } catch (e: any) {
-    if (e?.code !== 'ENOENT') throw e;
-  }
-  for (const f of [vaultFile, ...(opts.guardFiles ?? [])]) {
-    if (await exists(f)) {
-      throw new Error(`[MAIL_KEY_MISSING] ${f} exists but the vault key file ${keyFile} is missing — restore the key file (or remove the encrypted files to start over)`);
-    }
-  }
-  if (!opts.create) return null;
-  await fs.mkdir(path.dirname(keyFile), { recursive: true, mode: 0o700 });
-  const key = randomBytes(32);
-  try {
-    const fh = await fs.open(keyFile, 'wx', 0o600);
-    try { await fh.writeFile(key.toString('base64') + '\n'); await fh.sync(); } finally { await fh.close(); }
-    return key;
-  } catch (e: any) {
-    if (e?.code === 'EEXIST') return loadVaultKey({ ...opts, create: false });
-    throw e;
-  }
+  return getVaultKey({
+    keyFile: opts.keyFile ?? QODEX_VAULT_KEY_FILE,
+    vaultFile: opts.vaultFile ?? QODEX_VAULT_FILE,
+    create: opts.create,
+    guardFiles: opts.guardFiles,
+    codePrefix: 'MAIL',
+  });
 }
 
 /** A purpose-bound subkey (HKDF-SHA256), e.g. for signing drafts. PURE. */
