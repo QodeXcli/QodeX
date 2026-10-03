@@ -340,3 +340,36 @@ describe('browser_request_human — shape, Sentinel, relevance', () => {
     }
   });
 });
+
+describe('detectChallenge reads the page title when the in-page probe fails', () => {
+  const fakePage = (title: () => Promise<string>) => {
+    const main = { url: () => 'https://shop.example/', parentFrame: () => null };
+    return {
+      url: () => 'https://shop.example/',
+      isClosed: () => false,
+      mainFrame: () => main,
+      frames: () => [main],
+      evaluate: () => Promise.reject(new Error('Execution context was destroyed')),
+      title,
+    };
+  };
+
+  it('a Cloudflare interstitial title is classified (the title is awaited, not stringified as a Promise)', async () => {
+    const { detectChallenge } = await import('../src/tools/browser/challenge.js');
+    const r = await detectChallenge(fakePage(async () => 'Just a moment...'), { timeoutMs: 500 });
+    expect(r && r !== 'unknown' ? r.vendor : r).toMatch(/cloudflare/i);
+  });
+
+  it('a page that closes mid-detection rejects nothing unhandled', async () => {
+    const { detectChallenge } = await import('../src/tools/browser/challenge.js');
+    const unhandled: unknown[] = [];
+    const on = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', on);
+    try {
+      const r = await detectChallenge(fakePage(() => Promise.reject(new Error('page.title: Target page, context or browser has been closed'))), { timeoutMs: 500 });
+      await new Promise(res => setTimeout(res, 50));
+      expect(r === null || r === 'unknown').toBe(true);
+      expect(unhandled).toEqual([]);
+    } finally { process.off('unhandledRejection', on); }
+  });
+});

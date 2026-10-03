@@ -616,7 +616,7 @@ export async function detectChallenge(page: any, opts: DetectOptions = {}): Prom
 
   let title = typeof markers?.title === 'string' ? markers.title : '';
   if (!markers) {
-    title = await withTimeoutValue(Promise.resolve().then(() => String(page.title())), timeoutMs, '');
+    title = await withTimeoutValue(Promise.resolve().then(() => page.title()).then((t: unknown) => String(t ?? '')), timeoutMs, '');
   }
   const result = classifyChallenge({ mainUrl, title, status: opts.status, headers: opts.headers, frames, domMarkers: markers });
   if (!markers && !result) return 'unknown';
