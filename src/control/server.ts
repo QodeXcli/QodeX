@@ -1420,10 +1420,13 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
 
   // 2. `?k=` login: set the cookie and bounce to the same URL without the token.
   if (auth.via === 'query' && isRead) {
-    const stripped = stripTokenFromUrl(rawUrl);
-    const target = isLocalRedirect(stripped) ? stripped : '/';
+    const target = stripTokenFromUrl(rawUrl);
     const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}`;
-    if (wantsHtml(req)) {
+    if (!isLocalRedirect(target)) {
+      // Never bounce anywhere but this server (stripTokenFromUrl already keeps a bare path).
+      res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: '/', 'Content-Length': '0' });
+      res.end();
+    } else if (wantsHtml(req)) {
       // An HTML bounce (not a 302) so the follow-up navigation is initiated by OUR
       // page — a SameSite=Strict cookie is then sent even when the link was opened
       // from another site (Telegram web, a mail client, ...).
