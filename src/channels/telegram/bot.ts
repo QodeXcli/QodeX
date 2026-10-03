@@ -150,6 +150,8 @@ interface DeliveredApproval {
   messages: Array<{ chatId: number; messageId: number; lang: F.Lang }>;
   ready: Promise<void>;
   createdAt: number;
+  /** Chats whose card could not be sent (network, 5xx, 429...) → retried from tick() with backoff. */
+  failed: Map<number, { attempts: number; nextTry: number }>;
 }
 
 type FoundApproval = { source: 'broker' | 'mission'; options: string[]; card: F.ApprovalCardInput };
@@ -191,6 +193,8 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const MAX_DELIVERED = 500;
 const MAX_HANDLED = 2000;
 const MAX_OUTCOMES = 200;
+/** Send attempts per (approval, chat) before giving up (the user can still pull it with /approvals). */
+const MAX_DELIVERY_ATTEMPTS = 8;
 /** Replies to one unpaired chat: at most this many per window (a stranger can't make the bot spam). */
 const UNPAIRED_REPLIES_PER_CHAT = 5;
 const UNPAIRED_WINDOW_MS = 10 * 60_000;
@@ -780,7 +784,7 @@ export class TelegramBot {
   // ── approvals ──────────────────────────────────────────────────────────────
 
   private createEntry(id: string, source: 'broker' | 'mission', card: F.ApprovalCardInput, options: string[]): DeliveredApproval {
-    const entry: DeliveredApproval = { id, source, card, options: [...options], messages: [], ready: Promise.resolve(), createdAt: this.now() };
+    const entry: DeliveredApproval = { id, source, card, options: [...options], messages: [], ready: Promise.resolve(), createdAt: this.now(), failed: new Map() };
     this.delivered.set(id, entry);
     if (this.delivered.size > MAX_DELIVERED) {
       const oldest = this.delivered.keys().next().value as string;
@@ -790,16 +794,36 @@ export class TelegramBot {
     return entry;
   }
 
-  /** Send the approval card to `chats`; recorded on the entry for later retraction. */
+  /** Still worth showing: not retracted, and (for broker approvals) still pending. */
+  private isLive(entry: DeliveredApproval): boolean {
+    if (!this.running || this.delivered.get(entry.id) !== entry) return false;
+    return entry.source !== 'broker' || this.broker.get(entry.id) !== undefined;
+  }
+
+  /**
+   * Send the approval card to `chats`; recorded on the entry for later retraction.
+   * Stops once the approval is answered/retracted. Failed sends are remembered and
+   * retried from tick() with backoff (retryFailedDeliveries).
+   */
   private deliverTo(entry: DeliveredApproval, chats: PairedChat[]): Promise<void> {
     const run = async () => {
       const cbId = this.callbackIdFor(entry.id);
       for (const chat of chats) {
+        if (!this.isLive(entry)) return;
         const lang = F.langOf(chat.lang);
         const msg = await this.send(chat.chatId, F.formatApprovalWithHint(entry.card, lang), {
           replyMarkup: F.approvalKeyboard(cbId, entry.options, lang),
         });
-        if (msg) entry.messages.push({ chatId: chat.chatId, messageId: msg.message_id, lang });
+        if (msg) {
+          entry.messages.push({ chatId: chat.chatId, messageId: msg.message_id, lang });
+          entry.failed.delete(chat.chatId);
+          continue;
+        }
+        const attempts = (entry.failed.get(chat.chatId)?.attempts ?? 0) + 1;
+        entry.failed.set(chat.chatId, { attempts, nextTry: this.now() + Math.min(60_000, this.tickMs * 2 ** (attempts - 1)) });
+        if (attempts === MAX_DELIVERY_ATTEMPTS) {
+          this.log('warn', `Telegram: giving up delivering approval ${entry.id} to chat ${chat.chatId} after ${attempts} attempts (/approvals re-sends it)`);
+        }
       }
     };
     const prev = entry.ready;
@@ -822,14 +846,29 @@ export class TelegramBot {
         this.dropAlias(p.id);
         return;
       }
-      await this.deliverTo(entry, chats);
-      if (!entry.messages.length && this.delivered.get(p.id) === entry) {
-        // Nothing went out (Telegram unreachable): forget it so the next tick retries.
-        this.delivered.delete(p.id);
-        this.dropAlias(p.id);
-      }
+      await this.deliverTo(entry, chats); // failed sends are retried by retryFailedDeliveries()
     } catch (err) {
       this.log('warn', `Telegram: delivering approval ${p.id} failed: ${this.api.redact(errMsg(err))}`);
+    }
+  }
+
+  /**
+   * Re-send cards that could not be delivered to some chat (Telegram briefly
+   * unreachable, 5xx, 429...), with exponential backoff and at most
+   * MAX_DELIVERY_ATTEMPTS tries per chat — a chat that blocked the bot is not
+   * hit (and logged) every tick for as long as the approval stays pending.
+   */
+  private async retryFailedDeliveries(): Promise<void> {
+    const now = this.now();
+    const dueChats = (e: DeliveredApproval) => new Set([...e.failed].filter(([, f]) => f.attempts < MAX_DELIVERY_ATTEMPTS && f.nextTry <= now).map(([id]) => id));
+    const due = [...this.delivered.values()].filter((e) => e.failed.size > 0 && this.isLive(e) && dueChats(e).size > 0);
+    if (!due.length) return;
+    const chats = await this.pairing.listChats();
+    for (const entry of due) {
+      for (const id of entry.failed.keys()) if (!chats.some((c) => c.chatId === id)) entry.failed.delete(id); // unpaired meanwhile
+      const ids = dueChats(entry);
+      const retry = chats.filter((c) => ids.has(c.chatId));
+      if (retry.length) await this.deliverTo(entry, retry);
     }
   }
 
@@ -1020,6 +1059,7 @@ export class TelegramBot {
     try {
       await this.refreshChannel();
       if (!this.running) return;
+      await this.retryFailedDeliveries();
       if (this.channelUnregister) {
         // Broker approvals whose card could not be sent yet (a Sentinel prompt must not
         // silently wait out its timeout because Telegram was briefly unreachable).
@@ -1078,8 +1118,7 @@ export class TelegramBot {
           // (an in-process mission mirrors its broker approval into the DB).
           if (this.delivered.has(a.id) || this.handledMission.has(a.id) || this.answering.has(a.id)) continue;
           const entry = this.createEntry(a.id, 'mission', missionCard(a), missionOptions(a));
-          await this.deliverTo(entry, chats);
-          if (!entry.messages.length) this.delivered.delete(a.id); // retry next tick
+          await this.deliverTo(entry, chats); // failed sends are retried by retryFailedDeliveries()
         }
       }
     }

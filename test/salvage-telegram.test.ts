@@ -444,6 +444,32 @@ describe('salvage: bot', () => {
     expect(await pr).toEqual({ answer: 'no', by: 'telegram' });
   });
 
+  it('B9c: gives up on a chat that keeps failing instead of resending the card every tick', async () => {
+    await pairChat();
+    const base = tg.fetch;
+    let blocked = 0;
+    let unblocked = false;
+    tg.fetch = async (url, init) => {
+      if (!unblocked && url.endsWith('/sendMessage') && JSON.parse(String(init?.body)).reply_markup) {
+        blocked++;
+        return new Response(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }), { status: 403 });
+      }
+      return base(url, init);
+    };
+    let skew = 0; // jump the bot's clock past every backoff
+    const missions = fakeMissions();
+    missions.approvals = [{ id: 'ma_blocked', missionId: 'm_1', prompt: 'Pay?', options: ['yes', 'no'] }];
+    const logs: string[] = [];
+    await startBot({ missions, now: () => Date.now() + skew, log: (_l, m) => logs.push(m) });
+    for (let i = 0; i < 14; i++) { skew += 61_000; await new Promise((r) => setTimeout(r, 40)); }
+    expect(blocked).toBe(8);
+    expect(logs.filter((l) => l.includes('giving up delivering approval ma_blocked'))).toHaveLength(1);
+    // /approvals still re-sends it on demand.
+    unblocked = true;
+    tg.text(OWNER, '/approvals');
+    await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup && c.result));
+  });
+
   it('B10: a failed mission-approval write keeps the card answerable', async () => {
     await pairChat();
     const missions = fakeMissions();
