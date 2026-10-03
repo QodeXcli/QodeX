@@ -96,6 +96,12 @@ async function bootstrap(): Promise<{
   }
   const router = new ModelRouter(config);
   const registry = new ToolRegistry();
+  // ask_user — the agent's clarifying question (answers itself in auto mode). Registered
+  // here until the registry's builtin list carries it; a no-op once it does.
+  if (!registry.get('ask_user')) {
+    const { AskUserTool } = await import('./tools/builtin/ask-user.js');
+    registry.register(new AskUserTool());
+  }
   try {
     const { registerUserPlugins } = await import('./plugins/loader.js');
     await registerUserPlugins(registry, process.cwd());
