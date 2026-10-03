@@ -3840,8 +3840,12 @@ export const PLAN_MODE_LIFTED_NOTE =
   '[SYSTEM] Plan mode has ended: auto mode approved your plan. Every tool (write_file, edit_*, shell, …) ' +
   'is enabled now — ignore the earlier plan-mode restriction and execute the plan in this turn.';
 
-/** Edit tools whose approval prompt follows a 'diff' event for the evaluated path. */
-const EDIT_PROMPT_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
+/**
+ * Single-file edit tools whose approval prompt follows a 'diff' event for exactly the path
+ * they evaluated. multi_file_edit is left out on purpose: one prompt covers several files,
+ * so the last diff's path would not describe the whole request.
+ */
+const EDIT_PROMPT_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_text', 'multi_edit', 'edit_symbol']);
 
 /**
  * What a prompt raised inside a tool call is about. A caller-supplied tag wins (a
