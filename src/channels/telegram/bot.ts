@@ -241,6 +241,7 @@ export class TelegramBot {
   private ticking = false;
   private busUnsub: (() => void) | null = null;
   private channelUnregister: (() => void) | null = null;
+  private detachCallerSignal: (() => void) | null = null;
 
   private delivered = new Map<string, DeliveredApproval>();
   private aliasToId = new Map<string, string>();
@@ -307,12 +308,16 @@ export class TelegramBot {
     const ac = new AbortController();
     this.controller = ac;
     if (signal) {
+      // Removed again in cleanup(): a long-lived caller signal must not collect one listener per start.
+      const onCallerAbort = () => ac.abort();
       if (signal.aborted) ac.abort();
-      else signal.addEventListener('abort', () => ac.abort(), { once: true });
+      else signal.addEventListener('abort', onCallerAbort, { once: true });
+      this.detachCallerSignal = () => signal.removeEventListener('abort', onCallerAbort);
     }
     try {
       this.me = await this.api.getMe(ac.signal);
     } catch (err) {
+      this.detachCallerSignal?.(); this.detachCallerSignal = null;
       this.controller = null;
       throw err;
     }
@@ -411,6 +416,7 @@ export class TelegramBot {
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     this.busUnsub?.(); this.busUnsub = null;
     this.channelUnregister?.(); this.channelUnregister = null;
+    this.detachCallerSignal?.(); this.detachCallerSignal = null;
     // Confirm handled updates so a quick restart doesn't replay e.g. /mission.
     if (this.offset !== undefined) {
       const ac = new AbortController();
