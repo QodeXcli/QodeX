@@ -18,8 +18,11 @@
  *
  * Security notes: all dynamic text is inserted with textContent (never innerHTML),
  * links are only rendered for http(s) URLs, and the page talks only to its own
- * origin (the server sends a CSP with connect-src 'self' and frame-ancestors 'none').
+ * origin (the server sends a CSP with connect-src 'self', frame-ancestors 'none' and
+ * a script-src that allows only this file's inline script by hash).
  */
+
+import { createHash } from 'node:crypto';
 
 export type DashboardLang = 'en' | 'fa';
 
@@ -909,6 +912,14 @@ const SCRIPT = String.raw`
   setInterval(function () { if (!document.hidden) { refreshState(); if (hasAction('missions.approvals')) refreshMissions(); } }, 5000);
 })();
 `;
+
+/**
+ * CSP source allowing exactly the dashboard's one executable inline script (its
+ * sha256), so the server can drop 'unsafe-inline' for scripts: even if some text
+ * ever slipped into the page as HTML, it could not run. The boot JSON block is a
+ * data block (type="application/json") and is never executed.
+ */
+export const DASHBOARD_SCRIPT_CSP_SOURCE = `'sha256-${createHash('sha256').update(SCRIPT, 'utf8').digest('base64')}'`;
 
 /**
  * Render the dashboard. The returned string is a complete HTML document; it embeds

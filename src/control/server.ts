@@ -53,7 +53,7 @@ import {
 import { resolveControlConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { lanUrls, makeAccessToken, startTunnel, type TunnelHandle } from '../artifacts/live-share.js';
-import { renderDashboard, type DashboardLang } from './dashboard.js';
+import { renderDashboard, DASHBOARD_SCRIPT_CSP_SOURCE, type DashboardLang } from './dashboard.js';
 import { logger } from '../utils/logger.js';
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -1126,16 +1126,24 @@ const BASE_HEADERS: Record<string, string> = {
   'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
-const HTML_CSP = [
-  "default-src 'none'",
-  "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-].join('; ');
+/** CSP for our HTML pages. `scriptSrc` lists the exact inline scripts allowed (by
+ *  hash); there is no 'unsafe-inline' for scripts, so injected markup can't run. */
+function htmlCsp(scriptSrc: string): string {
+  return [
+    "default-src 'none'",
+    `script-src ${scriptSrc}`,
+    "style-src 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+function scriptHashSource(script: string): string {
+  return `'sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}'`;
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
   const text = safeStringify(body);
@@ -1152,11 +1160,11 @@ function sendError(res: ServerResponse, status: number, error: string, extra: Re
   sendJson(res, status, { ok: false, error }, extra);
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string, extra: Record<string, string> = {}): void {
+function sendHtml(res: ServerResponse, status: number, html: string, scriptSrc: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, {
     ...BASE_HEADERS,
     'Content-Type': 'text/html; charset=utf-8',
-    'Content-Security-Policy': HTML_CSP,
+    'Content-Security-Policy': htmlCsp(scriptSrc),
     // Opened from Telegram web / a mail client: sever window.opener so that page
     // can't navigate or script this tab.
     'Cross-Origin-Opener-Policy': 'same-origin',
@@ -1182,14 +1190,18 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
-function bouncePage(target: string): string {
+/** The `?k=` landing page (the cookie rides on the response): moves on to `target`
+ *  with history replacement. Returns the page and the CSP source for its one script. */
+function bouncePage(target: string): { html: string; scriptSrc: string } {
   const t = escapeHtml(target);
   const js = JSON.stringify(target).replace(/</g, '\\u003c');
-  return '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
+  const script = `location.replace(${js});`;
+  const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
     + `<meta http-equiv="refresh" content="0;url=${t}"><title>QodeX Control Center</title></head>`
     + '<body style="background:#0b0f14;color:#e5e7eb;font-family:system-ui,sans-serif;padding:24px">'
     + `<p>Signing you in… <a style="color:#22d3ee" href="${t}">continue</a></p>`
-    + `<script>location.replace(${js});</script></body></html>`;
+    + `<script>${script}</script></body></html>`;
+  return { html, scriptSrc: scriptHashSource(script) };
 }
 
 function unauthorizedPage(): string {
@@ -1427,7 +1439,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   const auth = authenticateRequest(rt.token, rt.port, req);
   if (!auth.ok) {
     if (!isRead) drainAndIgnore(req);
-    if (isRead && wantsHtml(req)) sendHtml(res, 401, unauthorizedPage());
+    if (isRead && wantsHtml(req)) sendHtml(res, 401, unauthorizedPage(), "'none'");
     else sendError(res, 401, '[UNAUTHORIZED] Missing or invalid access token. Open the full link printed by `qodex control` (it ends with ?k=…), or send Authorization: Bearer <token>.');
     return;
   }
@@ -1438,7 +1450,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   if (agentBrowserOnControlCenter(rt, req)) {
     if (!isRead) drainAndIgnore(req);
     const msg = '[AGENT_BROWSER] The control center refuses requests while the agent\'s own browser has it open (the agent must not answer its own approvals). Open the link in your own browser.';
-    if (isRead && wantsHtml(req)) sendHtml(res, 403, agentBrowserPage());
+    if (isRead && wantsHtml(req)) sendHtml(res, 403, agentBrowserPage(), "'none'");
     else sendError(res, 403, msg, { Connection: 'close' });
     return;
   }
@@ -1454,7 +1466,8 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
       // An HTML bounce (not a 302) so the follow-up navigation is initiated by OUR
       // page — a SameSite=Strict cookie is then sent even when the link was opened
       // from another site (Telegram web, a mail client, ...).
-      sendHtml(res, 200, bouncePage(target), { 'Set-Cookie': cookie });
+      const page = bouncePage(target);
+      sendHtml(res, 200, page.html, page.scriptSrc, { 'Set-Cookie': cookie });
     } else {
       res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: target, 'Content-Length': '0' });
       res.end();
@@ -1489,7 +1502,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   }
 
   if (path === '/' || path === '/index.html') {
-    sendHtml(res, 200, renderDashboard({ title: rt.title || undefined, lang: pickLang(rt, req) }));
+    sendHtml(res, 200, renderDashboard({ title: rt.title || undefined, lang: pickLang(rt, req) }), DASHBOARD_SCRIPT_CSP_SOURCE);
     return;
   }
   if (path === '/api/state') return routeState(rt, res, query);
