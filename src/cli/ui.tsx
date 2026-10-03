@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { emergencyStop, formatStopReport, registerStopHandler } from '../control/emergency-stop.js';
+import { checkGoalAsync, getStandingGoal, nextGoalStep, setStandingGoal } from '../goals/goal.js';
 import { Box, Text, Static, useApp, useInput, useStdout } from 'ink';
 import Spinner from 'ink-spinner';
 import { ChatInput } from './components/chat-input.js';
@@ -223,6 +225,12 @@ export function App(props: AppProps): React.ReactElement {
   // output isn't a TTY (piped) or the user opted out via QODEX_NO_MOTION=1.
   const motion = !!stdout?.isTTY && process.env.QODEX_NO_MOTION !== '1';
   const abortRef = useRef<AbortController | null>(null);
+  // /stop (here, the control center or Telegram) aborts the running turn through this handler.
+  useEffect(() => registerStopHandler('current run', () => {
+    const ac = abortRef.current;
+    if (ac && !ac.signal.aborted) { ac.abort(); return 'the running task'; }
+    return null;
+  }), []);
   // Exit guard: a stray Ctrl+C while idle shouldn't quit. The first press "arms" an
   // exit prompt; a second Ctrl+C within the window actually exits. Any other key (or
   // the timeout) disarms it. This mirrors what people expect from Claude Code et al.
@@ -866,6 +874,33 @@ export function App(props: AppProps): React.ReactElement {
       setThinkingChars(0);
       setActiveTools([]);
       abortRef.current = null;
+      // Standing goal (/goal): prove it with evidence, or queue the next round.
+      const goal = getStandingGoal();
+      if (goal && goal.status === 'active') {
+        if (ac.signal.aborted) {
+          setHistory(h => [...h, { type: 'system', text: '🎯 Goal paused — the run was stopped. Send a message to continue, or /goal clear to drop it.', id: nextId() }]);
+        } else {
+          const lastAnswer = [...(loaded?.messages ?? [])].reverse().find(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim())?.content ?? '';
+          setHistory(h => [...h, { type: 'system', text: `🎯 Checking the goal${goal.check ? `: ${goal.check}` : ''}…`, id: nextId() }]);
+          void checkGoalAsync(goal, String(lastAnswer), activeCwd).then((verdict) => {
+            if (getStandingGoal() !== goal) return; // cleared or replaced meanwhile
+            const next = nextGoalStep(goal, verdict);
+            const ev = verdict.evidence.length > 400 ? verdict.evidence.slice(0, 400) + '…' : verdict.evidence;
+            if (next.action === 'done') {
+              setStandingGoal(null);
+              setHistory(h => [...h, { type: 'system', text: `✓ Goal met: ${goal.objective}\n${ev}`, id: nextId() }]);
+            } else if (next.action === 'give-up') {
+              setStandingGoal(null);
+              setHistory(h => [...h, { type: 'error', text: `✗ Goal not met after ${goal.maxRounds} extra rounds: ${goal.objective}\n${ev}`, id: nextId() }]);
+            } else {
+              setStandingGoal(next.goal);
+              setHistory(h => [...h, { type: 'system', text: `↻ Goal not met yet — round ${next.goal.rounds}/${next.goal.maxRounds}`, id: nextId() }]);
+              // Through the queue, so it never races a prompt the user typed meanwhile.
+              setQueued(q => [next.prompt, ...q]);
+            }
+          });
+        }
+      }
     }
   }, [sessionId, mode, explicitModel, messages, props.cwd, activeCwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
 
@@ -876,6 +911,17 @@ export function App(props: AppProps): React.ReactElement {
     // Record for arrow-key recall (skip consecutive duplicates).
     const ph = promptHistoryRef.current;
     if (ph[ph.length - 1] !== v) ph.push(v);
+    // /stop and /stop all act at once — never queued behind the task they are meant to stop.
+    const stopCmd = /^\/stop(?:\s+(all))?\s*$/i.exec(v);
+    if (stopCmd) {
+      const all = !!stopCmd[1];
+      setQueued([]);
+      setStandingGoal(null);
+      void emergencyStop({ missions: all, by: 'TUI' }).then((report) => {
+        setHistory(h => [...h, { type: 'system', text: formatStopReport(report, all), id: nextId() }]);
+      });
+      return;
+    }
     // Mid-task steering: `/btw <note>` typed WHILE a turn is in flight is injected
     // into the running task (the model weighs it on its next step) instead of being
     // queued for after. When idle, it falls through to normal handling below.
