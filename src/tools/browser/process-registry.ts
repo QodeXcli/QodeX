@@ -204,15 +204,11 @@ function infoFor(proc: ManagedProcess): ProcessInfo {
   };
 }
 
-// Cleanup on QodeX exit
+// Cleanup on QodeX exit (kill() is synchronous, so it works in 'exit'). No SIGINT
+// listener: one that doesn't exit would disable Node's default Ctrl+C exit for every
+// command that imports the tool registry. Ctrl+C reaches these children anyway (same
+// process group), and the CLI's own SIGINT handlers exit via process.exit → 'exit'.
 process.on('exit', () => {
-  for (const proc of processes.values()) {
-    if (proc.exitCode === null) {
-      try { proc.child.kill('SIGTERM'); } catch { /* ignore */ }
-    }
-  }
-});
-process.on('SIGINT', () => {
   for (const proc of processes.values()) {
     if (proc.exitCode === null) {
       try { proc.child.kill('SIGTERM'); } catch { /* ignore */ }

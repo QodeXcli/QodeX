@@ -230,12 +230,10 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
       let code = 0;
       const ac = new AbortController();
       const onTerm = () => ac.abort();
-      // Ctrl+C. Node exits on SIGINT by itself only while NOTHING listens for it, and
-      // the CLI entry imports modules that do (the tool registry's process registry
-      // installs a cleanup listener that never exits) — which would leave "Press Ctrl+C
-      // to stop" doing nothing. So: when a listener already exists, stop the bot
-      // (confirming the update offset) and exit 130 ourselves; a second Ctrl+C exits at
-      // once. When none exists we add none, keeping Node's default.
+      // Ctrl+C: stop the bot (confirming the update offset, so a quick restart doesn't
+      // replay e.g. /mission) and exit 130 ourselves; a second Ctrl+C exits at once.
+      // Node's default SIGINT exit would skip that confirmation. Like `qodex control`,
+      // this listener always exits — one that didn't would turn Ctrl+C into a no-op.
       let interrupted = false;
       let force: NodeJS.Timeout | null = null;
       const onInt = () => {
@@ -245,7 +243,6 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         force = setTimeout(() => exit(130), 5000);
         force.unref?.();
       };
-      const ownSigint = process.listenerCount('SIGINT') > 0;
       try {
         const { cfg, env, raw } = await loadCtx();
         token = String(env[cfg.botTokenEnv] ?? '').trim();
@@ -264,7 +261,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         const stamp = () => new Date().toISOString().slice(11, 19);
         // SIGTERM → graceful stop.
         process.once('SIGTERM', onTerm);
-        if (ownSigint) process.on('SIGINT', onInt);
+        process.on('SIGINT', onInt);
         const handle = await startTelegramBot({
           config: raw,
           env,
@@ -300,7 +297,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         code = 1;
       } finally {
         process.removeListener('SIGTERM', onTerm);
-        if (ownSigint) process.removeListener('SIGINT', onInt);
+        process.removeListener('SIGINT', onInt);
         if (force) clearTimeout(force);
       }
       exit(interrupted && code === 0 ? 130 : code);

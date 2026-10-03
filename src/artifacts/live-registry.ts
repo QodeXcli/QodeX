@@ -2,7 +2,7 @@
  * In-process registry of live artifact servers, keyed by artifact id.
  *
  * Mirrors the lifecycle of src/tools/browser/process-registry.ts (start / stop / stopAll /
- * list + process exit/SIGINT cleanup), but holds in-process http.Server handles rather than
+ * list + process-exit cleanup), but holds in-process http.Server handles rather than
  * child processes — process-registry kills PIDs, which doesn't fit a server living in our
  * own process. Each entry may also own a tunnel child process (closed alongside the server).
  */
@@ -110,6 +110,7 @@ export function getLive(id: string): LiveServerHandle | undefined {
 
 // Best-effort cleanup so live servers + tunnels don't linger after QodeX exits. 'exit' must
 // be synchronous — fire close() without awaiting; the event loop is already winding down.
+// No SIGINT listener (see process-registry.ts): it would disable Node's default Ctrl+C exit.
 function cleanupSync(): void {
   for (const e of servers.values()) {
     try { e.tunnel?.close(); } catch { /* ignore */ }
@@ -118,4 +119,3 @@ function cleanupSync(): void {
   servers.clear();
 }
 process.on('exit', cleanupSync);
-process.on('SIGINT', () => { cleanupSync(); });

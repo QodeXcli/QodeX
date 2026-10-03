@@ -267,19 +267,21 @@ describe('qodex telegram start — Ctrl+C', () => {
     return fetch(url, init);
   };
 
-  it('adds no SIGINT listener of its own when none exists (Node keeps its default exit)', async () => {
+  it('owns Ctrl+C only while running: stops gracefully and exits 130', async () => {
     expect(process.listenerCount('SIGINT')).toBe(0);
     const h = harness({ fetch: longPoll });
     const run = h.run('start');
     await new Promise<void>((r) => { const t = setInterval(() => { if (h.out.join('\n').includes('is running')) { clearInterval(t); r(); } }, 5); });
-    expect(process.listenerCount('SIGINT')).toBe(0);
-    const { stopTelegramBot } = await import('../src/channels/telegram/index.js');
-    await stopTelegramBot();
+    expect(process.listenerCount('SIGINT')).toBe(1);
+    process.emit('SIGINT');
     await run;
+    expect(h.exits).toEqual([130]);
+    expect(getTelegramBot()).toBeNull();
+    expect(process.listenerCount('SIGINT')).toBe(0);
   });
 
   it('stops gracefully and exits 130 when another module already swallowed Ctrl+C', async () => {
-    // Importing the tool registry installs SIGINT listeners that do not exit.
+    // e.g. a third-party module's SIGINT listener that does not exit.
     const swallow = () => {};
     process.on('SIGINT', swallow);
     try {
