@@ -1954,6 +1954,7 @@ import { buildMissionCommand } from './missions/command.js';
 import { buildWorkflowCommand } from './workflows/command.js';
 import { buildTelegramCommand } from './channels/telegram/command.js';
 import { buildVaultCommand } from './vault/command.js';
+import { buildMailCommand } from './mail/command.js';
 
 program.addCommand(buildBrowserCommand());
 const controlCommand = buildControlCommand({
@@ -1993,6 +1994,10 @@ program.addCommand(buildTelegramCommand({
   missionAdapter: async () => (await import('./missions/telegram-adapter.js')).createTelegramMissionAdapter({ defaultCwd: process.cwd() }),
 }));
 program.addCommand(buildVaultCommand());
+// `qodex mail add|list|remove|test|default|presets` — IMAP/SMTP accounts, encrypted with the vault key.
+// Mail subcommands from other modules (watch, rule) attach with mailCommand.addCommand(...).
+const mailCommand = buildMailCommand();
+program.addCommand(mailCommand);
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);
