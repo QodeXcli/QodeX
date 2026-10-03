@@ -617,6 +617,9 @@ export class QodexBrowserManager implements BrowserManager {
   private takeoverOn = false;
   private takeoverWho: string | undefined;
   private takeoverWaiters = new Set<() => void>();
+  /** A human press-and-hold in progress (relayed 'down'): forced 'up' after HOLD_CAP_MS. */
+  private hold: { page: Page; button: 'left' | 'right' | 'middle'; timer: NodeJS.Timeout } | null = null;
+  static readonly HOLD_CAP_MS = 20_000;
 
   private actionListeners = new Set<(rec: BrowserActionRecord) => void>();
   private events = new EventEmitter();
@@ -818,6 +821,7 @@ export class QodexBrowserManager implements BrowserManager {
       this.stopChallengeTimers(st);
     }
     for (const sub of this.casts) { sub.session = null; sub.page = null; }
+    if (this.hold) { clearTimeout(this.hold.timer); this.hold = null; }
     this.ctx = null;
     this.cdpBrowser = null;
     this.mode = 'none';
@@ -1673,14 +1677,32 @@ export class QodexBrowserManager implements BrowserManager {
     return { ...(this.launchedCfg ?? this.currentConfig()).viewport };
   }
 
-  async screenshotJpeg(quality = 70): Promise<Buffer> {
+  /**
+   * One JPEG of the active tab's viewport — or only `clip` (viewport CSS px, e.g. a
+   * hand-off's challenge frameBox, so a phone card shows the widget and nothing else).
+   */
+  async screenshotJpeg(quality = 70, opts: { clip?: { x: number; y: number; width: number; height: number } } = {}): Promise<Buffer> {
     if (!this.ctx || !this.activeTab) throw new Error('[BROWSER_ERROR] The QodeX browser is not running.');
-    return this.activeTab.page.screenshot({ type: 'jpeg', quality: Math.min(100, Math.max(1, Math.round(quality))) });
+    const q = Math.min(100, Math.max(1, Math.round(quality)));
+    const c = opts.clip;
+    if (c && [c.x, c.y, c.width, c.height].every(n => Number.isFinite(n)) && c.width >= 1 && c.height >= 1) {
+      const clip = { x: Math.max(0, c.x), y: Math.max(0, c.y), width: Math.round(c.width), height: Math.round(c.height) };
+      return this.activeTab.page.screenshot({ type: 'jpeg', quality: q, clip });
+    }
+    return this.activeTab.page.screenshot({ type: 'jpeg', quality: q });
   }
 
   // ── takeover / human input ────────────────────────────────────────────────
 
-  setTakeover(on: boolean, by = 'human'): void {
+  /**
+   * Turn human takeover on / off. Turning it ON never silently steals it: while someone
+   * else holds it (a human in the control center, a hand-off) the owner stays and this
+   * returns false. Turning it OFF is an explicit hand-back and always releases (an
+   * automatic release must use releaseTakeover(owner)). Returns whether `by` now has the
+   * state it asked for.
+   */
+  setTakeover(on: boolean, by = 'human'): boolean {
+    if (on && this.takeoverOn && this.takeoverWho !== undefined && this.takeoverWho !== by) return false;
     const changed = this.takeoverOn !== on;
     this.takeoverOn = on;
     this.takeoverWho = on ? by : undefined;
@@ -1690,23 +1712,45 @@ export class QodexBrowserManager implements BrowserManager {
       this.takeoverWaiters.clear();
       for (const w of waiters) w();
     }
+    return true;
+  }
+
+  /** Compare-and-release: end the takeover only if `by` still owns it. */
+  releaseTakeover(by: string): boolean {
+    if (!this.takeoverOn || this.takeoverWho !== by) return false;
+    this.setTakeover(false, by);
+    return true;
   }
 
   isTakeover(): boolean {
     return this.takeoverOn;
   }
 
-  waitForTakeoverEnd(signal?: AbortSignal): Promise<void> {
-    if (!this.takeoverOn) return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
+  /**
+   * Resolve when the takeover ends (true) — or after `timeoutMs` (false). Rejects
+   * `[ABORTED]` on `signal`. Resolves true at once when no takeover is on.
+   */
+  waitForTakeoverEnd(signal?: AbortSignal, timeoutMs?: number): Promise<boolean> {
+    if (!this.takeoverOn) return Promise.resolve(true);
+    return new Promise<boolean>((resolve, reject) => {
       if (signal?.aborted) { reject(new Error('[ABORTED] Stopped waiting for the human to hand back the browser.')); return; }
-      const done = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
-      const onAbort = () => {
+      let timer: NodeJS.Timeout | null = null;
+      const cleanup = () => {
         this.takeoverWaiters.delete(done);
+        signal?.removeEventListener('abort', onAbort);
+        if (timer) clearTimeout(timer);
+      };
+      const done = () => { cleanup(); resolve(true); };
+      const onAbort = () => {
+        cleanup();
         reject(new Error('[ABORTED] Stopped waiting for the human to hand back the browser.'));
       };
       this.takeoverWaiters.add(done);
       signal?.addEventListener('abort', onAbort, { once: true });
+      if (timeoutMs !== undefined && timeoutMs >= 0) {
+        timer = setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
+        (timer as any).unref?.();
+      }
     });
   }
 
@@ -1742,6 +1786,27 @@ export class QodexBrowserManager implements BrowserManager {
       case 'move': {
         const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
         await page.mouse.move(p.x, p.y);
+        return;
+      }
+      case 'down': {
+        // Only ever the human's own gesture (control-center live view). One hold at a time.
+        await this.releaseHold();
+        const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+        const button = ev.button ?? 'left';
+        await page.mouse.move(p.x, p.y);
+        await page.mouse.down({ button });
+        const timer = setTimeout(() => { void this.releaseHold().catch(() => {}); }, QodexBrowserManager.HOLD_CAP_MS);
+        (timer as any).unref?.();
+        this.hold = { page, button, timer };
+        return;
+      }
+      case 'up': {
+        if (ev.x !== undefined && ev.y !== undefined) {
+          const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+          await page.mouse.move(p.x, p.y);
+        }
+        if (this.hold) await this.releaseHold();
+        else await page.mouse.up({ button: ev.button ?? 'left' });
         return;
       }
       case 'type': {
@@ -1781,6 +1846,15 @@ export class QodexBrowserManager implements BrowserManager {
         return;
       }
     }
+  }
+
+  /** End a relayed press-and-hold (the 'up', the hold cap, or a new 'down'). */
+  private async releaseHold(): Promise<void> {
+    const h = this.hold;
+    if (!h) return;
+    this.hold = null;
+    clearTimeout(h.timer);
+    try { await h.page.mouse.up({ button: h.button }); } catch { /* page gone */ }
   }
 
   // ── action feed ───────────────────────────────────────────────────────────

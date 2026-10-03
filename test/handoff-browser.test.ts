@@ -227,3 +227,104 @@ describe('challenge helpers', () => {
     await expect(waitForChallengeChange(null, { timeoutMs: 5000, intervalMs: 20, signal: ac.signal, detect: async () => ch })).rejects.toThrow(/ABORTED/);
   });
 });
+
+// ── item 5: takeover ownership, the tool's shape, Sentinel, relevance ─────────
+
+import * as os from 'os';
+import * as path from 'path';
+import { QodexBrowserManager } from '../src/tools/browser/session.js';
+import { BROWSER_TOOL_CLASSES } from '../src/tools/browser/index.js';
+import { BrowserRequestHumanTool, cleanReason, handoffPrompt, HANDOFF_OPTIONS } from '../src/tools/browser/handoff.js';
+import { classifyAction, isGuardedTool } from '../src/sentinel/policy.js';
+import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
+import { selectRelevantToolNames } from '../src/agent/tool-relevance.js';
+import { normalizeAnswer, safeOption } from '../src/control/approvals.js';
+
+describe('takeover ownership (compare-and-release, never stolen)', () => {
+  it('setTakeover(true) never steals; releaseTakeover only by the owner; timed wait', async () => {
+    const m = new QodexBrowserManager({ profilesDir: path.join(os.tmpdir(), 'qx-ho-none') });
+    expect(m.setTakeover(true, 'control')).toBe(true);
+    expect(m.setTakeover(true, 'handoff:ho_a')).toBe(false);
+    expect(m.status().takeoverBy).toBe('control');
+    expect(m.releaseTakeover('handoff:ho_a')).toBe(false);
+    expect(m.isTakeover()).toBe(true);
+    expect(await m.waitForTakeoverEnd(undefined, 30)).toBe(false);
+    const ended = m.waitForTakeoverEnd(undefined, 5000);
+    expect(m.releaseTakeover('control')).toBe(true);
+    expect(await ended).toBe(true);
+    expect(m.isTakeover()).toBe(false);
+    // An owned hand-off takeover; an explicit hand-back (off) always releases.
+    expect(m.setTakeover(true, 'handoff:ho_b')).toBe(true);
+    expect(m.setTakeover(true, 'handoff:ho_b')).toBe(true); // same owner: fine
+    m.setTakeover(false, 'terminal');
+    expect(m.isTakeover()).toBe(false);
+    expect(await m.waitForTakeoverEnd()).toBe(true);
+    const ac = new AbortController();
+    m.setTakeover(true, 'control');
+    const w = m.waitForTakeoverEnd(ac.signal);
+    ac.abort();
+    await expect(w).rejects.toThrow(/ABORTED/);
+    m.setTakeover(false);
+  });
+});
+
+describe('browser_request_human — shape, Sentinel, relevance', () => {
+  const tool = new BrowserRequestHumanTool();
+
+  it('is registered, waits without a tool timeout, is not read-only, has a short description', () => {
+    expect(BROWSER_TOOL_CLASSES.map(C => new C().name)).toContain('browser_request_human');
+    expect(tool.timeoutSeconds).toBe(0);
+    expect(tool.isReadOnly).toBe(false);
+    expect(tool.untrustedOutput).toBe(true);
+    expect(tool.description.length).toBeLessThan(220);
+    const props = (tool.schema().function.parameters as any).properties;
+    expect(props.reason.description).toBeTruthy();
+    expect(props.timeout_sec.description).toBeTruthy();
+  });
+
+  it('options have unique first letters; the safe answer is cancel', () => {
+    expect(HANDOFF_OPTIONS).toEqual(['done', 'cancel']);
+    expect(new Set(HANDOFF_OPTIONS.map(o => o[0])).size).toBe(2);
+    expect(safeOption(HANDOFF_OPTIONS)).toBe('cancel');
+    expect(normalizeAnswer('d', HANDOFF_OPTIONS)).toBe('done');
+    expect(normalizeAnswer('no', HANDOFF_OPTIONS)).toBe('cancel');
+  });
+
+  it('Sentinel classifies it low risk (it only waits) — never a prompt of its own', () => {
+    expect(isGuardedTool('browser_request_human')).toBe(true);
+    const c = classifyAction('browser_request_human', { reason: 'solve the CAPTCHA' }, { config: { ...DEFAULT_SENTINEL_CONFIG }, url: 'https://shop.example/login' });
+    expect(c.risk).toBe('low');
+    expect(c.category).toBeNull();
+  });
+
+  it('relevance gating surfaces the browser family (incl. the hand-off) for CAPTCHA talk, EN + FA', () => {
+    const names = ['read_file', 'shell', 'browser_navigate', 'browser_request_human', 'docker_ps'];
+    for (const t of ['there is a captcha on the signup page, help me', 'کپچا رو چطوری رد کنم؟']) {
+      const r = selectRelevantToolNames(names, t);
+      expect(r.selected.has('browser_request_human'), t).toBe(true);
+      expect(r.selected.has('docker_ps')).toBe(false);
+    }
+  });
+
+  it('the prompt names the vendor and host, never a URL query; the reason is cleaned', () => {
+    expect(cleanReason('solve it at https://x.example/a?__cf_chl_tk=SECRET#frag\nnow')).toBe('solve it at https://x.example/a now');
+    const p = handoffPrompt('solve the CAPTCHA', { vendor: 'recaptcha', state: 'needs-human', host: 'shop.example', hint: '' }, 'shop.example', 600_000);
+    expect(p).toContain('reCAPTCHA on shop.example');
+    expect(p).toContain('continues by itself');
+    expect(p).toMatch(/"done".*"cancel"/);
+    expect(handoffPrompt('approve the login on your phone', null, 'bank.example', 60_000)).toContain('On bank.example');
+  });
+
+  it('refuses to start when the browser is not open', async () => {
+    const mgr = new FakeManager();
+    mgr.running = false;
+    setBrowserManagerForTests(mgr);
+    try {
+      const r = await tool.execute({ reason: 'x' }, { cwd: '/tmp', signal: new AbortController().signal, emit: () => {} } as any);
+      expect(r.isError).toBe(true);
+      expect(r.content).toMatch(/not open yet/);
+    } finally {
+      setBrowserManagerForTests(null);
+    }
+  });
+});

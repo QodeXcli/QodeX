@@ -19,6 +19,7 @@ import { detectChallenge } from '../src/tools/browser/challenge.js';
 import { BrowserNavigateTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool } from '../src/tools/browser/tools.js';
 import { BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool } from '../src/tools/browser/tools-extra.js';
 import { getBus } from '../src/control/bus.js';
+import { BrowserRequestHumanTool, pendingHandoffs, resolveHandoff } from '../src/tools/browser/handoff.js';
 
 let pw: any = null;
 try { pw = await import('playwright'); } catch { pw = null; }
@@ -102,6 +103,20 @@ const INTERSTITIAL = `<!doctype html><html><head><title>Just a moment...</title>
 <script>setTimeout(function () { document.title = 'Shop home'; document.body.innerHTML = '<h1>Real content</h1><button>Buy</button>'; }, 2000);</script>
 </body></html>`;
 
+/** A PerimeterX-style "Press & Hold" page: only a ≥1 s hold (the human's own) passes it. */
+const PRESS_HOLD = `<!doctype html><html><head><title>Access to this page has been denied</title></head><body>
+<p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+<div id="px-captcha" style="width:300px;height:100px;background:#ddd">Press &amp; Hold</div>
+<script>
+  var el = document.getElementById('px-captcha'); var t0 = 0; window.ups = 0;
+  el.addEventListener('mousedown', function () { t0 = Date.now(); });
+  document.addEventListener('mouseup', function () {
+    window.ups++;
+    if (t0 && Date.now() - t0 >= 1000) { el.remove(); document.title = 'Shop'; document.body.insertAdjacentHTML('beforeend', '<h1>Welcome back</h1>'); }
+    t0 = 0;
+  });
+</script></body></html>`;
+
 describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
   let server: http.Server;
   let vendorServer: http.Server;
@@ -135,6 +150,7 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
         res.end(INTERSTITIAL);
         return;
       }
+      if (url.pathname === '/hold') { res.end(PRESS_HOLD); return; }
       if (url.pathname === '/plain') { res.end('<title>Plain</title><h1>Hello</h1><a href="/recaptcha">login</a>'); return; }
       res.statusCode = 404; res.end('not found');
     });
@@ -272,6 +288,130 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     const ok = await run(new BrowserFillTool(), { selector: '#user', value: 'bob', snapshot: false });
     expect(ok.isError).toBeFalsy();
     expect(await page.evaluate("document.querySelector('#user').value")).toBe('bob');
+  }, 60_000);
+
+  /** Wait until the hand-off has taken over and asked; returns its approval. */
+  async function waitForHandoff(): Promise<any> {
+    for (let i = 0; i < 100; i++) {
+      const p = pendingHandoffs()[0];
+      if (p && /^handoff:/.test(String(mgr.status().takeoverBy ?? ''))) return p;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    throw new Error('hand-off never started');
+  }
+
+  it('browser_request_human resumes by itself when the human passes it via the control-center input path', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const pending = run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA to sign in', timeout_sec: 60 });
+    const ap = await waitForHandoff();
+    expect(ap.category).toBe('challenge');
+    expect(ap.options).toEqual(['done', 'cancel']);
+    expect(ap.meta.handoff).toMatchObject({ host: '127.0.0.1', vendor: 'recaptcha', state: 'needs-human', tabIndex: 0, linkTtlSec: 60 });
+    expect(ap.meta.handoff.frameBox.w).toBeGreaterThan(200);
+    expect(ap.prompt).toContain('reCAPTCHA on 127.0.0.1');
+    // Agent tools wait while the human has the browser.
+    expect(mgr.isTakeover()).toBe(true);
+
+    // The scripted human clicks the widget through the control center's input path.
+    const box = ap.meta.handoff.frameBox;
+    await mgr.dispatchInput({ type: 'click', x: box.x + 20, y: box.y + 20 });
+
+    const r = await pending;
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toMatch(/^✓ The reCAPTCHA on 127\.0\.0\.1 is gone \(\d+s, noticed automatically\) — continuing\./);
+    expect((r.metadata as any)).toMatchObject({ outcome: 'cleared', by: 'challenge-cleared' });
+    expect(mgr.isTakeover()).toBe(false);
+    expect(pendingHandoffs()).toEqual([]);
+    const resolved = getBus().recent(300).find((e: any) => e.kind === 'approval.resolved' && e.id === ap.id);
+    expect(resolved).toMatchObject({ answer: 'done', by: 'challenge-cleared' });
+    // Nothing secret anywhere: no site key, no frame URL / query string.
+    const all = JSON.stringify(getBus().recent(300)) + r.content + JSON.stringify(r.metadata) + ctx.events.join('\n');
+    expect(all).not.toContain(SITEKEY);
+    expect(all).not.toMatch(/recaptcha\/api2/);
+  }, 60_000);
+
+  it('"done" while the challenge is still up keeps waiting; a page script removing it ends the hand-off', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const pending = run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 60 });
+    const ap = await waitForHandoff();
+    expect(resolveHandoff(ap.meta.handoff.id, 'done', 'control')).toBe(true);
+    for (let i = 0; i < 60 && !ctx.events.some(e => /still there/.test(e)); i++) await new Promise(r => setTimeout(r, 100));
+    expect(ctx.events.some(e => /still there/.test(e))).toBe(true);
+    const again = await waitForHandoff();
+    expect(again.prompt).toContain('is still there');
+    const page = await mgr.activePage();
+    await page.evaluate("document.getElementById('rc').remove()");
+    const r = await pending;
+    expect(r.content).toMatch(/^✓ /);
+    expect(mgr.isTakeover()).toBe(false);
+  }, 60_000);
+
+  it('times out with [CHALLENGE_UNSOLVED] and releases its takeover', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const t0 = Date.now();
+    const r = await run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 5 });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(4500);
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/^\[CHALLENGE_UNSOLVED\] Nobody finished the reCAPTCHA on 127\.0\.0\.1 within [56]s\. Do not retry automatically; tell the user\./);
+    expect(mgr.isTakeover()).toBe(false);
+    expect(pendingHandoffs()).toEqual([]);
+  }, 30_000);
+
+  it("never steals or releases a human's own takeover", async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    expect(mgr.setTakeover(true, 'control')).toBe(true);
+    try {
+      const pending = run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 30 });
+      for (let i = 0; i < 50 && !pendingHandoffs().length; i++) await new Promise(r => setTimeout(r, 100));
+      expect(pendingHandoffs().length).toBe(1);
+      expect(mgr.status().takeoverBy).toBe('control');
+      const page = await mgr.activePage();
+      await page.evaluate("document.getElementById('rc').remove()");
+      const r = await pending;
+      expect(r.content).toMatch(/^✓ /);
+      expect(mgr.status()).toMatchObject({ takeover: true, takeoverBy: 'control' });
+    } finally {
+      mgr.setTakeover(false, 'control');
+    }
+  }, 60_000);
+
+  it('aborting the run stops the hand-off with [ABORTED] and releases the takeover', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const ac = new AbortController();
+    const c = makeCtx(tmp, ac.signal);
+    const pending = run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 60 }, c);
+    await waitForHandoff();
+    ac.abort();
+    const r = await pending;
+    expect(r.content).toMatch(/^\[ABORTED\]/);
+    expect(mgr.isTakeover()).toBe(false);
+    expect(pendingHandoffs()).toEqual([]);
+  }, 30_000);
+
+  it('a "Press & Hold" check is passed by the human\'s own relayed hold (down … up); the hold is capped', async () => {
+    const nav = await run(new BrowserNavigateTool(), { url: `${base}/hold`, snapshot: false });
+    expect(nav.content).toContain('[CHALLENGE] PerimeterX "Press & Hold" on 127.0.0.1 needs a human.');
+    const page = await mgr.activePage();
+    // The cap forces an 'up' when the stream drops mid-hold (no stuck button).
+    const cap = (QodexBrowserManager as any).HOLD_CAP_MS;
+    (QodexBrowserManager as any).HOLD_CAP_MS = 300;
+    try {
+      await mgr.dispatchInput({ type: 'down', x: 50, y: 70 });
+      await new Promise(r => setTimeout(r, 700));
+      expect(await page.evaluate('window.ups')).toBe(1);
+    } finally {
+      (QodexBrowserManager as any).HOLD_CAP_MS = cap;
+    }
+    const pending = run(new BrowserRequestHumanTool(), { reason: 'press and hold the button', timeout_sec: 60 });
+    const ap = await waitForHandoff();
+    expect(ap.meta.handoff).toMatchObject({ vendor: 'perimeterx', state: 'needs-human' });
+    const b = ap.meta.handoff.frameBox;
+    await mgr.dispatchInput({ type: 'down', x: b.x + 40, y: b.y + 40 });
+    await new Promise(r => setTimeout(r, 1200));
+    await mgr.dispatchInput({ type: 'up', x: b.x + 40, y: b.y + 40 });
+    const r = await pending;
+    expect(r.content).toMatch(/^✓ The PerimeterX "Press & Hold" on 127\.0\.0\.1 is gone/);
+    expect(r.content).toContain('Welcome back');
   }, 60_000);
 
   it('navigate waits out a self-clearing interstitial without the human', async () => {
