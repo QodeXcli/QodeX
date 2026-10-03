@@ -20,18 +20,25 @@ export type PermissionVia =
   | 'read-only'
   | 'ask';
 
-/** How the TUI answers permission prompts this session. Cycle with Shift+Tab. */
-export type ApprovalMode = 'manual' | 'auto' | 'always';
+/**
+ * How permission prompts are answered this session. Cycle with Shift+Tab.
+ *   - manual: ask before file edits and shell commands.
+ *   - edits:  file edits run without asking; shell still asks (was called "auto").
+ *   - auto:   autonomous — nothing asks except purchases, payments, passwords, sending
+ *             messages (Sentinel critical) and destructive actions outside the project
+ *             (see src/security/autonomy.ts). Replaces the old "always yes".
+ */
+export type ApprovalMode = 'manual' | 'edits' | 'auto';
 
-export const APPROVAL_MODES: readonly ApprovalMode[] = ['manual', 'auto', 'always'];
+export const APPROVAL_MODES: readonly ApprovalMode[] = ['manual', 'edits', 'auto'];
 
 export const APPROVAL_MODE_META: Record<ApprovalMode, { label: string; hint: string }> = {
   manual: { label: 'manual', hint: 'Ask before file edits and shell commands.' },
-  auto: { label: 'auto', hint: 'File edits run without asking; shell still asks.' },
-  always: { label: 'always yes', hint: 'Tools run without asking. Hard-deny and irreversible still stop.' },
+  edits: { label: 'edits', hint: 'File edits run without asking; shell still asks.' },
+  auto: { label: 'auto', hint: 'Autonomous: runs without asking. Still asks for purchases, payments, passwords, sending messages and destructive actions outside the project.' },
 };
 
-/** File-mutating tools that "auto" (accept-edits) covers. Shell / MCP stay on evaluate(). */
+/** File-mutating tools that "edits" (accept-edits) covers. Shell / MCP stay on evaluate(). */
 const AUTO_EDIT_TOOLS = new Set([
   'write_file',
   'edit_text',
@@ -67,8 +74,8 @@ export function interpretPermissionAnswer(answer: string): 'allow' | 'always' | 
 export function parseApprovalMode(raw: string): ApprovalMode | null {
   const s = raw.trim().toLowerCase();
   if (s === 'manual' || s === 'off' || s === 'ask') return 'manual';
-  if (s === 'auto' || s === 'edits' || s === 'accept') return 'auto';
-  if (s === 'always' || s === 'on' || s === 'yes' || s === 'always-yes' || s === 'always_yes' || s === 'yolo') return 'always';
+  if (s === 'edits' || s === 'accept' || s === 'accept-edits' || s === 'accept_edits') return 'edits';
+  if (s === 'auto' || s === 'autonomous' || s === 'always' || s === 'on' || s === 'yes' || s === 'always-yes' || s === 'always_yes' || s === 'yolo') return 'auto';
   return null;
 }
 
@@ -151,7 +158,7 @@ export class PermissionEngine {
 
     // always yes (Shift+Tab / picker): skip the hub for ordinary work AND always-ask
     // (sudo, brew, …). Hard-deny and irreversible already returned above.
-    if (_approvalMode === 'always') return { decision: 'allow', via: 'mode-always' };
+    if (_approvalMode === 'auto') return { decision: 'allow', via: 'mode-always' };
 
     // Always-ask patterns — system-mutating commands. These OVERRIDE `auto` (accept
     // edits) and autoApprove regexes, but not `always yes`. The escape hatch is a
@@ -166,7 +173,7 @@ export class PermissionEngine {
       return { decision: 'ask', via: 'always-ask' };
     }
 
-    if (_approvalMode === 'auto' && isAutoEditTool(req.tool)) return { decision: 'allow', via: 'mode-auto-edit' };
+    if (_approvalMode === 'edits' && isAutoEditTool(req.tool)) return { decision: 'allow', via: 'mode-auto-edit' };
 
     // "Allow this tool for the whole session" — from gradient picker
     if (this.sessionToolAllows.has(req.tool)) return { decision: 'allow', via: 'session-tool' };
@@ -285,22 +292,25 @@ export const FALLBACK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 // ────────────────────────────────────────────────────────────────────────────────
 // Session-wide approval mode.
 //
-// Shift+Tab cycles manual → auto → always. `/auto on` is "always"; `/auto off` is
+// Shift+Tab cycles manual → edits → auto. `/auto on` is "auto"; `/auto off` is
 // "manual". Module-global because it's session-scoped and reset on process restart.
 
 let _approvalMode: ApprovalMode = 'manual';
 
 export function getApprovalMode(): ApprovalMode { return _approvalMode; }
-export function setApprovalMode(mode: ApprovalMode): void { _approvalMode = mode; }
+/** Legacy 'always' (the old "always yes") is the autonomous 'auto' mode now. */
+export function setApprovalMode(mode: ApprovalMode | 'always'): void { _approvalMode = mode === 'always' ? 'auto' : mode; }
+/** True in the autonomous 'auto' mode. */
+export function isAutonomousMode(): boolean { return _approvalMode === 'auto'; }
 export function cycleApprovalMode(): ApprovalMode {
   const i = APPROVAL_MODES.indexOf(_approvalMode);
   _approvalMode = APPROVAL_MODES[(i + 1) % APPROVAL_MODES.length]!;
   return _approvalMode;
 }
 
-/** @deprecated Prefer setApprovalMode. `true` = always, `false` = manual. */
+/** @deprecated Prefer setApprovalMode. `true` = auto, `false` = manual. */
 export function setAutoApproveSession(enabled: boolean): void {
-  _approvalMode = enabled ? 'always' : 'manual';
+  _approvalMode = enabled ? 'auto' : 'manual';
 }
-/** True only in "always yes" — not in accept-edits `auto`. */
-export function getAutoApproveSession(): boolean { return _approvalMode === 'always'; }
+/** True only in the autonomous 'auto' mode — not in accept-edits 'edits'. */
+export function getAutoApproveSession(): boolean { return _approvalMode === 'auto'; }

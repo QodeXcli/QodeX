@@ -75,7 +75,7 @@ export class MCPToolWrapper extends Tool<Record<string, unknown>> {
         return { content: `[USER_REJECTED] User declined MCP tool ${this.name}`, isError: true };
       }
       if (verdict === 'always') {
-        setApprovalMode('always');
+        setApprovalMode('auto');
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
       }
     }

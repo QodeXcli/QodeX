@@ -374,7 +374,9 @@ export function App(props: AppProps): React.ReactElement {
       }]);
       const pending = pendingPromptRef.current as PendingPrompt | null;
       if (pending) {
-        const shouldAccept = next === 'always' || (next === 'auto' && !!pending.diff);
+        // Only a pending file-edit diff is accepted on a mode switch; a shell, Sentinel or
+        // purchase prompt is never answered by pressing Shift+Tab.
+        const shouldAccept = (next === 'edits' || next === 'auto') && !!pending.diff;
         const answer = shouldAccept ? pickAutoAnswer(pending.options) : null;
         if (answer) {
           setPendingPrompt(null);
@@ -964,8 +966,8 @@ export function App(props: AppProps): React.ReactElement {
             options={pendingPrompt.options}
             onAnswer={(a) => {
               if (isAlwaysYesAnswer(a)) {
-                setApprovalModeGlobal('always');
-                setApprovalMode('always');
+                setApprovalModeGlobal('auto');
+                setApprovalMode('auto');
               }
               const p = pendingPrompt;
               setPendingPrompt(null);
@@ -1112,8 +1114,8 @@ function pickAutoAnswer(options: string[]): string | null {
 }
 
 function approvalColor(mode: ApprovalMode): 'green' | 'cyan' | 'yellow' {
-  if (mode === 'always') return 'yellow';
-  if (mode === 'auto') return 'cyan';
+  if (mode === 'auto') return 'yellow';
+  if (mode === 'edits') return 'cyan';
   return 'green';
 }
 

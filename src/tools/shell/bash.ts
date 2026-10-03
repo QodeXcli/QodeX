@@ -38,7 +38,7 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
         return { content: `[USER_REJECTED] User declined to run: ${cmd}`, isError: true };
       }
       if (verdict === 'always') {
-        setApprovalMode('always');
+        setApprovalMode('auto');
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
         // "always" now binds to THIS command, and irreversible commands refuse a standing
         // grant entirely. Say so, or the user believes they answered the question once and

@@ -70,9 +70,9 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate({ tool: 'shell', operation: 'diskutil eraseDisk' })).toBe('ask');
   });
 
-  it('accept-edits auto still asks for sudo; always yes does not', () => {
+  it('accept-edits still asks for sudo; always yes does not', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
-    setApprovalMode('auto');
+    setApprovalMode('edits');
     expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
     setApprovalMode('always');
@@ -107,17 +107,18 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(parseApprovalMode('manual')).toBe('manual');
     expect(parseApprovalMode('off')).toBe('manual');
     expect(parseApprovalMode('auto')).toBe('auto');
-    expect(parseApprovalMode('edits')).toBe('auto');
-    expect(parseApprovalMode('always')).toBe('always');
-    expect(parseApprovalMode('on')).toBe('always');
-    expect(parseApprovalMode('yes')).toBe('always');
+    expect(parseApprovalMode('edits')).toBe('edits');
+    expect(parseApprovalMode('accept')).toBe('edits');
+    expect(parseApprovalMode('always')).toBe('auto');
+    expect(parseApprovalMode('on')).toBe('auto');
+    expect(parseApprovalMode('yes')).toBe('auto');
     expect(parseApprovalMode('nope')).toBeNull();
   });
 
-  it('cycles manual → auto → always → manual', () => {
+  it('cycles manual → edits → auto → manual', () => {
     setApprovalMode('manual');
+    expect(cycleApprovalMode()).toBe('edits');
     expect(cycleApprovalMode()).toBe('auto');
-    expect(cycleApprovalMode()).toBe('always');
     expect(cycleApprovalMode()).toBe('manual');
     expect(getApprovalMode()).toBe('manual');
   });
@@ -130,8 +131,8 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
   });
 
-  it('auto accepts file edits but still asks for unknown shell', () => {
-    setApprovalMode('auto');
+  it('edits accepts file edits but still asks for unknown shell', () => {
+    setApprovalMode('edits');
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
     expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('allow');
@@ -172,9 +173,9 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(interpretPermissionAnswer('')).toBe('deny');
   });
 
-  it('setAutoApproveSession(true) still maps to always yes', () => {
+  it('setAutoApproveSession(true) maps to the autonomous auto mode', () => {
     setAutoApproveSession(true);
-    expect(getApprovalMode()).toBe('always');
+    expect(getApprovalMode()).toBe('auto');
     expect(getAutoApproveSession()).toBe(true);
     setAutoApproveSession(false);
     expect(getApprovalMode()).toBe('manual');

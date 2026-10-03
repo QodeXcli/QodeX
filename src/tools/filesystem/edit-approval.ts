@@ -83,7 +83,7 @@ export async function confirmEdit(
   const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
   // Mode only — a tool-wide session grant survived Shift+Tab back to manual and
   // kept auto-writing every file after the user thought they had left always-yes.
-  if (isAlwaysYesAnswer(answer)) setApprovalMode('always');
+  if (isAlwaysYesAnswer(answer)) setApprovalMode('auto');
   const branch = interpretApprovalAnswer(answer);
 
   if (branch === 'reject') return { kind: 'reject' };

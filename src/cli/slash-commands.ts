@@ -21,7 +21,7 @@ export interface SlashResult {
     | { type: 'clear' }
     | { type: 'set_model'; model: string }
     | { type: 'set_mode'; mode: 'plan' | 'normal' }
-    | { type: 'set_approval_mode'; mode: 'manual' | 'auto' | 'always' }
+    | { type: 'set_approval_mode'; mode: 'manual' | 'edits' | 'auto' }
     | { type: 'set_max_iterations'; value: number }
     | { type: 'set_effort'; value: 'low' | 'medium' | 'high' | 'off' }
     | { type: 'switch_session'; sessionId: string }
@@ -1282,7 +1282,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     }
 
     case 'auto': {
-      // /auto [manual|auto|always] — session approval mode. on=always, off=manual.
+      // /auto [manual|edits|auto] — session approval mode. on=auto, off=manual.
       // Shift+Tab in the TUI cycles the same three modes.
       const { parseApprovalMode, setApprovalMode, getApprovalMode, APPROVAL_MODE_META } =
         await import('../security/permissions.js');
@@ -1294,20 +1294,21 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           handled: true,
           message:
             `Approval: ${meta.label} — ${meta.hint}\n` +
-            'Usage: /auto manual | auto | always\n' +
+            'Usage: /auto manual | edits | auto\n' +
             '  manual  — ask before edits and shell (default)\n' +
-            '  auto    — file edits run without asking; shell still asks\n' +
-            '  always  — always yes: tools run without asking (hard-deny / irreversible still stop)\n' +
+            '  edits   — file edits run without asking; shell still asks\n' +
+            '  auto    — autonomous: nothing asks except purchases, payments, passwords,\n' +
+            '            sending messages and destructive actions outside the project\n' +
             'Safe shell can skip the hub without /auto: execution.allow in config.yaml\n' +
-            '  (e.g. `git status`, `npm test`). Deny / always-ask / irreversible still win.\n' +
-            'Aliases: /auto off = manual, /auto on = always. Shift+Tab cycles the three.',
+            '  (e.g. `git status`, `npm test`). Deny rules always win.\n' +
+            'Aliases: /auto off = manual, /auto on = auto. Shift+Tab cycles the three.',
         };
       }
       const mode = parseApprovalMode(sub);
       if (!mode) {
         return {
           handled: true,
-          message: 'Usage: /auto manual | auto | always   (aliases: off, on)',
+          message: 'Usage: /auto manual | edits | auto   (aliases: off, on)',
         };
       }
       setApprovalMode(mode);
@@ -1316,8 +1317,8 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         handled: true,
         action: { type: 'set_approval_mode', mode },
         message:
-          mode === 'always'
-            ? `⚠ Approval: ${meta.label} — ${meta.hint}\n  Hard-deny patterns still apply. Shift+Tab or /auto manual to go back.`
+          mode === 'auto'
+            ? `⚠ Approval: ${meta.label} — ${meta.hint}\n  Deny rules still apply. Shift+Tab or /auto manual to go back.`
             : `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
       };
     }

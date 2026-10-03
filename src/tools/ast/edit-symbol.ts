@@ -282,7 +282,7 @@ export class EditSymbolTool extends Tool<z.infer<typeof ArgsSchema>> {
       const verdict = interpretPermissionAnswer(answer);
       if (verdict === 'deny') return { content: `[USER_REJECTED]`, isError: true };
       if (verdict === 'always') {
-        setApprovalMode('always');
+        setApprovalMode('auto');
         ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
       }
     } else {
