@@ -50,6 +50,7 @@ import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { getActiveConfig } from '../../config/loader.js';
 import { QODEX_HOME } from '../../config/defaults.js';
 import { QODEX_BROWSER_PROFILES_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../../config/paths.js';
+import { VAULT_KEY_ARTIFACTS, isPasswordExportFile } from '../../vault/paths.js';
 import { resolveDesktopConfig, type DesktopConfig } from '../../config/agent-config.js';
 import { getBus } from '../../control/bus.js';
 import {
@@ -167,8 +168,9 @@ function insideDir(p: string, dir: string): boolean {
 export function isProtectedQodexTarget(absPath: string): boolean {
   const candidates = [path.resolve(absPath)];
   try { candidates.push(realpathSync(absPath)); } catch { /* doesn't exist (yet) */ }
-  const files = [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env')].map(normPath);
-  return candidates.some(p => files.includes(normPath(p)) || insideDir(p, QODEX_BROWSER_PROFILES_DIR));
+  const files = [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env'), ...VAULT_KEY_ARTIFACTS].map(normPath);
+  // A password-manager export puts every password on screen (one screenshot from the model).
+  return candidates.some(p => files.includes(normPath(p)) || insideDir(p, QODEX_BROWSER_PROFILES_DIR) || isPasswordExportFile(p));
 }
 
 /** Map + validate model coordinates; returns an error result or the screen point. */

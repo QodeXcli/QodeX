@@ -172,4 +172,4 @@ export function planImport(text: string, format: ImportFormat | 'auto' = 'auto')
 }
 
 /** File names of known plaintext password exports (Sentinel blocks the agent from reading them). */
-export const EXPORT_FILE_RE = /(?:^|[/\\])(?:(?:Chrome|Edge|Brave|Opera|Vivaldi|Microsoft Edge) Passwords(?: \(\d+\))?\.csv|logins(?:-\d+)?\.csv|bitwarden_export_[^/\\]*|1PasswordExport[^/\\]*|[^/\\]+\.1pux)$/i;
+export { EXPORT_FILE_RE, isPasswordExportFile } from './paths.js';

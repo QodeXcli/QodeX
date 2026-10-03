@@ -32,6 +32,7 @@ import { resolveBrowserConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { QODEX_HOME } from '../config/defaults.js';
 import { QODEX_BROWSER_DOWNLOADS_DIR, QODEX_SCREENSHOTS_DIR } from '../config/paths.js';
+import { isPasswordExportFile } from '../vault/paths.js';
 import { safeOption } from '../control/approvals.js';
 import { getSentinel, fenceUntrusted, scanInjection } from '../sentinel/index.js';
 import type { SentinelGuard } from '../sentinel/types.js';
@@ -908,6 +909,8 @@ export function isForbiddenUpload(absPath: string, home: string = QODEX_HOME): b
     return [...new Set([norm(p), norm(real)])];
   };
   const target = norm(absPath);
+  // A password-manager export (plaintext passwords) never leaves the machine either.
+  if (isPasswordExportFile(absPath)) return true;
   const allowed = [QODEX_BROWSER_DOWNLOADS_DIR, QODEX_SCREENSHOTS_DIR].flatMap(both);
   if (allowed.some(a => target.startsWith(a))) return false;
   return both(home).some(h => target.startsWith(h));
