@@ -119,6 +119,32 @@ const TOGGLE = `<!doctype html><html><head><title>Login</title></head><body>
 <button type="button" id="done">Done</button>
 </body></html>`;
 
+// A hostile page: hunts for the recorder's nonce (window property names, the
+// binding global) and forges a capture event with it.
+const FORGE = `<!doctype html><html><head><title>Forge</title><script>
+(function () {
+  var tried = {};
+  function attempt() {
+    var names = Object.getOwnPropertyNames(window).filter(function (n) { return n.indexOf('__qxRec') === 0 && n !== '__qxRecord'; });
+    names.forEach(function (n) {
+      var guess = n.split('_').pop();
+      if (tried[guess] || typeof window.__qxRecord !== 'function') return;
+      tried[guess] = 1;
+      try { window.__qxRecord(guess, { type: 'click', url: location.href, el: { selector: '#delete-account', role: 'button', name: 'Delete account' } }); } catch (e) {}
+    });
+  }
+  setInterval(attempt, 20);
+  // Synthetic (untrusted) input/change events must not author steps either.
+  window.addEventListener('load', function () {
+    var a = document.getElementById('amount');
+    a.value = '9999';
+    a.dispatchEvent(new Event('input', { bubbles: true }));
+    a.dispatchEvent(new Event('change', { bubbles: true }));
+    a.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  });
+})();
+</script></head><body><input id="amount" name="amount"><button id="ok">OK</button></body></html>`;
+
 function results(u: URL): string {
   const q = u.searchParams.get('q') ?? u.searchParams.get('query') ?? '';
   const sort = u.searchParams.get('sort') ?? u.searchParams.get('order') ?? '';
@@ -142,6 +168,7 @@ describe('workflows on a real Chromium', () => {
       else if (u.pathname === '/v2') res.end(V2);
       else if (u.pathname === '/results') res.end(results(u));
       else if (u.pathname === '/toggle') res.end(TOGGLE);
+      else if (u.pathname === '/forge') res.end(FORGE);
       else { res.statusCode = 404; res.end('nope'); }
     });
     await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
@@ -166,7 +193,9 @@ describe('workflows on a real Chromium', () => {
     // A "human" (Playwright input = real trusted DOM events) demonstrates.
     await page.fill('#q', 'green tea');
     await page.check('#instock');
-    await page.selectOption('#sort', 'price');
+    // Keyboard selection (a trusted change event, like a real person; selectOption() dispatches a synthetic one).
+    await page.focus('#sort');
+    await page.keyboard.press('ArrowDown');
     await page.fill('#pw', 'hunter2-secret');
     await page.click('#noop');
     await Promise.all([page.waitForURL(/\/results/), page.getByRole('button', { name: 'Search', exact: true }).click()]);
@@ -216,6 +245,23 @@ describe('workflows on a real Chromium', () => {
     expect(json).not.toContain('Sup3rSecret');
     expect(json).not.toContain('4321');
     expect(wf.params.map(p => [p.name, p.secret])).toEqual([['password', true], ['card_pin', true]]);
+    await ctx.close();
+  }, 60_000);
+
+  it.skipIf(!chromiumPath)('a page cannot learn the capture nonce from window properties and forge steps', async () => {
+    const ctx = await browser.newContext();
+    const mgr = new RealManager(ctx);
+    const page = await mgr.activePage();
+    await page.goto(base + '/');
+    const rec = new WorkflowRecorder();
+    await rec.start({ name: 'forge', source: 'human', mgr });
+    await page.goto(base + '/forge'); // loaded after the capture's init script is in place
+    await page.waitForTimeout(250);   // the page hunts for the nonce and tries to forge
+    await page.click('#ok');
+    const wf = await rec.stop();
+    expect(wf.steps.some(s => s.selector === '#delete-account' || s.name === 'Delete account')).toBe(false);
+    expect(JSON.stringify(wf)).not.toContain('9999');
+    expect(wf.steps.some(s => s.kind === 'click' && s.selector === '#ok')).toBe(true);
     await ctx.close();
   }, 60_000);
 

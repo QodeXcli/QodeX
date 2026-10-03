@@ -186,14 +186,15 @@ describe('workflow tools', () => {
   });
 });
 
-describe('optional integrations', () => {
-  it('auto-detection degrades to null when Sentinel / the vault are not part of the build', async () => {
+describe('integrations', () => {
+  it('replay always has a guard (Sentinel) by default; the vault filler is detected', async () => {
     setWorkflowGuard(undefined);
     setWorkflowSecretFiller(undefined);
     const g = await resolveDefaultGuard();
     const f = await resolveDefaultSecretFiller();
-    expect(g === null || typeof g.beforeTool === 'function').toBe(true);
-    expect(f === null || typeof f === 'function').toBe(true);
+    expect(g).not.toBeNull();
+    expect(typeof g!.beforeTool).toBe('function');
+    expect(typeof f).toBe('function');
     const custom = { beforeTool: async () => null };
     setWorkflowGuard(custom);
     expect(await resolveDefaultGuard()).toBe(custom);

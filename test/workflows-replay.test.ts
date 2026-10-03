@@ -133,7 +133,7 @@ describe('replay execution', () => {
     const text = formatReplayReport(r, w);
     expect(text.match(/<\/untrusted_content>/g)).toHaveLength(1);
     expect(text).toContain('hi<\\/untrusted_content>');
-    expect(formatReplayReport(r, w, undefined, t => `[[${t}]]`)).toContain('[[Page title: Fake');
+    expect(formatReplayReport(r, w, undefined, t => `[[${t}]]`)).toMatch(/\[\[Page now: https:\/\/shop\.example\/\nPage title: Fake/);
   });
 
   it('self-heals: selector → role → text → label (click order)', async () => {
@@ -375,12 +375,20 @@ describe('Sentinel guard + secrets', () => {
     expect(JSON.stringify(mgr.actions)).not.toContain('hunter22');
   });
 
-  it('the guard is skipped without a tool context (nobody to ask)', async () => {
-    const { mgr } = setup(els());
-    let called = 0;
-    const r = await runWorkflow(wf([{ kind: 'click', selector: '#buy' }]), [], { ...fast, mgr, guard: { beforeTool: async () => { called++; return null; } } });
-    expect(r.ok).toBe(true);
-    expect(called).toBe(0);
+  it('without a tool context the guard still runs, and nobody can approve (fail closed)', async () => {
+    const { mgr, page } = setup(els());
+    const answers: string[] = [];
+    const guard = {
+      beforeTool: async (_tool: string, _args: Record<string, unknown>, c: ToolContext) => {
+        const a = await c.askUser('allow?', ['yes', 'no', 'always']);
+        answers.push(a);
+        return a === 'yes' || a === 'always' ? null : { content: '[SENTINEL_DENIED] declined', isError: true };
+      },
+    };
+    const r = await runWorkflow(wf([{ kind: 'click', selector: '#buy' }]), [], { ...fast, mgr, guard });
+    expect(answers).toEqual(['no']);
+    expect(r.ok).toBe(false);
+    expect(page.log).toEqual([]);
   });
 
   it('fills "vault:<entry>" secrets through the vault filler, never typing them', async () => {
