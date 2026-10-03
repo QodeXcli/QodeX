@@ -985,10 +985,11 @@ export class TelegramBot {
 
   /** Pairing refresh (channel registration), mission approvals, mission events. Never throws. */
   async tick(): Promise<void> {
-    if (this.ticking) return;
+    if (this.ticking || !this.running) return;
     this.ticking = true;
     try {
       await this.refreshChannel();
+      if (!this.running) return;
       if (this.channelUnregister) {
         // Broker approvals whose card could not be sent yet (a Sentinel prompt must not
         // silently wait out its timeout because Telegram was briefly unreachable).
@@ -1023,6 +1024,9 @@ export class TelegramBot {
   private async refreshChannel(): Promise<void> {
     if (!this.running) return;
     const chats = await this.pairing.listChats();
+    // stop() may have run meanwhile: a channel registered now would outlive the bot
+    // (hasRemoteChannel() stuck at true → unattended approvals wait for a dead bot).
+    if (!this.running) return;
     if (chats.length && !this.channelUnregister) {
       this.channelUnregister = this.broker.registerChannel(this.channel);
     } else if (!chats.length && this.channelUnregister) {
