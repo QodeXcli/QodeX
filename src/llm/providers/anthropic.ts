@@ -2,12 +2,54 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } from '../types.js';
 import type { Message } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
+import { resolveCapability } from '../model-catalog.js';
 
-const ANTHROPIC_MODELS: ModelInfo[] = [
-  { id: 'claude-opus-4-7', contextWindow: 200000, maxOutput: 32000, inputCostPerMillion: 15, outputCostPerMillion: 75, supportsToolCalls: true, supportsStreaming: true },
-  { id: 'claude-sonnet-4-6', contextWindow: 200000, maxOutput: 32000, inputCostPerMillion: 3, outputCostPerMillion: 15, supportsToolCalls: true, supportsStreaming: true },
-  { id: 'claude-haiku-4-5', contextWindow: 200000, maxOutput: 16000, inputCostPerMillion: 1, outputCostPerMillion: 5, supportsToolCalls: true, supportsStreaming: true },
+/**
+ * What `listModels` advertises, newest line first. Window / output / price come from the model
+ * catalog (one table, so a price change is one edit). The older ids stay listed so a config
+ * that pins them (`defaults.model: claude-sonnet-4-6`) keeps resolving after an upgrade.
+ */
+const ANTHROPIC_MODEL_IDS = [
+  'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5', 'claude-fable-5-1',
+  'claude-opus-4-7', 'claude-sonnet-4-6',
 ];
+const ANTHROPIC_MODELS: ModelInfo[] = ANTHROPIC_MODEL_IDS.map(id => {
+  const cap = resolveCapability(id);
+  return {
+    id,
+    contextWindow: cap.contextWindow,
+    maxOutput: cap.maxOutput,
+    inputCostPerMillion: cap.inputCostPerMillion ?? 0,
+    outputCostPerMillion: cap.outputCostPerMillion ?? 0,
+    supportsToolCalls: true,
+    supportsStreaming: true,
+  };
+});
+
+/**
+ * Opus 4.7+, every 5.x model, and Fable / Mythos reject `temperature` / `top_p` / `top_k` with a
+ * 400 (Sonnet 5.5 accepts only the default value) — sending our usual 0.3 would fail every turn.
+ */
+export function rejectsSamplingParams(model: string): boolean {
+  return /claude-(?:opus-4-[7-9]|(?:opus|sonnet|haiku)-(?:[5-9]|\d\d)|fable|mythos)/i.test(model ?? '');
+}
+
+/** Models that take `output_config.effort` (GA). Haiku 4.5 and older models reject it. */
+export function supportsEffort(model: string): boolean {
+  return /claude-(?:opus-4-[5-9]|sonnet-4-6|(?:opus|sonnet|haiku)-(?:[5-9]|\d\d)|fable|mythos)/i.test(model ?? '');
+}
+
+/**
+ * Thinking is on by default (Opus 5.x / Sonnet 5.x) or cannot be turned off (Opus 5.5, Fable),
+ * and its tokens count against `max_tokens` — so the old 8k default can cut a turn off mid
+ * tool call. Give those models room; streaming keeps a large cap safe from HTTP timeouts.
+ */
+function defaultMaxTokens(model: string): number {
+  if (/claude-(?:(?:opus|sonnet|haiku)-(?:[5-9]|\d\d)|fable|mythos)/i.test(model ?? '')) {
+    return Math.min(32_000, resolveCapability(model).maxOutput);
+  }
+  return 8192;
+}
 
 const EPHEMERAL = { type: 'ephemeral' as const };
 
@@ -250,6 +292,12 @@ export class AnthropicProvider extends Provider {
       toolsForApi = prepped.tools;
     }
 
+    // Per-model request fields: newer models 400 on sampling params, and /effort maps onto the
+    // API's effort control (GA, no beta header) where the model has one.
+    const modelParams: Record<string, any> = {};
+    if (!rejectsSamplingParams(req.model)) modelParams.temperature = req.temperature ?? 0.3;
+    if (req.reasoningEffort && supportsEffort(req.model)) modelParams.output_config = { effort: req.reasoningEffort };
+
     try {
       const { withRetry } = await import('../../utils/retry.js');
       const stream = await withRetry(
@@ -258,8 +306,8 @@ export class AnthropicProvider extends Provider {
           system: systemForApi as any,
           messages: messagesForApi,
           tools: toolsForApi,
-          max_tokens: req.maxTokens ?? 8192,
-          temperature: req.temperature ?? 0.3,
+          max_tokens: req.maxTokens ?? defaultMaxTokens(req.model),
+          ...modelParams,
           stream: true,
         }, { signal: req.signal } as any),
         { signal: req.signal, label: 'anthropic.complete', maxAttempts: 4 },
@@ -270,6 +318,7 @@ export class AnthropicProvider extends Provider {
       let cacheCreation = 0;
       let cacheRead = 0;
       const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
+      let refusal: { category: string | null } | null = null;
 
       for await (const event of stream) {
         if (req.signal?.aborted) {
@@ -324,10 +373,22 @@ export class AnthropicProvider extends Provider {
           }
         } else if (event.type === 'message_delta') {
           outputTokens = event.usage.output_tokens;
+          // A safety-classifier decline is an HTTP 200 with stop_reason 'refusal' and usually no
+          // text — without this the turn would look like an empty answer.
+          const delta = event.delta as any;
+          if (delta?.stop_reason === 'refusal') refusal = { category: delta.stop_details?.category ?? null };
         }
       }
 
       yield { type: 'usage', usage: { input: inputTokens, output: outputTokens, cacheRead, cacheCreation } };
+      if (refusal) {
+        yield {
+          type: 'error',
+          error: `[${this.name}] ${req.model} declined this request (stop_reason: refusal` +
+            `${refusal.category ? `, category: ${refusal.category}` : ''}). Rephrase it, or switch model with /model.`,
+        };
+        return;
+      }
       yield { type: 'done' };
     } catch (e: any) {
       yield {

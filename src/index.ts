@@ -220,7 +220,7 @@ program
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
   .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
-  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
+  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-opus-5-5, gpt-4o; aliases: opus, sonnet, haiku, fable)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')

@@ -316,7 +316,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
   Mode & model
     /plan              Switch to plan mode (read-only)
     /normal            Switch back to normal mode
-    /model <id>        Override model for this conversation (bare /model lists models)
+    /model <id|alias>  Override model for this conversation (opus/sonnet/haiku/fable; bare /model lists)
     /effort <level>    Reasoning effort: low|medium|high|off (for models that support it)
     /trellis [init]    Show Trellis harness status, or scaffold .trellis/ (spec+tasks+journals)
     /auto [manual|edits|auto]  Approval mode (or Shift+Tab; also /mode). on=auto, off=manual
@@ -779,13 +779,20 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           lines.push('Configured models:');
           for (const m of list) lines.push(`  ${m === def ? '●' : '○'} ${m}`);
         }
-        lines.push('', 'Switch with: /model <model-id>  (applies from the next turn).');
+        const { MODEL_ALIASES } = await import('../llm/model-catalog.js');
+        lines.push('', 'Aliases (latest of each line):');
+        for (const [alias, id] of Object.entries(MODEL_ALIASES)) lines.push(`  ${alias.padEnd(7)} → ${id}`);
+        lines.push('', 'Switch with: /model <model-id|alias>  (applies from the next turn).');
         return { handled: true, message: lines.join('\n') };
       }
+      // The router expands the alias at resolve time (an exact model id still wins), so the
+      // action carries what the user typed; the message just says what it means.
+      const { resolveModelAlias } = await import('../llm/model-catalog.js');
+      const expanded = resolveModelAlias(arg);
       return {
         handled: true,
         action: { type: 'set_model', model: arg },
-        message: `Model set to ${arg} for next turn.`,
+        message: `Model set to ${arg}${expanded ? ` (→ ${expanded})` : ''} for next turn.`,
       };
     }
 

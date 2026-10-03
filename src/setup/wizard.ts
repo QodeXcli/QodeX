@@ -125,9 +125,10 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   // Default: a configured-API model first (the user just set it up), else the detector's
   // top local recommendation, else the first choice.
   const recommended = recommendPrimary(detected);
+  // With nothing local and an Anthropic key already set, the cloud default is the current Opus.
   const defaultPick = apiModels[0]
     ? `${apiModels[0].provider}/${apiModels[0].id}`
-    : (recommended?.id ?? modelChoices[0]!.value);
+    : (recommended?.id ?? (process.env.ANTHROPIC_API_KEY ? CLOUD_DEFAULT_MODEL : modelChoices[0]!.value));
   let primaryModel = await choose<string>(
     'Pick the model QodeX should use by default:',
     modelChoices,
@@ -237,7 +238,8 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
       // Your configured-API models first (you just set them up), then the built-in cloud options.
       ...apiModels.map(m => ({ value: `${m.provider}/${m.id}`, label: `${m.provider}/${m.id}`, hint: `API · ${m.provider}` })),
       { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5', hint: 'cheap, fast — good for batch sub-tasks' },
-      { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', hint: 'premium quality, higher cost' },
+      { value: 'claude-sonnet-5-5', label: 'claude-sonnet-5-5', hint: 'faster, cheaper than Opus — everyday sub-tasks' },
+      { value: CLOUD_DEFAULT_MODEL, label: CLOUD_DEFAULT_MODEL, hint: 'new default — premium quality for the hardest sub-tasks' },
       { value: 'gpt-4o-mini', label: 'gpt-4o-mini', hint: 'cheap OpenAI option' },
       { value: 'gpt-4o', label: 'gpt-4o', hint: 'premium OpenAI' },
       { value: 'deepseek-chat', label: 'deepseek-chat', hint: 'low cost, decent quality' },
@@ -401,6 +403,9 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
  *      require a `ollama pull` first.
  *   3. Cloud options.
  */
+/** The cloud model the wizard recommends when nothing local is installed (Anthropic, 2026-10). */
+export const CLOUD_DEFAULT_MODEL = 'claude-opus-5-5';
+
 /** A model offered by a CONFIGURED custom API provider (providers.custom[] with its key set). */
 export interface ApiCatalogModel { provider: string; id: string; contextWindow?: number }
 
@@ -477,8 +482,10 @@ export function buildModelChoices(
     });
   }
 
-  // 3. Cloud options — always listed last
-  choices.push({ value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', hint: 'cloud, needs ANTHROPIC_API_KEY' });
+  // 3. Cloud options — always listed last. Opus 5.5 is the new default; Sonnet 5.5 is the
+  //    faster, cheaper pick; Haiku 4.5 stays the batch / sub-agent choice (offered in step 3).
+  choices.push({ value: CLOUD_DEFAULT_MODEL, label: CLOUD_DEFAULT_MODEL, hint: 'cloud · new default · needs ANTHROPIC_API_KEY' });
+  choices.push({ value: 'claude-sonnet-5-5', label: 'claude-sonnet-5-5', hint: 'cloud · faster, cheaper · needs ANTHROPIC_API_KEY' });
   choices.push({ value: 'gpt-4o-mini', label: 'gpt-4o-mini', hint: 'cloud, needs OPENAI_API_KEY' });
   choices.push({ value: 'deepseek-coder', label: 'deepseek-coder', hint: 'cloud, needs DEEPSEEK_API_KEY' });
   return choices;

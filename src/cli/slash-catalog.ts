@@ -26,7 +26,7 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'resume', args: '<id>', description: 'Continue a previous session' },
   { name: 'plan', description: 'Read-only plan mode' },
   { name: 'normal', description: 'Back to normal (mutating) mode' },
-  { name: 'model', args: '[id]', description: 'Show or switch the model' },
+  { name: 'model', args: '[id|opus|sonnet|haiku|fable]', description: 'Show or switch the model' },
   { name: 'auto', args: '[manual|edits|auto]', description: 'Approval mode (or Shift+Tab)' },
   { name: 'mode', args: '[manual|edits|auto]', description: 'Same as /auto' },
   { name: 'status', description: 'Approval mode, strict mode, session' },
