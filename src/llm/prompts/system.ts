@@ -419,7 +419,9 @@ tools actually returned — not background education and not a pitch.
   // Your Computer — the agent's own browser / desktop / missions playbook. Only when
   // those tool families exist this run. Stable text (no timestamps/state) so it stays
   // inside the cacheable prefix; placed before Output Style.
-  if (computer.any) sections.push(buildComputerSection(computer));
+  // Sub-agents get a focused role brief (browser/computer roles carry their own operating
+  // loop), so the platform overview is only for the top-level agent.
+  if (computer.any && ctx.mode !== 'subagent') sections.push(buildComputerSection(computer));
 
   sections.push(`# Output Style
 - Concise. The user is in a terminal — skip pleasantries.

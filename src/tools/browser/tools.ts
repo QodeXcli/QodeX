@@ -68,10 +68,10 @@ async function safeTitleOf(page: any): Promise<string> {
 }
 
 /** Shared zod pieces (`.describe()` BEFORE `.optional()` so the description survives). */
-export const refField = () => z.string().describe('Element ref from the latest browser_snapshot, e.g. "e12" (preferred over selector).').optional();
-export const selectorField = () => z.string().describe('Playwright selector, used when no ref is given (CSS, text="...", role=button[name="..."], xpath=...).').optional();
-export const snapshotField = () => z.boolean().describe('Append a compact snapshot of the page after the action (default: browser.snapshotAfterAction, normally true). Pass false to skip it.').optional();
-export const timeoutField = () => z.number().int().min(100).max(120_000).describe('Max wait in ms for the element to become actionable (default: browser.actionTimeoutMs, 8000).').optional();
+export const refField = () => z.string().describe('Ref from the latest snapshot, e.g. "e12" (preferred).').optional();
+export const selectorField = () => z.string().describe('Playwright selector, if no ref.').optional();
+export const snapshotField = () => z.boolean().describe('Append a fresh page snapshot (default true).').optional();
+export const timeoutField = () => z.number().int().min(100).max(120_000).describe('Max wait ms (default 8000).').optional();
 
 /** `{ref, selector}` from tool args; a ref passed as `selector` ("e12") is treated as a ref. */
 export function targetOf(args: { ref?: string; selector?: string }): { ref?: string; selector?: string } | null {
@@ -453,7 +453,7 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
 const ClickArgs = z.object({
   ref: refField(),
   selector: selectorField(),
-  element: z.string().describe('Short human-readable description of the target (e.g. "Add to cart button") — shown in approvals and logs.').optional(),
+  element: z.string().describe('What the target is, e.g. "Add to cart button" (for approvals).').optional(),
   button: z.enum(['left', 'right', 'middle']).describe('Mouse button. Default left.').optional(),
   click_count: z.number().int().min(1).max(3).describe('1 = single (default), 2 = double, 3 = triple.').optional(),
   double: z.boolean().describe('Double-click (same as click_count 2).').optional(),
