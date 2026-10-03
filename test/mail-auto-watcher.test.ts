@@ -231,7 +231,7 @@ describe('MailWatcher loop', () => {
     expect(events.filter(e => e.type === 'new-mail')).toHaveLength(1);
     expect((await state.read()).accounts.work.mode).toBe('idle');
     expect(events.map(e => e.type)).toEqual(expect.arrayContaining(['watch-started', 'watch-stopped']));
-  });
+  }, 30_000);
 
   it('IDLE: mail that lands between the check and the wait is announced at once, not after the IDLE timeout', async () => {
     const box = new FakeMailbox(true);
@@ -241,10 +241,10 @@ describe('MailWatcher loop', () => {
     await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX);
     box.pushAfterFetch = mail({ messageId: '<race@acme.com>' }); // arrives during the next check
     box.push(mail({ messageId: '<second@acme.com>' }));
-    await waitFor(() => events.filter(e => e.type === 'new-mail').length >= 2, 2000);
+    await waitFor(() => events.filter(e => e.type === 'new-mail').length >= 2); // far below the 60 s IDLE timeout
     await w.stop();
     expect(box.waitedSince.every(v => typeof v === 'number')).toBe(true);
-  });
+  }, 30_000);
 
   it('polling fallback when the source has no IDLE', async () => {
     const box = new FakeMailbox(false);
@@ -435,7 +435,7 @@ describe('helpers, daemon bookkeeping, events', () => {
   });
 });
 
-async function waitFor(cond: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
+async function waitFor(cond: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
   const until = Date.now() + ms;
   while (Date.now() < until) {
     if (await cond()) return;

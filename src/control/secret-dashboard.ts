@@ -330,12 +330,18 @@ export const SECRET_DASHBOARD_SCRIPT = SECRET_SEAL_JS + String.raw`
   });
   $('langBtn').addEventListener('click', function () { renderSecrets(true); renderVault(); });
   // The broker announces requests with a metadata-only notice: refresh at once.
-  var qxBusBase = onBus;
-  onBus = function (ev) {
-    qxBusBase(ev);
-    if (ev && ev.kind === 'notice' && /🔐/.test(String(ev.message || ''))) refreshSecrets();
-  };
-  refreshSecrets();
-  loadVault();
-  setInterval(function () { if (!document.hidden) refreshSecrets(); }, 4000);
+  // A hand-off page (opened from a scoped hand-off link, or ?handoff=) is the live view of
+  // one bot check and nothing else: no secret requests, no vault panel, no polling.
+  if (HO) {
+    ['secretsPanel', 'vaultPanel'].forEach(function (id) { var p = document.getElementById(id); if (p) p.hidden = true; });
+  } else {
+    var qxBusBase = onBus;
+    onBus = function (ev) {
+      qxBusBase(ev);
+      if (ev && ev.kind === 'notice' && /🔐/.test(String(ev.message || ''))) refreshSecrets();
+    };
+    refreshSecrets();
+    loadVault();
+    setInterval(function () { if (!document.hidden) refreshSecrets(); }, 4000);
+  }
 `;
