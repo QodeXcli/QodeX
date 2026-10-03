@@ -1283,9 +1283,9 @@ function sendHtml(res: ServerResponse, status: number, html: string, scriptSrc: 
     ...BASE_HEADERS,
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': htmlCsp(scriptSrc),
-    // Opened from Telegram web / a mail client: sever window.opener so that page
-    // can't navigate or script this tab.
-    'Cross-Origin-Opener-Policy': 'same-origin',
+    // (No Cross-Origin-Opener-Policy: its browsing-context-group swap makes the agent
+    //  browser's navigation hang when it races the eviction of an agent tab that
+    //  opened the control center — see test/control-e2e.test.ts.)
     'Content-Length': String(Buffer.byteLength(html)),
     ...extra,
   });

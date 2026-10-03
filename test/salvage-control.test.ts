@@ -141,7 +141,7 @@ describe('salvaged control hardening — headers', () => {
     expect(denied.headers.get('content-security-policy') ?? '').toContain("script-src 'none'");
   });
 
-  it('forbids cross-origin embedding of frames and API responses (CORP) and severs window.opener (COOP)', async () => {
+  it('forbids cross-origin embedding of frames and API responses (CORP)', async () => {
     const running: Partial<BrowserManager> = {
       isRunning: () => true,
       status: () => ({ running: true } as BrowserStatus),
@@ -159,8 +159,6 @@ describe('salvaged control hardening — headers', () => {
     const denied = await fetch(`${base}/api/frame.jpg`);
     expect(denied.status).toBe(401);
     expect(denied.headers.get('cross-origin-resource-policy')).toBe('same-origin');
-    const page = await fetch(`${base}/`, { headers: { ...bearer, accept: 'text/html' } });
-    expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     const ac = new AbortController();
     const sse = await fetch(`${base}/api/events`, { headers: { ...bearer, accept: 'text/event-stream' }, signal: ac.signal });
     expect(sse.headers.get('cross-origin-resource-policy')).toBe('same-origin');
