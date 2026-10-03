@@ -277,11 +277,12 @@ describe('x11 backend', () => {
     ]);
   });
 
-  it('types with a UTF-8 locale and "--" before the text', async () => {
+  it('types with a UTF-8 locale, the text on stdin (never argv: `ps` would show it)', async () => {
     const { calls } = fakeExec();
-    const r = await new X11Backend(deps()).type('-rf سلام');
+    const r = await new X11Backend(deps()).type('-rf سلام', { method: 'type' });
     expect(r.method).toBe('type');
-    expect(calls[0]!.args).toEqual(['type', '--delay', '25', '--clearmodifiers', '--', '-rf سلام']);
+    expect(calls[0]!.args).toEqual(['type', '--delay', '25', '--clearmodifiers', '--file', '-']);
+    expect(calls[0]!.opts?.stdin).toBe('-rf سلام');
     expect(calls[0]!.opts?.env?.LC_ALL).toBe('C.UTF-8');
     // An already-UTF-8 locale is left alone.
     const { calls: c2 } = fakeExec();
@@ -289,21 +290,35 @@ describe('x11 backend', () => {
     expect(c2[0]!.opts?.env?.LC_ALL).toBeUndefined();
   });
 
-  it('falls back to clipboard paste when typing Persian fails, restoring the clipboard', async () => {
+  it('falls back to "--" + argv on an xdotool without --file', async () => {
     const { calls } = fakeExec(c => {
-      if (c.cmd === 'xdotool' && c.args[0] === 'type') return { code: 1, stderr: 'Invalid multi-byte sequence encountered' };
+      if (c.cmd === 'xdotool' && c.args.includes('--file')) return { code: 1, stderr: "type: unrecognized option '--file'\nUsage: type [options] something to type" };
+    });
+    expect((await new X11Backend(deps()).type('-rf x')).method).toBe('type');
+    expect(calls.map(c => c.args)).toEqual([
+      ['type', '--delay', '25', '--clearmodifiers', '--file', '-'],
+      ['type', '--delay', '25', '--clearmodifiers', '--', '-rf x'],
+    ]);
+  });
+
+  it('auto pastes non-ASCII text (xdotool types Persian unreliably), restoring the clipboard', async () => {
+    const { calls } = fakeExec(c => {
       if (c.cmd === 'xclip' && c.args.includes('-o')) return { stdout: 'previous' };
     });
     const r = await new X11Backend(deps()).type('سلام دنیا');
     expect(r.method).toBe('paste');
     const seq = calls.map(c => `${c.cmd} ${c.args.join(' ')}${c.opts?.stdin !== undefined ? ` <${c.opts.stdin}` : ''}`);
     expect(seq).toEqual([
-      'xdotool type --delay 25 --clearmodifiers -- سلام دنیا',
       'xclip -selection clipboard -o',
       'xclip -selection clipboard <سلام دنیا',
       'xdotool key --clearmodifiers --delay 40 ctrl+v',
       'xclip -selection clipboard <previous',
     ]);
+    // ASCII is typed; with no clipboard tool non-ASCII is typed too (best effort).
+    const f2 = fakeExec(undefined, ['xclip', 'xsel']);
+    expect((await new X11Backend(deps()).type('hi')).method).toBe('type');
+    expect((await new X11Backend(deps()).type('سلام')).method).toBe('type');
+    expect(f2.calls.map(c => c.args[0])).toEqual(['type', 'type']);
   });
 
   it('presses keys with repeat', async () => {
@@ -668,10 +683,15 @@ describe('Wayland backend', () => {
     expect(calls[3]!.opts?.stdin).toBe('prev');
   });
 
-  it('types ASCII with ydotool type', async () => {
+  it('types ASCII with ydotool type, the text on stdin', async () => {
     const { calls } = fakeExec();
     await wl().type('hello');
-    expect(calls[0]!.args).toEqual(['type', '--key-delay', '25', '--', 'hello']);
+    expect(calls[0]!.args).toEqual(['type', '--key-delay', '25', '--file', '-']);
+    expect(calls[0]!.opts?.stdin).toBe('hello');
+    // A ydotool without --file: argument form.
+    const f2 = fakeExec(c => (c.args.includes('--file') ? { code: 1, stderr: "type: unrecognized option '--file'" } : undefined));
+    await wl().type('-x');
+    expect(f2.calls.map(c => c.args)).toEqual([['type', '--key-delay', '25', '--file', '-'], ['type', '--key-delay', '25', '--', '-x']]);
   });
 
   it('explains the ydotool 0.1.x CLI', async () => {

@@ -43,6 +43,7 @@ import {
   isJpegPath,
   parseKeyCombo,
   pickWindow,
+  windowLabel,
   windowMatches,
   windowNotFound,
 } from './types.js';
@@ -246,7 +247,7 @@ export class WindowsBackend extends CommandBackend implements DesktopBackend {
       win = pickWindow(wins, opts.window);
       if (!win) throw windowNotFound(opts.window, wins);
       if (!win.bounds || win.bounds.x <= -30000 || win.bounds.width <= 0) {
-        throw desktopError('COMPUTER_USE_ERROR', `windows: "${win.title}" is minimized. Call computer_use_focus_window first.`);
+        throw desktopError('COMPUTER_USE_ERROR', `windows: "${windowLabel(win)}" is minimized. Call computer_use_focus_window first.`);
       }
     }
     const b = win?.bounds;
@@ -347,8 +348,28 @@ $res | ConvertTo-Json -Compress`;
   async type(text: string, opts: TypeOptions = {}): Promise<{ method: 'type' | 'paste' }> {
     const method = opts.method ?? 'auto';
     if (method === 'paste' || (method === 'auto' && hasNonAscii(text))) {
+      this.throwIfAborted();
       // One PowerShell round-trip: save clipboard (text / image / files), paste, restore.
-      await this.ps(`$oldText = $null; $oldImage = $null; $oldFiles = $null
+      try {
+        await this.pasteScript(text);
+      } catch (e) {
+        // Killed (abort / timeout) or failed after SetText: the saved copy of the old
+        // clipboard died with that PowerShell, but the typed text (maybe a password)
+        // must not stay on the clipboard — clear it if it is still ours.
+        await this.evenIfAborted(() => this.ps(
+          `if ([System.Windows.Forms.Clipboard]::ContainsText() -and [System.Windows.Forms.Clipboard]::GetText() -ceq ${psQuote(text)}) { [System.Windows.Forms.Clipboard]::Clear() }`,
+          15_000,
+        )).catch(() => { /* best-effort */ });
+        throw e;
+      }
+      return { method: 'paste' };
+    }
+    await this.ps(`[System.Windows.Forms.SendKeys]::SendWait(${psQuote(escapeSendKeys(text))})`, 30_000 + text.length * 30);
+    return { method: 'type' };
+  }
+
+  private async pasteScript(text: string): Promise<void> {
+    await this.ps(`$oldText = $null; $oldImage = $null; $oldFiles = $null
 try {
   if ([System.Windows.Forms.Clipboard]::ContainsText()) { $oldText = [System.Windows.Forms.Clipboard]::GetText() }
   elseif ([System.Windows.Forms.Clipboard]::ContainsImage()) { $oldImage = [System.Windows.Forms.Clipboard]::GetImage() }
@@ -364,10 +385,6 @@ try {
   elseif ($null -ne $oldFiles) { [System.Windows.Forms.Clipboard]::SetFileDropList($oldFiles) }
   else { [System.Windows.Forms.Clipboard]::Clear() }
 } catch {}`, 30_000 + text.length * 2);
-      return { method: 'paste' };
-    }
-    await this.ps(`[System.Windows.Forms.SendKeys]::SendWait(${psQuote(escapeSendKeys(text))})`, 30_000 + text.length * 30);
-    return { method: 'type' };
   }
 
   async key(combo: string, opts: { repeat?: number } = {}): Promise<void> {

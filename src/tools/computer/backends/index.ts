@@ -18,7 +18,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { QODEX_SCREENSHOTS_DIR } from '../../../config/paths.js';
 import type { DesktopConfig } from '../../../config/agent-config.js';
-import type { BackendDeps, DesktopBackend, DesktopBackendName, Point, ScreenshotResult } from './types.js';
+import { windowLabel, type BackendDeps, type DesktopBackend, type DesktopBackendName, type Point, type ScreenshotResult } from './types.js';
 import { MacosBackend } from './macos.js';
 import { X11Backend } from './x11.js';
 import { WaylandBackend } from './wayland.js';
@@ -83,13 +83,27 @@ export interface CaptureMapping {
   scale: number;
   origin: Point;
   backend: string;
+  /** Captured window as a sanitized "app: title" label (titles are untrusted; this is echoed in errors). */
   window?: string;
   ts: number;
 }
 
 let lastCapture: CaptureMapping | null = null;
 
+/** The element the last computer_use_locate found, in pixels of the capture it was found in. */
+export interface LocatedElement {
+  description: string;
+  x: number;
+  y: number;
+  box?: { x: number; y: number; w: number; h: number };
+  /** `ts` of the CaptureMapping the coordinates belong to. */
+  captureTs: number;
+}
+
+let lastLocated: LocatedElement | null = null;
+
 export function rememberCapture(shot: ScreenshotResult, backend: string): CaptureMapping {
+  lastLocated = null; // a new screenshot is the new coordinate reference
   lastCapture = {
     path: shot.path,
     width: shot.width,
@@ -97,7 +111,7 @@ export function rememberCapture(shot: ScreenshotResult, backend: string): Captur
     scale: shot.scale > 0 && Number.isFinite(shot.scale) ? shot.scale : 1,
     origin: { ...shot.origin },
     backend,
-    window: shot.window ? (shot.window.title || shot.window.app) : undefined,
+    window: shot.window ? windowLabel(shot.window) : undefined,
     ts: Date.now(),
   };
   return lastCapture;
@@ -110,6 +124,31 @@ export function getLastCapture(): CaptureMapping | null {
 /** Tests / backend switches: forget the last screenshot mapping. */
 export function resetDesktopState(): void {
   lastCapture = null;
+  lastLocated = null;
+}
+
+/** Record what computer_use_locate found in the CURRENT capture. */
+export function rememberLocated(el: Omit<LocatedElement, 'captureTs'>): void {
+  if (!lastCapture) return;
+  lastLocated = { ...el, description: el.description.replace(/\s+/g, ' ').trim().slice(0, 120), captureTs: lastCapture.ts };
+}
+
+/**
+ * The description of the located element at (x, y) — screenshot pixels of the
+ * current capture — or null. Lets a click carry WHAT it clicks ("Place order
+ * button") so the approval prompt / Sentinel and the activity timeline can show
+ * it instead of bare coordinates. PURE given the module state.
+ */
+export function describeDesktopPoint(x: number, y: number): string | null {
+  const el = lastLocated;
+  if (!el || !lastCapture || el.captureTs !== lastCapture.ts) return null;
+  const tol = 4;
+  if (el.box) {
+    const b = el.box;
+    if (x >= b.x - tol && x <= b.x + b.w + tol && y >= b.y - tol && y <= b.y + b.h + tol) return el.description;
+    return null;
+  }
+  return Math.hypot(x - el.x, y - el.y) <= 12 ? el.description : null;
 }
 
 export interface MappedPoint extends Point {
@@ -161,6 +200,14 @@ export function desktopScreenshotsDir(): string {
 
 const KEEP_SCREENSHOTS = 200;
 
+/** mkdir -p with mode 0700, tightening an existing directory too (POSIX; best-effort). */
+async function ensurePrivateDir(dir: string): Promise<void> {
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') await fs.chmod(dir, 0o700);
+  } catch { /* the backend reports a real failure to write */ }
+}
+
 /** Default path for a new desktop screenshot. */
 export function defaultScreenshotPath(prefix: 'desktop' | 'locate' = 'desktop', ext = 'png'): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -190,8 +237,12 @@ export async function captureScreenshot(
   backend: DesktopBackend,
   opts: { dest: string; window?: string; maxWidth?: number },
 ): Promise<{ shot: ScreenshotResult; mapping: CaptureMapping }> {
+  const inDefaultDir = path.dirname(opts.dest) === desktopScreenshotsDir();
+  // Desktop screenshots show whatever is on screen (mail, banking, password managers):
+  // keep the default directory private to this user, like the Sentinel audit dir.
+  if (inDefaultDir) await ensurePrivateDir(desktopScreenshotsDir());
   const shot = await backend.screenshot({ path: opts.dest, window: opts.window, maxWidth: opts.maxWidth });
   const mapping = rememberCapture(shot, backend.name);
-  if (path.dirname(opts.dest) === desktopScreenshotsDir()) await pruneDesktopScreenshots();
+  if (inDefaultDir) await pruneDesktopScreenshots();
   return { shot, mapping };
 }

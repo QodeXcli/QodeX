@@ -282,8 +282,8 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
   // ── input ──
 
   /** ydotool with a clearer error for the old 0.1.x CLI (Debian/Ubuntu ship it) and a missing daemon. */
-  private async ydotool(args: string[], timeoutMs?: number): Promise<void> {
-    const r = await this.run('ydotool', args, timeoutMs ? { timeoutMs } : {});
+  private async ydotool(args: string[], timeoutMs?: number, stdin?: string): Promise<void> {
+    const r = await this.run('ydotool', args, { ...(timeoutMs ? { timeoutMs } : {}), ...(stdin !== undefined ? { stdin } : {}) });
     if (r.code === 0) return;
     if (r.code === 130) throw desktopError('ABORTED', 'wayland: ydotool aborted.');
     const detail = (r.stderr || r.stdout).trim().replace(/\s+/g, ' ').slice(0, 300);
@@ -341,7 +341,14 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
       return { method: 'paste' };
     }
     const delay = Math.max(1, Math.min(this.inputDelay, 25));
-    await this.ydotool(['type', '--key-delay', String(delay), '--', text], 15_000 + text.length * (delay * 2 + 15));
+    const timeoutMs = 15_000 + text.length * (delay * 2 + 15);
+    try {
+      // Text on stdin (`--file -`), never argv: a typed password must not show up in `ps`.
+      await this.ydotool(['type', '--key-delay', String(delay), '--file', '-'], timeoutMs, text);
+    } catch (e: any) {
+      if (!/unrecognized option|invalid option|unknown option|usage:/i.test(String(e?.message ?? e))) throw e;
+      await this.ydotool(['type', '--key-delay', String(delay), '--', text], timeoutMs);
+    }
     return { method: 'type' };
   }
 

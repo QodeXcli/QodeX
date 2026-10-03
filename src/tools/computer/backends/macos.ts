@@ -47,6 +47,7 @@ import {
   parseKeyCombo,
   pickWindow,
   readImageSize,
+  windowLabel,
   windowMatches,
   windowNotFound,
 } from './types.js';
@@ -316,7 +317,7 @@ export class MacosBackend extends CommandBackend implements DesktopBackend {
         const wins = await this.listWindows();
         const w = pickWindow(wins, opts.window);
         if (!w) throw windowNotFound(opts.window, wins);
-        if (!w.bounds || w.bounds.width <= 0) throw desktopError('COMPUTER_USE_ERROR', `macos: window "${w.title || w.app}" has no on-screen bounds (minimized?). Focus it first with computer_use_focus_window.`);
+        if (!w.bounds || w.bounds.width <= 0) throw desktopError('COMPUTER_USE_ERROR', `macos: window "${windowLabel(w)}" has no on-screen bounds (minimized?). Focus it first with computer_use_focus_window.`);
         const b = w.bounds;
         await this.check('screencapture', ['-x', `-R${Math.round(b.x)},${Math.round(b.y)},${Math.round(b.width)},${Math.round(b.height)}`, ...typeArgs, dest], { timeoutMs: 20_000 });
         notes.push('Captured the window\'s screen area (anything covering it is included).');
