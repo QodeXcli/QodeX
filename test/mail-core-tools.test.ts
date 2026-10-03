@@ -12,10 +12,10 @@ import { MailAccountStore } from '../src/mail/accounts.js';
 import { DraftStore } from '../src/mail/drafts.js';
 import { InMemoryMailTransport } from '../src/mail/fake.js';
 import { MailService, setMailServiceForTests } from '../src/mail/service.js';
-import { MAIL_TOOL_CLASSES, safeAttachmentName } from '../src/mail/tools.js';
+import { MAIL_TOOL_CLASSES, MailSendTool, safeAttachmentName } from '../src/mail/tools.js';
 import { buildSendPrompt } from '../src/mail/approval.js';
 import { describeOutgoingMail } from '../src/mail/outgoing.js';
-import { Sentinel, setSentinelForTests } from '../src/sentinel/guard.js';
+import { Sentinel, getSentinel, setSentinelForTests } from '../src/sentinel/guard.js';
 import { SentinelAudit } from '../src/sentinel/audit.js';
 import { recordSentinelApproval } from '../src/sentinel/auto-mode.js';
 import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
@@ -270,13 +270,24 @@ describe('mail_send approval (never without a human)', () => {
   });
 
   it('does not ask twice when Sentinel already got the human\'s yes for this call', async () => {
+    // The tool's own gate honours Sentinel's one-shot mark.
     const id = await draftTo();
     const { ctx, prompts } = makeCtx(human('no'));
     recordSentinelApproval(ctx, 'mail_send');
-    const r = await run('mail_send', { draft_id: id }, ctx);
-    expect(r.isError).toBeFalsy();
+    const direct = await new MailSendTool().execute({ draft_id: id }, ctx);
+    expect(direct.isError).toBeFalsy();
     expect(prompts).toEqual([]);
     expect(fake.sent).toHaveLength(1);
+    // The agent loop's flow (Sentinel classifies mail_send): its preflight asks the human
+    // once and passes this ctx; the registry then runs the tool without a second prompt.
+    const id2 = await draftTo();
+    const { ctx: c2, prompts: p2 } = makeCtx(human('yes'));
+    expect(await getSentinel().preflight('mail_send', { draft_id: id2 }, c2)).toBeNull();
+    expect(p2).toHaveLength(1);
+    const r = await run('mail_send', { draft_id: id2 }, c2);
+    expect(r.isError).toBeFalsy();
+    expect(p2).toHaveLength(1);
+    expect(fake.sent).toHaveLength(2);
   });
 
   it('a Sentinel mark never outlives a call that failed before sending', async () => {

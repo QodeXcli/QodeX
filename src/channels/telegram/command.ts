@@ -328,6 +328,14 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
           print(`Paired chats: ${chats.map((c) => (c.username ? '@' + c.username : String(c.chatId))).join(', ')}`);
         }
         print(adapter ? 'Missions: connected (/mission, /missions, /cancel, approvals).' : 'Missions: not connected — only approvals raised in this process reach Telegram.');
+        // mail.watch on in the config: make sure the mail watcher daemon runs (new-mail notices, rules).
+        if (!deps.loadConfig) {
+          try {
+            const { maybeStartMailWatchFromConfig } = await import('../../mail/watcher.js');
+            const note = await maybeStartMailWatchFromConfig({ config: raw });
+            if (note) print(note);
+          } catch { /* mail automation unavailable */ }
+        }
         try {
           await handle.done;
         } catch (err) {

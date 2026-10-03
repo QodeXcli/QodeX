@@ -57,6 +57,10 @@ import {
   QODEX_BROWSER_PROFILES_DIR, QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE,
 } from '../config/paths.js';
 import type { ElementInfo } from '../tools/browser/types.js';
+import { QODEX_GRANTS_FILE, QODEX_MAIL_AUTO_DIR } from '../grants/paths.js';
+import type { MailSendResolution } from '../grants/mail-scope.js';
+import { QODEX_MAIL_ACCOUNTS_FILE, QODEX_MAIL_DIR } from '../mail/paths.js';
+import { describeOutgoingMail, formatOutgoingPrompt, summarizeOutgoingMail, type MailSendArgs } from '../mail/outgoing.js';
 import type { ActionClassification, RiskLevel } from './types.js';
 
 // ── public types ────────────────────────────────────────────────────────────
@@ -123,6 +127,12 @@ export interface PolicyContext {
   workflow?: WorkflowLike | null;
   /** Override the protected-path set (tests). */
   protectedPaths?: ProtectedPaths;
+  /**
+   * mail_send: what it would send — the mail core's description of the loaded draft /
+   * arguments (resolved by the guard, src/grants/mail-scope.ts resolveMailSend).
+   * undefined = not resolved; null = could not be read in time.
+   */
+  mail?: MailSendResolution | null;
 }
 
 export interface PolicyClassification extends ActionClassification {
@@ -133,6 +143,8 @@ export interface PolicyClassification extends ActionClassification {
    * always a fresh human answer — `sentinel.autoApprove` does not apply.
    */
   integrity?: boolean;
+  /** Extra lines for the approval prompt (mail_send: recipients, subject, body preview). */
+  details?: string[];
 }
 
 // ── text normalization ──────────────────────────────────────────────────────
@@ -666,9 +678,17 @@ function markerFor(p: string): string {
 }
 
 export const DEFAULT_PROTECTED_PATHS: ProtectedPaths = {
-  files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE],
-  dirs: [QODEX_BROWSER_PROFILES_DIR],
-  markers: [markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR)],
+  // Standing grants, the mail automation state (rules = trusted instructions, the
+  // received-mail index that scopes auto-replies), the mail account secrets and the
+  // signed drafts (~/.qodex/mail): the agent may neither read nor write them — only the
+  // human surfaces and the mail tools themselves change them.
+  files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE, QODEX_GRANTS_FILE, QODEX_MAIL_ACCOUNTS_FILE],
+  dirs: [QODEX_BROWSER_PROFILES_DIR, QODEX_MAIL_AUTO_DIR, QODEX_MAIL_DIR],
+  markers: [
+    markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR),
+    markerFor(QODEX_GRANTS_FILE), markerFor(QODEX_MAIL_ACCOUNTS_FILE), markerFor(QODEX_MAIL_AUTO_DIR),
+    markerFor(QODEX_MAIL_DIR),
+  ],
   // .env holds the provider keys + the Telegram bot token; sessions.db holds the
   // mission approval queue; channels/ holds the Telegram pairing (who may approve).
   configFiles: [QODEX_CONFIG_FILE, path.join(QODEX_HOME, '.env'), QODEX_SESSION_DB],
@@ -688,7 +708,7 @@ const QODEX_ENTRY = String.raw`(?:(?:(?:tsx|ts-node|bun)\s+)?(?:\S*[/\\])?(?:ind
  * Root options before the subcommand (`qodex --json -m x mission approve …`). An option's
  * value never swallows a subcommand word, which also keeps the match linear.
  */
-const ROOT_OPTS = String.raw`(?:\s+-\S+(?:\s+(?!(?:missions?|vault|setup|config|control|telegram|browser)\b)[^\s-]\S*)?)*`;
+const ROOT_OPTS = String.raw`(?:\s+-\S+(?:\s+(?!(?:missions?|vault|setup|config|control|telegram|browser|grant|mail)\b)[^\s-]\S*)?)*`;
 /** `--yes` / `-y` anywhere in the same command (before or after the subcommand). */
 const YES_AHEAD = String.raw`(?=[^|;&\n]*\s(?:--yes|-y)(?![\w-]))`;
 /** Answering or steering a mission (a steering note carries the user's authority). */
@@ -717,6 +737,9 @@ const QODEX_SELF_CHANGE_RE = new RegExp([
   String.raw`|telegram\s+(?:setup|pair|unpair)`,
   String.raw`|${MISSION_ANSWER}`,
   String.raw`|browser\s+reset-profile`,
+  // Standing grants and mail rules: a grant lets email go out unasked, a rule's task is a trusted instruction.
+  String.raw`|grant\s+(?:add|revoke|rm|remove)\b`,
+  String.raw`|mail\s+(?:rules?\s+(?:add|rm|remove|delete)\b|reply-all\b)`,
   String.raw`)`,
   String.raw`|${QODEX_BIN}${YES_AHEAD}${ROOT_OPTS}\s+${MISSION_AUTO}`,
   String.raw`|${QODEX_ENTRY}${ROOT_OPTS}\s+${MISSION_ANSWER}`,
@@ -1251,7 +1274,7 @@ const DESKTOP_GUARDED = new Set([
   'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_move', 'computer_use_drag',
   'computer_use_scroll', 'computer_use_clipboard', 'computer_use_open', 'computer_use_focus_window',
 ]);
-const OTHER_GUARDED = new Set(['http_request', 'workflow_run']);
+const OTHER_GUARDED = new Set(['http_request', 'workflow_run', 'mail_send']);
 
 /** Literal name fragments that make any tool (MCP or not) a guarded action. */
 const NAME_KEYWORD_RE = /send_email|send_message|post_|create_payment|transfer|purchase|delete/i;
@@ -1686,10 +1709,60 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
     case 'workflow_run':
       return classifyWorkflow(a, ctx);
+    case 'mail_send':
+      return classifyMailSend(a, ctx);
   }
 
   if (MCP_PREFIX_RE.test(toolName) || NAME_KEYWORD_RE.test(toolName)) return classifyByName(toolName, a, cfg);
   return none(toolName);
+}
+
+// ── email (mail_send) ───────────────────────────────────────────────────────
+
+/**
+ * mail_send — sending email is the 'send' category (critical by default: always a
+ * human, unless a standing mail-reply grant covers it — decided by the guard). The
+ * summary and prompt lines are the mail core's own (src/mail/outgoing.ts): From, To,
+ * Cc, Bcc, Subject, the thread it replies to, attachments from disk and a body
+ * preview, secret-masked. PURE: the guard loads + verifies the draft into `ctx.mail`.
+ *
+ * A message the mail core already knows it will refuse (`problems`: a tampered or
+ * missing draft, draft + fields, no recipient) needs no approval: the tool refuses it
+ * before its own human gate, and nothing marks it approved.
+ */
+function classifyMailSend(a: Record<string, unknown>, ctx: PolicyContext): PolicyClassification {
+  const cfg = ctx.config;
+  const clean = (x: string, n: number) => oneLine(maskControlTokens(maskSecrets(String(x ?? ''))), n);
+  const resolved = ctx.mail;
+  if (resolved && resolved.description.problems.length) {
+    return {
+      category: null, risk: 'low',
+      summary: `mail_send the mail tool will refuse: ${clean(resolved.description.problems.slice(0, 2).join('; '), 200)}`,
+      reason: 'the message cannot be sent as given — nothing to approve',
+    };
+  }
+  const draftId = str(a.draft_id ?? a.draftId).trim();
+  // Without the guard's resolution a draft's contents are unknown: still a critical send.
+  const desc = resolved?.description ?? (draftId ? null : describeOutgoingMail(a as MailSendArgs));
+  if (!desc) {
+    const summary = `send email draft ${clean(draftId, 60)} (its contents could not be read)`;
+    return { ...make('send', riskFor('send', cfg), summary, 'sending an email whose draft could not be read'), details: [] };
+  }
+  const extras = [
+    desc.isReplyTo ? `a reply in the thread of ${clean(desc.isReplyTo.threadSender, 80)}` : 'a NEW email (not a reply)',
+    desc.cc.length ? `${desc.cc.length} cc` : '',
+    desc.bcc.length ? `${desc.bcc.length} bcc (hidden recipients)` : '',
+    desc.extraRecipients.length && desc.isReplyTo ? `${desc.extraRecipients.length} recipient(s) outside the thread` : '',
+    desc.attachments.length ? `${desc.attachments.length} attachment(s) from disk` : '',
+    desc.isReplyTo?.injectionFlagged ? 'the original email was flagged for prompt injection' : '',
+  ].filter(Boolean).join(', ');
+  const details = formatOutgoingPrompt(desc).map(l => clean(l, 600));
+  const secrets = detectSecrets(`${desc.subject}\n${resolved?.body ?? desc.bodyPreview}`);
+  if (secrets.length) details.push(`⚠ The email would send ${describeSecret(secrets[0].kind)}.`);
+  const first = desc.to[0] ?? desc.cc[0] ?? desc.bcc[0] ?? '';
+  const at = first.lastIndexOf('@');
+  const domain = at > 0 ? first.slice(at + 1).toLowerCase() || undefined : undefined;
+  return { ...make('send', riskFor('send', cfg), clean(summarizeOutgoingMail(desc), 400), `sending an email: ${extras}`, domain), details };
 }
 
 // ── workflows ───────────────────────────────────────────────────────────────

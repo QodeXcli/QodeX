@@ -1319,6 +1319,14 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       return handlePlatformSlash(cmd, args, cwd);
     }
 
+    // Standing grants (/allow) and mail automation (/mail): typed by the human at the
+    // TUI. A headless run (a schedule's prompt) may list / revoke, never create.
+    case 'allow':
+    case 'mail': {
+      const { mailAutomationSlash } = await import('./platform-slash.js');
+      return mailAutomationSlash(cmd, args, cwd, sessionId);
+    }
+
     case 'status': {
       const { getApprovalMode, APPROVAL_MODE_META } = await import('../security/permissions.js');
       const { isStrictMode } = await import('../safety/strict-mode.js');

@@ -43,6 +43,7 @@ import {
   type ApprovalBroker, type ApprovalChannel, type ApprovalResult, type PendingApproval,
 } from '../../control/approvals.js';
 import { getBus, type AgentBus, type BusEvent } from '../../control/bus.js';
+import { formatMailNotice, handleTelegramMailCommand } from './mail.js';
 import { peekBrowserManager, type BrowserManager } from '../../tools/browser/types.js';
 import { logger } from '../../utils/logger.js';
 
@@ -504,6 +505,11 @@ export class TelegramBot {
       case 'lang':
       case 'language':
         return this.cmdLang(chat, cmd.args, lang);
+      // Standing grants and mail automation: a paired chat is a human surface (src/channels/telegram/mail.ts).
+      case 'allow':
+      case 'mail':
+        await this.send(chatId, await handleTelegramMailCommand(cmd.cmd, cmd.args, { chatId, username: chat.username, lang }));
+        return;
       case 'unpair':
         await this.pairing.unpair(chatId);
         await this.send(chatId, S.unpaired);
@@ -1193,6 +1199,11 @@ export class TelegramBot {
       const by = (ev.data as Record<string, unknown> | undefined)?.answeredBy;
       if (typeof by === 'string' && by.split(':')[0] === 'telegram') return;
       void this.broadcast((lang) => F.formatSentinelNotice(ev.type, ev.data, lang)).catch(() => {});
+    } else if (ev.kind === 'mail') {
+      // New mail, auto-replies, rule runs, grants. A copy mirrored from another process's
+      // feed was already sent by that process (its own bot or the direct notifier).
+      if ((ev.data as Record<string, unknown> | undefined)?.bridged === true) return;
+      void this.broadcast((lang) => formatMailNotice(ev.type, ev.data, lang)).catch(() => {});
     }
   }
 

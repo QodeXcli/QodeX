@@ -158,6 +158,13 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
     ],
     patterns: [/\b(in|into) the background\b/, /\bbackground (task|job|mission|work|run)s?\b/, /\b(run|keep) (it )?(going|running)\b/],
   },
+  // Email (src/mail): the mail_* tools only for mail tasks. Not the bare Persian 'میل'
+  // (it matches 'تکمیل') or 'نامه' (it matches 'برنامه').
+  {
+    members: ['mail_'],
+    keywords: ['email', 'e-mail', 'mail', 'inbox', 'mailbox', 'unread', 'attachment', 'ایمیل', 'ای میل', 'جیمیل', 'صندوق ورودی', 'اینباکس', 'پیوست'],
+    patterns: [/\breply to\b/, /\bdrafts?\b/],
+  },
   { members: ['dev_server_'], keywords: ['dev server', 'npm run', 'serve', 'localhost', 'vite', 'next dev', 'hot reload', 'hmr', 'سرور توسعه', 'لوکال‌هاست'] },
   { members: ['background_job_'], keywords: ['background job', 'long-running', 'long running', 'async job', 'queue', 'worker'] },
   { members: ['csv_read', 'csv_write', 'xlsx_read', 'pdf_read', 'media_probe', 'media_transform'],

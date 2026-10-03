@@ -91,6 +91,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     k_browser: 'Browser',
     k_sentinel: 'Sentinel',
     k_notice: 'Notice',
+    k_mail: 'Mail',
     risk_low: 'low',
     risk_medium: 'medium',
     risk_high: 'high',
@@ -182,6 +183,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     k_browser: 'مرورگر',
     k_sentinel: 'نگهبان',
     k_notice: 'اطلاعیه',
+    k_mail: 'ایمیل',
     risk_low: 'کم',
     risk_medium: 'متوسط',
     risk_high: 'زیاد',
@@ -305,6 +307,7 @@ textarea{width:100%;min-height:70px;resize:vertical;background:var(--bg);border:
 #activityList time{color:var(--muted);font-variant-numeric:tabular-nums;flex:none;direction:ltr}
 #activityList .chip{flex:none;font-size:10.5px;padding:0 6px;border-radius:6px;background:var(--panel2);border:1px solid var(--border);color:var(--muted)}
 #activityList .chip.k-sentinel{color:#fca5a5}#activityList .chip.k-mission{color:#a5b4fc}#activityList .chip.k-browser{color:var(--accent)}#activityList .chip.k-approval{color:var(--warn)}#activityList .chip.k-warn{color:var(--warn)}#activityList .chip.k-error{color:#fca5a5}
+#activityList .chip.k-mail{color:#86efac}
 #activityList .txt{min-width:0;word-break:break-word}
 .banner{display:none;margin:12px 16px 0;padding:10px 12px;border-radius:10px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.5);color:#fecaca}
 .banner.show{display:block}
@@ -898,6 +901,8 @@ const SCRIPT = String.raw`
       case 'browser': s = summarize(ev.data); return { chip: t('k_browser'), cls: 'k-browser', text: ev.type + (s ? ' · ' + s : '') };
       case 'sentinel': s = summarize(ev.data); return { chip: t('k_sentinel'), cls: 'k-sentinel', text: ev.type + (s ? ' · ' + s : '') };
       case 'notice': return { chip: t('k_notice'), cls: 'k-' + (ev.level || 'info'), text: clip(ev.message, 400) };
+      // Mail automation: data.summary is a one-line, secret-masked text; shown with textContent (never as HTML).
+      case 'mail': s = ev.data && typeof ev.data === 'object' && typeof ev.data.summary === 'string' ? clip(ev.data.summary, 300) : summarize(ev.data); return { chip: t('k_mail'), cls: 'k-mail', text: s || ev.type };
       case 'agent': s = summarize(ev.data); return { chip: ev.source ? clip(ev.source, 20) : t('k_agent'), cls: 'k-agent', text: ev.type + (s ? ' · ' + s : '') };
       default: return { chip: String(ev.kind || '?'), cls: '', text: ev.truncated ? clip(ev.preview, 200) : summarize(ev.data) };
     }

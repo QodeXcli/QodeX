@@ -20,6 +20,8 @@ export type BusEvent =
   | { kind: 'mission'; missionId: string; type: string; data?: unknown; ts: number }
   | { kind: 'browser'; type: string; data?: unknown; ts: number }
   | { kind: 'sentinel'; type: string; data?: unknown; ts: number }
+  /** Mail automation (src/grants/mail-events.ts): new mail, auto-replies, rule runs, grants. Data is clipped + secret-masked. */
+  | { kind: 'mail'; type: string; data?: unknown; ts: number }
   | { kind: 'notice'; level: 'info' | 'warn' | 'error'; message: string; ts: number };
 
 /** Event shapes without the timestamp — `publish` stamps them. */

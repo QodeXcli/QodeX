@@ -2005,6 +2005,14 @@ program.addCommand(buildVaultCommand());
 const mailCommand = buildMailCommand();
 program.addCommand(mailCommand);
 
+// Standing grants (`qodex grant …`) and the mail automation (`qodex mail watch|rule|reply-all`).
+// Keep attachMailAutomationCommands AFTER the core `qodex mail` command is added: it mounts
+// its subcommands under it (or creates `mail` when the core command is absent).
+import { buildGrantCommand } from './grants/command.js';
+import { attachMailAutomationCommands } from './mail/watcher.js';
+program.addCommand(buildGrantCommand());
+attachMailAutomationCommands(program);
+
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);
   if (process.env.QODEX_DEBUG) console.error(err.stack);
