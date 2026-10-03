@@ -15,6 +15,7 @@
  * user chose it with /lang), else English.
  */
 
+import { createHash } from 'crypto';
 import type { InlineKeyboardMarkup } from './api.js';
 import { detectSecrets } from '../../sentinel/policy.js';
 
@@ -391,6 +392,16 @@ export function optionLabel(option: string, lang: Lang): string {
 export function buildCallbackData(id: string, index: number): string | null {
   const data = `ap:${id}:${index}`;
   return Buffer.byteLength(data, 'utf-8') <= MAX_CALLBACK_BYTES ? data : null;
+}
+
+/**
+ * Callback alias for approval ids that don't fit `ap:<id>:<i>` in 64 bytes (or
+ * contain ':'). Derived from the id itself, NOT a counter: a counter restarts
+ * at 1 in a new process, so a button on a card from a previous run (`ap:~1:0`)
+ * would silently answer whatever approval got `~1` this time. PURE.
+ */
+export function approvalAlias(id: string): string {
+  return '~' + createHash('sha256').update(id).digest('base64url').slice(0, 20);
 }
 
 export function parseCallbackData(data: string | undefined): { id: string; index: number } | null {

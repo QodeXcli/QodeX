@@ -246,7 +246,6 @@ export class TelegramBot {
   private delivered = new Map<string, DeliveredApproval>();
   private aliasToId = new Map<string, string>();
   private idToAlias = new Map<string, string>();
-  private aliasSeq = 0;
   private handledMission = new Set<string>();
   /** Mission approvals whose answer is being written right now (the tick must not retract them). */
   private answering = new Set<string>();
@@ -981,7 +980,7 @@ export class TelegramBot {
     if (!id.startsWith('~') && !id.includes(':') && F.buildCallbackData(id, 999) !== null) return id;
     const existing = this.idToAlias.get(id);
     if (existing) return existing;
-    const alias = `~${(++this.aliasSeq).toString(36)}`;
+    const alias = F.approvalAlias(id); // stable across restarts: an old card can't hit another approval
     this.aliasToId.set(alias, id);
     this.idToAlias.set(id, alias);
     return alias;
