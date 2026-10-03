@@ -72,6 +72,9 @@ const MAX_CLIENT_BUFFER = 4 * 1024 * 1024;
 const FRAME_POLL_MS = 1500;
 /** Back-off after a failed startScreencast before retrying. */
 const FRAME_RETRY_MS = 5000;
+/** A screencast that started but delivered no frame for this long is restarted
+ *  (doubling per consecutive stall, up to 8x). */
+const FRAME_STALL_MS = 4000;
 const COOKIE_PREFIX = 'qx_ctl';
 const COOKIE_MAX_AGE_S = 7 * 24 * 3600;
 /** Default grace before an orphaned control-center takeover is handed back. */
@@ -655,6 +658,10 @@ class FrameHub {
   private last: { frame: ScreencastFrame; at: number } | null = null;
   private poll: NodeJS.Timeout | null = null;
   private lastFailure = 0;
+  /** When the current screencast's start resolved (0 = none running). */
+  private castStart = 0;
+  /** Consecutive restarts of a screencast that never delivered a frame. */
+  private stalls = 0;
 
   constructor(private readonly opts: { quality: number; maxFps: number }) {}
 
@@ -699,6 +706,13 @@ class FrameHub {
       }
       return;
     }
+    // The real manager resolves startScreencast even when attaching to the page failed
+    // (it logs and waits for the next tab event): a cast with no frame ever is restarted.
+    if (this.stopFn && !this.live && this.castStart && Date.now() - this.castStart > FRAME_STALL_MS * 2 ** Math.min(this.stalls, 3)) {
+      this.stalls++;
+      void this.stop().then(() => this.sync());
+      return;
+    }
     if (this.stopFn || this.startingGen) return;
     if (Date.now() - this.lastFailure < FRAME_RETRY_MS) return;
     this.start(mgr);
@@ -720,6 +734,7 @@ class FrameHub {
         return;
       }
       this.stopFn = stop;
+      this.castStart = Date.now();
     }).catch(err => {
       if (this.startingGen === g) this.startingGen = 0;
       if (g !== this.gen) return;
@@ -732,6 +747,7 @@ class FrameHub {
     if (g !== this.gen || !f || typeof f.data !== 'string') return;
     this.last = { frame: f, at: Date.now() };
     this.live = true;
+    this.stalls = 0;
     const json = frameJson(f);
     for (const v of this.viewers) v.send('frame', json, true);
   }
@@ -740,6 +756,7 @@ class FrameHub {
     this.gen++;
     this.startingGen = 0;
     this.live = false;
+    this.castStart = 0;
     const s = this.stopFn;
     this.stopFn = null;
     if (s) {
@@ -748,6 +765,7 @@ class FrameHub {
   }
 
   onBrowserEvent(type: string): void {
+    if (type === 'closed' || type === 'launched') this.stalls = 0;
     if (type === 'closed') {
       void this.stop();
       this.last = null;
