@@ -1157,6 +1157,9 @@ function sendHtml(res: ServerResponse, status: number, html: string, extra: Reco
     ...BASE_HEADERS,
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': HTML_CSP,
+    // Opened from Telegram web / a mail client: sever window.opener so that page
+    // can't navigate or script this tab.
+    'Cross-Origin-Opener-Policy': 'same-origin',
     'Content-Length': String(Buffer.byteLength(html)),
     ...extra,
   });
