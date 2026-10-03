@@ -1656,12 +1656,15 @@ Never invent commits. If the range is empty, say so and stop.`;
 }
 
 /**
- * The mod-writing playbook for /mod new: the installed modsmith skill (the user may have
- * edited their copy), else the copy bundled with QodeX (examples/skills/modsmith).
+ * The mod-writing playbook for /mod new: the user's installed modsmith skill (they may
+ * have edited their copy), else the copy bundled with QodeX (examples/skills/modsmith).
+ * A `modsmith` from the project (`<cwd>/.qodex/skills`) or a Claude Code plugin is never
+ * used: that is repository content, and this playbook writes code that runs with the
+ * user's permissions in every later session, outside the project's trust gate.
  */
 async function modsmithPlaybook(): Promise<{ body: string; allowedTools?: string[]; model?: string } | null> {
   const installed = getSkill('modsmith');
-  if (installed?.body) return installed;
+  if (installed?.body && (installed.origin === 'user' || installed.origin === 'builtin')) return installed;
   try {
     const { promises: fsp } = await import('fs');
     const path = await import('path');
