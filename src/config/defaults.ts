@@ -688,6 +688,16 @@ export interface QodexConfig {
   control?: Partial<ControlConfig>;
   /** Telegram channel (approvals + missions from your phone). */
   telegram?: Partial<TelegramConfig>;
+  /**
+   * Approval mode defaults. Read ONLY from the user config (~/.qodex/config.yaml): a
+   * project's .qodex/config.yaml must not switch a user into autonomous mode.
+   */
+  approval?: {
+    /** Mode at startup: 'manual' (default), 'edits' or 'auto' (autonomous). */
+    defaultMode?: 'manual' | 'edits' | 'auto';
+    /** Extra directories auto mode treats as part of the project (besides cwd and the temp dir). */
+    extraRoots?: string[];
+  };
 }
 
 export const DEFAULT_CONFIG: QodexConfig = {
