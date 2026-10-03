@@ -321,10 +321,12 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         print(`✓ QodeX Telegram bot @${handle.username} is running (pid ${process.pid}). Press Ctrl+C to stop.`);
         const store = handle.bot.pairing;
         const chats = await store.listChats();
-        if (!chats.length) {
+        if (!chats.length && interactive()) {
           const { code: pairCode } = await store.createPairingCode();
           print(`No chats paired yet. Open https://t.me/${handle.username}?start=${pairCode}`);
           print(`  — or send  /pair ${pairCode}  to @${handle.username} in a private chat (valid 10 minutes).`);
+        } else if (!chats.length) {
+          print('No chats paired yet. Run `qodex telegram pair` in a terminal to get a one-time code.');
         } else {
           print(`Paired chats: ${chats.map((c) => (c.username ? '@' + c.username : String(c.chatId))).join(', ')}`);
         }
