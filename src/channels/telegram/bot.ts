@@ -360,6 +360,8 @@ export class TelegramBot {
           allowedUpdates: ['message', 'callback_query'],
           signal,
         });
+        // A broken mirror/proxy answering `{ok:true, result:{}}` must neither kill the loop nor make it spin.
+        if (!Array.isArray(updates)) throw new TelegramApiError({ method: 'getUpdates', status: 502, description: 'malformed result (not an array)' });
         if (failures > 0) this.log('info', 'Telegram polling recovered');
         failures = 0;
         this.conflictWarned = false;
