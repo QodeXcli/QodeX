@@ -131,6 +131,21 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
       /\bplace (an|the|my) order\b/, /\border (online|from|on|via)\b/, /\bcart\b/, /\bon amazon\b/,
     ],
   },
+  // The credential vault and the tools that sign in with it, for password-manager / 2FA
+  // requests that name no site yet ("log me in with my saved password"). Keyed on the
+  // user's OWN credentials, never on a bare "password" (that is usually code: hashing,
+  // reset endpoints); the browser family above already brings them for any login job.
+  {
+    members: ['vault_', 'browser_login', 'browser_fill_secret'],
+    keywords: [
+      'vault', 'password manager', 'saved password', 'stored password', 'saved login', 'my password',
+      'password for my', 'my credentials', 'login credentials', 'log me in', 'sign me in', 'sign me up',
+      'one-time code', '2fa code', 'two-factor code', 'authenticator app', 'authenticator code',
+      'گاوصندوق', 'رمزم', 'رمز عبورم', 'پسوردم', 'گذرواژه‌ام', 'رمز ذخیره', 'پسورد ذخیره',
+      'کد دو مرحله', 'تایید دو مرحله', 'تأیید دو مرحله', 'ورود دو مرحله', 'کد یکبار مصرف',
+      'لاگینم کن', 'وارد حسابم', 'وارد اکانتم',
+    ],
+  },
   {
     members: ['computer_use_'],
     keywords: [

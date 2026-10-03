@@ -395,3 +395,23 @@ describe('real Chromium flows', () => {
     expectNoLeak(PASS);
   }, 60_000);
 });
+
+describe('prompts point at the vault login tools', () => {
+  it('the # Your Computer credentials line names browser_login, and vault_request_login only when it exists', async () => {
+    const { buildComputerSection, detectComputerFamilies } = await import('../src/llm/prompts/system.js');
+    const base = ['browser_navigate', 'browser_fill_secret', 'browser_login', 'vault_list', 'vault_generate_and_fill'];
+    const without = buildComputerSection(detectComputerFamilies(base));
+    expect(without).toMatch(/Credentials\*\*: sign in with `browser_login`/);
+    expect(without).not.toContain('vault_request_login');
+    expect(buildComputerSection(detectComputerFamilies([...base, 'vault_request_login']))).toMatch(/none saved\? `vault_request_login`/);
+    expect(buildComputerSection(detectComputerFamilies(['browser_navigate', 'browser_fill_secret', 'vault_list']))).toMatch(/use the vault \(`vault_list`, `browser_fill_secret`\)/);
+  });
+  it('the browser sub-agent gets the vault login tools', async () => {
+    const { builtinRoleAllowedTools, getBuiltinRolePrompt } = await import('../src/llm/prompts/role-prompts.js');
+    const allowed = builtinRoleAllowedTools('browser', ['browser_click', 'browser_login', 'browser_agent', 'vault_list', 'vault_generate_and_fill', 'vault_request_login', 'shell'])!;
+    expect(allowed).toEqual(expect.arrayContaining(['browser_login', 'vault_list', 'vault_generate_and_fill', 'vault_request_login']));
+    expect(allowed).not.toContain('browser_agent');
+    expect(allowed).not.toContain('shell');
+    expect(getBuiltinRolePrompt('browser')).toMatch(/browser_login/);
+  });
+});
