@@ -67,7 +67,10 @@
   },
   "optionalDependencies": {
     "gpt-tokenizer": "^2.5.0",
+    "imapflow": "^2.2.1",
+    "mailparser": "^3.9.33",
     "mysql2": "^3.11.4",
+    "nodemailer": "^10.0.13",
     "pg": "^8.13.1",
     "playwright": "^1.49.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
@@ -80,6 +83,7 @@
     "@types/react": "^18.3.12",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "smtp-server": "^3.19.16",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.6"
