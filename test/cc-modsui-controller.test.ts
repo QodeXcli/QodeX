@@ -75,6 +75,25 @@ describe('rendering', () => {
     expect(history).toEqual([{ kind: 'log', plugin: 'bad', text: 'ui.render (AbovePrompt) refused: Text prop "bogusProp" is not allowed' }]);
   });
 
+  it('refusals whose reason changes every pass (a prop named after data) stop after a few lines', async () => {
+    const f = fakeHost();
+    let n = 0;
+    f.sites.AbovePrompt = () => ({ trees: [{ plugin: 'spready', tree: Text('x', { [`file_${n++}`]: true }) }] });
+    ctl.attach(f.host);
+    for (let i = 0; i < 20; i++) { ctl.invalidate(); await flush(); }
+    expect(n).toBeGreaterThanOrEqual(20);
+    expect(history.map(h => h.text)).toEqual([
+      'ui.render (AbovePrompt) refused: Text prop "file_0" is not allowed',
+      'ui.render (AbovePrompt) refused: Text prop "file_1" is not allowed',
+      'ui.render (AbovePrompt) refused: Text prop "file_2" is not allowed',
+      'ui.render (AbovePrompt) refused again; further refusals are not shown until the mod reloads',
+    ]);
+    // A reload (unload) starts over.
+    f.emit({ kind: 'unload', plugin: 'spready' });
+    await flush();
+    expect(history).toHaveLength(5);
+  });
+
   it('throttles redraws to 10 a second and never runs two passes at once', async () => {
     const f = fakeHost();
     ctl.attach(f.host);

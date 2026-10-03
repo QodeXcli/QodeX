@@ -71,6 +71,8 @@ const CHORD_MS = 1500;
 const MAX_TOASTS = 3;
 const MAX_STATUS_CHARS = 300;
 const MAX_LINE_CHARS = 2000;
+/** Distinct refusal lines per mod and site before the rest are kept quiet. */
+const MAX_REFUSAL_LINES = 3;
 
 export interface ModsUiControllerOptions {
   /** A log/notice line (or a refused-tree line) for the transcript. */
@@ -439,15 +441,25 @@ export class ModsUiController {
     return suffix ? { suffix } : null;
   }
 
-  /** Validate a tree; a refusal is logged once per mod, site and reason. */
+  /** Validate a tree; a refusal is logged once per mod, site and reason (a few per mod and site). */
   private accept(plugin: string, site: ModRenderSite, tree: unknown): ModElement | null {
     if (tree === null || tree === undefined) return null;
     const r = validateModTree(tree);
     if (r.ok) return r.tree;
     const k = `${plugin}\u0000${site}\u0000${r.reason}`;
     if (!this.refused.has(k)) {
+      // A reason can name a mod's own data (a prop or element name), so a mod that
+      // spreads a record into props would log a new line on every pass: cap it.
+      const site0 = `${plugin}\u0000${site}\u0000`;
+      const seen = [...this.refused].filter(x => x.startsWith(site0)).length;
+      if (seen > MAX_REFUSAL_LINES) return null;
       this.refused.add(k);
-      this.history({ kind: 'log', plugin, text: `ui.render (${site}) refused: ${r.reason}` });
+      this.history({
+        kind: 'log', plugin,
+        text: seen < MAX_REFUSAL_LINES
+          ? `ui.render (${site}) refused: ${r.reason}`
+          : `ui.render (${site}) refused again; further refusals are not shown until the mod reloads`,
+      });
     }
     return null;
   }
