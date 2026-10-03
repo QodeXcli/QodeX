@@ -18,8 +18,11 @@
  *
  * Security notes: all dynamic text is inserted with textContent (never innerHTML),
  * links are only rendered for http(s) URLs, and the page talks only to its own
- * origin (the server sends a CSP with connect-src 'self' and frame-ancestors 'none').
+ * origin (the server sends a CSP with connect-src 'self', frame-ancestors 'none' and
+ * a script-src that allows only this file's inline script by hash).
  */
+
+import { createHash } from 'node:crypto';
 
 export type DashboardLang = 'en' | 'fa';
 
@@ -299,9 +302,90 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;padding:0 16px 22px
 @media (max-width:900px){main{display:flex;flex-direction:column;align-items:stretch;padding:10px}#side{display:contents}#approvalsPanel{order:1}#livePanel{order:2}#steerPanel{order:3}#missionsPanel{order:4}#activityPanel{order:5}header{padding:10px}#activityList{max-height:300px}}
 `;
 
+/**
+ * Page-side input helpers as plain ES5 source. The page script embeds this exact
+ * string, and the unit tests evaluate it with `new Function`, so both run the same
+ * code (no DOM needed — the functions only look at the event fields they're given).
+ *
+ * qxKeyAction(keydownEvent) → null (ignore) | {kind:'paste'} (let the native paste
+ * event carry the text) | {kind:'text', text} | {kind:'key', key: <Playwright key>}.
+ * Rules: one user-perceived character (any script, emoji, ZWNJ, AltGr / macOS
+ * Option compositions) is typed as text — Playwright's keyboard.press() only knows
+ * US-layout keys. Shortcuts on a non-Latin layout (Persian Ctrl+A arrives as "ش")
+ * are sent by PHYSICAL key (e.code, e.g. "ControlOrMeta+KeyA"), which Playwright
+ * accepts and which matches what the user pressed.
+ *
+ * qxEnqueueInput(queue, ev, max?) adds an input event to the not-yet-sent queue,
+ * coalescing so a slow link never builds a backlog: consecutive pointer moves
+ * collapse to the latest, a move right before a click (or a positioned scroll) is
+ * dropped, scrolls at the same point and consecutive typing merge, and the queue is
+ * bounded (oldest move dropped first, then the oldest event).
+ */
+export const DASHBOARD_INPUT_HELPERS = String.raw`
+var QX_MODIFIER_KEYS = ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'FnLock', 'OS', 'Hyper', 'Super', 'Symbol', 'SymbolLock'];
+var QX_PHYSICAL_KEY = /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash|IntlBackslash)$/;
+var QX_MAX_DELTA = 100000;
+function qxKeyAction(e) {
+  var key = e && typeof e.key === 'string' ? e.key : '';
+  if (!key || e.isComposing || key === 'Unidentified' || key === 'Dead' || key === 'Process') return null;
+  if (QX_MODIFIER_KEYS.indexOf(key) >= 0) return null;
+  var code = typeof e.code === 'string' ? e.code : '';
+  var altGr = false;
+  try { altGr = !!(e.getModifierState && e.getModifierState('AltGraph')); } catch (x) { altGr = false; }
+  // Windows reports AltGr as Ctrl+Alt: those characters are typed, not shortcuts.
+  var ctrlOrMeta = !!(e.ctrlKey || e.metaKey) && !altGr;
+  var alt = !!e.altKey && !altGr;
+  var single = Array.from(key).length === 1;
+  if (ctrlOrMeta && !alt && (code === 'KeyV' || key === 'v' || key === 'V')) return { kind: 'paste' };
+  if (single && !ctrlOrMeta && (!alt || !/^[A-Za-z0-9]$/.test(key))) return { kind: 'text', text: key };
+  var name;
+  if (key === ' ') name = 'Space';
+  else if (single) {
+    if (/^[\x21-\x7e]$/.test(key)) name = e.shiftKey ? key : key.toLowerCase();
+    else if (QX_PHYSICAL_KEY.test(code)) name = code;
+    else return null;
+  } else name = key;
+  var parts = [];
+  if (ctrlOrMeta) parts.push('ControlOrMeta');
+  if (alt) parts.push('Alt');
+  if (e.shiftKey && (!single || ctrlOrMeta || alt)) parts.push('Shift');
+  parts.push(name);
+  return { kind: 'key', key: parts.join('+') };
+}
+function qxClampDelta(v) { return Math.max(-QX_MAX_DELTA, Math.min(QX_MAX_DELTA, Math.round(v))); }
+function qxEnqueueInput(queue, ev, max) {
+  var cap = max > 0 ? max : 200;
+  var last = queue.length ? queue[queue.length - 1] : null;
+  if (ev.type === 'move') {
+    if (last && last.type === 'move') { queue[queue.length - 1] = ev; return queue; }
+  } else if (ev.type === 'click' || (ev.type === 'scroll' && typeof ev.x === 'number')) {
+    while (queue.length && queue[queue.length - 1].type === 'move') queue.pop();
+    last = queue.length ? queue[queue.length - 1] : null;
+  }
+  if (ev.type === 'scroll') {
+    ev.dx = qxClampDelta(ev.dx || 0); ev.dy = qxClampDelta(ev.dy || 0);
+    if (last && last.type === 'scroll' && last.x === ev.x && last.y === ev.y && last.frameWidth === ev.frameWidth && last.frameHeight === ev.frameHeight) {
+      last.dx = qxClampDelta(last.dx + ev.dx); last.dy = qxClampDelta(last.dy + ev.dy);
+      return queue;
+    }
+  } else if (ev.type === 'type' && last && last.type === 'type' && (last.text + ev.text).length <= 10000) {
+    last.text = last.text + ev.text;
+    return queue;
+  }
+  queue.push(ev);
+  while (queue.length > cap) {
+    var drop = -1;
+    for (var i = 0; i < queue.length - 1; i++) if (queue[i].type === 'move') { drop = i; break; }
+    queue.splice(drop >= 0 ? drop : 0, 1);
+  }
+  return queue;
+}
+`;
+
 const SCRIPT = String.raw`
 (function () {
   'use strict';
+` + DASHBOARD_INPUT_HELPERS + String.raw`
   var boot = {};
   try { boot = JSON.parse(document.getElementById('qx-boot').textContent || '{}'); } catch (e) { boot = {}; }
   var STR = boot.strings || { en: {} };
@@ -418,6 +502,7 @@ const SCRIPT = String.raw`
     btn.className = 'btn ' + (state.takeover ? 'danger' : 'primary');
     var ids = ['url', 'goBtn', 'backBtn', 'fwdBtn', 'reloadBtn', 'typeBox', 'typeSend', 'enterBtn'];
     for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = !state.takeover;
+    if (!state.takeover && inputQueue) { inputQueue.length = 0; typeBuf = ''; }
     renderOverlay();
   }
   $('takeBtn').addEventListener('click', function () {
@@ -477,14 +562,24 @@ const SCRIPT = String.raw`
   });
 
   // ── human input (only while the human holds control) ───────────────────────
-  var inputChain = Promise.resolve();
+  // One request in flight at a time; everything else waits in a coalescing queue
+  // (qxEnqueueInput), so a slow phone/tunnel link never builds a backlog of moves.
+  var inputQueue = [], inputBusy = false;
   function liveMsg(text, isErr) { var m = $('liveMsg'); m.textContent = text || ''; m.classList.toggle('err', !!isErr); }
   function sendInput(ev) {
     if (!state.takeover) return;
-    inputChain = inputChain.then(function () { return api('POST', '/api/input', ev); }).then(function () { liveMsg(''); }).catch(function (e) {
+    qxEnqueueInput(inputQueue, ev);
+    pumpInput();
+  }
+  function pumpInput() {
+    if (inputBusy || !inputQueue.length) return;
+    if (!state.takeover) { inputQueue.length = 0; return; }
+    var ev = inputQueue.shift();
+    inputBusy = true;
+    api('POST', '/api/input', ev).then(function () { liveMsg(''); }).catch(function (e) {
       liveMsg(errText(e), true);
-      if (e && e.status === 409) refreshState();
-    });
+      if (e && e.status === 409) { inputQueue.length = 0; refreshState(); }
+    }).then(function () { inputBusy = false; pumpInput(); });
   }
   var frameImg = $('frame'), screen = $('screen');
   function framePoint(e) {
@@ -556,37 +651,24 @@ const SCRIPT = String.raw`
     if (!wheel.timer) wheel.timer = setTimeout(flushWheel, 80);
   }, { passive: false });
 
-  // Keyboard: printable characters are batched into one "type" event; everything
-  // else becomes a Playwright key name ("Enter", "ControlOrMeta+a", "Shift+Tab").
+  // Keyboard: characters are batched into one "type" event; everything else becomes
+  // a Playwright key name ("Enter", "ControlOrMeta+a", "Shift+Tab") — see qxKeyAction.
   var typeBuf = '', typeTimer = null;
   function flushType() { clearTimeout(typeTimer); typeTimer = null; if (typeBuf) { var s = typeBuf; typeBuf = ''; sendInput({ type: 'type', text: s }); } }
   screen.addEventListener('keydown', function (e) {
-    if (!state.takeover || e.isComposing) return;
-    var key = e.key;
-    if (!key || key === 'Unidentified' || key === 'Dead') return;
-    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'OS'].indexOf(key) >= 0) return;
-    var mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.altKey && key.toLowerCase() === 'v') return; // let the paste event carry the text
-    // One CHARACTER (code points, so emoji count as one) that the keyboard composed:
-    // plain keys, AltGr layouts (reported as Ctrl+Alt) and macOS Option characters
-    // (non-ASCII with Alt) are text; Alt+ASCII letter stays a shortcut (accesskeys).
-    var single = Array.from(key).length === 1;
-    var altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
-    if (single && (altGr || (!mod && (!e.altKey || key.charCodeAt(0) > 127)))) {
-      e.preventDefault();
-      typeBuf += key;
-      clearTimeout(typeTimer); typeTimer = setTimeout(flushType, 120);
+    if (!state.takeover) return;
+    var a = qxKeyAction(e);
+    if (!a || a.kind === 'paste') return; // paste: the 'paste' event below carries the text
+    e.preventDefault();
+    if (a.kind === 'text') {
+      typeBuf += a.text;
+      clearTimeout(typeTimer);
+      // (flush long bursts early: the server takes at most 10000 characters per event)
+      if (typeBuf.length >= 2000) flushType(); else typeTimer = setTimeout(flushType, 120);
       return;
     }
-    e.preventDefault();
     flushType();
-    var parts = [];
-    if (mod) parts.push('ControlOrMeta');
-    if (e.altKey) parts.push('Alt');
-    if (e.shiftKey && (key.length > 1 || mod || e.altKey)) parts.push('Shift');
-    var name = key === ' ' ? 'Space' : (key.length === 1 && !e.shiftKey ? key.toLowerCase() : key);
-    parts.push(name);
-    sendInput({ type: 'key', key: parts.join('+') });
+    sendInput({ type: 'key', key: a.key });
   });
   screen.addEventListener('paste', function (e) {
     if (!state.takeover) return;
@@ -757,6 +839,8 @@ const SCRIPT = String.raw`
   }
   var missionsTimer = null;
   function refreshMissions() {
+    // The missions integration went away: its approval cards can't be answered any more.
+    if (!hasAction('missions.approvals') && Object.keys(state.missionApprovals).length) { state.missionApprovals = {}; renderApprovals(); }
     if (!hasAction('missions.list')) { renderMissions(); return Promise.resolve(); }
     var p1 = api('POST', '/api/actions/missions.list', { limit: 20 }).then(function (j) { state.missions = missionsFrom(j.result); renderMissions(); }).catch(function () {});
     var p2 = !hasAction('missions.approvals') ? Promise.resolve() : api('POST', '/api/actions/missions.approvals', {}).then(function (j) {
@@ -826,8 +910,13 @@ const SCRIPT = String.raw`
         // Every tab reports its navigations: only the ACTIVE tab drives the URL bar.
         var act = activeTab(state.browser);
         if (!(act && act.id && d.tab && d.tab !== act.id)) {
-          if (act) act.url = d.url;
-          if (document.activeElement !== $('url')) $('url').value = d.url;
+          // Bus copies are secret-masked: a masked URL must not land in the URL bar;
+          // the authoritative /api/state snapshot carries the real one.
+          if (d.url.indexOf('***') >= 0) scheduleState();
+          else {
+            if (act) act.url = d.url;
+            if (document.activeElement !== $('url')) $('url').value = d.url;
+          }
         }
       }
       if (ev.type === 'launched' || ev.type === 'closed' || ev.type === 'tab') scheduleState();
@@ -909,6 +998,14 @@ const SCRIPT = String.raw`
   setInterval(function () { if (!document.hidden) { refreshState(); if (hasAction('missions.approvals')) refreshMissions(); } }, 5000);
 })();
 `;
+
+/**
+ * CSP source allowing exactly the dashboard's one executable inline script (its
+ * sha256), so the server can drop 'unsafe-inline' for scripts: even if some text
+ * ever slipped into the page as HTML, it could not run. The boot JSON block is a
+ * data block (type="application/json") and is never executed.
+ */
+export const DASHBOARD_SCRIPT_CSP_SOURCE = `'sha256-${createHash('sha256').update(SCRIPT, 'utf8').digest('base64')}'`;
 
 /**
  * Render the dashboard. The returned string is a complete HTML document; it embeds

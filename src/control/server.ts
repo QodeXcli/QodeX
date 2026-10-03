@@ -53,7 +53,7 @@ import {
 import { resolveControlConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { lanUrls, makeAccessToken, startTunnel, type TunnelHandle } from '../artifacts/live-share.js';
-import { renderDashboard, type DashboardLang } from './dashboard.js';
+import { renderDashboard, DASHBOARD_SCRIPT_CSP_SOURCE, type DashboardLang } from './dashboard.js';
 import { logger } from '../utils/logger.js';
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -72,6 +72,9 @@ const MAX_CLIENT_BUFFER = 4 * 1024 * 1024;
 const FRAME_POLL_MS = 1500;
 /** Back-off after a failed startScreencast before retrying. */
 const FRAME_RETRY_MS = 5000;
+/** A screencast that started but delivered no frame for this long is restarted
+ *  (doubling per consecutive stall, up to 8x). */
+const FRAME_STALL_MS = 4000;
 const COOKIE_PREFIX = 'qx_ctl';
 const COOKIE_MAX_AGE_S = 7 * 24 * 3600;
 /** Default grace before an orphaned control-center takeover is handed back. */
@@ -427,12 +430,47 @@ export function safeStringify(value: unknown): string {
   }
 }
 
-/** Wire form of a bus event (truncated when huge, so one event can't flood viewers). */
+/**
+ * Copy of `value` with maskSecrets() applied to every string inside it. Works on
+ * values (never on serialized JSON, so an escaped quote can't corrupt the output);
+ * cycles and very deep nesting are replaced by markers instead of being copied.
+ */
+export function maskSecretsDeep(value: unknown): unknown {
+  const stack = new Set<object>();
+  const walk = (v: unknown, depth: number): unknown => {
+    if (typeof v === 'string') return maskSecrets(v);
+    if (!v || typeof v !== 'object') return v;
+    if (typeof AbortSignal !== 'undefined' && v instanceof AbortSignal) return undefined;
+    const withJson = v as { toJSON?: () => unknown };
+    if (typeof withJson.toJSON === 'function') {
+      try { return walk(withJson.toJSON(), depth); } catch { return '[unserializable]'; }
+    }
+    if (stack.has(v)) return '[circular]';
+    if (depth > 12) return '[…]';
+    stack.add(v);
+    try {
+      if (Array.isArray(v)) return v.map(x => walk(x, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = walk(x, depth + 1);
+      return out;
+    } finally {
+      stack.delete(v);
+    }
+  };
+  return walk(value, 0);
+}
+
+/**
+ * Wire form of a bus event for (possibly remote) viewers: secret-looking strings are
+ * masked — bus events carry page URLs, typed text and tool summaries from every
+ * producer — and huge events are truncated so one event can't flood viewers.
+ */
 export function busEventJson(ev: BusEvent): string {
-  const s = safeStringify(ev);
+  const masked = maskSecretsDeep(ev) as Record<string, unknown>;
+  const s = safeStringify(masked);
   if (s.length <= MAX_EVENT_JSON) return s;
   const head: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(ev as unknown as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(masked)) {
     if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
       head[k] = typeof v === 'string' && v.length > 2000 ? v.slice(0, 2000) + '…' : v;
     }
@@ -551,6 +589,7 @@ function openSse(res: ServerResponse): void {
     'X-Accel-Buffering': 'no',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
+    'Cross-Origin-Resource-Policy': 'same-origin',
   });
   res.flushHeaders?.();
   res.write('retry: 2000\n\n');
@@ -619,6 +658,10 @@ class FrameHub {
   private last: { frame: ScreencastFrame; at: number } | null = null;
   private poll: NodeJS.Timeout | null = null;
   private lastFailure = 0;
+  /** When the current screencast's start resolved (0 = none running). */
+  private castStart = 0;
+  /** Consecutive restarts of a screencast that never delivered a frame. */
+  private stalls = 0;
 
   constructor(private readonly opts: { quality: number; maxFps: number }) {}
 
@@ -663,6 +706,13 @@ class FrameHub {
       }
       return;
     }
+    // The real manager resolves startScreencast even when attaching to the page failed
+    // (it logs and waits for the next tab event): a cast with no frame ever is restarted.
+    if (this.stopFn && !this.live && this.castStart && Date.now() - this.castStart > FRAME_STALL_MS * 2 ** Math.min(this.stalls, 3)) {
+      this.stalls++;
+      void this.stop().then(() => this.sync());
+      return;
+    }
     if (this.stopFn || this.startingGen) return;
     if (Date.now() - this.lastFailure < FRAME_RETRY_MS) return;
     this.start(mgr);
@@ -684,6 +734,7 @@ class FrameHub {
         return;
       }
       this.stopFn = stop;
+      this.castStart = Date.now();
     }).catch(err => {
       if (this.startingGen === g) this.startingGen = 0;
       if (g !== this.gen) return;
@@ -696,6 +747,7 @@ class FrameHub {
     if (g !== this.gen || !f || typeof f.data !== 'string') return;
     this.last = { frame: f, at: Date.now() };
     this.live = true;
+    this.stalls = 0;
     const json = frameJson(f);
     for (const v of this.viewers) v.send('frame', json, true);
   }
@@ -704,6 +756,7 @@ class FrameHub {
     this.gen++;
     this.startingGen = 0;
     this.live = false;
+    this.castStart = 0;
     const s = this.stopFn;
     this.stopFn = null;
     if (s) {
@@ -712,6 +765,7 @@ class FrameHub {
   }
 
   onBrowserEvent(type: string): void {
+    if (type === 'closed' || type === 'launched') this.stalls = 0;
     if (type === 'closed') {
       void this.stop();
       this.last = null;
@@ -818,8 +872,25 @@ function isLoopbackHost(h: string): boolean {
   return h === '127.0.0.1' || h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
 
+/**
+ * $QODEX_CONTROL_TOKEN, read once and then REMOVED from process.env: tools spawn
+ * children with this environment (not all of them sanitize it), and whoever holds
+ * the token can answer Sentinel approvals — the agent must never be able to approve
+ * its own purchase. Later starts in this process reuse the remembered value.
+ */
+let envToken: string | undefined;
+function takeEnvToken(): string | undefined {
+  const v = process.env.QODEX_CONTROL_TOKEN;
+  if (v !== undefined) {
+    envToken = v;
+    delete process.env.QODEX_CONTROL_TOKEN;
+  }
+  return envToken;
+}
+
 function resolveToken(t: string | undefined): string {
-  const v = String(t ?? process.env.QODEX_CONTROL_TOKEN ?? '').trim();
+  const fromEnv = takeEnvToken();
+  const v = String(t ?? fromEnv ?? '').trim();
   if (!v) return makeAccessToken();
   if (!/^[A-Za-z0-9._~-]{16,256}$/.test(v)) {
     throw new Error('[CONTROL_WEAK_TOKEN] The control-center token must be 16-256 URL-safe characters (A-Z a-z 0-9 . _ ~ -).');
@@ -892,6 +963,26 @@ async function openTunnel(rt: Running): Promise<void> {
   }
 }
 
+/** Hand a rebound server the previous server's tunnel. The tunnel forwards to
+ *  127.0.0.1:<port>, so it keeps working when the port is unchanged; otherwise it is
+ *  replaced by a fresh one. */
+async function adoptTunnel(fresh: Running, old: Running): Promise<void> {
+  if (!old.tunnel) {
+    if (old.tunnelError && !fresh.tunnelError) fresh.tunnelError = old.tunnelError;
+    return;
+  }
+  if (fresh.port === old.port) {
+    fresh.tunnel = old.tunnel;
+    fresh.tunnelUrl = old.tunnelUrl;
+    fresh.tunnelError = undefined;
+    old.tunnel = undefined;
+    return;
+  }
+  try { old.tunnel.close(); } catch { /* ignore */ }
+  old.tunnel = undefined;
+  await openTunnel(fresh);
+}
+
 async function launch(opts: ControlCenterOptions): Promise<Running> {
   const cfg = resolveControlConfig(getActiveConfig());
   const lan = !!opts.lan;
@@ -944,6 +1035,11 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
   });
 
   rt.port = await listenWithFallback(server, port, host);
+  // A listening net.Server still emits 'error' (e.g. EMFILE on accept). Unhandled,
+  // that would crash the whole QodeX process (TUI, mission worker) it runs in.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    logger.warn('Control center server error', { err: errMessage(err), code: err?.code });
+  });
 
   // Human approvals: make this a remote channel so unattended runs can ask here.
   const channel: ApprovalChannel = {
@@ -1013,23 +1109,37 @@ function checkOrphanedTakeover(rt: Running): void {
   } catch { /* the manager went away */ }
 }
 
-async function shutdown(rt: Running, releaseTakeover: boolean): Promise<void> {
+interface ShutdownOptions {
+  /** Hand browser control back to the agent if the dashboard holds it. */
+  releaseTakeover: boolean;
+  /** Leave the tunnel child running (a LAN rebind hands it to the new server on the same port). */
+  keepTunnel?: boolean;
+  /** Leave the 'control' approval channel registered until the rebound server replaces it,
+   *  so a request made during the rebind isn't answered "no" for lack of any channel. */
+  keepChannel?: boolean;
+}
+
+async function shutdown(rt: Running, o: ShutdownOptions): Promise<void> {
   if (rt.watchdog) { clearInterval(rt.watchdog); rt.watchdog = null; }
   if (rt.cookieSweep) { clearInterval(rt.cookieSweep); rt.cookieSweep = null; }
-  try { rt.unregisterChannel(); } catch { /* ignore */ }
+  if (!o.keepChannel) {
+    try { rt.unregisterChannel(); } catch { /* ignore */ }
+  }
   try { rt.unsubscribeBus(); } catch { /* ignore */ }
   await rt.frames.close().catch(() => {});
   for (const c of [...rt.eventClients]) c.end();
   rt.eventClients.clear();
-  if (releaseTakeover) {
+  if (o.releaseTakeover) {
     // Never leave the agent paused behind a takeover nobody can hand back.
     try {
       const mgr = peekBrowserManager();
       if (mgr?.isTakeover() && mgr.status().takeoverBy === 'control') mgr.setTakeover(false, 'control');
     } catch { /* ignore */ }
   }
-  try { rt.tunnel?.close(); } catch { /* ignore */ }
-  rt.tunnel = undefined;
+  if (!o.keepTunnel) {
+    try { rt.tunnel?.close(); } catch { /* ignore */ }
+    rt.tunnel = undefined;
+  }
   await new Promise<void>(resolve => {
     rt.server.close(() => resolve());
     (rt.server as Server & { closeAllConnections?: () => void }).closeAllConnections?.();
@@ -1052,7 +1162,8 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
       if (opts.onSteer) rt.onSteer = opts.onSteer;
       if (opts.lan && !isWildcardHost(rt.host)) {
         // LAN needs an all-interfaces bind: rebind with the same token/port/settings.
-        // Open dashboards reconnect on their own; the takeover state is kept.
+        // Open dashboards reconnect on their own; the takeover state is kept, and so
+        // are the public tunnel (same shared link) and the approval channel.
         const keep: ControlCenterOptions = {
           host: rt.host,
           port: rt.port,
@@ -1063,21 +1174,34 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
           screencastQuality: rt.quality,
           screencastMaxFps: rt.maxFps,
           takeoverReleaseMs: rt.takeoverReleaseMs,
-          tunnel: !!rt.tunnel,
         };
         // (explicitly-undefined fields in `opts` must not wipe the kept settings)
         const given = Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) as ControlCenterOptions;
-        const next: ControlCenterOptions = { ...keep, ...given, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: !!opts.tunnel || !!rt.tunnel };
+        const next: ControlCenterOptions = { ...keep, ...given, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: false };
         current = null;
-        await shutdown(rt, false);
+        await shutdown(rt, { releaseTakeover: false, keepTunnel: true, keepChannel: true });
+        let fresh: Running | null = null;
+        let failure: unknown = null;
         try {
-          current = await launch(next);
+          fresh = await launch(next);
         } catch (e) {
           // Don't leave the user without a control center: restore the previous bind.
-          current = await launch(keep).catch(() => null);
-          throw e;
+          failure = e;
+          fresh = await launch(keep).catch(() => null);
         }
-        return infoOf(current);
+        if (!fresh) {
+          // Nothing serves any more: drop the orphaned channel (else unattended runs
+          // would wait on a dashboard that can't exist) and the tunnel child.
+          try { rt.unregisterChannel(); } catch { /* ignore */ }
+          try { rt.tunnel?.close(); } catch { /* ignore */ }
+          rt.tunnel = undefined;
+          throw failure;
+        }
+        await adoptTunnel(fresh, rt);
+        if (opts.tunnel && !fresh.tunnel) await openTunnel(fresh);
+        current = fresh;
+        if (failure) throw failure;
+        return infoOf(fresh);
       }
       if (opts.tunnel && !rt.tunnel) await openTunnel(rt);
       return infoOf(rt);
@@ -1093,7 +1217,7 @@ export function stopControlCenter(): Promise<boolean> {
     const rt = current;
     if (!rt) return false;
     current = null;
-    await shutdown(rt, true);
+    await shutdown(rt, { releaseTakeover: true });
     return true;
   });
 }
@@ -1103,6 +1227,11 @@ export function getControlCenter(): ControlCenterInfo | null {
   return current ? infoOf(current) : null;
 }
 
+/** Test hook: the running node:http server (or null). */
+export function controlServerForTests(): Server | null {
+  return current?.server ?? null;
+}
+
 // ── request handling ──────────────────────────────────────────────────────────
 
 const BASE_HEADERS: Record<string, string> = {
@@ -1110,18 +1239,29 @@ const BASE_HEADERS: Record<string, string> = {
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
   'Cache-Control': 'no-store',
+  // Another site on the same host (any port counts as same-site) must not be able to
+  // embed /api/frame.jpg or other responses with <img>/<script> and probe them.
+  'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
-const HTML_CSP = [
-  "default-src 'none'",
-  "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-].join('; ');
+/** CSP for our HTML pages. `scriptSrc` lists the exact inline scripts allowed (by
+ *  hash); there is no 'unsafe-inline' for scripts, so injected markup can't run. */
+function htmlCsp(scriptSrc: string): string {
+  return [
+    "default-src 'none'",
+    `script-src ${scriptSrc}`,
+    "style-src 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+function scriptHashSource(script: string): string {
+  return `'sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}'`;
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
   const text = safeStringify(body);
@@ -1138,11 +1278,14 @@ function sendError(res: ServerResponse, status: number, error: string, extra: Re
   sendJson(res, status, { ok: false, error }, extra);
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string, extra: Record<string, string> = {}): void {
+function sendHtml(res: ServerResponse, status: number, html: string, scriptSrc: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, {
     ...BASE_HEADERS,
     'Content-Type': 'text/html; charset=utf-8',
-    'Content-Security-Policy': HTML_CSP,
+    'Content-Security-Policy': htmlCsp(scriptSrc),
+    // (No Cross-Origin-Opener-Policy: its browsing-context-group swap makes the agent
+    //  browser's navigation hang when it races the eviction of an agent tab that
+    //  opened the control center — see test/control-e2e.test.ts.)
     'Content-Length': String(Buffer.byteLength(html)),
     ...extra,
   });
@@ -1153,18 +1296,30 @@ function wantsHtml(req: IncomingMessage): boolean {
   return /text\/html/i.test(String(req.headers.accept ?? ''));
 }
 
+/** Whether the viewer reached us over https (TLS socket, or a tunnel that says so). */
+function requestIsHttps(req: IncomingMessage): boolean {
+  if ((req.socket as Socket & { encrypted?: boolean }).encrypted) return true;
+  const raw = req.headers['x-forwarded-proto'];
+  const first = String(Array.isArray(raw) ? raw[0] : raw ?? '').split(',')[0]?.trim().toLowerCase();
+  return first === 'https';
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
-function bouncePage(target: string): string {
+/** The `?k=` landing page (the cookie rides on the response): moves on to `target`
+ *  with history replacement. Returns the page and the CSP source for its one script. */
+function bouncePage(target: string): { html: string; scriptSrc: string } {
   const t = escapeHtml(target);
   const js = JSON.stringify(target).replace(/</g, '\\u003c');
-  return '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
+  const script = `location.replace(${js});`;
+  const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
     + `<meta http-equiv="refresh" content="0;url=${t}"><title>QodeX Control Center</title></head>`
     + '<body style="background:#0b0f14;color:#e5e7eb;font-family:system-ui,sans-serif;padding:24px">'
     + `<p>Signing you in… <a style="color:#22d3ee" href="${t}">continue</a></p>`
-    + `<script>location.replace(${js});</script></body></html>`;
+    + `<script>${script}</script></body></html>`;
+  return { html, scriptSrc: scriptHashSource(script) };
 }
 
 function unauthorizedPage(): string {
@@ -1402,7 +1557,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   const auth = authenticateRequest(rt.token, rt.port, req);
   if (!auth.ok) {
     if (!isRead) drainAndIgnore(req);
-    if (isRead && wantsHtml(req)) sendHtml(res, 401, unauthorizedPage());
+    if (isRead && wantsHtml(req)) sendHtml(res, 401, unauthorizedPage(), "'none'");
     else sendError(res, 401, '[UNAUTHORIZED] Missing or invalid access token. Open the full link printed by `qodex control` (it ends with ?k=…), or send Authorization: Bearer <token>.');
     return;
   }
@@ -1413,7 +1568,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   if (agentBrowserOnControlCenter(rt, req)) {
     if (!isRead) drainAndIgnore(req);
     const msg = '[AGENT_BROWSER] The control center refuses requests while the agent\'s own browser has it open (the agent must not answer its own approvals). Open the link in your own browser.';
-    if (isRead && wantsHtml(req)) sendHtml(res, 403, agentBrowserPage());
+    if (isRead && wantsHtml(req)) sendHtml(res, 403, agentBrowserPage(), "'none'");
     else sendError(res, 403, msg, { Connection: 'close' });
     return;
   }
@@ -1421,7 +1576,9 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   // 2. `?k=` login: set the cookie and bounce to the same URL without the token.
   if (auth.via === 'query' && isRead) {
     const target = stripTokenFromUrl(rawUrl);
-    const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}`;
+    // Behind an https tunnel the cookie must never travel over plain http.
+    const secure = requestIsHttps(req) ? '; Secure' : '';
+    const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}${secure}`;
     if (!isLocalRedirect(target)) {
       // Never bounce anywhere but this server (stripTokenFromUrl already keeps a bare path).
       res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: '/', 'Content-Length': '0' });
@@ -1430,7 +1587,8 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
       // An HTML bounce (not a 302) so the follow-up navigation is initiated by OUR
       // page — a SameSite=Strict cookie is then sent even when the link was opened
       // from another site (Telegram web, a mail client, ...).
-      sendHtml(res, 200, bouncePage(target), { 'Set-Cookie': cookie });
+      const page = bouncePage(target);
+      sendHtml(res, 200, page.html, page.scriptSrc, { 'Set-Cookie': cookie });
     } else {
       res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: target, 'Content-Length': '0' });
       res.end();
@@ -1465,7 +1623,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   }
 
   if (path === '/' || path === '/index.html') {
-    sendHtml(res, 200, renderDashboard({ title: rt.title || undefined, lang: pickLang(rt, req) }));
+    sendHtml(res, 200, renderDashboard({ title: rt.title || undefined, lang: pickLang(rt, req) }), DASHBOARD_SCRIPT_CSP_SOURCE);
     return;
   }
   if (path === '/api/state') return routeState(rt, res, query);

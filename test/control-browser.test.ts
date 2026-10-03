@@ -297,6 +297,161 @@ describe('control center dashboard in a real browser', () => {
     await page.close();
   }, 60_000);
 
+  async function openDashboardAndTakeOver(): Promise<any> {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    await page.locator('#frame:not(.hidden)').waitFor({ timeout: 10_000 });
+    await page.locator('#takeBtn').click();
+    await page.locator('body.takeover').waitFor({ timeout: 10_000 });
+    expect(await waitUntil(() => fake.takeover)).toBe(true);
+    return page;
+  }
+
+  async function handBack(page: any): Promise<void> {
+    await page.locator('#takeBtn').click();
+    expect(await waitUntil(() => !fake.takeover)).toBe(true);
+    await page.close();
+  }
+
+  it.skipIf(!chromiumPath)('sends Persian-layout shortcuts, emoji and AltGr characters as input real Playwright accepts', async () => {
+    fake.inputs = [];
+    const page = await openDashboardAndTakeOver();
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    // Synthetic key events as a Persian keyboard produces them (layout switching isn't
+    // scriptable in headless Chromium): Ctrl+A → key "ش" on the physical KeyA.
+    await page.evaluate(`(function () {
+      var s = document.getElementById('screen');
+      s.focus();
+      var evs = [
+        { key: 'ش', code: 'KeyA', ctrlKey: true },
+        { key: '😀', code: '' },
+        { key: '@', code: 'KeyQ', ctrlKey: true, altKey: true, modifierAltGraph: true },
+        { key: 'Enter', code: 'Enter' }
+      ];
+      evs.forEach(function (o) { o.bubbles = true; o.cancelable = true; s.dispatchEvent(new KeyboardEvent('keydown', o)); });
+    })()`);
+    expect(await waitUntil(() => fake.inputs.some(e => e.type === 'key' && e.key === 'Enter'))).toBe(true);
+    expect(fake.inputs).toEqual([
+      { type: 'key', key: 'ControlOrMeta+KeyA' },
+      { type: 'type', text: '😀@' },
+      { type: 'key', key: 'Enter' },
+    ]);
+
+    // Replay exactly what the manager received on a real page: every key must be one
+    // Playwright knows, and ControlOrMeta+KeyA must really select all.
+    const target = await browser.newPage();
+    await target.setContent('<input id="i" value="hello world">');
+    await target.focus('#i');
+    await target.keyboard.press((fake.inputs[0] as { key: string }).key);
+    expect(await target.evaluate('[document.getElementById("i").selectionStart, document.getElementById("i").selectionEnd]')).toEqual([0, 11]);
+    await target.keyboard.type((fake.inputs[1] as { text: string }).text);
+    await target.keyboard.press((fake.inputs[2] as { key: string }).key);
+    expect(await target.evaluate('document.getElementById("i").value')).toBe('😀@');
+    await target.close();
+
+    // A long burst of typing is flushed in chunks (the server takes at most 10000 characters per event).
+    fake.inputs = [];
+    await page.evaluate(`(function () {
+      var s = document.getElementById('screen');
+      for (var i = 0; i < 2500; i++) s.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true }));
+    })()`);
+    const typedLen = () => fake.inputs.reduce((n, e) => n + (e.type === 'type' ? e.text.length : 0), 0);
+    expect(await waitUntil(() => typedLen() === 2500)).toBe(true);
+    expect(fake.inputs.map(e => (e.type === 'type' ? e.text.length : -1))).toEqual([2000, 500]);
+
+    expect(pageErrors).toEqual([]);
+    await handBack(page);
+  }, 60_000);
+
+  it.skipIf(!chromiumPath)('does not build an input backlog behind pointer moves on a slow link', async () => {
+    fake.inputs = [];
+    const original = fake.dispatchInput;
+    const dispatched: Array<{ type: string; at: number }> = [];
+    fake.dispatchInput = async (ev: HumanInputEvent) => {
+      await new Promise(r => setTimeout(r, 300)); // a slow phone / tunnel round-trip
+      dispatched.push({ type: ev.type, at: Date.now() });
+      fake.inputs.push(ev);
+    };
+    try {
+      const page = await openDashboardAndTakeOver();
+      // ~2s of hovering over the live frame (the page throttles moves to one per 120ms).
+      await page.evaluate(`new Promise(function (done) {
+        var img = document.getElementById('frame'), r = img.getBoundingClientRect(), i = 0;
+        var t = setInterval(function () {
+          i++;
+          img.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 10 + i * 5, clientY: r.top + 20 + i * 3 }));
+          if (i >= 16) { clearInterval(t); done(); }
+        }, 130);
+      })`);
+      const t0 = Date.now();
+      await page.locator('#frame').click({ position: { x: 30, y: 30 } });
+      expect(await waitUntil(() => dispatched.some(d => d.type === 'click'), 8000)).toBe(true);
+      const clickAt = dispatched.find(d => d.type === 'click')!.at;
+      // Without coalescing the click waits behind every queued move (~3s here).
+      expect(clickAt - t0).toBeLessThan(1500);
+      expect(dispatched.filter(d => d.type === 'move').length).toBeLessThanOrEqual(9);
+      await handBack(page);
+    } finally {
+      fake.dispatchInput = original;
+    }
+  }, 60_000);
+
+  it.skipIf(!chromiumPath)('drops mission approval cards when the missions integration goes away', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    const offList = registerControlAction('missions.list', () => []);
+    const offApprovals = registerControlAction('missions.approvals', () => [{ id: 'ap_gone', missionId: 'm_7', prompt: 'Book the flight for $310?', options: ['yes', 'no'], category: 'payment', createdAt: new Date().toISOString() }]);
+    try {
+      const card = page.locator('#approvalList .card', { hasText: 'Book the flight' });
+      await card.waitFor({ timeout: 10_000 });
+      offApprovals();
+      await card.waitFor({ state: 'detached', timeout: 5000 });
+    } finally {
+      offApprovals();
+      offList();
+    }
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
+
+  it.skipIf(!chromiumPath)('masks secrets in forwarded bus events but never puts a masked URL into the URL bar', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    const realUrl = 'https://shop.example/oauth/cb?access_token=abcdefghijklmnopqrstuvwxyz';
+    const originalTabs = fake.tabs;
+    fake.tabs = () => [{ index: 0, id: 't1', url: realUrl, title: 'Callback', active: true }];
+    try {
+      getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: 't1', index: 0, url: realUrl } });
+      getBus().publish({ kind: 'notice', level: 'info', message: 'after-secret-nav' });
+      await page.locator('#activityList li', { hasText: 'after-secret-nav' }).waitFor({ timeout: 10_000 });
+      // The timeline copy is masked...
+      expect(await page.locator('#activityList').textContent()).not.toContain('abcdefghijklmnopqrstuvwxyz');
+      // ...and the URL bar shows the real (authoritative /api/state) URL, never the masked one.
+      let seen = '';
+      for (let i = 0; i < 80 && seen !== realUrl; i++) {
+        seen = await page.locator('#url').inputValue();
+        expect(seen).not.toContain('***');
+        if (seen !== realUrl) await new Promise(r => setTimeout(r, 50));
+      }
+      expect(seen).toBe(realUrl);
+    } finally {
+      fake.tabs = originalTabs;
+    }
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('shows an access message instead of the dashboard without the token', async () => {
     const page = await browser.newPage();
     const r = await page.goto(`http://127.0.0.1:${info.port}/`);
