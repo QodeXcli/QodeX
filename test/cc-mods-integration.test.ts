@@ -444,9 +444,10 @@ describe('commands', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli', 'slash-commands.ts'), 'utf-8');
     const cases = [...src.matchAll(/^\s+case '([a-z0-9-]+)':/gm)].map(m => m[1]!);
     expect(cases.length).toBeGreaterThan(50);
-    const reserved = new Set(CAT.RESERVED_SLASH_NAMES);
+    // A new command goes in SLASH_CATALOG; a new alias in RESERVED_SLASH_NAMES — either way
+    // a mod can never take the name.
+    const reserved = new Set([...CAT.RESERVED_SLASH_NAMES, ...CAT.SLASH_CATALOG.map(c => c.name)]);
     expect(cases.filter(c => !reserved.has(c))).toEqual([]);
-    expect(CAT.SLASH_CATALOG.map(c => c.name).filter(n => !reserved.has(n))).toEqual([]);
   });
 });
 

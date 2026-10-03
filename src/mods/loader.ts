@@ -381,10 +381,19 @@ async function stripTypes(source: string, file: string): Promise<string> {
   if (typeof mod.stripTypeScriptTypes !== 'function') {
     throw new Error(`${path.basename(file)} is TypeScript, and this Node (${process.version}) cannot strip types — use a .js entry or upgrade Node to 22.13+`);
   }
+  // Node prints an ExperimentalWarning for this API to stderr, which would scribble over
+  // the TUI: keep just that one warning quiet.
+  const emit = process.emitWarning;
+  process.emitWarning = function (this: unknown, w: string | Error, ...rest: unknown[]) {
+    if (/stripTypeScriptTypes/.test(typeof w === 'string' ? w : String(w?.message))) return;
+    return (emit as (...a: unknown[]) => void).call(process, w, ...rest);
+  } as typeof process.emitWarning;
   try {
     return mod.stripTypeScriptTypes(source, { mode: 'strip' });
   } catch (e: any) {
     throw new Error(`${path.basename(file)}: ${e?.message ?? e} (only erasable TypeScript is supported: no enums, namespaces or parameter properties)`);
+  } finally {
+    process.emitWarning = emit;
   }
 }
 
