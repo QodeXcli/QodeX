@@ -508,7 +508,7 @@ export class ImapSmtpTransport implements MailTransport {
    * resolves on the first EXISTS that grows the folder, on timeout, or on abort. Servers
    * without IDLE get imapflow's NOOP polling. Default timeout 25 min (servers drop IDLE ~29).
    */
-  async waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<WaitResult> {
+  async waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal; sinceUidNext?: number } = {}): Promise<WaitResult> {
     if (opts.signal?.aborted) return { changed: false, reason: 'abort' };
     const path = await this.resolveFolder(folder || 'inbox');
     const mod = await (this.opts.loaders?.imapflow ?? loadImapFlow)();
@@ -524,6 +524,10 @@ export class ImapSmtpTransport implements MailTransport {
     let lock: any;
     try {
       lock = await c.getMailboxLock(path, { readOnly: true });
+      // Mail that arrived between the caller's last check and this SELECT raises no EXISTS
+      // during IDLE: the folder's UIDNEXT already shows it.
+      const uidNext = Number(c.mailbox?.uidNext ?? 0);
+      if (opts.sinceUidNext !== undefined && uidNext > opts.sinceUidNext) return { changed: true, reason: 'exists' };
       return await new Promise<WaitResult>((resolve) => {
         let done = false;
         const finish = (r: WaitResult) => {

@@ -159,7 +159,8 @@ export interface MailTransport {
    * Wait until new mail arrives in `folder` (IMAP IDLE on a dedicated connection, NOOP
    * polling where the server has no IDLE), a timeout, or an abort. Optional.
    */
-  waitForNew?(folder: string, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<WaitResult>;
+  /** `sinceUidNext`: resolve at once (changed) when the folder's UIDNEXT is already past it. */
+  waitForNew?(folder: string, opts?: { timeoutMs?: number; signal?: AbortSignal; sinceUidNext?: number }): Promise<WaitResult>;
   close(): Promise<void>;
 }
 

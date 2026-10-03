@@ -75,9 +75,12 @@ export interface WatchSource {
   fetchSince(folder: string, fromUid: number, limit: number): Promise<WatchMessage[]>;
   /**
    * Resolve when the server reports new mail (IMAP IDLE), after `maxMs`, or when
-   * `signal` aborts. Absent → the watcher polls.
+   * `signal` aborts. `sinceUidNext` is the next UID the watcher has not seen yet: when
+   * the folder is already past it (mail arrived between the last check and the start of
+   * the wait), resolve at once — otherwise that mail would wait for the next wake-up.
+   * Absent → the watcher polls.
    */
-  waitForChange?(folder: string, maxMs: number, signal: AbortSignal): Promise<void>;
+  waitForChange?(folder: string, maxMs: number, signal: AbortSignal, sinceUidNext?: number): Promise<void>;
   close?(): Promise<void>;
   /** The account's own address (its own mail never gets an auto-reply). */
   self?: string;
@@ -149,9 +152,9 @@ export async function openMailServiceSource(account: string, service: MailServic
       } catch (e) { throw safe(e); }
     },
     ...(transport.waitForNew ? {
-      async waitForChange(folder: string, maxMs: number, signal: AbortSignal) {
+      async waitForChange(folder: string, maxMs: number, signal: AbortSignal, sinceUidNext?: number) {
         let r;
-        try { r = await transport.waitForNew!(folder, { timeoutMs: maxMs, signal }); } catch (e) { throw safe(e); }
+        try { r = await transport.waitForNew!(folder, { timeoutMs: maxMs, signal, sinceUidNext }); } catch (e) { throw safe(e); }
         // The IDLE connection closed under us: pause like a poll instead of spinning.
         if (r?.reason === 'closed' && !signal.aborted) await sleep(Math.min(maxMs, 60_000), signal);
       },
@@ -340,8 +343,13 @@ export class MailWatcher {
         backoff = initialBackoff;
         if (signal.aborted) break;
         if (this.opts.idle !== false && source.waitForChange) {
-          await this.state.update(account, a => { a.mode = 'idle'; }).catch(() => {});
-          await source.waitForChange(this.folder, idleMax, signal);
+          let seen: number | undefined;
+          await this.state.update(account, a => {
+            a.mode = 'idle';
+            const f = a.folders[this.folder];
+            if (f) seen = f.lastUid + 1;
+          }).catch(() => {});
+          await source.waitForChange(this.folder, idleMax, signal, seen);
         } else {
           await this.state.update(account, a => { a.mode = 'poll'; }).catch(() => {});
           await sleep(pollMs, signal);

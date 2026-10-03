@@ -144,9 +144,12 @@ export class InMemoryMailTransport implements MailTransport {
     };
   }
 
-  waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<WaitResult> {
+  waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal; sinceUidNext?: number } = {}): Promise<WaitResult> {
     this.check();
     const name = this.resolveFolder(folder);
+    if (opts.sinceUidNext !== undefined && !opts.signal?.aborted && this.box(name).nextUid > opts.sinceUidNext) {
+      return Promise.resolve({ changed: true, reason: 'exists' });
+    }
     return new Promise<WaitResult>((resolve) => {
       let done = false;
       const finish = (r: WaitResult) => {

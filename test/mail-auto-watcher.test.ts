@@ -25,6 +25,9 @@ class FakeMailbox {
   private waiters: Array<() => void> = [];
   failNext: Error | null = null;
   fetches = 0;
+  waitedSince: Array<number | undefined> = [];
+  /** Deliver this message right after the next fetch (between the watcher's check and its IDLE wait). */
+  pushAfterFetch: (Omit<WatchMessage, 'uid'> & { uid?: number }) | null = null;
   constructor(readonly idle: boolean) {}
   push(m: Omit<WatchMessage, 'uid'> & { uid?: number }): WatchMessage {
     const uid = m.uid ?? (this.messages.reduce((a, x) => Math.max(a, x.uid), 0) + 1);
@@ -42,11 +45,16 @@ class FakeMailbox {
       },
       async fetchSince(_f, from, limit) {
         self.fetches++;
-        return self.messages.filter(m => m.uid >= from).sort((a, b) => a.uid - b.uid).slice(0, limit);
+        const out = self.messages.filter(m => m.uid >= from).sort((a, b) => a.uid - b.uid).slice(0, limit);
+        if (self.pushAfterFetch) { const m = self.pushAfterFetch; self.pushAfterFetch = null; self.messages.push({ ...m, uid: m.uid ?? (self.messages.reduce((a, x) => Math.max(a, x.uid), 0) + 1) } as WatchMessage); }
+        return out;
       },
     };
     if (this.idle) {
-      src.waitForChange = (_f, maxMs, signal) => new Promise<void>((resolve) => {
+      src.waitForChange = (_f, maxMs, signal, sinceUidNext) => new Promise<void>((resolve) => {
+        self.waitedSince.push(sinceUidNext);
+        // Like a real IMAP SELECT before IDLE: mail already past what the caller saw ends the wait at once.
+        if (sinceUidNext !== undefined && self.messages.some(m => m.uid >= sinceUidNext)) { resolve(); return; }
         const t = setTimeout(done, maxMs);
         function done() { clearTimeout(t); signal.removeEventListener('abort', done); resolve(); }
         self.waiters.push(done);
@@ -223,6 +231,19 @@ describe('MailWatcher loop', () => {
     expect(events.filter(e => e.type === 'new-mail')).toHaveLength(1);
     expect((await state.read()).accounts.work.mode).toBe('idle');
     expect(events.map(e => e.type)).toEqual(expect.arrayContaining(['watch-started', 'watch-stopped']));
+  });
+
+  it('IDLE: mail that lands between the check and the wait is announced at once, not after the IDLE timeout', async () => {
+    const box = new FakeMailbox(true);
+    box.push(mail({ messageId: '<first@acme.com>' }));
+    const w = watcher(box, { pollIntervalMs: 60_000, idleMaxMs: 60_000 });
+    await w.start();
+    await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX);
+    box.pushAfterFetch = mail({ messageId: '<race@acme.com>' }); // arrives during the next check
+    box.push(mail({ messageId: '<second@acme.com>' }));
+    await waitFor(() => events.filter(e => e.type === 'new-mail').length >= 2, 2000);
+    await w.stop();
+    expect(box.waitedSince.every(v => typeof v === 'number')).toBe(true);
   });
 
   it('polling fallback when the source has no IDLE', async () => {
