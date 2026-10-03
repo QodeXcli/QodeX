@@ -66,9 +66,13 @@ function raceAbort(p: Promise<string>, signal: AbortSignal | undefined): Promise
   });
 }
 
-/** Get a human's explicit yes for exactly this outgoing email (or Sentinel's, already given). */
-export async function approveSend(ctx: ToolContext, d: OutgoingMailDescription): Promise<SendApproval> {
-  if (takeSentinelApproval(ctx, 'mail_send')) return { ok: true, by: 'sentinel' };
+/**
+ * Get a human's explicit yes for exactly this outgoing email (or Sentinel's, already given).
+ * `sentinelApproved`: the caller took Sentinel's one-shot mark at the start of the call (so a
+ * mark never outlives a call that failed before asking); omitted → taken here.
+ */
+export async function approveSend(ctx: ToolContext, d: OutgoingMailDescription, sentinelApproved?: boolean): Promise<SendApproval> {
+  if (sentinelApproved ?? takeSentinelApproval(ctx, 'mail_send')) return { ok: true, by: 'sentinel' };
   const prompt = buildSendPrompt(d);
   try { ctx.emit?.({ type: 'progress', message: `🛡 Waiting for a human to approve: ${summarizeOutgoingMail(d)}` }); } catch { /* UI only */ }
 

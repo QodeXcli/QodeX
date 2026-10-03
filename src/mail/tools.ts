@@ -22,7 +22,9 @@ import { Tool, type ToolContext, type ToolResult } from '../tools/base.js';
 import { isApproval } from '../control/approvals.js';
 import { getBus } from '../control/bus.js';
 import { QODEX_HOME } from '../config/defaults.js';
+import { QODEX_BROWSER_DOWNLOADS_DIR, QODEX_SCREENSHOTS_DIR } from '../config/paths.js';
 import { askHumanForAutoMode, explainRequest, unansweredMessage, whyLine } from '../security/human-approval.js';
+import { takeSentinelApproval } from '../sentinel/auto-mode.js';
 import { scanInjection } from '../sentinel/injection.js';
 import { isProtectedPath, isSecretFile } from '../sentinel/policy.js';
 import { approveSend } from './approval.js';
@@ -94,12 +96,21 @@ function inside(child: string, parent: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-/** QodeX's own state (vault, keys, mail accounts, config, sessions): never attached, never written. */
-async function isQodexPrivate(p: string, cwd: string): Promise<boolean> {
+/** Files under ~/.qodex the user may still want to mail: browser downloads and screenshots. */
+const QODEX_SHAREABLE_DIRS = [QODEX_BROWSER_DOWNLOADS_DIR, QODEX_SCREENSHOTS_DIR];
+
+/**
+ * QodeX's own state (vault, keys, mail accounts, config, sessions): never attached, never
+ * written. With `forAttach`, browser downloads and screenshots are allowed (a file the
+ * agent downloaded is a normal thing to mail on).
+ */
+async function isQodexPrivate(p: string, cwd: string, forAttach = false): Promise<boolean> {
   const abs = path.resolve(cwd, expandHome(p));
   if (isProtectedPath(abs, cwd)) return true;
   const real = await realish(abs);
-  return inside(abs, QODEX_HOME) || inside(real, QODEX_HOME) || isProtectedPath(real, cwd);
+  if (isProtectedPath(real, cwd)) return true;
+  const shareable = (x: string) => forAttach && QODEX_SHAREABLE_DIRS.some(d => inside(x, d) && x !== d);
+  return [abs, real].some(x => inside(x, QODEX_HOME) && !shareable(x));
 }
 
 /** Read files to attach, after the safety checks. */
@@ -109,7 +120,7 @@ async function loadAttachments(paths: string[], cwd: string): Promise<{ files: O
   let total = 0;
   for (const p of paths) {
     const abs = path.resolve(cwd, expandHome(String(p)));
-    if (await isQodexPrivate(abs, cwd)) return { error: `${p} is QodeX's private state (vault, keys, mail accounts, config) — it can never be attached` };
+    if (await isQodexPrivate(abs, cwd, true)) return { error: `${p} is QodeX's private state (vault, keys, mail accounts, config) — it can never be attached` };
     const real = await realish(abs);
     if (isSecretFile(abs) || isSecretFile(real)) return { error: `${p} looks like a credentials file (keys, .env, tokens) — refusing to attach it` };
     let st;
@@ -335,6 +346,9 @@ export class MailSendTool extends Tool<SendArgsT> {
   isDestructive = true;
 
   async execute(args: SendArgsT, ctx: ToolContext): Promise<ToolResult> {
+    // Sentinel's "a human approved this call" mark is one-shot and taken unconditionally, so
+    // a call that fails early never leaves it behind for a later send.
+    const sentinelApproved = takeSentinelApproval(ctx, 'mail_send');
     const s = svc();
     const drafts = s.drafts();
     try {
@@ -348,7 +362,7 @@ export class MailSendTool extends Tool<SendArgsT> {
       const loaded = await loadAttachments(desc.attachments.map(a => a.path), ctx.cwd);
       if ('error' in loaded) return err('MAIL_ATTACHMENT', `Not sent: ${loaded.error}`);
 
-      const approval = await approveSend(ctx, desc);
+      const approval = await approveSend(ctx, desc, sentinelApproved);
       if (!approval.ok) return { content: approval.message, isError: true };
 
       const body = draft ? draft.body : String(args.body ?? '');

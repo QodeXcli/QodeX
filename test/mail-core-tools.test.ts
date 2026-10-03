@@ -279,6 +279,18 @@ describe('mail_send approval (never without a human)', () => {
     expect(fake.sent).toHaveLength(1);
   });
 
+  it('a Sentinel mark never outlives a call that failed before sending', async () => {
+    const id = await draftTo();
+    const { ctx, prompts } = makeCtx(human('no'));
+    recordSentinelApproval(ctx, 'mail_send');
+    const bad = await run('mail_send', { draft_id: id, to: 'x@y.co' }, ctx); // invalid: draft + fields
+    expect(bad.content).toMatch(/MAIL_INVALID/);
+    const r = await run('mail_send', { draft_id: id }, ctx);
+    expect(r.content).toMatch(/SENTINEL_DENIED/);
+    expect(prompts).toHaveLength(1);
+    expect(fake.sent).toHaveLength(0);
+  });
+
   it('sends a new message from fields with a project attachment; refuses credentials files', async () => {
     await fs.writeFile(path.join(project, 'report.csv'), 'a,b\n');
     await fs.writeFile(path.join(project, '.env'), 'KEY=1\n');
