@@ -4,7 +4,8 @@
  * Wayland deliberately hides other clients' windows and input, so this backend
  * is more limited than X11:
  *   input       ydotool (needs the ydotoold daemon + /dev/uinput access)
- *   screenshots grim (wlroots: sway, Hyprland, ...) → gnome-screenshot → spectacle (KDE)
+ *   screenshots grim (wlroots: sway, Hyprland, ...) → gnome-screenshot → spectacle (KDE),
+ *               the first that works
  *   clipboard   wl-copy / wl-paste
  *   windows     only where the compositor exposes them: sway (swaymsg) or
  *               Hyprland (hyprctl). Elsewhere window tools return a clear
@@ -208,21 +209,39 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
         }
       }
     }
-    const tool = await firstAvailable(WAYLAND_SCREENSHOT_TOOLS);
-    if (!tool) throw this.unavailable(WAYLAND_SCREENSHOT_TOOLS.join('|'), hint(this.deps, ['grim']));
-    if (tool === 'grim') {
-      const type = /\.jpe?g$/i.test(dest) ? ['-t', 'jpeg'] : [];
-      const regionArgs = region ? ['-g', region] : [];
-      // -s 1: logical-pixel image, the same space ydotool moves in (HiDPI-safe).
-      const r = await this.run('grim', ['-s', '1', ...type, ...regionArgs, dest], { timeoutMs: 20_000 });
-      if (r.code !== 0) await this.check('grim', [...type, ...regionArgs, dest], { timeoutMs: 20_000 });
-    } else {
-      if (region) { notes.push(`${tool} can't capture a region; captured the full screen.`); origin = { x: 0, y: 0 }; }
-      if (tool === 'gnome-screenshot') await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
-      else await this.check('spectacle', ['-b', '-n', '-f', '-o', dest], { timeoutMs: 20_000 });
+    const tools: string[] = [];
+    for (const t of WAYLAND_SCREENSHOT_TOOLS) if (await which(t)) tools.push(t);
+    if (!tools.length) throw this.unavailable(WAYLAND_SCREENSHOT_TOOLS.join('|'), hint(this.deps, ['grim']));
+    // The first tool that WORKS: grim is often installed on GNOME / KDE too, but
+    // only wlroots compositors (sway, Hyprland, ...) let it capture.
+    let used: string | null = null;
+    let lastErr: unknown;
+    for (const tool of tools) {
+      try {
+        await fs.rm(dest, { force: true }); // no partial file from a failed attempt
+        if (tool === 'grim') {
+          const type = /\.jpe?g$/i.test(dest) ? ['-t', 'jpeg'] : [];
+          const regionArgs = region ? ['-g', region] : [];
+          // -s 1: logical-pixel image, the same space ydotool moves in (HiDPI-safe).
+          const r = await this.run('grim', ['-s', '1', ...type, ...regionArgs, dest], { timeoutMs: 20_000 });
+          if (r.code !== 0) await this.check('grim', [...type, ...regionArgs, dest], { timeoutMs: 20_000 });
+        } else if (tool === 'gnome-screenshot') {
+          await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
+        } else {
+          await this.check('spectacle', ['-b', '-n', '-f', '-o', dest], { timeoutMs: 20_000 });
+        }
+        used = tool;
+        break;
+      } catch (e) {
+        this.throwIfAborted();
+        lastErr = e;
+      }
     }
+    if (!used) throw lastErr;
+    const regionApplied = used === 'grim' && !!region;
+    if (region && !regionApplied) { notes.push(`${used} can't capture a region; captured the full screen.`); origin = { x: 0, y: 0 }; }
     const raw = await readImageSize(dest);
-    if (!region) sizeCache = { size: raw, at: Date.now() };
+    if (!regionApplied) sizeCache = { size: raw, at: Date.now() };
     let size = raw;
     if (opts.maxWidth && raw.width > opts.maxWidth) {
       const scaler = await firstAvailable(IMAGE_SCALERS);

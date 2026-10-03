@@ -2,7 +2,9 @@
  * Desktop control — fixes salvaged from a desktop reviewer's stranded working
  * tree (b5a8e06) that HEAD did not already have in another form:
  *   - X11 full-screen capture uses the first screenshot tool that WORKS, not
- *     the first one installed (a broken scrot no longer blocks `import`).
+ *     the first one installed (a broken scrot no longer blocks `import`);
+ *   - so does Wayland (grim is often installed where the compositor can't
+ *     serve it: GNOME, KDE).
  * Fakes only (setDesktopExec) — no real input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -10,7 +12,7 @@ import { promises as fs, existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { setDesktopExec, type ExecOptions, type ExecResult } from '../src/tools/computer/exec.js';
-import { X11Backend, type BackendDeps } from '../src/tools/computer/backends/index.js';
+import { X11Backend, WaylandBackend, type BackendDeps } from '../src/tools/computer/backends/index.js';
 
 interface Call { cmd: string; args: string[]; opts?: ExecOptions }
 type Responder = (c: Call) => Partial<ExecResult> | void | Promise<Partial<ExecResult> | void>;
@@ -96,5 +98,56 @@ describe('x11: full-screen capture falls back to the next screenshot tool that w
     await expect(new X11Backend(deps({ signal: ac.signal })).screenshot({ path: path.join(tmp, 's.png') }))
       .rejects.toThrow(/^\[ABORTED\]/);
     expect(calls.map(c => c.cmd)).toEqual(['scrot']);
+  });
+});
+
+describe('wayland: screenshots fall back to the next tool that works', () => {
+  const wl = (env: NodeJS.ProcessEnv = { WAYLAND_DISPLAY: 'wayland-0' }, over: Partial<BackendDeps> = {}) =>
+    new WaylandBackend(deps({ env, ...over }));
+  const NO_SCREENCOPY = { code: 1, stderr: "compositor doesn't support wlr-screencopy-unstable-v1" };
+
+  it('grim on a compositor without wlr-screencopy (GNOME) falls back to gnome-screenshot', async () => {
+    const dest = path.join(tmp, 'shot.png');
+    const calls = fakeExec(async c => {
+      if (c.cmd === 'grim') return NO_SCREENCOPY;
+      if (c.cmd === 'gnome-screenshot') await fs.writeFile(c.args[1]!, png(1920, 1080));
+    }, ['swaymsg', 'hyprctl', 'magick', 'convert']);
+    const shot = await wl().screenshot({ path: dest });
+    expect(calls.map(c => [c.cmd, ...c.args])).toEqual([
+      ['grim', '-s', '1', dest],
+      ['grim', dest],
+      ['gnome-screenshot', '-f', dest],
+    ]);
+    expect(shot).toMatchObject({ path: dest, width: 1920, height: 1080, origin: { x: 0, y: 0 } });
+  });
+
+  it('a window region the fallback tool can\'t capture → full screen, origin 0,0, and the size is cached', async () => {
+    const tree = JSON.stringify({ type: 'root', nodes: [{ type: 'output', nodes: [{ type: 'workspace', nodes: [
+      { type: 'con', id: 9, name: 'foot', app_id: 'foot', pid: 11, focused: true, rect: { x: 960, y: 0, width: 960, height: 1080 } },
+    ] }] }] });
+    const dest = path.join(tmp, 'win.png');
+    const calls = fakeExec(async c => {
+      if (c.cmd === 'swaymsg') return { stdout: c.args.includes('get_tree') ? tree : '[]' };
+      if (c.cmd === 'grim') return NO_SCREENCOPY;
+      if (c.cmd === 'gnome-screenshot') await fs.writeFile(c.args[1]!, png(2000, 1000));
+    }, ['hyprctl', 'magick', 'convert']);
+    const b = wl({ WAYLAND_DISPLAY: 'wayland-1', SWAYSOCK: '/run/sway.sock' });
+    const shot = await b.screenshot({ path: dest, window: 'foot' });
+    expect(calls.filter(c => c.cmd === 'grim')[0]!.args).toEqual(['-s', '1', '-g', '960,0 960x1080', dest]);
+    expect(shot.origin).toEqual({ x: 0, y: 0 });
+    expect(shot.notes.join(' ')).toMatch(/gnome-screenshot can't capture a region; captured the full screen/);
+    // It was a full-screen image after all: screenSize() can use it (no throwaway capture).
+    const before = calls.length;
+    expect(await b.screenSize()).toEqual({ width: 2000, height: 1000 });
+    expect(calls.slice(before).map(c => c.cmd)).toEqual(['swaymsg']);
+  });
+
+  it('a cancelled capture stops instead of trying the next tool', async () => {
+    const ac = new AbortController();
+    const calls = fakeExec(c => {
+      if (c.cmd === 'grim') { ac.abort(); return { code: 130, stderr: 'aborted' }; }
+    }, ['swaymsg', 'hyprctl']);
+    await expect(wl(undefined, { signal: ac.signal }).screenshot({ path: path.join(tmp, 's.png') })).rejects.toThrow(/^\[ABORTED\]/);
+    expect(calls.map(c => c.cmd)).toEqual(['grim']);
   });
 });
