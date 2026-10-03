@@ -258,6 +258,37 @@ describe('$.clock, $.settings, $.session', () => {
     expect(s.providers.anthropic.apiKey).toBe('[redacted]');
     expect(s.telegram.botToken).toBe('[redacted]');
     expect(s.defaults.model).toBe('m1');
+    expect(s.budget.perTaskMaxTokens).toBe(1000); // a number is never a credential
+    rt.dispose();
+  });
+
+  it('settings.read also redacts secret env names, URL credentials and live secret values', async () => {
+    const prev = process.env.QX_MODS_TEST_API_KEY;
+    process.env.QX_MODS_TEST_API_KEY = 'live-secret-value-123456';
+    try {
+      const config = {
+        mcp: { servers: { notion: { env: { NOTION_KEY: 'ntn_abc', DB_PASS: 'hunter22', LOG_LEVEL: 'info' }, url: 'https://bob:pa55word@mcp.example.com/sse?api_key=k123&x=1' } } },
+        mail: { imap: { pass: 'mailpw' } },
+        defaults: { model: 'm1', note: 'copied live-secret-value-123456 here' },
+      };
+      const { $, rt } = await apiOf('reader2', { config });
+      const s = await $.settings.read() as any;
+      const env = s.mcp.servers.notion.env;
+      expect(env.NOTION_KEY).toBe('[redacted]');
+      expect(env.DB_PASS).toBe('[redacted]');
+      expect(env.LOG_LEVEL).toBe('info');
+      expect(s.mcp.servers.notion.url).toBe('https://[redacted]@mcp.example.com/sse?api_key=[redacted]&x=1');
+      expect(s.mail.imap.pass).toBe('[redacted]');
+      expect(JSON.stringify(s)).not.toContain('live-secret-value-123456');
+      rt.dispose();
+    } finally {
+      if (prev === undefined) delete process.env.QX_MODS_TEST_API_KEY; else process.env.QX_MODS_TEST_API_KEY = prev;
+    }
+  });
+
+  it('session.usage has the documented shape', async () => {
+    const config = { defaults: { model: 'm1', maxIterations: 50 }, budget: { perTaskMaxTokens: 1000, perTaskLimitUsd: 0, perTaskMaxWallSeconds: 0 } };
+    const { $, rt } = await apiOf('reader', { config });
     rt.lastRun = {
       messages: [
         { role: 'system', content: 'You are QodeX.\n\n# Project Rules (from QODEX.md)\nuse pnpm\n\n# Memory (from past sessions)\nfacts' },

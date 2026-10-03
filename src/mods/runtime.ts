@@ -10,6 +10,8 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger.js';
 import { registerModInstructionDirs } from '../security/instruction-files.js';
+import { isSecretName } from '../secrets/sanitize.js';
+import { redactDeep as scrubSecretValues } from '../secrets/redact.js';
 import type { QodexConfig } from '../config/defaults.js';
 import type { ModelRouter } from '../llm/router.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -73,14 +75,22 @@ export async function reservedCommandNames(cwd: string): Promise<Map<string, str
   return out;
 }
 
-function redactDeep(v: unknown, depth = 0): unknown {
-  const SENSITIVE = /(api[_-]?key|token|password|passwd|secret|authorization|^auth$|access[_-]?key|private[_-]?key|client[_-]?secret|bearer|cookie|credential)/i;
+const SENSITIVE_KEY = /(api[_-]?key|token|password|passwd|secret|authorization|^auth$|access[_-]?key|private[_-]?key|client[_-]?secret|bearer|cookie|credential|^pass$|[_-]pass$|^pwd$|[_-]pwd$)/i;
+/** user:password@ in a URL, and credential-looking query parameters. */
+const URL_USERINFO = /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi;
+const URL_SECRET_PARAM = /([?&][a-z0-9_.-]*(?:key|token|secret|password|passwd|sig|signature|auth|code)[a-z0-9_.-]*=)[^&#\s]+/gi;
+
+/** $.settings.read: secret-named fields, URL credentials and live secret values are redacted. */
+export function redactSettings(v: unknown, depth = 0): unknown {
   if (depth > 12) return '[…]';
-  if (Array.isArray(v)) return v.map(x => redactDeep(x, depth + 1));
+  if (typeof v === 'string') return v.replace(URL_USERINFO, '$1[redacted]@').replace(URL_SECRET_PARAM, '$1[redacted]');
+  if (Array.isArray(v)) return v.map(x => redactSettings(x, depth + 1));
   if (v && typeof v === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-      out[k] = SENSITIVE.test(k) && x !== null && x !== undefined && x !== '' ? '[redacted]' : redactDeep(x, depth + 1);
+      // Numbers and booleans are never credentials (perTaskMaxTokens, showTokenCount…).
+      const secretKey = (SENSITIVE_KEY.test(k) || isSecretName(k)) && (typeof x === 'string' ? x !== '' : !!x && typeof x === 'object');
+      out[k] = secretKey ? '[redacted]' : redactSettings(x, depth + 1);
     }
     return out;
   }
@@ -136,7 +146,8 @@ class RuntimeHost implements ModHost {
     if (!cfg) {
       try { cfg = (await import('../config/loader.js')).getActiveConfig(); } catch { /* */ }
     }
-    return (redactDeep(JSON.parse(JSON.stringify(cfg ?? {}))) ?? {}) as Record<string, unknown>;
+    // Field names first, then any live secret value (from the environment) wherever it sits.
+    return (scrubSecretValues(redactSettings(JSON.parse(JSON.stringify(cfg ?? {})))) ?? {}) as Record<string, unknown>;
   }
 
   async registerCommand(plugin: string, cmd: ModCommandSpec): Promise<void> {
