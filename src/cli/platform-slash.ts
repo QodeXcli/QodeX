@@ -131,9 +131,15 @@ async function browserCmd(sub: string, rest: string, cwd: string): Promise<strin
 
 // ── /control, /takeover ──────────────────────────────────────────────────────
 
+/** This process's one reference on the control center's mission actions (released by /control stop). */
+let missionControl: Promise<() => void> | null = null;
+
 async function controlCmd(sub: string, args: string[]): Promise<string> {
   const server = await import('../control/server.js');
   if (sub === 'stop' || sub === 'off') {
+    const held = missionControl;
+    missionControl = null;
+    if (held) (await held.catch(() => null))?.();
     const stopped = await server.stopControlCenter();
     return stopped ? 'Control center stopped.' : 'Control center was not running.';
   }
@@ -143,8 +149,13 @@ async function controlCmd(sub: string, args: string[]): Promise<string> {
   }
   const flags = new Set(args.map(a => a.replace(/^--/, '').toLowerCase()));
   const info = await server.startControlCenter({ lan: flags.has('lan'), tunnel: flags.has('tunnel') });
-  const { registerMissionControl } = await import('../control/missions-bridge.js');
-  await registerMissionControl();
+  if (!missionControl) {
+    const pending = import('../control/missions-bridge.js').then(m => m.registerMissionControl());
+    missionControl = pending;
+    // A failed registration must not stick: the next /control tries again.
+    pending.catch(() => { if (missionControl === pending) missionControl = null; });
+  }
+  await missionControl;
   return server.describeControlCenter(info, flags.has('fa') ? 'fa' : 'en');
 }
 

@@ -17,10 +17,11 @@ import { MissionMilestoneTool } from '../src/missions/tools.js';
 import { createTelegramMissionAdapter } from '../src/missions/telegram-adapter.js';
 import { getBus, type BusEvent } from '../src/control/bus.js';
 import { ApprovalBroker } from '../src/control/approvals.js';
-import { stopControlCenter } from '../src/control/server.js';
+import { listControlActions, stopControlCenter } from '../src/control/server.js';
 import { TelegramApi, type FetchLike, type TgUpdate } from '../src/channels/telegram/api.js';
 import { TelegramPairingStore } from '../src/channels/telegram/pairing.js';
 import { TelegramBot } from '../src/channels/telegram/bot.js';
+import { handlePlatformSlash } from '../src/cli/platform-slash.js';
 
 const DEAD_PID = 2 ** 22 + 777;
 
@@ -204,4 +205,21 @@ describe('telegram pairing', () => {
       expect(s.liveUrl).not.toContain('SECRET');
     }
   });
+});
+
+// ── /control ─────────────────────────────────────────────────────────────────
+
+describe('/control mission actions', () => {
+  it('registers once however often /control runs, and /control stop releases them', async () => {
+    await handlePlatformSlash('control', [], dir);
+    await handlePlatformSlash('control', [], dir);
+    expect(listControlActions()).toContain('missions.list');
+    await handlePlatformSlash('control', ['stop'], dir);
+    expect(listControlActions()).not.toContain('missions.list');
+    // ...and a later /control registers them again.
+    await handlePlatformSlash('control', [], dir);
+    expect(listControlActions()).toContain('missions.list');
+    await handlePlatformSlash('control', ['stop'], dir);
+    expect(listControlActions()).not.toContain('missions.list');
+  }, 20_000);
 });
