@@ -190,18 +190,22 @@ export function defaultWaitForUser(_mgr: BrowserManager): Promise<void> {
       const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       if (/[\r\n\x03\x04]/.test(s)) finish();
     };
+    // A closed stdin (piped input that ended, </dev/null) counts as Ctrl+D.
+    const onEnd = () => finish();
     const raw = !!stdin.isTTY && typeof (stdin as any).setRawMode === 'function';
     function finish(): void {
       if (finished) return;
       finished = true;
       unsub();
       stdin.off('data', onData);
+      stdin.off('end', onEnd);
       if (raw) { try { (stdin as any).setRawMode(false); } catch { /* ignore */ } }
       stdin.pause();
       resolve();
     }
     if (raw) (stdin as any).setRawMode(true);
     stdin.on('data', onData);
+    stdin.once('end', onEnd);
     stdin.resume();
   });
 }
