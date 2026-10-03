@@ -302,8 +302,27 @@ function matchesOverride(o: CheckOverride, req: PermissionRequest): boolean {
 }
 
 /**
+ * The decision the override yields against the rules' LIVE answer for `req`. The override
+ * was computed from a prediction made before the call ran; by the time the tool asks, the
+ * rules may say something stricter (the approval mode flipped, a "no for this session"
+ * landed, the request differs in a way the prediction missed). Clamping again here keeps
+ * a deny a deny and an instruction-file / auto-mode ask an ask whatever happened between.
+ */
+function liveOverride(target: PermissionEngine, o: CheckOverride, req: PermissionRequest, live: PermissionDecision): PermissionDecision {
+  let ex: { decision: PermissionDecision; via?: string } | null = null;
+  try { ex = typeof target.explain === 'function' ? target.explain(req) : null; } catch { ex = null; }
+  if (!ex || ex.decision !== live) {
+    // No reliable reason for the live answer: the mod may tighten it, never loosen it.
+    const rank = { allow: 0, ask: 1, deny: 2 } as const;
+    return rank[o.decision] > rank[live] ? o.decision : live;
+  }
+  return clampModDecision(ex, o.decision, req.operation ?? '');
+}
+
+/**
  * The permission engine a tool sees inside a call the mods wrapper ran: identical, except
- * evaluate()/explain() for the request a tool.check hook decided return that decision.
+ * evaluate()/explain() for the request a tool.check hook decided return that decision —
+ * clamped again against the rules' live answer, so it can never loosen what they say now.
  */
 export function modsPermissionsFor(tc: ToolCall, permissions: PermissionEngine): PermissionEngine {
   const o = reentry.get(tc)?.check;
@@ -314,15 +333,18 @@ export function modsPermissionsFor(tc: ToolCall, permissions: PermissionEngine):
         return (req: PermissionRequest) => {
           const base = target.evaluate(req); // fires the audit hook with the rules' decision
           if (!matchesOverride(o, req)) return base;
-          logger.info('tool.check: a mod changed the permission decision', { tool: req.tool, from: base, to: o.decision });
-          return o.decision;
+          const decision = liveOverride(target, o, req, base);
+          if (decision !== base) logger.info('tool.check: a mod changed the permission decision', { tool: req.tool, from: base, to: decision });
+          return decision;
         };
       }
       if (prop === 'explain') {
         return (req: PermissionRequest) => {
           const ex = target.explain(req);
           if (!matchesOverride(o, req)) return ex;
-          return { ...ex, decision: o.decision, reason: ex.reason ?? 'a mod (tool.check) asks for this', canAlways: false };
+          const decision = clampModDecision(ex, o.decision, req.operation ?? '');
+          if (decision === ex.decision) return ex;
+          return { ...ex, decision, reason: ex.reason ?? 'a mod (tool.check) asks for this', canAlways: false };
         };
       }
       const v = Reflect.get(target, prop, receiver);

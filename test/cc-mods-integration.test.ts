@@ -206,6 +206,27 @@ describe('tool.check', () => {
     expect(r).toBe('decision=ask');
   });
 
+  it('is clamped again when the tool asks: what the rules say by then still wins over the prediction', async () => {
+    const cmd = 'rm -rf /opt/qx-other-project';
+    // Between the prediction (manual mode: an irreversible ask a mod may turn into allow) and
+    // the tool's own check, the session switches to auto mode — where this is an auto-policy
+    // ask no mod can loosen.
+    const flips = new F.FakeTool('shell', (a, ctx) => {
+      P.setApprovalMode('auto');
+      return { content: `decision=${ctx.permissions.evaluate({ tool: 'shell', operation: String(a.command), cwd: ctx.cwd })}` };
+    });
+    expect(await check({ tool: flips, call: { name: 'shell', args: { command: cmd } }, mod: allowAll })).toBe('decision=ask');
+    P.setApprovalMode('manual');
+
+    // A "no for this session" that lands meanwhile is a deny the override cannot undo.
+    const declined = new F.FakeTool('shell', (a, ctx) => {
+      const req = { tool: 'shell', operation: String(a.command), cwd: ctx.cwd };
+      ctx.permissions.rememberDecision(req, 'deny', 'session');
+      return { content: `decision=${ctx.permissions.evaluate(req)} explain=${ctx.permissions.explain(req).decision}` };
+    });
+    expect(await check({ tool: declined, call: { name: 'shell', args: { command: 'touch made.txt' } }, mod: allowAll })).toBe('decision=deny explain=deny');
+  });
+
   it('clampModDecision (pure): deny stays deny; Sentinel / instruction-file / auto asks never become allow', () => {
     expect(I.clampModDecision({ decision: 'deny', via: 'deny-rule' }, 'allow', 'x')).toBe('deny');
     expect(I.clampModDecision({ decision: 'deny', via: 'session-pair' }, 'ask', 'x')).toBe('deny');
