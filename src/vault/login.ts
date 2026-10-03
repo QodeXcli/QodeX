@@ -254,12 +254,13 @@ export class BrowserLoginTool extends Tool<LoginArgsT> {
     if (!pwFirst) {
       // Identifier-first: submit the username step, then wait for the password field.
       if (!steps.length) return err(`[LOGIN_FORM_NOT_FOUND] ${host} shows no password field and there is no username to start with.`);
+      const staleUserError = await loginErrorShown(page);
       const s = await this.submit(mgr, userLoc, entry, 'username');
       if (s) return s;
       const next = await waitFor<string>(async () => {
         if (await autoDetect(mgr, 'password')) return 'password';
         if (await challengeOn(page)) return 'challenge';
-        return (await loginErrorShown(page)) ? 'error' : null;
+        return !staleUserError && (await loginErrorShown(page)) ? 'error' : null;
       }, 15_000, ctx.signal);
       if (ctx.signal?.aborted) return err('[CANCELLED] browser_login was cancelled.');
       if (next === 'challenge') return this.challenge(hostOf(mgr.activeUrl()), steps);
@@ -277,9 +278,11 @@ export class BrowserLoginTool extends Tool<LoginArgsT> {
       return { content: `✓ Filled ${steps.join(' and ')} from vault entry "${entry.name}" on ${host} (values hidden). Not submitted — submit with browser_click when ready.`, metadata: { vault: { entry: entry.name, origin: site.origin, submitted: false } } };
     }
 
+    // An error left on the page by an earlier attempt must not read as this one failing.
+    const staleError = await loginErrorShown(page);
     const sub = await this.submit(mgr, pwLoc, entry, 'password');
     if (sub) return sub;
-    let outcome = await this.settle(mgr, page, false, ctx.signal);
+    let outcome = await this.settle(mgr, page, false, staleError, ctx.signal);
     if (outcome === 'otp') {
       if (!entry.totp) {
         return err(`[LOGIN_NEEDS_2FA] ${hostOf(mgr.activeUrl())} asks for a one-time code, and vault entry "${entry.name}" has no TOTP seed. Ask the user to enter the code in the browser (they can take it over), or to add the seed: qodex vault rotate ${entry.name} --totp-only`);
@@ -291,7 +294,7 @@ export class BrowserLoginTool extends Tool<LoginArgsT> {
       steps.push('one-time code');
       const s2 = await this.submit(mgr, otpLoc, entry, 'one-time code');
       if (s2) return s2;
-      outcome = await this.settle(mgr, page, true, ctx.signal);
+      outcome = await this.settle(mgr, page, true, false, ctx.signal);
     }
     if (ctx.signal?.aborted) return err('[CANCELLED] browser_login was cancelled after submitting.');
     if (outcome === 'challenge') return this.challenge(hostOf(mgr.activeUrl()), steps);
@@ -375,8 +378,12 @@ export class BrowserLoginTool extends Tool<LoginArgsT> {
     }
   }
 
-  /** After a submit: signed in ('done'), a 2FA step ('otp'), a CAPTCHA, or 'failed'. */
-  private async settle(mgr: BrowserManager, page: any, otpStep: boolean, signal?: AbortSignal): Promise<'done' | 'otp' | 'challenge' | 'failed'> {
+  /**
+   * After a submit: signed in ('done'), a 2FA step ('otp'), a CAPTCHA, or 'failed'. With
+   * `staleError` (an error message was already on the page before submitting) only the
+   * form still being there at the deadline counts as a failure.
+   */
+  private async settle(mgr: BrowserManager, page: any, otpStep: boolean, staleError: boolean, signal?: AbortSignal): Promise<'done' | 'otp' | 'challenge' | 'failed'> {
     const deadline = Date.now() + 12_000;
     await sleep(300, signal);
     while (!signal?.aborted) {
@@ -392,7 +399,7 @@ export class BrowserLoginTool extends Tool<LoginArgsT> {
         const back = await autoDetect(mgr, 'password').catch(() => null) || (otpStep && await autoDetect(mgr, 'totp').catch(() => null));
         if (!back) return 'done';
       }
-      if (await loginErrorShown(page)) return 'failed';
+      if (!staleError && await loginErrorShown(page)) return 'failed';
       if (Date.now() >= deadline) return 'failed';
       await sleep(400, signal);
     }
