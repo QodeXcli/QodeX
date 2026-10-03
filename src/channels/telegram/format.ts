@@ -164,6 +164,7 @@ const EN = {
     '/missions — recent missions\n' +
     '/mission &lt;goal&gt; — start a background mission\n' +
     '/cancel &lt;id&gt; — cancel a mission\n' +
+    '/stop — emergency stop: the running task, side runs, dev servers (<code>/stop all</code> cancels missions too)\n' +
     '/screen — screenshot of the agent\'s browser\n' +
     '/approvals — pending approvals\n' +
     '/lang fa|en — switch language\n' +
@@ -254,6 +255,7 @@ const FA: Catalog = {
     '/missions — مأموریت‌های اخیر\n' +
     '/mission &lt;هدف&gt; — شروع یک مأموریت در پس‌زمینه\n' +
     '/cancel &lt;شناسه&gt; — لغو مأموریت\n' +
+    '/stop — توقف اضطراری: کار در حال اجرا، اجراهای جانبی، سرورهای توسعه (<code>/stop all</code> مأموریت‌ها را هم لغو می‌کند)\n' +
     '/screen — تصویر صفحهٔ مرورگرِ عامل\n' +
     '/approvals — درخواست‌های تأیید در انتظار\n' +
     '/lang fa|en — تغییر زبان\n' +

@@ -543,6 +543,9 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /plan  /normal     Plan mode (read-only)  /  back to normal
 /auto [manual|edits|auto]   Approval mode (also /mode; Shift+Tab cycles) — see "Approval modes"
 /status            Approval mode, strict mode, session
+/goal <done> [--check "<cmd>"] [--max N]   Keep working until the goal is proven (/goal · /goal clear)
+/stop [all]        Emergency stop: running task, side runs, dev servers (all: missions too)
+/learn [name]      Turn the task you just finished into a reusable skill
 /model <id>        Override model for this conversation
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
@@ -581,6 +584,11 @@ queue when one is connected, and is refused otherwise; it is never answered "yes
   `terraform destroy`, databases on other hosts, package unpublish), publishing (`npm publish`,
   `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks); on the
   web, deleting data or changing an account on a non-local site.
+- **Writes to the agent's own instruction files** — `AGENTS.md`, `QODEX.md`, `CLAUDE.md`,
+  `GEMINI.md`, `AI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, the
+  project's `.qodex/` and `.cursor/rules/`, `~/.qodex/skills|rules|hooks|memory`. These ask in
+  **every** mode (edit tools and shell alike) so a prompt-injected page can never rewrite the
+  agent's standing orders; no allow rule or "always yes" covers them.
 
 The agent's **own questions** are not asked in auto mode either: `ask_user` and plan approval
 (`present_plan`) return "decide yourself", so the model picks a sensible default, keeps going and
@@ -696,6 +704,11 @@ qodex schedule add --name nightly-deps \
   --deliver telegram:<your-chat-id>          # result lands on your phone, not just a desktop ping
 qodex schedule list      ·  runs <id>  ·  enable/disable <id>  ·  rm <id>
 ```
+
+**Monitors that remember.** `--continuity` gives each run the previous run's answer so it reports
+only what changed; `--notify-on-change` skips the notification / chat delivery when the answer is
+the same as last time (`qodex schedule add --name price --cron @hourly --prompt "price of X at
+shop.example" --continuity --notify-on-change`).
 
 **Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>` / `slack:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
 

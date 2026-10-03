@@ -62,6 +62,43 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
   }
 
   switch (cmd) {
+    case 'goal': {
+      // /goal <what done looks like> [--check "<cmd>"] [--max N] · /goal · /goal clear
+      const { parseGoalCommand, newGoal, setStandingGoal, getStandingGoal, describeGoal, goalKickoffPrompt } = await import('../goals/goal.js');
+      const parsed = parseGoalCommand(trimmed.slice(1 + cmd!.length));
+      if (parsed.kind === 'status') return { handled: true, message: describeGoal(getStandingGoal()) };
+      if (parsed.kind === 'clear') {
+        const had = getStandingGoal();
+        setStandingGoal(null);
+        return { handled: true, message: had ? `Goal cleared: ${had.objective}` : 'No standing goal.' };
+      }
+      if (parsed.kind === 'error') return { handled: true, message: parsed.message };
+      const goal = newGoal(parsed.objective, parsed.check, parsed.maxRounds);
+      setStandingGoal(goal);
+      return {
+        handled: true,
+        message: `🎯 ${describeGoal(goal)}\n   QodeX keeps working until ${goal.check ? `\`${goal.check}\` passes` : 'it can cite evidence'} (max ${goal.maxRounds} extra rounds). /goal clear or /stop to end it.`,
+        action: { type: 'submit_prompt', prompt: `${goal.objective}\n\n${goalKickoffPrompt(goal)}`, commandName: 'goal', rawInput: trimmed },
+      };
+    }
+    case 'learn': {
+      // /learn [name] — turn the task you just finished into a reusable skill.
+      const { getSessionStore } = await import('../session/store.js');
+      const { learnFromSession } = await import('../skills/learning/learn-now.js');
+      const loaded = getSessionStore().loadSession(sessionId);
+      const r = await learnFromSession(loaded?.messages ?? [], cwd, { name: args.join('-') || undefined });
+      return { handled: true, message: r.ok ? `🧠 ${r.message}` : r.message };
+    }
+    case 'stop': {
+      // /stop · /stop all — emergency stop. The TUI intercepts it even mid-task; this path
+      // serves idle use and other hosts.
+      const { emergencyStop, formatStopReport } = await import('../control/emergency-stop.js');
+      const { setStandingGoal } = await import('../goals/goal.js');
+      setStandingGoal(null);
+      const all = (args[0] ?? '').toLowerCase() === 'all';
+      const report = await emergencyStop({ missions: all, by: 'slash command' });
+      return { handled: true, message: formatStopReport(report, all) };
+    }
     case 'btw': {
       // When a task is running, `/btw` is intercepted in the UI and injected live.
       // Reaching here means it was typed while IDLE — there's nothing to steer.

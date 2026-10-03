@@ -10,6 +10,7 @@
  *   - Approvals: pending human decisions with a risk/category badge and one button
  *                per option (plus mission-queue approvals when that action exists).
  *   - Steer:     a note injected into the running agent at its next step.
+ *   - Stop:      emergency stop (src/control/emergency-stop.ts), missions included.
  *   - Missions:  shown only when a `missions.list` control action is registered.
  *   - Activity:  the event bus timeline, newest first.
  *
@@ -62,6 +63,10 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     steerPh: 'Add a note for the agent — it is injected at its next step.',
     steerSent: 'Sent — the agent will see it at its next step.',
     noAgent: 'No agent is running in this process.',
+    stopAll: '⏹ Stop',
+    confirmStop: 'Stop everything QodeX is doing — the running task, background runs, dev servers and all active missions?',
+    stopDone: 'Stopped',
+    stopNothing: 'Nothing was running.',
     missions: 'Missions',
     noMissions: 'No missions yet.',
     cancel: 'Cancel',
@@ -150,6 +155,10 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     steerPh: 'یادداشتی برای عامل بنویسید — در قدم بعدی به آن اضافه می‌شود.',
     steerSent: 'ارسال شد — عامل در قدم بعدی آن را می‌بیند.',
     noAgent: 'در این پردازش عاملی در حال اجرا نیست.',
+    stopAll: '⏹ توقف',
+    confirmStop: 'همهٔ کارهای QodeX متوقف شود — کار در حال اجرا، اجراهای پس‌زمینه، سرورهای توسعه و همهٔ مأموریت‌های فعال؟',
+    stopDone: 'متوقف شد',
+    stopNothing: 'چیزی در حال اجرا نبود.',
     missions: 'مأموریت‌ها',
     noMissions: 'هنوز مأموریتی وجود ندارد.',
     cancel: 'لغو',
@@ -786,6 +795,16 @@ const SCRIPT = String.raw`
     }).then(function () { btn.disabled = false; });
   }
   $('steerBtn').addEventListener('click', sendSteer);
+
+  // ── emergency stop ──────────────────────────────────────────────────────────
+  $('stopBtn').addEventListener('click', function () {
+    if (!window.confirm(t('confirmStop'))) return;
+    var btn = $('stopBtn'); btn.disabled = true;
+    api('POST', '/api/stop', { all: true }).then(function (r) {
+      var stopped = (r && r.stopped) || [];
+      steerMsg(stopped.length ? t('stopDone') + ': ' + stopped.join('; ') : t('stopNothing'));
+    }).catch(function (e) { steerMsg(errText(e), true); }).then(function () { btn.disabled = false; });
+  });
   $('steerText').addEventListener('keydown', function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendSteer(); } });
 
   // ── missions ────────────────────────────────────────────────────────────────
@@ -1047,6 +1066,7 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
   <h1 id="appTitle">${escapeHtml(title)}</h1>
   <span id="approvalCount" class="badge count hidden" title="${tx('approvals')}">0</span>
   <span id="connText" class="conn">${tx('disconnected')}</span>
+  <button id="stopBtn" class="btn danger" type="button" data-i18n="stopAll">${tx('stopAll')}</button>
   <button id="langBtn" class="btn" type="button">${lang === 'fa' ? 'English' : 'فارسی'}</button>
 </header>
 <div id="authBanner" class="banner" role="alert" data-i18n="authLost">${tx('authLost')}</div>

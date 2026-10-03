@@ -58,12 +58,19 @@ export function autonomousPermissions(base: PermissionEngine, cwd: string, extra
     const d = base.evaluateDetailed(req);
     // The process already runs the autonomous policy, or base decided without asking.
     if (d.decision !== 'ask' || isAutonomousMode()) return d;
+    // Agent instruction files ask in every mode — auto included, and as an auto-mode ask
+    // so an automatic answerer leaves it to a human.
+    if (d.via === 'instruction-file') return { ...d, via: 'auto-policy-ask' };
     let v: 'allow' | 'ask' | 'deny';
     try { v = autonomousDecision({ tool: req.tool, operation: req.operation }, where).decision; } catch { v = 'ask'; }
     return { decision: v, via: d.via };
   };
   engine.evaluateDetailed = detailed;
   engine.evaluate = (req: PermissionRequest) => detailed(req).decision;
+  engine.explain = (req: PermissionRequest) => {
+    const ex = base.explain(req);
+    return ex.via === 'instruction-file' ? { ...ex, via: 'auto-policy-ask', canAlways: false } : ex;
+  };
   return markAutonomousPermissions(engine);
 }
 

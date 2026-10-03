@@ -44,9 +44,10 @@ export interface AutoPolicyContext {
 /**
  * Tools whose permission `operation` is a shell command line. Only these get command
  * parsing, the irreversible tier and always-ask patterns — never an edit path, an MCP tool
- * name, a mission goal or a Sentinel operation string.
+ * name, a mission goal or a Sentinel operation string. code_run passes its snippet as the
+ * equivalent `python3 -c '…'` line (codeRunCommandLine).
  */
-export const COMMAND_TOOLS: ReadonlySet<string> = new Set(['shell', 'bash', 'background_job_start']);
+export const COMMAND_TOOLS: ReadonlySet<string> = new Set(['shell', 'bash', 'background_job_start', 'code_run']);
 export function isCommandTool(tool: string): boolean { return COMMAND_TOOLS.has(tool); }
 
 /** File tools whose `operation` is a path (relative to the call's cwd, or absolute). */

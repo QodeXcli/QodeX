@@ -71,3 +71,18 @@ describe('/goal evidence loop', () => {
     expect(goalContinuationPrompt(newGoal('a', undefined, 2), 'x'.repeat(5000)).length).toBeLessThan(3500);
   });
 });
+
+describe('/goal async check', () => {
+  it('matches the sync check and reports timeouts', async () => {
+    const { checkGoalAsync } = await import('../src/goals/goal.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qodex-goal-async-'));
+    const pass = await checkGoalAsync(newGoal('x', 'echo ok', 2), '', dir);
+    expect(pass).toMatchObject({ met: true });
+    expect(pass.evidence).toMatch(/exited 0\nok/);
+    expect((await checkGoalAsync(newGoal('x', 'echo nope >&2; exit 3', 2), '', dir))).toMatchObject({ met: false, evidence: expect.stringMatching(/exited 3\nnope/) });
+    const slow = await checkGoalAsync(newGoal('x', 'sleep 5', 2), '', dir, 200);
+    expect(slow.met).toBe(false);
+    expect(slow.evidence).toMatch(/timed out/);
+    expect((await checkGoalAsync(newGoal('x', undefined, 2), 'GOAL_MET: ran the build, 0 errors', dir)).met).toBe(true);
+  });
+});

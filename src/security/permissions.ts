@@ -5,6 +5,7 @@ import { assessAnalysis, canGrantAlways, matchDenyRule, matchesAtCommandPosition
 import { compileAllowRules, matchAllowRule, type AllowMatcher } from './allow-rules.js';
 import { analyzeShell, isNeutralSegment, type ShellAnalysis } from './shell-analyze.js';
 import { autonomousDecision, editPathDecision, isCommandTool, isFileEditTool, workspaceRoots, type AutoPolicyContext } from './autonomy.js';
+import { instructionFileHit, instructionFileReason, type InstructionFileHit } from './instruction-files.js';
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
@@ -25,6 +26,8 @@ export type PermissionVia =
   | 'auto-policy'
   /** Auto mode: the policy asks a human (outside-project destructive, remote, system-level). */
   | 'auto-policy-ask'
+  /** A write to an agent instruction file (AGENTS.md, QODEX.md, .qodex/…): asks in every mode. */
+  | 'instruction-file'
   | 'ask';
 
 /** evaluate() plus the words a prompt shows. */
@@ -177,10 +180,28 @@ export class PermissionEngine {
     return { cwd, roots: workspaceRoots(cwd, this.extraRoots) };
   }
 
+  /**
+   * The agent instruction file this request writes, if any (src/security/instruction-files.ts):
+   * an edit tool's path, or any path a shell command writes, deletes, moves or chmods.
+   */
+  private instructionWrite(req: PermissionRequest): InstructionFileHit | null {
+    const op = req.operation ?? '';
+    if (!op || op.startsWith('sentinel:')) return null;
+    const ctx = this.policyContext(req);
+    if (isFileEditTool(req.tool)) return instructionFileHit(op, ctx.cwd);
+    if (!isCommandTool(req.tool)) return null;
+    for (const p of analyzeShell(op, ctx).writeTargets ?? []) {
+      const hit = instructionFileHit(p, ctx.cwd);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
   /** Would the autonomous policy run this without asking? */
   private autoWouldAllow(req: PermissionRequest): boolean {
     if (this.isReadOnlyTool(req.tool)) return true;
     try {
+      if (this.instructionWrite(req)) return false;
       return autonomousDecision(req, this.policyContext(req)).decision === 'allow';
     } catch {
       return false;
@@ -205,6 +226,19 @@ export class PermissionEngine {
     // neither a command line nor a path.
     const sentinelOp = (req.operation ?? '').startsWith('sentinel:');
     const commandTool = isCommandTool(req.tool) && !sentinelOp;
+
+    // Agent instruction files (AGENTS.md, QODEX.md, .qodex/…, ~/.qodex/skills…) are the
+    // agent's standing orders: a prompt-injected page that rewrites one persists into every
+    // later session. Writes to them ask in EVERY mode; only the human's own "yes for this
+    // session" on this exact request skips the prompt — no allow rule, tool-wide allow,
+    // edits mode or auto mode does.
+    let instr: InstructionFileHit | null = null;
+    try { instr = this.instructionWrite(req); } catch { instr = null; }
+    if (instr) {
+      if (this.sessionDenies.has(key)) return { decision: 'deny', via: 'session-pair', reason: 'you declined this for the session' };
+      if (this.sessionAllows.has(key)) return { decision: 'allow', via: 'session-pair' };
+      return { decision: 'ask', via: _approvalMode === 'auto' ? 'auto-policy-ask' : 'instruction-file', reason: instructionFileReason(instr) };
+    }
 
     // Auto mode: the autonomous policy decides (src/security/autonomy.ts). It asks only for
     // destructive actions outside the project, remote-destructive / publish / deploy, and

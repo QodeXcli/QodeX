@@ -39,6 +39,8 @@ import * as os from 'os';
 import { randomBytes } from 'crypto';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import { isAutonomousContext } from '../../sentinel/auto-mode.js';
+import { confirmShellCommand } from './confirm.js';
 
 const CodeRunArgs = z.object({
   language: z.enum([
@@ -87,6 +89,22 @@ function pickInterpreter(lang: string): InterpreterInfo {
     default:
       throw new Error(`Unsupported language: ${lang}`);
   }
+}
+
+const EVAL_COMMAND: Record<string, string> = {
+  python: 'python3 -c', python3: 'python3 -c',
+  node: 'node -e', javascript: 'node -e', js: 'node -e', typescript: 'node -e', ts: 'node -e',
+  bash: 'bash -c', sh: 'bash -c', php: 'php -r', ruby: 'ruby -e', rb: 'ruby -e',
+};
+const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The snippet as the equivalent command line — what the auto-mode policy analyzes (it is
+ * never executed). PURE.
+ */
+export function codeRunCommandLine(args: { language: string; code: string; cwd?: string }): string {
+  const run = `${EVAL_COMMAND[args.language] ?? 'python3 -c'} ${shQuote(args.code)}`;
+  return args.cwd ? `cd ${shQuote(args.cwd)} && ${run}` : run;
 }
 
 /** Check if a binary is on PATH. */
@@ -142,7 +160,16 @@ export class CodeRunTool extends Tool<z.infer<typeof CodeRunArgs>> {
   isDestructive = false;
   argsSchema = CodeRunArgs;
 
-  async execute(args: z.infer<typeof CodeRunArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof CodeRunArgs>, ctx: ToolContext): Promise<ToolResult> {
+    // Linux and Windows have no sandbox layer (macOS's sandbox-exec confines writes to the
+    // temp dir), so in auto mode code that clearly deletes or writes outside the project
+    // asks a human exactly like the same shell command would.
+    if (os.platform() !== 'darwin' && ctx?.permissions && isAutonomousContext(ctx)) {
+      const refused = await confirmShellCommand(ctx, {
+        tool: 'code_run', command: codeRunCommandLine(args), description: `code_run (${args.language})`,
+      });
+      if (refused) return refused;
+    }
     const timeoutMs = args.timeout_ms ?? 30_000;
     const allowNetwork = args.network !== false; // default true
 

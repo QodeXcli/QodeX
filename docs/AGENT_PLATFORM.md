@@ -150,7 +150,14 @@ Sentinel rates non-critical. Only these still stop for a human:
   workspace roots, force-push / remote branch deletes, deleting remote data (cloud, Kubernetes,
   `terraform destroy`, other hosts' databases, package unpublish), publishing (`npm publish`,
   `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks), and on
-  the web deleting data or changing an account on a non-local site.
+  the web deleting data or changing an account on a non-local site;
+- **writes to the agent's own instruction files** — `AGENTS.md`, `QODEX.md`, `CLAUDE.md`,
+  `GEMINI.md`, `AI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`,
+  anything under the project's `.qodex/` or `.cursor/rules/`, and `~/.qodex/skills|rules|hooks|memory`.
+  A prompt-injected page that got the agent to rewrite one would persist into every later
+  session, so these ask in **every** mode, by edit tool or by shell (`>>`, `tee`, `cp`, `sed -i`,
+  `rm`…). No allow rule or "always yes" covers them; your "yes for this session" on that exact
+  write does.
 
 With no human at the terminal (`-p`, schedules, detached missions) those questions go to the
 control center, Telegram or the mission's approval queue, and are refused when none is
@@ -261,6 +268,43 @@ Private chats only, pairing codes expire, brute-force lockout; Persian and Engli
 Telegram allows **one** poller per bot token — if you also run `qodex bot`, give the notifier
 its own bot and point `telegram.botTokenEnv` at that token's variable.
 
+## 8. Goals, emergency stop, /learn and monitors
+
+**Standing goals — keep going until it is actually done.** `/goal <what done looks like>`
+starts a task and keeps QodeX working on it across turns until the goal is proven, not merely
+claimed:
+
+```
+/goal all tests pass and the build is green --check "npm test && npm run build" --max 10
+/goal the README documents every CLI flag          # no check: the model must cite evidence
+/goal            # show the goal and its rounds      /goal clear   # drop it
+```
+
+After each run QodeX checks: with `--check`, the command must exit 0; without one, the final
+answer must cite evidence on a `GOAL_MET: …` line. If not met, it starts another round with the
+check's output (up to `--max`, default 8, max 50) and then stops and says what is missing.
+
+**Emergency stop.** `/stop` halts everything this QodeX process is doing — the running task,
+side runs, background jobs and dev servers — and clears the standing goal. It works mid-task
+(it is not queued as a steering note). `/stop all` also cancels every active mission. The same
+stop is on the control center (the red **⏹ Stop** button, missions included) and in Telegram
+(`/stop`, `/stop all`).
+
+**`/learn [name]` — keep what just worked.** Turns the task you just finished (its request, the
+ordered tool steps, the files it changed, the outcome) into an active skill under
+`~/.qodex/skills/<name>/`, with the same deterministic distiller the automatic flywheel uses. A
+skill you wrote yourself with that name is never overwritten. Use it with `/<name>`.
+
+**Monitors — schedules that remember.** `qodex schedule add … --continuity` hands each run the
+previous run's answer so it reports what changed; `--notify-on-change` skips the notification /
+chat delivery when the answer is the same as last time (the run is still logged):
+
+```bash
+qodex schedule add --name gpu-price --cron "@hourly" \
+  --prompt "check the price of the RTX 5090 at shop.example" \
+  --continuity --notify-on-change --deliver telegram:<chat-id>
+```
+
 ---
 
 ### For weaker local models
@@ -295,6 +339,11 @@ with their own session and budget.
 - **مأموریت‌های پس‌زمینه** که بعد از بستن برنامه هم ادامه می‌دهند: `qodex mission start "..."`
 - **Sentinel**: خرید، پرداخت، ارسال پیام و ورود اطلاعات حساس بدون تأیید شما انجام نمی‌شود — حتی با `/auto on` یا `--yes`. محتوای صفحات وب «داده» حساب می‌شود و تزریق دستور (فارسی و انگلیسی) شناسایی می‌شود.
 - **حالت خودکار (auto)**: سه حالت تأیید داریم — `manual` (پیش‌فرض)، `edits` و `auto`؛ با Shift+Tab عوض می‌شوند و نوار وضعیت حالت فعلی را نشان می‌دهد. در حالت auto هر کاری داخل پروژه (ویرایش، شل، نصب پکیج، کامیت و push معمولی، حذف فایل‌های پروژه) بدون پرسش انجام می‌شود و ایجنت سؤال‌های خودش را هم نمی‌پرسد: خودش تصمیم می‌گیرد و فرض‌هایش را در پایان می‌گوید. فقط این‌ها هنوز تأیید شما را لازم دارند: خرید، پرداخت، رمز عبور، ارسال پیام، و کارهای مخرب بیرون از پروژه (حذف فایل بیرون از پروژه، force-push، حذف داده‌ی راه‌دور، انتشار پکیج، sudo). اگر کسی پای ترمینال نباشد این موارد به مرکز کنترل / تلگرام می‌روند یا رد می‌شوند. روشن کردن: Shift+Tab، `/auto on`، `qodex --auto`، یا `approval.defaultMode: auto` فقط در `~/.qodex/config.yaml` (تنظیمات پروژه نمی‌تواند شما را به auto ببرد). `approval.extraRoots` پوشه‌های دیگری را جزو پروژه حساب می‌کند. قوانین deny و بودجه‌ها همچنان اعمال می‌شوند.
+- **فایل‌های دستورالعمل ایجنت** (`AGENTS.md`، `QODEX.md`، `CLAUDE.md`، پوشهٔ `.qodex/`، `~/.qodex/skills` و …) در **همهٔ** حالت‌ها، حتی auto، فقط با تأیید شما تغییر می‌کنند — تا صفحه‌ای که تزریق دستور دارد نتواند قوانین دائمی ایجنت را بازنویسی کند.
+- **هدف ماندگار** (`/goal`): ایجنت تا وقتی هدف واقعاً ثابت نشده ادامه می‌دهد — یا دستور بررسی (`--check "npm test"`) موفق شود، یا با سطر `GOAL_MET:` مدرک بیاورد؛ حداکثر تعداد دور با `--max`.
+- **توقف اضطراری** (`/stop`): کار در حال اجرا، اجراهای جانبی و سرورهای توسعه را فوراً متوقف می‌کند؛ `/stop all` مأموریت‌ها را هم لغو می‌کند. همین دکمه در مرکز کنترل و دستور `/stop` در تلگرام هم هست.
+- **یادگیری فوری** (`/learn`): کاری که همین الان انجام شد را به یک مهارت قابل استفادهٔ دوباره تبدیل می‌کند.
+- **پایش زمان‌بندی‌شده**: `qodex schedule add … --continuity --notify-on-change` — هر اجرا جواب اجرای قبلی را می‌بیند و فقط وقتی چیزی عوض شده خبر می‌دهد.
 - **گاوصندوق رمزها**: ایجنت رمز را هرگز نمی‌بیند و فقط روی سایت اصلی پر می‌کند (ضد فیشینگ)، با پشتیبانی از کد دومرحله‌ای.
 - **مرکز کنترل وب**: تماشای زنده‌ی مرورگر ایجنت، در دست گرفتن کنترل، تأیید با یک کلیک — حتی از گوشی. `qodex control --lan`
 - **یادگیری از نمایش**: یک بار کار را انجام دهید، QodeX ضبط و بعداً تکرار می‌کند. `qodex workflow record`

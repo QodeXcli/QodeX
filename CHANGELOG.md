@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — standing goals, emergency stop, /learn, monitors
+
+1. **`/goal` — keep working until it is proven done.** `/goal <what done looks like>
+   [--check "<cmd>"] [--max N]` starts the task and, after each run, checks the goal: the check
+   command must exit 0, or (without one) the answer must cite evidence on a `GOAL_MET:` line.
+   Not met → another round with the check's output, up to `--max` (default 8, cap 50), then it
+   stops and says what is missing. `/goal` shows it, `/goal clear` drops it.
+2. **Emergency stop.** `/stop` halts the running task, side runs, background jobs and dev
+   servers and clears the goal — mid-task too; `/stop all` also cancels every active mission.
+   Also in the control center (⏹ Stop) and Telegram (`/stop`, `/stop all`).
+3. **`/learn [name]`.** Turns the task you just finished into an active skill with the
+   deterministic distiller (no model call); never overwrites a skill you wrote.
+4. **Monitors.** `qodex schedule add --continuity` gives each run the previous answer so it
+   reports what changed; `--notify-on-change` skips the notification / delivery when nothing did.
+   `qodex schedule list` shows both.
+5. **Protected instruction files.** Writes to `AGENTS.md`, `QODEX.md`, `CLAUDE.md`, `GEMINI.md`,
+   `AI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, the project's
+   `.qodex/` and `.cursor/rules/`, and `~/.qodex/skills|rules|hooks|memory` ask in every mode,
+   auto included — by edit tool or any shell command that writes, moves, deletes or chmods them.
+   No allow rule, tool-wide allow or "always yes" covers them.
+
 ## Unreleased — a real auto mode
 
 **Auto mode now means "work without asking me" — except for money, passwords, messages and

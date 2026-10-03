@@ -122,6 +122,37 @@ export function checkGoal(goal: StandingGoal, finalText: string, cwd: string, ti
     : { met: false, evidence: 'The answer did not end with a "GOAL_MET: <evidence>" line citing a check you ran and its result.' };
 }
 
+/** checkGoal without blocking the event loop (the TUI keeps rendering while tests run). */
+export async function checkGoalAsync(goal: StandingGoal, finalText: string, cwd: string, timeoutMs = 600_000): Promise<GoalVerdict> {
+  if (!goal.check) return checkGoal(goal, finalText, cwd);
+  const { spawn } = await import('child_process');
+  return new Promise<GoalVerdict>((resolve) => {
+    let out = '';
+    let settled = false;
+    const finish = (ok: boolean, code: number | null, extra = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const tail = (out + extra).length > 4000 ? '…' + (out + extra).slice(-4000) : out + extra;
+      const head = `\`${goal.check}\` exited ${code ?? 'abnormally'}`;
+      resolve({ met: ok, evidence: tail.trim() ? `${head}\n${tail.trimEnd()}` : head });
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(goal.check!, { shell: true, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e: any) {
+      resolve({ met: false, evidence: `check failed to start: ${e?.message ?? e}` });
+      return;
+    }
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } finish(false, null, '\n(check timed out)'); }, timeoutMs);
+    const add = (d: Buffer) => { out += d.toString(); if (out.length > 64_000) out = out.slice(-32_000); };
+    child.stdout?.on('data', add);
+    child.stderr?.on('data', add);
+    child.on('error', (e) => finish(false, null, `\n${e.message}`));
+    child.on('close', (code) => finish(code === 0, code));
+  });
+}
+
 export type GoalNext = { action: 'done'; goal: StandingGoal } | { action: 'continue'; goal: StandingGoal; prompt: string } | { action: 'give-up'; goal: StandingGoal };
 
 /** What to do after a run finished while a goal is active. PURE. */
