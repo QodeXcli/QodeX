@@ -26,6 +26,7 @@ import * as path from 'path';
 import { QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../config/paths.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { withLock } from '../utils/file-lock.js';
+import { vaultKeyStore, type VaultKeyStore } from './keystore.js';
 import { parseTotpInput, type TotpAlgorithm } from './totp.js';
 
 export interface VaultEntry {
@@ -222,46 +223,26 @@ function summarize(e: VaultEntry): VaultEntrySummary {
 export class Vault {
   readonly file: string;
   readonly keyFile: string;
+  private keystore: VaultKeyStore | null;
 
-  constructor(opts: { file?: string; keyFile?: string } = {}) {
+  constructor(opts: { file?: string; keyFile?: string; keystore?: VaultKeyStore } = {}) {
     this.file = opts.file ?? QODEX_VAULT_FILE;
-    this.keyFile = opts.keyFile ?? QODEX_VAULT_KEY_FILE;
+    this.keyFile = opts.keyFile ?? opts.keystore?.keyFile ?? QODEX_VAULT_KEY_FILE;
+    this.keystore = opts.keystore ?? null;
   }
 
   private async exists(p: string): Promise<boolean> {
     try { await fs.access(p); return true; } catch { return false; }
   }
 
-  /** Read the key; create it (0600) on first use when `create` and no vault exists yet. */
+  /**
+   * The vault key from the shared keystore (key file or OS keychain, see keystore.ts).
+   * A key is minted only on a fresh install when `create` is set; a missing key with an
+   * existing vault (or a keystore record) is `[VAULT_KEY_MISSING]`.
+   */
   private async key(create: boolean): Promise<Buffer | null> {
-    try {
-      const text = (await fs.readFile(this.keyFile, 'utf-8')).trim();
-      const key = Buffer.from(text, 'base64');
-      if (key.length !== 32) throw new Error('[VAULT_KEY_INVALID] the vault key file is damaged (expected 32 bytes of base64)');
-      if (process.platform !== 'win32') {
-        try {
-          const st = await fs.stat(this.keyFile);
-          if ((st.mode & 0o077) !== 0) await fs.chmod(this.keyFile, 0o600);
-        } catch { /* best effort */ }
-      }
-      return key;
-    } catch (e: any) {
-      if (e?.code !== 'ENOENT') throw e;
-    }
-    if (await this.exists(this.file)) {
-      throw new Error(`[VAULT_KEY_MISSING] ${this.file} exists but its key file ${this.keyFile} is missing — restore the key file, or delete the vault to start over`);
-    }
-    if (!create) return null;
-    await fs.mkdir(path.dirname(this.keyFile), { recursive: true, mode: 0o700 });
-    const key = randomBytes(32);
-    try {
-      const fh = await fs.open(this.keyFile, 'wx', 0o600);
-      try { await fh.writeFile(key.toString('base64') + '\n'); await fh.sync(); } finally { await fh.close(); }
-      return key;
-    } catch (e: any) {
-      if (e?.code === 'EEXIST') return this.key(false); // another process won the race
-      throw e;
-    }
+    if (!this.keystore) this.keystore = vaultKeyStore({ keyFile: this.keyFile });
+    return this.keystore.load({ create, guardFiles: [this.file] });
   }
 
   private async load(create = false): Promise<{ entries: VaultEntry[]; key: Buffer | null }> {
