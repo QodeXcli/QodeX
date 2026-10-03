@@ -22,8 +22,11 @@
  *        operation), asking yes / no / always when it is undecided;
  *   4. every meaningful decision → audit log + bus event {kind:'sentinel'}.
  *
- * afterTool: tools flagged `untrustedOutput` get their text scanned for prompt
- * injection and fenced as data (injection.ts).
+ * afterTool: tools flagged `untrustedOutput` — plus web_fetch / web_search /
+ * remote http_request and MCP tools — get their text scanned for prompt
+ * injection and fenced as data (injection.ts). "Already fenced" is decided by
+ * the result's metadata, never by its text (page text could start with a fake
+ * fence). Every result also has control-center access tokens masked.
  *
  * preflight: the same review for the agent loop to run BEFORE it arms a tool's
  * timeout (a remote approval can take minutes); an allowed preflight leaves a
@@ -34,7 +37,7 @@
 
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { resolveSentinelConfig, type SentinelConfig } from '../config/agent-config.js';
+import { DEFAULT_SENTINEL_CONFIG, resolveSentinelConfig, type SentinelConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { QODEX_WORKFLOWS_DIR, sanitizeName } from '../config/paths.js';
 import { getBus } from '../control/bus.js';
@@ -43,11 +46,13 @@ import {
 } from '../control/approvals.js';
 import type { ToolContext, ToolResult } from '../tools/base.js';
 import { peekBrowserManager, type BrowserManager, type ElementInfo } from '../tools/browser/types.js';
+import { normalizeWorkflowName } from '../workflows/types.js';
 import { SentinelAudit, redactForAudit } from './audit.js';
-import { fenceUntrusted, injectionBanner, isFenced, scanInjection } from './injection.js';
+import { fenceUntrusted, injectionBanner, scanInjection } from './injection.js';
 import {
-  classifyAction, isGuardedTool, maskSecrets, type PolicyClassification, type PolicyContext,
-  type ProtectedPaths, type WorkflowLike,
+  classifyAction, isEnterKey, isGuardedTool, isPrivateHost, isSpaceKey, maskControlTokens, maskSecrets, parseTarget, scriptSelectors,
+  type ControlCenterLike,
+  type PolicyClassification, type PolicyContext, type ProtectedPaths, type WorkflowLike,
 } from './policy.js';
 import type { ActionClassification, SentinelDecision, SentinelGuard } from './types.js';
 
@@ -66,6 +71,11 @@ export interface SentinelOptions {
   broker?: () => ApprovalBroker;
   /** Is a human sitting at this process's askUser? Default: isInteractiveHuman(). */
   interactive?: () => boolean;
+  /**
+   * The control center running in this process (default: src/control/server.ts
+   * getControlCenter(), loaded lazily). Its port and token are off-limits to the agent.
+   */
+  controlCenter?: () => { port?: number; token?: string; url?: string; urls?: string[]; tunnelUrl?: string } | null;
 }
 
 /** Outcome of a review, before any prompting. */
@@ -106,6 +116,44 @@ function str(v: unknown): string {
 
 const ELEMENT_TOOLS = new Set(['browser_click', 'browser_fill', 'browser_type', 'browser_press', 'browser_upload', 'browser_fill_secret']);
 
+/** Tools that can reach QodeX's own control center (URL / command arguments). */
+const CONTROL_REACHING_TOOLS = new Set([
+  'browser_navigate', 'browser_tabs', 'browser_agent', 'computer_use_open', 'http_request', 'workflow_run',
+  'shell', 'code_run', 'background_job_start', 'dev_server_start', 'docker_exec',
+]);
+
+/**
+ * Tools whose output is text from the outside world even though they don't set
+ * `untrustedOutput` themselves (web pages, search results, HTTP bodies, MCP
+ * servers such as mail or chat): they get the same injection scan + fence.
+ */
+const EXTERNAL_TEXT_TOOLS = new Set(['web_fetch', 'web_search', 'http_request']);
+const MCP_TOOL_RE = /^mcp(?::|__)/i;
+
+type ControlInfo = NonNullable<ReturnType<NonNullable<SentinelOptions['controlCenter']>>>;
+/** Lazily loaded getControlCenter (src/control/server.ts is only imported when a guarded call could reach it). */
+let controlGetter: (() => ControlInfo | null) | null = null;
+let controlLoading: Promise<void> | null = null;
+function loadControlGetter(): Promise<void> {
+  if (controlGetter) return Promise.resolve();
+  if (!controlLoading) {
+    controlLoading = import('../control/server.js')
+      .then((m: any) => { controlGetter = typeof m?.getControlCenter === 'function' ? () => m.getControlCenter() : () => null; })
+      .catch(() => { controlGetter = () => null; });
+  }
+  return controlLoading;
+}
+
+function hostOfUrl(u: string | undefined): string {
+  try { return u ? new URL(u).hostname.toLowerCase().replace(/^\[|\]$/g, '') : ''; } catch { return ''; }
+}
+
+function toControlLike(info: ControlInfo | null | undefined): ControlCenterLike | null {
+  if (!info) return null;
+  const hosts = [...new Set([info.url, ...(info.urls ?? []), info.tunnelUrl].map(hostOfUrl).filter(Boolean))];
+  return { port: typeof info.port === 'number' ? info.port : undefined, token: info.token || undefined, hosts };
+}
+
 export class Sentinel implements SentinelGuard {
   private readonly approvals = new Set<string>();
   /**
@@ -123,8 +171,13 @@ export class Sentinel implements SentinelGuard {
     this.auditWriter = opts.audit;
   }
 
+  /** The Sentinel settings; the safe defaults when they can't be read (fail closed, never off). */
   config(): SentinelConfig {
-    return this.opts.config ? this.opts.config() : resolveSentinelConfig(getActiveConfig());
+    try {
+      return this.opts.config ? this.opts.config() : resolveSentinelConfig(getActiveConfig());
+    } catch {
+      return { ...DEFAULT_SENTINEL_CONFIG };
+    }
   }
 
   /** "category|domain" pairs the user answered "always" for this session. */
@@ -153,6 +206,38 @@ export class Sentinel implements SentinelGuard {
     }
   }
 
+  /** The in-process control center (port, token, hosts), loading the accessor on first use. */
+  private async controlInfo(): Promise<ControlCenterLike | null> {
+    try {
+      if (this.opts.controlCenter) return toControlLike(this.opts.controlCenter());
+      // A running control center registers the 'control' approval channel; without
+      // one there is nothing to protect and no reason to load the server module.
+      if (!controlGetter && !this.controlChannelUp()) return null;
+      await loadControlGetter();
+      return toControlLike(controlGetter?.());
+    } catch {
+      return null;
+    }
+  }
+
+  /** Same, synchronously (afterTool): only when the accessor is already loaded. */
+  private controlTokenSync(): string | undefined {
+    try {
+      if (this.opts.controlCenter) return this.opts.controlCenter()?.token || undefined;
+      if (!controlGetter) {
+        if (this.controlChannelUp()) void loadControlGetter();
+        return undefined;
+      }
+      return controlGetter()?.token || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private controlChannelUp(): boolean {
+    try { return this.broker().channelNames().includes('control'); } catch { return false; }
+  }
+
   private audit(cfg: SentinelConfig): SentinelAudit | null {
     if (!cfg.audit || this.auditWriter === null) return null;
     if (!this.auditWriter) this.auditWriter = new SentinelAudit();
@@ -168,6 +253,7 @@ export class Sentinel implements SentinelGuard {
 
   private async gather(toolName: string, args: Record<string, unknown>, ctx: ToolContext): Promise<Omit<PolicyContext, 'config'>> {
     const out: Omit<PolicyContext, 'config'> = { cwd: ctx?.cwd, protectedPaths: this.opts.protectedPaths };
+    if (CONTROL_REACHING_TOOLS.has(toolName)) out.control = await this.controlInfo();
     if (toolName === 'workflow_run' && str(args.name)) {
       out.workflow = await this.loadWorkflow(str(args.name));
     }
@@ -189,21 +275,46 @@ export class Sentinel implements SentinelGuard {
       const ref = str(args.ref);
       const selector = str(args.selector);
       if (toolName === 'browser_press' && !ref && !selector) {
-        out.element = /enter|return/i.test(str(args.key)) ? await describe(undefined, '*:focus') : null;
+        // Enter submits and Space activates whatever has focus.
+        const key = str(args.key);
+        out.element = isEnterKey(key) || isSpaceKey(key) ? await describe(undefined, '*:focus') : null;
+      } else if (toolName === 'browser_type' && !ref && !selector) {
+        // Without a target the text goes into the focused element (maybe a password field).
+        out.element = await describe(undefined, '*:focus');
       } else {
         out.element = await describe(ref || undefined, selector || undefined);
       }
     } else if (toolName === 'browser_fill_form' && Array.isArray(args.fields)) {
-      const refs = (args.fields as Array<Record<string, unknown>>).map(f => str(f?.ref)).filter(Boolean).slice(0, 25);
-      const infos = await Promise.all(refs.map(r => describe(r)));
-      out.elements = Object.fromEntries(refs.map((r, i) => [r, infos[i]]));
+      // Fields are keyed by ref, or by selector when they have no ref (policy reads the same key).
+      const targets = (args.fields as Array<Record<string, unknown>>)
+        .map(f => ({ ref: str(f?.ref), selector: str(f?.selector) }))
+        .filter(t => t.ref || t.selector)
+        .slice(0, 25);
+      const infos = await Promise.all(targets.map(t => describe(t.ref || undefined, t.ref ? undefined : t.selector)));
+      out.elements = Object.fromEntries(targets.map((t, i) => [t.ref || t.selector, infos[i]]));
+    } else if (toolName === 'browser_evaluate' || /^\s*javascript:/i.test(str(args.url))) {
+      // A script (or javascript: URL) that clicks/submits: describe what it selects.
+      let script = toolName === 'browser_evaluate' ? str(args.script) : str(args.url).trim().replace(/^javascript:/i, '');
+      if (toolName !== 'browser_evaluate') { try { script = decodeURIComponent(script); } catch { /* keep */ } }
+      const sels = scriptSelectors(script);
+      if (sels.length) out.scriptTargets = await Promise.all(sels.map(sel => describe(undefined, sel)));
+    } else if (toolName === 'browser_dialog' && str(args.action) === 'accept') {
+      // The manager's status carries the active tab's waiting dialog ({type, message}).
+      try {
+        const pd = (mgr.status() as unknown as { pendingDialog?: { type?: string; message?: string } })?.pendingDialog;
+        out.dialog = pd && typeof pd === 'object' ? { type: str(pd.type), message: str(pd.message) } : null;
+      } catch { out.dialog = null; }
     }
     return out;
   }
 
   private async loadWorkflow(name: string): Promise<WorkflowLike | null> {
     const dir = this.opts.workflowsDir ?? QODEX_WORKFLOWS_DIR;
-    const candidates = [...new Set([name, sanitizeName(name)])].filter(c => c && !/[/\\]/.test(c) && c !== '.' && c !== '..');
+    // The workflow store files a workflow under normalizeWorkflowName(name) (lower-case slug,
+    // hash suffix for Persian names) — look there first, like workflow_run does.
+    let id = '';
+    try { id = normalizeWorkflowName(name); } catch { id = ''; }
+    const candidates = [...new Set([id, name, sanitizeName(name)])].filter(c => c && !/[/\\]/.test(c) && c !== '.' && c !== '..');
     for (const c of candidates) {
       try {
         const parsed = JSON.parse(await fs.readFile(path.join(dir, `${c}.json`), 'utf-8'));
@@ -232,7 +343,9 @@ export class Sentinel implements SentinelGuard {
       return { via: 'policy', decision: { action: 'deny', classification: cls, message: `[SENTINEL_BLOCKED] ${cls.summary} — ${cls.reason}. This is a hard policy block; do not retry or work around it. Tell the user if the task needs it.` } };
     }
     if (!cls.category || cls.risk === 'low') return { via: 'low-risk', decision: { action: 'allow', classification: cls } };
-    if (cfg.autoApprove.includes(cls.category)) return { via: 'auto-approve', decision: { action: 'allow', classification: cls } };
+    // Integrity rules (QodeX's config, vault CLI, approval channels) are never pre-approved:
+    // `autoApprove: [account]` for website settings must not let the agent approve itself.
+    if (cfg.autoApprove.includes(cls.category) && !cls.integrity) return { via: 'auto-approve', decision: { action: 'allow', classification: cls } };
     if (cls.risk !== 'critical' && this.approvals.has(this.approvalKey(cls))) {
       return { via: 'session', decision: { action: 'allow', classification: cls } };
     }
@@ -451,11 +564,24 @@ export class Sentinel implements SentinelGuard {
 
   afterTool(toolName: string, args: Record<string, unknown>, result: ToolResult, meta: { untrustedOutput?: boolean } = {}): ToolResult {
     try {
-      if (!meta?.untrustedOutput || !result) return result;
+      if (!result || typeof result.content !== 'string') return result;
       const cfg = this.config();
-      if (!cfg.enabled || !cfg.injectionDefense) return result;
-      const content = result.content;
-      if (typeof content !== 'string' || !content.trim() || isFenced(content)) return result;
+      if (!cfg.enabled) return result;
+      // Control-center access tokens (a mission's live URL, `qodex control` output, a
+      // sessions.db dump) never reach the model: with one it could approve its own actions.
+      const token = this.controlTokenSync();
+      const masked = maskControlTokens(result.content, token ? [token] : []);
+      if (masked !== result.content) result = { ...result, content: masked };
+
+      // web_fetch / http_request against the user's own dev server (localhost, LAN) is
+      // their own code's output, not the outside world: left unfenced.
+      const target = parseTarget(str(args?.url));
+      const external = EXTERNAL_TEXT_TOOLS.has(toolName) && !(target?.host && isPrivateHost(target.host));
+      const untrusted = meta?.untrustedOutput === true || external || MCP_TOOL_RE.test(toolName);
+      if (!untrusted || !cfg.injectionDefense) return result;
+      const content = result.content as string;
+      // Already fenced BY SENTINEL (metadata, not a text prefix: page text could start with a fake fence).
+      if (!content.trim() || (result.metadata as any)?.sentinel?.fenced === true) return result;
       const findings = scanInjection(content);
       const source = this.sourceFor(toolName, args ?? {});
       if (findings.length) {
@@ -483,7 +609,7 @@ export class Sentinel implements SentinelGuard {
       const mgr = this.browser();
       try { if (mgr?.isRunning()) url = mgr.activeUrl(); } catch { /* ignore */ }
     }
-    url = maskSecrets(url).slice(0, 160);
+    url = maskControlTokens(maskSecrets(url)).slice(0, 160);
     return url ? `${toolName} ${url}` : toolName;
   }
 }

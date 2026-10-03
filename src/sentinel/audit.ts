@@ -18,7 +18,7 @@ import * as path from 'path';
 import { QODEX_SENTINEL_DIR } from '../config/paths.js';
 import { redactValue } from '../utils/redact.js';
 import { logger } from '../utils/logger.js';
-import { maskSecrets } from './policy.js';
+import { maskControlTokens, maskSecrets } from './policy.js';
 
 export interface AuditRecord {
   /** 'decision' for guarded tool calls, 'injection' for flagged untrusted output. */
@@ -52,7 +52,7 @@ export function redactForAudit(v: unknown, opts: { hideTyped?: boolean } = {}, k
     if (opts.hideTyped && SENSITIVE_VALUE_KEYS.test(key)) return `[hidden ${v.length} chars]`;
     const r = redactValue(key, v);
     if (typeof r !== 'string') return r;
-    const masked = r === v ? maskSecrets(v) : r;
+    const masked = r === v ? maskControlTokens(maskSecrets(v)) : r;
     return masked.length > MAX_STRING ? masked.slice(0, MAX_STRING) + `…[+${masked.length - MAX_STRING}]` : masked;
   }
   if (Array.isArray(v)) return v.slice(0, 50).map(x => redactForAudit(x, opts, key, depth + 1));
@@ -125,7 +125,14 @@ export class SentinelAudit {
           await fs.rename(file, path.join(this.dir, 'audit.1.jsonl')).catch(() => {});
         }
       } catch { /* no file yet */ }
-      await fs.appendFile(file, line, { encoding: 'utf-8', mode: 0o600 });
+      try {
+        await fs.appendFile(file, line, { encoding: 'utf-8', mode: 0o600 });
+      } catch (e: any) {
+        if (e?.code !== 'ENOENT') throw e;
+        // The directory was removed while we were running: recreate it once, keep auditing.
+        await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
+        await fs.appendFile(file, line, { encoding: 'utf-8', mode: 0o600 });
+      }
     } catch (e: any) {
       if (!this.warned) {
         this.warned = true;

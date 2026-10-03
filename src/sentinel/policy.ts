@@ -16,10 +16,21 @@
  *     computer_use_type): password fields, payment fields, and text that LOOKS
  *     like a secret (Luhn-valid card, Iranian card BINs, IBAN / Sheba, API keys,
  *     private keys, JWTs) → credential;
- *   - uploads, downloads, page scripts, desktop input, mutating HTTP requests,
+ *   - page scripts (browser_evaluate, javascript: URLs): a script that clicks /
+ *     submits is judged like a click on what it selects (by selector words and
+ *     the described target elements), so `.click()` can't route around the
+ *     purchase guard; Space on a focused button is an activation too;
+ *   - uploads, downloads, JS dialogs, desktop input, mutating HTTP requests,
  *     workflow replays and MCP tools (by the verb in their name);
- *   - file/shell tools touching the vault key, the vault or browser profiles
- *     (hard block: those are the agent's credentials).
+ *   - file/shell tools touching the vault key, the vault or browser profiles —
+ *     also via a bulk read (tar / rsync / grep -r / s3_sync) of ~/.qodex as a
+ *     whole (hard block: those are the agent's credentials);
+ *   - QodeX's own integrity (`integrity: true`, never auto-approved): changing
+ *     its config / .env / approval stores (sessions.db, Telegram pairing, audit),
+ *     CLI commands that change the vault or answer / open approval channels
+ *     (`qodex mission approve`, `qodex control`, `qodex telegram pair`), and any
+ *     use of the in-process control center (hard block) — the agent must never
+ *     be able to approve its own actions.
  *
  * Risk: a category listed in `config.requireApproval` is CRITICAL (an explicit
  * human answer, never auto-approved by `/auto on` or `--yes`), otherwise the
@@ -40,22 +51,37 @@ import * as os from 'os';
 import * as path from 'path';
 import { domainToASCII } from 'url';
 import type { SentinelCategory, SentinelConfig } from '../config/agent-config.js';
-import { QODEX_CONFIG_FILE, QODEX_HOME } from '../config/defaults.js';
-import { QODEX_BROWSER_PROFILES_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../config/paths.js';
+import { QODEX_CONFIG_FILE, QODEX_HOME, QODEX_SESSION_DB } from '../config/defaults.js';
+import {
+  QODEX_BROWSER_PROFILES_DIR, QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE,
+} from '../config/paths.js';
 import type { ElementInfo } from '../tools/browser/types.js';
 import type { ActionClassification, RiskLevel } from './types.js';
 
 // ── public types ────────────────────────────────────────────────────────────
 
-/** Minimal shape of a recorded workflow (src/workflows) the policy can inspect. */
+/** Minimal shape of a recorded workflow (src/workflows/types.ts) the policy can inspect. */
 export interface WorkflowLike {
   name?: string;
   startUrl?: string;
-  params?: Array<{ name?: string; secret?: boolean }>;
+  params?: Array<{ name?: string; secret?: boolean; default?: string; vaultField?: string }>;
   steps?: Array<{
     kind?: string; url?: string; selector?: string; ref?: string; role?: string; name?: string;
-    text?: string; value?: string; key?: string;
+    text?: string; value?: string; values?: string[]; files?: string[]; key?: string; newTab?: boolean;
   }>;
+}
+
+/**
+ * The control center running in THIS process (src/control/server.ts), if any.
+ * It holds the approval queue and human takeover, so the agent must never
+ * operate it — that would let it approve its own critical actions.
+ */
+export interface ControlCenterLike {
+  port?: number;
+  /** Access token (`?k=` / Bearer). */
+  token?: string;
+  /** Hosts it is reachable on (loopback, LAN IPs, tunnel host). */
+  hosts?: string[];
 }
 
 export interface ProtectedPaths {
@@ -66,11 +92,14 @@ export interface ProtectedPaths {
   /** Substrings that identify those locations inside free-form commands. */
   markers: string[];
   /**
-   * QodeX's own configuration (incl. the Sentinel settings). Reading is fine;
-   * CHANGING it needs an explicit human answer, so injected page text can't get
-   * the agent to switch Sentinel off for future runs.
+   * QodeX's own configuration and approval trust stores (config.yaml, .env,
+   * sessions.db with the mission approval queue). Reading is fine; CHANGING
+   * them needs an explicit human answer, so injected page text can't get the
+   * agent to switch Sentinel off or approve its own actions.
    */
   configFiles?: string[];
+  /** Directories with the same write protection (Telegram pairing, the audit trail). */
+  configDirs?: string[];
 }
 
 export interface PolicyContext {
@@ -78,8 +107,14 @@ export interface PolicyContext {
   url?: string;
   /** Element behind the call's ref/selector, if it could be described. */
   element?: ElementInfo | null;
-  /** browser_fill_form: element info per field ref. */
+  /** browser_fill_form: element info per field, keyed by the field's ref (or its selector when it has no ref). */
   elements?: Record<string, ElementInfo | null>;
+  /** browser_dialog: the JavaScript dialog waiting on the active tab, if known. */
+  dialog?: { type?: string; message?: string } | null;
+  /** The control center running in this process, if any (never operable by the agent). */
+  control?: ControlCenterLike | null;
+  /** browser_evaluate / javascript: URLs: the elements the script selects (see scriptSelectors). */
+  scriptTargets?: Array<ElementInfo | null>;
   config: SentinelConfig;
   /** Tool working directory, for resolving relative paths. */
   cwd?: string;
@@ -92,6 +127,11 @@ export interface PolicyContext {
 export interface PolicyClassification extends ActionClassification {
   /** Hard policy block: the guard denies without asking anyone. */
   block?: boolean;
+  /**
+   * Guards QodeX's own integrity (its config, vault CLI, approval channels):
+   * always a fresh human answer — `sentinel.autoApprove` does not apply.
+   */
+  integrity?: boolean;
 }
 
 // ── text normalization ──────────────────────────────────────────────────────
@@ -628,19 +668,61 @@ export const DEFAULT_PROTECTED_PATHS: ProtectedPaths = {
   files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE],
   dirs: [QODEX_BROWSER_PROFILES_DIR],
   markers: [markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR)],
-  configFiles: [QODEX_CONFIG_FILE],
+  // .env holds the provider keys + the Telegram bot token; sessions.db holds the
+  // mission approval queue; channels/ holds the Telegram pairing (who may approve).
+  configFiles: [QODEX_CONFIG_FILE, path.join(QODEX_HOME, '.env'), QODEX_SESSION_DB],
+  configDirs: [QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR],
 };
 
 /** Shell fragments that write/move/delete a file (vs. merely reading it). */
 const SHELL_WRITE_RE = /(?<![<=-])>>?(?!\s*(?:\/dev\/null|&\d))|\btee\b|\bsed\s+(?:-[a-z]*\s+)*-[a-z]*i|\bperl\s+-[a-z]*i|\b(?:mv|cp|rm|truncate|chmod|chown|ln|install|dd)\b|writeFile|\.write\(|open\([^)]*['"][wa]|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item/i;
+/** SQL that changes a database (`sqlite3 ~/.qodex/sessions.db "UPDATE mission_approvals ..."`). */
+const SQL_WRITE_RE = /\b(?:update|insert|delete|replace|drop|alter|create|attach|vacuum)\b/i;
 
-/** CLI invocations that change the vault or QodeX's own setup (`qodex vault rm github`, `qx setup`). */
-const QODEX_SELF_CHANGE_RE = /\b(?:qodex|qx)(?:\.mjs)?\s+(?:vault\s+(?:add|rm|remove)|setup|config\s+(?:set|edit|reset))\b/i;
+/**
+ * CLI invocations that change the vault or QodeX's own setup, or that answer /
+ * open the approval channels themselves: approving a mission's pending
+ * approvals, starting a control center (its token approves anything), pairing
+ * a Telegram chat (the code would let whoever receives it approve), or giving
+ * a mission auto-approval. The agent must never do these on its own.
+ */
+const QODEX_SELF_CHANGE_RE = new RegExp([
+  // Command position only (start, after ; && || | ( $( ` or `sh -c "`, behind sudo/env/npx/node
+  // prefixes), so `grep "qodex control" docs/` is not mistaken for running it.
+  String.raw`(?:^|[;&|(\x60\n{]|\$\(|-c\s+["'])\s*`,
+  String.raw`(?:(?:sudo|nohup|exec|time|command|env(?:\s+-\S+)*|npx(?:\s+-\S+)*|node(?:\s+-\S+)*|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*`,
+  String.raw`(?:\S*[/\\])?(?:qodex|qx)(?:\.mjs|\.js|\.cmd)?\s+(?:`,
+  String.raw`vault\s+(?:add|rm|remove)`,
+  String.raw`|setup`,
+  String.raw`|config\s+(?:set|edit|reset)`,
+  String.raw`|control\b`,
+  String.raw`|telegram\s+(?:setup|pair|unpair)`,
+  String.raw`|missions?\s+(?:approve|deny)`,
+  String.raw`|missions?\s+(?:start|resume)\b[^|;&\n]*\s(?:--yes|-y)(?![\w-])`,
+  String.raw`|browser\s+reset-profile`,
+  String.raw`)`,
+].join(''), 'i');
 
-/** Does `text` mention one of the config files? PURE. */
-function mentionsConfig(text: string, pp: ProtectedPaths): boolean {
+/** Config files / dirs mentioned in `text` (absolute or ~/.qodex/... form). PURE. */
+function mentionedConfig(text: string, pp: ProtectedPaths): string[] {
   const t = String(text ?? '').replace(/\\/g, '/').toLowerCase();
-  return (pp.configFiles ?? []).some(f => t.includes(f.replace(/\\/g, '/').toLowerCase()) || t.includes(markerFor(f).toLowerCase()));
+  return [...(pp.configFiles ?? []), ...(pp.configDirs ?? [])]
+    .filter(f => t.includes(f.replace(/\\/g, '/').toLowerCase()) || t.includes(markerFor(f).toLowerCase()));
+}
+
+/** Does this shell command change one of the config files / trust stores? PURE. */
+function commandChangesConfig(cmd: string, pp: ProtectedPaths): boolean {
+  const hits = mentionedConfig(cmd, pp);
+  if (!hits.length) return false;
+  if (SHELL_WRITE_RE.test(cmd)) return true;
+  return hits.some(f => /\.(?:db|sqlite3?)$/i.test(f)) && SQL_WRITE_RE.test(cmd);
+}
+
+/** Is `abs` one of the config files (incl. SQLite -wal/-shm/-journal companions) or inside a config dir? PURE. */
+function isConfigPath(abs: string, pp: ProtectedPaths): boolean {
+  const a = normPath(abs);
+  if ((pp.configFiles ?? []).some(f => a === normPath(f) || a.startsWith(normPath(f) + '-'))) return true;
+  return (pp.configDirs ?? []).some(d => samePathOrInside(abs, d));
 }
 
 function expandHome(p: string): string {
@@ -696,6 +778,25 @@ export function textHitsProtectedMarker(text: string, pp: ProtectedPaths = DEFAU
   return false;
 }
 
+/**
+ * Is `abs` (inside QodeX's own tree) a directory that CONTAINS a protected
+ * location? Archiving, syncing or recursively grepping it reads the vault key
+ * and the browser profiles just like opening them one by one. PURE.
+ */
+function containsProtected(abs: string, pp: ProtectedPaths): boolean {
+  if (!abs || !samePathOrInside(abs, QODEX_HOME)) return false;
+  return [...pp.files, ...pp.dirs].some(f => samePathOrInside(f, abs));
+}
+
+/** Commands that read / copy / ship whole directory trees. */
+const BULK_READ_RE = /\b(?:tar|zip|7z|7za|rar|rsync|scp|sftp|rclone|gsutil|azcopy|restic|borg|duplicity)\b|\bcp\s+(?:-\S+\s+)*-[a-zA-Z]*[rRa]|\baws\s+s3\s+(?:sync|cp)\b|\bgrep\s+(?:-\S+\s+)*-[a-zA-Z]*[rR]|\b(?:rg|ag|ack)\s|\bfind\b[^|;&]*-exec|\bxargs\b|\bcat\s+[^|;&]*\*|\bcurl\b[^|;&]*(?:\s-T\b|--upload-file|\s-F\b|--form|--data-binary)|\bshutil\.(?:copytree|make_archive)|\bcpSync\b|\bfs\.cp\b/i;
+
+/** The ~/.qodex directory itself (or its browser/ dir) as a whole, not a file inside it. */
+const QODEX_ROOT_RE = new RegExp(
+  `(?:^|[\\s'"=:(\x60])(?:(?:~|\\$HOME|\\$\\{HOME\\}|${escapeRe(path.dirname(QODEX_HOME).replace(/\\/g, '/'))})/)?\\.qodex(?:/browser)?/?\\*?(?=$|[\\s'"\x60;|&)<>])`,
+  'i',
+);
+
 /** Files that hold credentials — uploading one is a credential action. */
 const SECRET_FILE_RE = /(?:^|[/\\])(?:\.env(?:\.[\w.-]+)?|id_(?:rsa|dsa|ecdsa|ed25519)|[^/\\]+\.(?:pem|key|p12|pfx|keystore|jks|kdbx|ovpn|ppk)|credentials(?:\.json)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|wallet\.dat|[^/\\]*keychain[^/\\]*)$/i;
 const SECRET_DIR_RE = /(?:^|[/\\])(?:\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.azure|\.config[/\\]gcloud)(?:[/\\]|$)/i;
@@ -716,6 +817,16 @@ function isButtonLike(el: ElementInfo | null | undefined): boolean {
   if (tag === 'button') return true;
   if (tag === 'input' && ['submit', 'button', 'image', 'reset'].includes(type)) return true;
   return false;
+}
+
+/** Enter / Return (also in chords like Control+Enter): submits forms and message boxes. PURE. */
+export function isEnterKey(key: string): boolean {
+  return /enter|return/i.test(String(key ?? ''));
+}
+
+/** Space (" ", "Space", "Spacebar", chords): activates a focused button / checkbox. PURE. */
+export function isSpaceKey(key: string): boolean {
+  return /^(?:.*\+)?(?:space|spacebar| )$/i.test(String(key ?? ''));
 }
 
 function isLink(el: ElementInfo | null | undefined): boolean {
@@ -796,7 +907,7 @@ function urlHits(u: string | undefined, which: 'formUrl' | 'hrefUrl', label: str
  * Classify activating an element (click, Enter, submit). `submit` adds the
  * compose-box rule (Enter / submit in a message box sends the message).
  */
-function classifyActivation(el: ElementInfo | null | undefined, description: string | undefined, pageUrl: string | undefined, submit: boolean): Hit | null {
+function classifyActivation(el: ElementInfo | null | undefined, description: string | undefined, pageUrl: string | undefined, submit: boolean, argSelector?: string): Hit | null {
   const buttonLike = isButtonLike(el);
   const hits: Hit[] = [];
   const page = parseTarget(pageUrl ?? '');
@@ -806,6 +917,11 @@ function classifyActivation(el: ElementInfo | null | undefined, description: str
   hits.push(...keywordHits(visible, buttonLike || !el, 'button/link'));
   const ids = normalizeText(selectorWords(el?.selector));
   if (ids) hits.push(...keywordHits(ids, buttonLike, 'element id'));
+  // The selector the model passed (`#place-order`, `text=Pay now`) still says what it
+  // targets when the element could not be described (slow page, describe timeout).
+  // Strong phrases only: a bare id like `#post-12` is no evidence of an action.
+  const argIds = argSelector && argSelector !== el?.selector ? normalizeText(selectorWords(argSelector)) : '';
+  if (argIds) hits.push(...keywordHits(argIds, false, 'element selector'));
 
   if (isLink(el)) hits.push(...urlHits(el?.href, 'hrefUrl', 'link'));
   if (buttonLike && el?.formAction) hits.push(...urlHits(el.formAction, 'formUrl', 'form'));
@@ -893,6 +1009,142 @@ function none(summary: string, domain?: string): PolicyClassification {
   return make(null, 'low', summary, 'not a guarded action', domain);
 }
 
+// ── page scripts (browser_evaluate, javascript: URLs) ───────────────────────
+
+/** Script fragments that activate page elements — a click/submit that skips the click guard. */
+const SCRIPT_ACTIVATION_RE = /\.click\s*\(|\.requestSubmit\s*\(|\.submit\s*\(|\bdispatchEvent\s*\(|\bnew\s+(?:Mouse|Pointer|Submit|Keyboard|Touch)Event\b|\binit(?:Mouse|Keyboard)Event\b/;
+/** Script fragments that reach the network, cookies or storage. */
+const SCRIPT_NET_RE = /\b(fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.credentials|navigator\.clipboard|\.submit\s*\(|window\.open|location\s*(?:\.href)?\s*=|location\.(?:assign|replace)|postMessage|importScripts)\b/;
+
+/** Words of a script for keyword matching ("querySelector('#placeOrder')" → "query selector place order"). */
+function scriptWords(script: string): string {
+  return normalizeText(String(script ?? '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[^\p{L}\p{N}]+/gu, ' '));
+}
+
+/**
+ * Selectors a page script picks elements with (`getElementById('place')`,
+ * `querySelector('#buy')`, `getElementsByName('confirm')`), so the guard can
+ * describe what a scripted click would hit. PURE.
+ */
+export function scriptSelectors(script: string): string[] {
+  const s = String(script ?? '');
+  const out: string[] = [];
+  const cssString = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  for (const m of s.matchAll(/getElementById\(\s*(['"`])([^'"`\n]{1,200})\1\s*\)/g)) out.push(`[id="${cssString(m[2])}"]`);
+  for (const m of s.matchAll(/getElementsByName\(\s*(['"`])([^'"`\n]{1,200})\1\s*\)/g)) out.push(`[name="${cssString(m[2])}"]`);
+  for (const m of s.matchAll(/querySelector(?:All)?\(\s*(['"`])((?:(?!\1)[^\n]){1,300})\1\s*\)/g)) out.push(m[2]);
+  return [...new Set(out)].slice(0, 6);
+}
+
+/**
+ * Classify running `script` in the active page. A script that clicks or submits
+ * elements is an ACTIVATION like browser_click — so `document.querySelector(
+ * '#place-order').click()` is a purchase, not a generic "other" that `/auto on`
+ * would wave through. PURE.
+ */
+function classifyScript(script: string, ctx: PolicyContext, what: string): PolicyClassification {
+  const cfg = ctx.config;
+  const page = parseTarget(ctx.url ?? '');
+  const pageHost = page?.host ?? '';
+  const pageLocal = !!pageHost && isPrivateHost(pageHost);
+  const onHost = pageHost ? ` on ${pageHost}` : '';
+  const net = script.match(SCRIPT_NET_RE);
+  const activates = SCRIPT_ACTIVATION_RE.test(script);
+  const summary = `${what} (${script.length} chars)${activates ? ' that clicks/submits page elements' : ''}${net ? ` using ${net[1]}` : ''}${onHost}`;
+  if (activates) {
+    // Strong phrases only: a script is code, and words like `delete` / `post` / `order` are common identifiers.
+    const hits = keywordHits(scriptWords(script), false, 'the script targets');
+    // The elements the script selects, as described on the live page: clicking them
+    // is judged exactly like browser_click on them.
+    for (const el of ctx.scriptTargets ?? []) {
+      if (!el) continue;
+      const h = classifyActivation(el, undefined, ctx.url, false);
+      if (h) hits.push({ category: h.category, reason: `the script clicks/submits "${elementLabel(el)}" — ${h.reason}` });
+    }
+    if (pageHost && isPaymentGatewayHost(pageHost)) {
+      hits.push({ category: 'payment', reason: `the script clicks/submits on the payment gateway ${pageHost}` });
+    } else if (page?.url) {
+      const pathTokens = urlTokens(page.url);
+      const inCheckout = firstMatch(pathTokens, CHECKOUT_PATH);
+      if (inCheckout) {
+        const payPage = /\b(pay|payment|billing)\b/.test(pathTokens) || /پرداخت/.test(pathTokens);
+        hits.push({ category: payPage ? 'payment' : 'purchase', reason: `the script clicks/submits on a ${inCheckout} page` });
+      }
+    }
+    const best = bestHit(hits);
+    if (best) return make(best.category, riskFor(best.category, cfg, { escalate: !pageLocal }), summary, best.reason, pageHost || undefined);
+    return make('other', riskFor('other', cfg, { base: 'high' }), summary, 'the script clicks / submits elements in the page, bypassing the per-click checks', pageHost || undefined);
+  }
+  if (net) return make('other', riskFor('other', cfg, { base: 'high' }), summary, `the script uses ${net[1]} (network / cookies / storage access)`, pageHost || undefined);
+  return make('other', riskFor('other', cfg), summary, 'arbitrary JavaScript in the page', pageHost || undefined);
+}
+
+// ── QodeX's own control center ──────────────────────────────────────────────
+
+/** `?k=<token>` — the control center's login link format (16-256 URL-safe chars). */
+const K_TOKEN_QUERY_RE = /[?&]k=[A-Za-z0-9_-]{16,256}(?![A-Za-z0-9_-])/;
+const K_TOKEN_URL_RE = /(\bhttps?:\/\/([^\s"'<>/?#]+)[^\s"'<>]*?[?&]k=)[A-Za-z0-9_-]{16,256}(?![A-Za-z0-9_-])/gi;
+/** Where `qodex control --tunnel` publishes the control center (cloudflared / ngrok / localtunnel). */
+const TUNNEL_SUFFIXES = ['trycloudflare.com', 'ngrok.io', 'ngrok.app', 'ngrok-free.app', 'ngrok-free.dev', 'ngrok.dev', 'loca.lt'];
+
+/**
+ * Hide control-center access tokens: `?k=<token>` in http(s) URLs on a local /
+ * private / tunnel host (where control centers live — public sites' `k=`
+ * parameters in source files stay intact), plus the given raw tokens anywhere.
+ * A model that saw the token could open the dashboard (or POST /api/approvals)
+ * and approve its own actions. PURE.
+ */
+export function maskControlTokens(text: string, tokens: string[] = []): string {
+  let s = String(text ?? '');
+  if (s.includes('k=')) {
+    s = s.replace(K_TOKEN_URL_RE, (whole, prefix: string, authority: string) => {
+      const host = authority.replace(/^[^@]*@/, '').replace(/:\d+$/, '').toLowerCase();
+      const controlHost = isPrivateHost(host) || TUNNEL_SUFFIXES.some(d => hostMatchesDomain(host, d));
+      return controlHost ? `${prefix}[redacted]` : whole;
+    });
+  }
+  for (const t of tokens) if (t && t.length >= 8 && s.includes(t)) s = s.split(t).join('[redacted]');
+  return s;
+}
+
+const LOCAL_HOST_SRC = String.raw`(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|[\w.-]+\.(?:local|internal|localhost))`;
+
+/** Why opening `t` would operate QodeX's own control center, or null. PURE. */
+function controlCenterTarget(t: ParsedTarget | null, raw: string, cc: ControlCenterLike | null | undefined): string | null {
+  if (cc?.token && cc.token.length >= 8 && raw.includes(cc.token)) return 'it carries the QodeX control center\'s access token';
+  if (!t?.url || (t.scheme !== 'http' && t.scheme !== 'https')) return null;
+  const host = t.host;
+  const ccHosts = (cc?.hosts ?? []).map(h => h.toLowerCase());
+  const known = ccHosts.includes(host);
+  if (!known && !isPrivateHost(host)) return null;
+  const port = Number(t.url.port || (t.scheme === 'https' ? 443 : 80));
+  if (cc?.port && port === cc.port) return `${host}:${port} is QodeX's own control center (approvals, human takeover)`;
+  if (known && !isPrivateHost(host)) return `${host} is the tunnel to QodeX's own control center`;
+  if (K_TOKEN_QUERY_RE.test(t.url.search)) return 'it is a QodeX control center link (?k= access token)';
+  return null;
+}
+
+/** Why a shell command would operate the control center, or null. PURE. */
+function commandHitsControl(cmd: string, cc: ControlCenterLike | null | undefined): string | null {
+  if (cc?.token && cc.token.length >= 8 && cmd.includes(cc.token)) return 'it uses the QodeX control center\'s access token';
+  if (cc?.port) {
+    const hosts = [LOCAL_HOST_SRC, ...(cc.hosts ?? []).map(escapeRe)].join('|');
+    if (new RegExp(`(?:${hosts}):${cc.port}(?!\\d)`, 'i').test(cmd)) return `it talks to QodeX's own control center (port ${cc.port})`;
+  }
+  if (new RegExp(`${LOCAL_HOST_SRC}(?::\\d+)?\\/?\\?(?:[^\\s'"]*&)?k=[A-Za-z0-9_-]{16,}`, 'i').test(cmd)) return 'it uses a QodeX control center link (?k= access token)';
+  return null;
+}
+
+function controlBlock(toolName: string, what: string, reason: string, domain?: string): PolicyClassification {
+  return {
+    ...make('account', 'critical', `${toolName} ${oneLine(maskControlTokens(maskSecrets(what)), 120)}`,
+      `${reason} — the agent may never operate it (it could approve its own actions)`, domain, true),
+    integrity: true,
+  };
+}
+
 // ── navigation ──────────────────────────────────────────────────────────────
 
 const HIGH_SCHEMES = new Set(['file', 'javascript', 'data', 'chrome', 'chrome-extension', 'chrome-untrusted', 'devtools', 'edge', 'brave', 'opera', 'vivaldi', 'view-source', 'blob', 'filesystem']);
@@ -902,8 +1154,10 @@ export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'o
   const cfg = ctx.config;
   const pp = ctx.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
   const t = parseTarget(rawUrl);
-  const shown = oneLine(maskSecrets(rawUrl), 160);
+  const shown = oneLine(maskControlTokens(maskSecrets(rawUrl)), 160);
   if (!t) return make('navigation', 'medium', `${verb} ${shown}`, 'the URL could not be parsed');
+  const cc = controlCenterTarget(t, rawUrl, ctx.control);
+  if (cc) return controlBlock(verb, rawUrl, cc, t.host || undefined);
 
   let scheme = t.scheme;
   let inner = t;
@@ -938,6 +1192,14 @@ export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'o
     const local = !!host && isPrivateHost(host);
     return make('credential', riskFor('credential', cfg, { escalate: !local }), `${verb} ${shown}`, `the URL carries ${describeSecret(secrets[0].kind)} (possible exfiltration)`, host || undefined);
   }
+  if (scheme === 'javascript') {
+    // A javascript: URL runs in the CURRENT page, exactly like browser_evaluate
+    // (Playwright's goto reports ERR_ABORTED but the script has already run).
+    let body = rawUrl.trim().replace(/^javascript:/i, '');
+    try { body = decodeURIComponent(body); } catch { /* keep as is */ }
+    const sc = classifyScript(body, ctx, `${verb} a javascript: URL`);
+    if (sc.category && sc.category !== 'other') return sc;
+  }
   if (HIGH_SCHEMES.has(scheme) || HIGH_SCHEMES.has(t.scheme)) {
     return make('navigation', riskFor('navigation', cfg, { base: 'high' }), `${verb} ${shown}`, `${t.scheme}: URLs can read local files or run code in the page`, host || undefined);
   }
@@ -949,8 +1211,10 @@ export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'o
 /** Tools whose path / command arguments are checked against protected paths. */
 const PATH_TOOLS = new Set([
   'read_file', 'write_file', 'edit_text', 'edit_symbol', 'multi_edit', 'multi_file_edit', 'ls', 'glob', 'grep',
-  'pdf_read', 'csv_read', 'csv_write', 'xlsx_read', 'safe_delete_file', 'safe_rename', 'media_transform',
+  'pdf_read', 'csv_read', 'csv_write', 'xlsx_read', 'safe_delete_file', 'safe_rename', 'media_transform', 's3_sync',
 ]);
+/** Path tools that read whole trees: a directory CONTAINING the vault / profiles is as protected as they are. */
+const TREE_TOOLS = new Set(['grep', 's3_sync']);
 const COMMAND_TOOLS = new Set(['shell', 'code_run', 'background_job_start', 'dev_server_start', 'docker_exec']);
 const WRITE_TOOLS = new Set(['write_file', 'edit_text', 'edit_symbol', 'multi_edit', 'multi_file_edit', 'csv_write', 'safe_delete_file', 'safe_rename', 'media_transform']);
 
@@ -1023,7 +1287,7 @@ function str(v: unknown): string {
 
 function collectPathArgs(toolName: string, args: Record<string, unknown>): string[] {
   const out: string[] = [];
-  const keys = ['path', 'file_path', 'filepath', 'file', 'target', 'dir', 'directory', 'cwd', 'from', 'to', 'old_path', 'new_path', 'input', 'output'];
+  const keys = ['path', 'file_path', 'filepath', 'file', 'target', 'dir', 'directory', 'cwd', 'from', 'to', 'old_path', 'new_path', 'input', 'output', 'source', 'dest'];
   // glob's pattern IS a path; grep's pattern is a regex over contents (its file filter is `glob`).
   if (toolName === 'glob' && typeof args?.pattern === 'string') {
     out.push(path.join(typeof args.path === 'string' ? args.path : '.', args.pattern));
@@ -1044,14 +1308,26 @@ function collectPathArgs(toolName: string, args: Record<string, unknown>): strin
 
 /** Changing QodeX's own configuration: always an explicit human answer (fixed critical). */
 function configChange(toolName: string, what: string): PolicyClassification {
-  return make('account', 'critical', `${toolName} changes QodeX's configuration (${oneLine(maskSecrets(what), 100)})`,
-    'it can change Sentinel and other safety settings for every future run');
+  return {
+    ...make('account', 'critical', `${toolName} changes QodeX's configuration (${oneLine(maskControlTokens(maskSecrets(what)), 100)})`,
+      'it can change Sentinel, the approval channels and other safety settings for every future run'),
+    integrity: true,
+  };
 }
 
 function protectedBlock(toolName: string, what: string): PolicyClassification {
   return make('credential', 'critical', `${toolName} ${oneLine(what, 120)}`,
     'that path is QodeX\'s own secret store (vault key, vault, browser profiles with your logins) — the agent may never read, change or send it',
     undefined, true);
+}
+
+/** Desktop input that would run a QodeX approval / setup command (typed into a terminal). */
+function desktopSelfChange(toolName: string, text: string): PolicyClassification {
+  return {
+    ...make('account', 'critical', `${toolName}: "${oneLine(maskControlTokens(maskSecrets(text)), 100)}"`,
+      'it types a QodeX command that changes its vault, safety settings or approval channels (an agent must never approve its own actions)'),
+    integrity: true,
+  };
 }
 
 function textPreview(text: string, mask: boolean): string {
@@ -1079,8 +1355,12 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     const paths = collectPathArgs(toolName, a);
     const hit = paths.find(p => isProtectedPath(p, ctx.cwd, pp));
     if (hit) return protectedBlock(toolName, hit);
+    if (TREE_TOOLS.has(toolName)) {
+      const tree = paths.find(p => !/^[a-z][a-z0-9+.-]*:\/\//i.test(p) && containsProtected(path.resolve(ctx.cwd || process.cwd(), expandHome(p)), pp));
+      if (tree) return protectedBlock(toolName, tree);
+    }
     if (WRITE_TOOLS.has(toolName)) {
-      const cfgHit = paths.find(p => (pp.configFiles ?? []).some(f => normPath(path.resolve(ctx.cwd || process.cwd(), expandHome(p))) === normPath(f)));
+      const cfgHit = paths.find(p => isConfigPath(path.resolve(ctx.cwd || process.cwd(), expandHome(p)), pp));
       if (cfgHit) return configChange(toolName, cfgHit);
     }
     return none(`${toolName}`);
@@ -1089,11 +1369,19 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     const cmd = [a.command, a.cmd, a.code, a.script, Array.isArray(a.args) ? a.args.join(' ') : a.args].map(str).join(' ');
     const cwdArg = str(a.cwd);
     if (cwdArg && isProtectedPath(cwdArg, ctx.cwd, pp)) return protectedBlock(toolName, cwdArg);
-    if (textHitsProtectedMarker(cmd, pp, cwdArg ? path.resolve(ctx.cwd || process.cwd(), expandHome(cwdArg)) : ctx.cwd)) return protectedBlock(toolName, cmd);
-    if (mentionsConfig(cmd, pp) && SHELL_WRITE_RE.test(cmd)) return configChange(toolName, cmd);
+    const runDir = cwdArg ? path.resolve(ctx.cwd || process.cwd(), expandHome(cwdArg)) : ctx.cwd;
+    if (textHitsProtectedMarker(cmd, pp, runDir)) return protectedBlock(toolName, cmd);
+    // tar / zip / rsync / cp -r / grep -r over ~/.qodex as a whole ships the vault key and profiles too.
+    if (BULK_READ_RE.test(cmd) && (QODEX_ROOT_RE.test(cmd) || (!!runDir && containsProtected(runDir, pp)))) return protectedBlock(toolName, cmd);
+    const cc = commandHitsControl(cmd, ctx.control);
+    if (cc) return controlBlock(`${toolName}:`, cmd, cc);
+    if (commandChangesConfig(cmd, pp)) return configChange(toolName, cmd);
     if (QODEX_SELF_CHANGE_RE.test(cmd)) {
-      return make('account', 'critical', `${toolName}: ${oneLine(maskSecrets(cmd), 120)}`,
-        'it changes QodeX\'s credential vault or safety settings via the CLI');
+      return {
+        ...make('account', 'critical', `${toolName}: ${oneLine(maskControlTokens(maskSecrets(cmd)), 120)}`,
+          'it changes QodeX\'s credential vault, safety settings or approval channels via the CLI (an agent must never approve its own actions)'),
+        integrity: true,
+      };
     }
     return none(toolName);
   }
@@ -1118,16 +1406,19 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
 
     case 'browser_click': {
-      const hit = classifyActivation(ctx.element, str(a.element) || undefined, ctx.url, false);
+      const hit = classifyActivation(ctx.element, str(a.element) || undefined, ctx.url, false, str(a.selector) || undefined);
       const summary = `click "${elementLabel(ctx.element, str(a.element) || str(a.ref) || str(a.selector))}"${roleSuffix(ctx.element)}${onHost}`;
       if (!hit) return none(summary, pageHost || undefined);
       return make(hit.category, riskFor(hit.category, cfg, { escalate: !pageLocal }), summary, hit.reason, pageHost || undefined);
     }
     case 'browser_press': {
       const key = str(a.key);
-      if (!/enter|return/i.test(key)) return none(`press ${key}`, pageHost || undefined);
-      const hit = classifyActivation(ctx.element, undefined, ctx.url, true);
-      const summary = `press ${key} in "${elementLabel(ctx.element, str(a.ref) || 'the focused element')}"${roleSuffix(ctx.element)}${onHost}`;
+      const enter = isEnterKey(key);
+      // Space activates a focused button / checkbox / switch just like a click.
+      const space = !enter && isSpaceKey(key) && !!ctx.element && isButtonLike(ctx.element);
+      if (!enter && !space) return none(`press ${key}`, pageHost || undefined);
+      const hit = classifyActivation(ctx.element, undefined, ctx.url, enter, str(a.selector) || undefined);
+      const summary = `press ${key} in "${elementLabel(ctx.element, str(a.ref) || str(a.selector) || 'the focused element')}"${roleSuffix(ctx.element)}${onHost}`;
       if (!hit) return none(summary, pageHost || undefined);
       return make(hit.category, riskFor(hit.category, cfg, { escalate: !pageLocal }), summary, hit.reason, pageHost || undefined);
     }
@@ -1135,11 +1426,12 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     case 'browser_type': {
       const text = str(a.text ?? a.value);
       const submit = toolName === 'browser_type' && a.submit === true;
-      const typing = classifyTyping(ctx.element, text, ctx.url, str(a.element) || undefined);
+      const described = [str(a.element), selectorWords(str(a.selector))].filter(Boolean).join(' ') || undefined;
+      const typing = classifyTyping(ctx.element, text, ctx.url, described);
       const mask = typing?.mask ?? false;
       const where = `"${elementLabel(ctx.element, str(a.element) || str(a.ref) || str(a.selector))}"${roleSuffix(ctx.element)}`;
       const summary = `type ${textPreview(text, mask)} into ${where}${submit ? ' and submit' : ''}${onHost}`;
-      const activation = submit ? classifyActivation(ctx.element, str(a.element) || undefined, ctx.url, true) : null;
+      const activation = submit ? classifyActivation(ctx.element, str(a.element) || undefined, ctx.url, true, str(a.selector) || undefined) : null;
       const hit = bestHit([typing, activation].filter((h): h is Hit => !!h));
       if (!hit) return none(summary, pageHost || undefined);
       return make(hit.category, riskFor(hit.category, cfg, { escalate: !pageLocal }), summary, hit.reason, pageHost || undefined);
@@ -1148,11 +1440,14 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       const fields = Array.isArray(a.fields) ? (a.fields as Array<Record<string, unknown>>) : [];
       const hits: Array<Hit & { label: string }> = [];
       for (const f of fields.slice(0, 50)) {
+        // A field is addressed by its ref, or by a selector when it has none.
         const ref = str(f?.ref);
-        const el = ctx.elements?.[ref] ?? null;
+        const selector = str(f?.selector);
+        const key = ref || selector;
+        const el = (key && ctx.elements?.[key]) || null;
         const value = typeof f?.value === 'boolean' ? '' : str(f?.value);
-        const h = classifyTyping(el, value, ctx.url);
-        if (h) hits.push({ ...h, label: elementLabel(el, ref) });
+        const h = classifyTyping(el, value, ctx.url, selector ? selectorWords(selector) || undefined : undefined);
+        if (h) hits.push({ ...h, label: elementLabel(el, key) });
       }
       const top = bestHit(hits) as (Hit & { label: string }) | null;
       const summary = `fill ${fields.length} form field${fields.length === 1 ? '' : 's'}${top ? ` incl. "${top.label}"` : ''}${onHost}`;
@@ -1181,15 +1476,19 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
         const k = detectSecrets(text)[0].kind;
         return make('credential', riskFor('credential', cfg, { escalate: !pageLocal }), `answer a page dialog with ${textPreview(text, true)}${onHost}`, `the text looks like ${describeSecret(k)}`, pageHost || undefined);
       }
+      // Accepting a confirm()/prompt() commits what it asks ("Place this order?", "Delete your account?").
+      const d = ctx.dialog;
+      if (action === 'accept' && d?.message && !/^(?:alert|beforeunload)$/i.test(d.type ?? '')) {
+        const hit = bestHit(keywordHits(normalizeText(d.message), true, 'the dialog says'));
+        if (hit) {
+          const summary = `accept the page dialog "${oneLine(maskSecrets(d.message), 100)}"${onHost}`;
+          return make(hit.category, riskFor(hit.category, cfg, { escalate: !pageLocal }), summary, hit.reason, pageHost || undefined);
+        }
+      }
       return none(`dialog ${action}`, pageHost || undefined);
     }
-    case 'browser_evaluate': {
-      const script = str(a.script ?? a.expression ?? a.code);
-      const touches = script.match(/\b(fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.credentials|navigator\.clipboard|\.submit\s*\(|window\.open|location\s*(?:\.href)?\s*=|location\.(?:assign|replace)|postMessage|importScripts)\b/);
-      const summary = `run a page script (${script.length} chars)${touches ? ` using ${touches[1]}` : ''}${onHost}`;
-      if (touches) return make('other', riskFor('other', cfg, { base: 'high' }), summary, `the script uses ${touches[1]} (network / cookies / storage access)`, pageHost || undefined);
-      return make('other', riskFor('other', cfg), summary, 'arbitrary JavaScript in the page', pageHost || undefined);
-    }
+    case 'browser_evaluate':
+      return classifyScript(str(a.script ?? a.expression ?? a.code), ctx, 'run a page script');
     case 'browser_fill_secret': {
       const field = str(a.field) || 'secret';
       const summary = `fill the ${field} of vault entry "${oneLine(str(a.secret), 60)}" into "${elementLabel(ctx.element, str(a.ref) || str(a.selector) || 'the login form')}"${onHost}`;
@@ -1200,6 +1499,8 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     // ── desktop ────────────────────────────────────────────────────────────
     case 'computer_use_type': {
       const text = str(a.text);
+      // Typing `qodex mission approve ...` into a terminal is the agent approving itself.
+      if (QODEX_SELF_CHANGE_RE.test(text) || commandHitsControl(text, ctx.control)) return desktopSelfChange(toolName, text);
       const secrets = detectSecrets(text);
       if (secrets.length) {
         return make('credential', riskFor('credential', cfg), `type ${textPreview(text, true)} on the desktop`, `the text looks like ${describeSecret(secrets[0].kind)}`);
@@ -1209,6 +1510,7 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     case 'computer_use_clipboard': {
       const action = str(a.action);
       const text = str(a.text);
+      if (action === 'set' && (QODEX_SELF_CHANGE_RE.test(text) || commandHitsControl(text, ctx.control))) return desktopSelfChange(toolName, text);
       if (action === 'set' && detectSecrets(text).length) {
         return make('credential', riskFor('credential', cfg), `put ${textPreview(text, true)} on the clipboard`, `the text looks like ${describeSecret(detectSecrets(text)[0].kind)}`);
       }
@@ -1244,7 +1546,10 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       const host = t?.host ?? '';
       const local = !!host && isPrivateHost(host);
       const query = a.query && typeof a.query === 'object' ? JSON.stringify(a.query) : '';
-      const summary = `${method} ${oneLine(maskSecrets(url), 160)}`;
+      const headers = a.headers && typeof a.headers === 'object' ? JSON.stringify(a.headers) : str(a.headers);
+      const cc = controlCenterTarget(t, `${url} ${query} ${headers} ${str(a.body)}`, ctx.control);
+      if (cc) return controlBlock(`${method}`, url, cc, host || undefined);
+      const summary = `${method} ${oneLine(maskControlTokens(maskSecrets(url)), 160)}`;
       const secrets = detectSecrets(`${url} ${query} ${str(a.body)}`);
       if (secrets.length) {
         return make('credential', riskFor('credential', cfg, { escalate: !local }), summary, `the request carries ${describeSecret(secrets[0].kind)} (possible exfiltration)`, host || undefined);
@@ -1275,8 +1580,12 @@ function classifyWorkflow(a: Record<string, unknown>, ctx: PolicyContext): Polic
   if (a.dry_run === true) return none(`dry-run workflow "${name}"`);
   if (!wf) return make('other', riskFor('other', cfg), `replay workflow "${oneLine(name, 60)}"`, 'recorded browser steps (contents unknown)');
 
+  // Replay fills params the caller left out from their defaults (src/workflows/replay.ts resolveParams).
+  for (const p of wf.params ?? []) {
+    if (p?.name && typeof p.default === 'string' && !(p.name in paramVals)) paramVals[p.name] = p.default;
+  }
   const steps = Array.isArray(wf.steps) ? wf.steps : [];
-  const secretParams = new Set((wf.params ?? []).filter(p => p?.secret && p.name).map(p => String(p.name)));
+  const secretParams = new Set((wf.params ?? []).filter(p => (p?.secret || p?.vaultField) && p.name).map(p => String(p.name)));
   const subst = (s: string | undefined) => String(s ?? '').replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, k) => paramVals[k] ?? `{{${k}}}`);
   let currentUrl = wf.startUrl ? subst(wf.startUrl) : '';
   let worst: { cls: PolicyClassification; idx: number } | null = null;
@@ -1292,20 +1601,35 @@ function classifyWorkflow(a: Record<string, unknown>, ctx: PolicyContext): Polic
     const kind = str(s?.kind);
     const el: ElementInfo = { role: s?.role, name: s?.name ? subst(s.name) : undefined, text: s?.text && kind === 'click' ? subst(s.text) : undefined, selector: s?.selector };
     const pageCtx: PolicyContext = { ...ctx, url: currentUrl || undefined, element: el };
-    if (kind === 'navigate' && s?.url) {
-      currentUrl = subst(s.url);
-      consider(classifyNavigation(currentUrl, pageCtx, 'open'), i);
+    const opensUrl = (kind === 'navigate' || (kind === 'tab' && (!s?.value || s.value === 'new'))) && !!s?.url;
+    if (opensUrl) {
+      const target = subst(s.url);
+      // A new tab becomes the active tab, so later steps act on it too.
+      currentUrl = target;
+      consider(classifyNavigation(target, pageCtx, 'open'), i);
     } else if (kind === 'click') {
       consider(classifyAction('browser_click', {}, pageCtx), i);
     } else if (kind === 'press') {
       consider(classifyAction('browser_press', { key: str(s?.key) || 'Enter' }, pageCtx), i);
-    } else if (kind === 'type' || kind === 'fill' || kind === 'select') {
+    } else if (kind === 'type' || kind === 'fill') {
       const raw = String(s?.value ?? s?.text ?? '');
+      const solo = raw.match(/^\s*\{\{\s*([\w.-]+)\s*\}\}\s*$/);
+      // "vault:<entry>" for a secret param: replay fills it through browser_fill_secret,
+      // which checks the entry's origins itself — same fixed risk as that tool.
+      if (solo && secretParams.has(solo[1]) && /^vault:\S+$/.test(paramVals[solo[1]] ?? '')) {
+        const host = hostOf(currentUrl);
+        consider(make('credential', 'high', `fill vault entry "${oneLine(paramVals[solo[1]].slice(6), 60)}" into "${elementLabel(el)}"${host ? ` on ${host}` : ''}`,
+          'filling a stored credential (origin-checked by the vault)', host || undefined), i);
+        return;
+      }
       const usesSecret = [...raw.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)].some(m => secretParams.has(m[1]));
       const elT: ElementInfo = { ...el, text: undefined, isPassword: usesSecret || undefined };
-      if (kind !== 'select') consider(classifyAction('browser_type', { text: subst(raw) }, { ...pageCtx, element: elT }), i);
+      consider(classifyAction('browser_type', { text: subst(raw) }, { ...pageCtx, element: elT }), i);
     } else if (kind === 'upload') {
-      consider(classifyAction('browser_upload', { paths: subst(s?.value ?? s?.text).split(/[,\n]/).map(x => x.trim()).filter(Boolean) }, pageCtx), i);
+      const files = Array.isArray(s?.files) && s.files.length
+        ? s.files.map(f => subst(String(f ?? '')))
+        : subst(s?.value ?? s?.text).split(/[,\n]/);
+      consider(classifyAction('browser_upload', { paths: files.map(x => x.trim()).filter(Boolean) }, pageCtx), i);
     }
   });
 

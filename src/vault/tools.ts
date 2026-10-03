@@ -10,8 +10,10 @@
  * recorder sees "***"). Before filling it checks, on the live page:
  *   - the active tab's origin is one of the entry's origins (exact host or
  *     subdomain, https unless localhost) — anti-phishing;
- *   - the target element's own document is on an allowed origin too (a
- *     cross-origin iframe on a legit page can't receive the secret);
+ *   - the target element's own document is on an allowed ORIGIN too (a
+ *     cross-origin iframe on a legit page can't receive the secret — nor an
+ *     about:blank / srcdoc child it creates, which inherits its origin, nor a
+ *     sandboxed frame with an opaque origin);
  *   - the element is the right kind of field: a password goes only into
  *     <input type=password>, a username / code only into a text-like <input>
  *     (never a textarea or rich editor that would publish it).
@@ -58,6 +60,8 @@ interface FieldInfo {
   disabled: boolean;
   readOnly: boolean;
   href: string;
+  /** Serialized origin of the field's document ('null' when opaque, '' when unknown). */
+  origin: string;
   name: string;
   autocomplete: string;
 }
@@ -70,9 +74,29 @@ const inspectField = (el: any): FieldInfo => ({
   disabled: !!el?.disabled,
   readOnly: !!el?.readOnly,
   href: String(el?.ownerDocument?.location?.href ?? ''),
+  // window.origin: an about:blank / srcdoc frame INHERITS its creator's origin, which
+  // its URL doesn't show ('about:blank'); a sandboxed frame is opaque ('null').
+  origin: String(el?.ownerDocument?.defaultView?.origin ?? ''),
   name: String(el?.getAttribute?.('aria-label') || el?.getAttribute?.('name') || el?.getAttribute?.('placeholder') || el?.id || ''),
   autocomplete: String(el?.getAttribute?.('autocomplete') ?? '').toLowerCase(),
 });
+
+/**
+ * The URL whose origin decides whether the field's document may receive the
+ * secret. The document's ORIGIN wins over its URL: an about:blank child of an ad
+ * iframe has URL "about:blank" but the ad's origin. Unknown origins of about:
+ * documents are refused rather than guessed from the tab URL.
+ */
+function fieldDocumentUrl(info: FieldInfo, pageUrl: string): { url: string } | { refuse: string } {
+  const origin = info.origin.trim();
+  if (origin === 'null') return { refuse: 'the field is in a sandboxed frame with an opaque origin' };
+  if (origin) {
+    return /^https?:\/\/[^/]+$/i.test(origin) ? { url: origin + '/' } : { refuse: `the field's document has the origin "${origin.slice(0, 80)}"` };
+  }
+  if (!info.href) return { url: pageUrl };
+  if (info.href.startsWith('about:')) return { refuse: `the field is in an ${info.href.slice(0, 20)} frame of unknown origin` };
+  return { url: info.href };
+}
 
 function hostOf(url: string): string {
   try { return new URL(url).hostname; } catch { return url || '(no page)'; }
@@ -180,8 +204,8 @@ export class BrowserFillSecretTool extends Tool<FillSecretArgsT> {
       return { content: `[BROWSER_ERROR] Could not inspect the target field: ${clean(e?.message ?? String(e))}`, isError: true };
     }
     const release = () => { if (el !== loc) void Promise.resolve(el.dispose?.()).catch(() => {}); };
-    const frameUrl = !info.href || info.href.startsWith('about:') ? pageUrl : info.href;
-    const frameMatch = matchOrigin(frameUrl, entry.origins);
+    const frame = fieldDocumentUrl(info, pageUrl);
+    const frameMatch = 'refuse' in frame ? { ok: false as const, reason: frame.refuse } : matchOrigin(frame.url, entry.origins);
     if (!frameMatch.ok) {
       release();
       return { content: `[VAULT_ORIGIN_MISMATCH] Refusing to fill "${entry.name}": the field is inside a frame from another site (${frameMatch.reason}).`, isError: true };

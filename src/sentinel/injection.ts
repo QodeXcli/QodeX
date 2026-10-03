@@ -239,7 +239,9 @@ function stripSmuggledTags(text: string): string {
 export function injectionBanner(findings: InjectionFinding[]): string {
   if (!findings.length) return '';
   const list = findings.slice(0, 4).map(f => {
-    const ex = f.excerpt ? ` ("${f.excerpt.replace(/\s+/g, ' ').replace(/"/g, "'").slice(0, 70)}")` : '';
+    // The banner sits OUTSIDE the fence: excerpts (page text) must not carry markup
+    // such as a fake `</untrusted_content>` or `<|im_start|>`.
+    const ex = f.excerpt ? ` ("${f.excerpt.replace(/\s+/g, ' ').replace(/"/g, "'").replace(/</g, '‹').replace(/>/g, '›').slice(0, 70)}")` : '';
     return `${f.id}${ex}`;
   }).join('; ');
   const more = findings.length > 4 ? ` +${findings.length - 4} more` : '';
