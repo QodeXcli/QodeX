@@ -234,6 +234,8 @@ const EN = {
   live: 'Live view',
   handoffTitle: 'A bot check needs you',
   handoffBody: 'Solve it in the live view — <b>QodeX continues by itself</b> as soon as it is gone.',
+  handoffStepTitle: 'QodeX needs you in the browser',
+  handoffStepBody: 'Do it in the live view, then tap <b>Done</b>.',
   handoffOpen: '🖐 Open live view',
   handoffDone: '✅ Done',
   handoffCancel: '✖️ Can\'t solve it',
@@ -338,6 +340,8 @@ const FA: Catalog = {
   live: 'نمای زنده',
   handoffTitle: 'یک بررسیِ ضدربات منتظر شماست',
   handoffBody: 'آن را در نمای زنده حل کنید — <b>QodeX خودش ادامه می‌دهد</b> به محض اینکه برطرف شود.',
+  handoffStepTitle: 'QodeX در مرورگر به شما نیاز دارد',
+  handoffStepBody: 'کار را در نمای زنده انجام دهید و بعد <b>انجام شد</b> را بزنید.',
   handoffOpen: '🖐 باز کردن نمای زنده',
   handoffDone: '✅ انجام شد',
   handoffCancel: '✖️ نمی‌توانم حلش کنم',
@@ -499,6 +503,7 @@ const CHANNEL_NAMES: Record<string, { en: string; fa: string }> = {
   local: { en: 'terminal', fa: 'ترمینال' },
   'mission-db': { en: 'mission queue', fa: 'صف مأموریت' },
   'challenge-cleared': { en: 'auto-resume (the check cleared)', fa: 'ادامهٔ خودکار (بررسی برطرف شد)' },
+  'takeover-released': { en: 'browser handed back', fa: 'تحویل مرورگر' },
 };
 
 function channelName(by: string, lang: Lang): string {
@@ -757,13 +762,16 @@ export interface HandoffCardInput {
   missionId?: string;
   /** Fallback text when the meta has no host (the approval prompt). */
   prompt?: string;
+  /** A plain "do this step" hand-off (no challenge detected): Done is what resumes it. */
+  step?: boolean;
 }
 
 const VENDOR_NAMES: Record<string, string> = {
   recaptcha: 'reCAPTCHA', hcaptcha: 'hCaptcha', turnstile: 'Cloudflare Turnstile', cloudflare: 'Cloudflare',
   akamai: 'Akamai', perimeterx: 'HUMAN (PerimeterX)', human: 'HUMAN (PerimeterX)', datadome: 'DataDome',
   'aws-waf': 'AWS WAF', awswaf: 'AWS WAF', arkose: 'Arkose', funcaptcha: 'Arkose', geetest: 'GeeTest',
-  kasada: 'Kasada', 'ddos-guard': 'DDoS-Guard', sucuri: 'Sucuri', captcha: 'CAPTCHA', generic: 'CAPTCHA',
+  kasada: 'Kasada', 'ddos-guard': 'DDoS-Guard', sucuri: 'Sucuri', imperva: 'Imperva', 'friendly-captcha': 'Friendly Captcha',
+  altcha: 'ALTCHA', yandex: 'Yandex SmartCaptcha', captcha: 'CAPTCHA', generic: 'CAPTCHA',
 };
 
 /** Display name of a challenge vendor id. PURE. */
@@ -780,12 +788,12 @@ export function vendorLabel(vendor: string | undefined): string {
  */
 export function formatHandoffCard(h: HandoffCardInput, lang: Lang, opts: { linkTtlMin?: number; lanUrl?: string; local?: boolean } = {}): string {
   const S = strings(lang);
-  const lines = [`🧩 <b>${S.handoffTitle}</b>`];
+  const lines = [`🧩 <b>${h.step ? S.handoffStepTitle : S.handoffTitle}</b>`];
   const where = [h.host ? `<b>${esc(h.host, 120)}</b>` : '', h.vendor ? esc(vendorLabel(h.vendor), 40) : ''].filter(Boolean).join(' · ');
   if (where) lines.push(where);
   else if (h.prompt) lines.push(esc(maskOutbound(h.prompt), 300));
   if (h.missionId) lines.push(`🎯 ${S.approvalMission}: <code>${esc(h.missionId, 60)}</code>`);
-  lines.push('', S.handoffBody);
+  lines.push('', h.step ? S.handoffStepBody : S.handoffBody);
   if (opts.lanUrl) lines.push('', S.handoffLan(esc(redactUrlSecrets(opts.lanUrl), 200)));
   else if (opts.linkTtlMin) lines.push('', `<i>${S.handoffLinkNote(opts.linkTtlMin)}</i>`);
   else if (opts.local) lines.push('', S.handoffLocal);

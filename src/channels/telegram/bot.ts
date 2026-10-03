@@ -958,7 +958,7 @@ export class TelegramBot {
           // Hand-off card: the outcome replaces the hint, and the keyboard — the only
           // place the link's token ever was — goes away ("✓ Challenge cleared, continuing").
           const h = entry.handoff;
-          const caption = `${F.formatHandoffCard({ host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt }, m.lang)}\n\n<b>${F.formatHandoffOutcome(result, m.lang)}</b>`;
+          const caption = `${F.formatHandoffCard({ host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt, step: !!h.meta && !h.meta.vendor && !h.meta.frameBox }, m.lang)}\n\n<b>${F.formatHandoffOutcome(result, m.lang)}</b>`;
           await this.editCard(m.chatId, m.messageId, caption, !!m.photo);
           continue;
         }
@@ -1083,7 +1083,7 @@ export class TelegramBot {
       ? `<b>${F.formatHandoffOutcome(past.result, lang)}</b>`
       : F.formatOutcome(past.result, past.options, lang);
     const head = past.card.handoff || past.card.category === 'challenge'
-      ? F.formatHandoffCard({ host: past.card.handoff?.host, vendor: past.card.handoff?.vendor, missionId: past.card.missionId, prompt: past.card.prompt }, lang)
+      ? F.formatHandoffCard({ host: past.card.handoff?.host, vendor: past.card.handoff?.vendor, missionId: past.card.missionId, prompt: past.card.prompt, step: !!past.card.handoff && !past.card.handoff.vendor && !past.card.handoff.frameBox }, lang)
       : F.formatApproval(past.card, lang);
     await this.editCard(chatId, message.message_id, `${head}\n\n${outcome}`, isPhotoMessage(message));
   }
@@ -1441,7 +1441,7 @@ export class TelegramBot {
         ? Math.max(1, Math.round(((link.expiresAt ?? this.now() + (h.meta?.linkTtlSec ?? 600) * 1000) - this.now()) / 60_000))
         : undefined;
       const caption = F.formatHandoffCard(
-        { host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt },
+        { host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt, step: !!h.meta && !h.meta.vendor && !h.meta.frameBox },
         lang,
         { linkTtlMin: ttlMin, lanUrl: link ? undefined : h.lanUrl, local: !link && !h.lanUrl && entry.source === 'broker' },
       );

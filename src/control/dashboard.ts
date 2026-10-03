@@ -129,6 +129,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     opt_done: 'Done',
     cat_challenge: 'bot check',
     hoBanner: 'Solve it — QodeX continues by itself',
+    hoStepBanner: 'QodeX needs you in the browser — tap Done when finished',
     hoSub: 'A bot check needs a person. Tap, press and hold, or drag on the page below just as you would on the site.',
     hoDone: 'Done ✓',
     hoCant: 'Can\'t solve it',
@@ -242,6 +243,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     opt_done: 'انجام شد',
     cat_challenge: 'بررسی ضدربات',
     hoBanner: 'حلش کنید — QodeX خودش ادامه می‌دهد',
+    hoStepBanner: 'QodeX در مرورگر به شما نیاز دارد — وقتی تمام شد «انجام شد» را بزنید',
     hoSub: 'یک بررسیِ ضدربات به انسان نیاز دارد. روی صفحهٔ زیر همان‌طور که در خودِ سایت کار می‌کنید بزنید، نگه دارید یا بکشید.',
     hoDone: 'انجام شد ✓',
     hoCant: 'نمی‌توانم حلش کنم',
@@ -870,6 +872,8 @@ const SCRIPT = String.raw`
     if (!HO) return;
     $('handoffBar').classList.remove('hidden');
     var m = hoMeta(), info = ho.info, parts = [];
+    // A plain "do this step" hand-off (no check detected) resumes on Done, not by itself.
+    $('hoTitle').textContent = m && !m.vendor && !m.frameBox ? t('hoStepBanner') : t('hoBanner');
     if (m && m.vendor) parts.push(String(m.vendor));
     if (m && m.host) parts.push(String(m.host));
     $('hoInfo').textContent = parts.join(' · ');

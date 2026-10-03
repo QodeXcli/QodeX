@@ -348,6 +348,32 @@ describe('Telegram hand-off card', () => {
   });
 });
 
+describe('hand-off card with the browser controller\'s meta shape', () => {
+  it('accepts frameBox {x, y, w, h}; a plain step hand-off asks for Done', async () => {
+    await pairOwner();
+    await startBot({ handoffLink: async () => null });
+    const pr = broker.request({
+      prompt: '🧩 QodeX needs you in the browser: solve the CAPTCHA\nAnswer "done" when finished or "cancel" to give up.',
+      options: ['done', 'cancel'], source: 'browser_request_human', category: 'challenge', risk: 'medium', timeoutMs: 60_000,
+      meta: { handoff: { id: 'ho_h1', host: 'shop.example', vendor: 'datadome', state: 'needs-human', tabIndex: 0, frameBox: { x: 10, y: 20, w: 400, h: 300 }, linkTtlSec: 300 } },
+    });
+    await waitUntil(() => tg.of('sendPhoto')[0]);
+    expect(clips[0]).toEqual(padClip({ x: 10, y: 20, width: 400, height: 300 }));
+    broker.cancel(broker.pending()[0]!.id);
+    await pr;
+    const step = broker.request({
+      prompt: 'Do the 2FA step', options: ['done', 'cancel'], source: 'browser_request_human', category: 'challenge', timeoutMs: 60_000,
+      meta: { handoff: { id: 'ho_step', host: 'bank.example', tabIndex: 0, linkTtlSec: 300 } },
+    });
+    const card = await waitUntil(() => tg.of('sendPhoto')[1]);
+    expect(htmlToPlain(card.body.caption)).toContain('QodeX needs you in the browser');
+    expect(htmlToPlain(card.body.caption)).toContain('then tap Done');
+    expect(clips[1]).toBeUndefined(); // no box: the whole viewport
+    broker.cancel(broker.pending()[0]!.id);
+    await step;
+  });
+});
+
 describe('hand-off formatting', () => {
   it('formats cards and outcomes in both languages, without links in text', () => {
     const en = htmlToPlain(formatHandoffCard({ host: 'a.example', vendor: 'hcaptcha' }, 'en', { linkTtlMin: 5 }));
