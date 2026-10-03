@@ -13,8 +13,9 @@
  */
 import { getBus } from '../control/bus.js';
 import {
-  getMissionStore, isActiveStatus, approvalOptions, type MissionStore,
+  getMissionStore, approvalOptions, type MissionStore,
 } from './store.js';
+import { safeLine } from './runner.js';
 import {
   startMission, cancelMission, prepareResume, spawnMissionWorker, steerMission,
   answerMissionApproval, answerApprovalById, summarizeMission, listMissionSummaries,
@@ -178,12 +179,30 @@ export function createMissionChannelAdapter(opts: { store?: MissionStore; defaul
   };
 }
 
+const BRIDGED_TERMINAL = new Set(['completed', 'failed', 'cancelled', 'paused']);
+
+/** A stored event's bus payload: a 'status' row gains `status` (and, when it ends a run, the report excerpt). */
+function bridgedData(store: MissionStore, ev: { missionId: string; type: string; payload: any }): unknown {
+  if (ev.type !== 'status' || !ev.payload || typeof ev.payload !== 'object') return ev.payload;
+  const to = ev.payload.to;
+  const data: Record<string, unknown> = { ...ev.payload, status: to };
+  if (BRIDGED_TERMINAL.has(to)) {
+    const report = store.get(ev.missionId)?.report;
+    if (report) data.report = safeLine(report, 400);
+  }
+  return data;
+}
+
 /**
- * Mirror mission events written by OTHER processes (detached workers) onto this
- * process's bus as `{kind:'mission'}` events, so the control center / Telegram
- * see milestones, approvals and completions of background missions. Status
- * transitions to completed/failed/cancelled/paused are also published under
- * that type (as the worker does in-process). Returns a stop function.
+ * Mirror mission events written by OTHER processes (detached workers, a CLI
+ * cancelling) onto this process's bus as `{kind:'mission'}` events, so the
+ * control center / Telegram see milestones, approvals and completions of
+ * background missions. Exactly one bus event per stored event: a status
+ * transition is published once, as `{type:'status', data:{from, to, status,
+ * error, report?}}` — the shape the in-process runner publishes — so a timeline
+ * renders it once wherever the mission runs. Events this process already put on
+ * its bus (a mission run inline here) are skipped, including the final ones read
+ * after the run released the mission. Returns a stop function.
  */
 export function startMissionEventBridge(opts: { store?: MissionStore; intervalMs?: number; types?: string[] } = {}): () => void {
   const store = opts.store ?? getMissionStore();
@@ -192,17 +211,8 @@ export function startMissionEventBridge(opts: { store?: MissionStore; intervalMs
     try {
       for (const ev of store.eventsAfter(last, { limit: 500, types: opts.types })) {
         last = ev.id;
-        const m = store.get(ev.missionId);
-        // A mission running in THIS process already publishes to the bus itself.
-        if (m && m.pid === process.pid && isActiveStatus(m.status)) continue;
-        getBus().publish({ kind: 'mission', missionId: ev.missionId, type: ev.type, data: ev.payload, ts: Date.parse(ev.ts) || Date.now() });
-        const to = ev.type === 'status' ? ev.payload?.to : undefined;
-        if (to === 'completed' || to === 'failed' || to === 'cancelled' || to === 'paused') {
-          getBus().publish({
-            kind: 'mission', missionId: ev.missionId, type: to,
-            data: { status: to, error: ev.payload?.error, report: (m?.report ?? '').slice(0, 400), goal: m?.goal },
-          });
-        }
+        if (store.takeBusPublished(ev.id)) continue;
+        getBus().publish({ kind: 'mission', missionId: ev.missionId, type: ev.type, data: bridgedData(store, ev), ts: Date.parse(ev.ts) || Date.now() });
       }
     } catch { /* DB busy — next tick */ }
   }, Math.max(100, opts.intervalMs ?? 2000));

@@ -548,17 +548,23 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
   const emit = (type: string, data?: Record<string, unknown>, opts: { stepId?: string; persist?: boolean } = {}) => {
     const payload = opts.stepId ? { stepId: opts.stepId, ...(data ?? {}) } : data;
     if (opts.persist !== false) {
-      try { store.appendEvent(missionId, type, payload); } catch (e: any) { logger.warn('mission event write failed', { missionId, type, err: e?.message }); }
+      // Published right below: the cross-process bridge must not mirror it again.
+      try { store.noteBusPublished(store.appendEvent(missionId, type, payload)); } catch (e: any) { logger.warn('mission event write failed', { missionId, type, err: e?.message }); }
     }
     getBus().publish({ kind: 'mission', missionId, type, data: payload });
     try { deps.onEvent?.({ missionId, type, stepId: opts.stepId, data: payload, ts: now() }); } catch { /* observer */ }
   };
-  const setStatus = (status: MissionStatus, extra: { error?: string | null } = {}) => {
+  /**
+   * A status transition is ONE bus event, `{type:'status', data:{from, to, status,
+   * error, ...summary}}` (the bridge mirrors a worker's transitions in the same
+   * shape), so a timeline renders it once. `summary` rides along on the final one.
+   */
+  const setStatus = (status: MissionStatus, extra: { error?: string | null } = {}, summary?: Record<string, unknown>) => {
     const from = store.get(missionId)?.status;
-    store.setStatus(missionId, status, extra);
+    store.noteBusPublished(store.setStatus(missionId, status, extra));
     if (from === status) return;
     // Same shape as the persisted 'status' event, so every consumer reads {from, to}.
-    const data = { from, to: status, status, error: extra.error ?? undefined };
+    const data = { from, to: status, status, error: extra.error ?? undefined, ...(summary ?? {}) };
     getBus().publish({ kind: 'mission', missionId, type: 'status', data });
     try { deps.onEvent?.({ missionId, type: 'status', data, ts: now() }); } catch { /* observer */ }
   };
@@ -1020,15 +1026,19 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
     error = `[MISSION_ERROR] ${e?.message ?? String(e)}`;
   }
 
-  try { setStatus(status, { error }); } catch (e: any) { logger.error('mission status write failed', { missionId, err: e?.message }); }
+  // The run's summary rides on the final 'status' bus event (one event per transition).
+  const final = result(status, error);
+  const summary = { report: safeLine(final.report, 400), stepsDone: final.stepsDone, stepsFailed: final.stepsFailed, costUsd: final.costUsd };
+  try { setStatus(status, { error }, summary); } catch (e: any) { logger.error('mission status write failed', { missionId, err: e?.message }); }
   try { store.expirePendingApprovals(missionId, `mission-${status}`); } catch { /* ignore */ }
   if (channel) { channel.dispose(`mission-${status}`); unregisterChannel(); }
   // This process no longer runs the mission: a later cancel/resume must not treat
   // it (a TUI, a control center, a worker winding down) as the mission's worker.
   try { store.releaseWorker(missionId, process.pid); } catch { /* ignore */ }
 
-  const final = result(status, error);
-  emit(status, { report: safeLine(final.report, 400), error, stepsDone: final.stepsDone, stepsFailed: final.stepsFailed, costUsd: final.costUsd }, { persist: false });
+  // The local observer (a foreground `mission run`, the inline runner's progress) also
+  // gets the one-line outcome; the bus already carried it on the 'status' event.
+  try { deps.onEvent?.({ missionId, type: status, data: { ...summary, error }, ts: now() }); } catch { /* observer */ }
   if (status === 'completed' || status === 'failed') {
     worklog(null, `Mission ${missionId} ${status}: ${oneLine(initial.goal, 80)} — ${safeLine(final.report ?? error ?? '', 220)}`);
   }

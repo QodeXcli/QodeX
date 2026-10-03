@@ -408,7 +408,7 @@ describe('mission integration adapters', () => {
     try {
       store.appendEvent(m.id, 'milestone', { title: 'from worker' });
       store.setStatus(m.id, 'completed');
-      await waitFor(() => seen.some(e => e.kind === 'mission' && e.type === 'completed'));
+      await waitFor(() => seen.some(e => e.kind === 'mission' && e.type === 'status' && (e.data as any).to === 'completed'));
       expect(seen.some(e => e.kind === 'mission' && e.type === 'milestone' && (e.data as any).title === 'from worker')).toBe(true);
     } finally {
       stop();

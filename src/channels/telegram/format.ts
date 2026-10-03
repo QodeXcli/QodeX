@@ -579,8 +579,8 @@ export interface NoticeView {
   text: string;
   /** Terminal events (completed/failed/cancelled) bypass the rate limiter. */
   important: boolean;
-  /** For state changes: the same mission reaching the same state twice (a 'status' event
-   *  plus a bridged 'completed' event) is announced once. */
+  /** For state changes: the same mission reaching the same state twice (e.g. a 'status'
+   *  event and a legacy/third-party '<state>' event for it) is announced once. */
   dedupeKey?: string;
 }
 

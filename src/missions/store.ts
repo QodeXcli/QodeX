@@ -459,17 +459,18 @@ export class MissionStore {
    * Change status. Entering an active state clears finished_at (resume); entering
    * 'running' the first time stamps started_at; a terminal state stamps finished_at.
    */
-  setStatus(id: string, status: MissionStatus, extra: { error?: string | null } = {}): void {
+  setStatus(id: string, status: MissionStatus, extra: { error?: string | null } = {}): number | undefined {
     const ts = this.iso();
     const m = this.get(id);
-    if (!m) return;
+    if (!m) return undefined;
     const startedAt = m.started_at ?? (status === 'running' ? ts : null);
     const finishedAt = isTerminalStatus(status) ? ts : null;
     const error = 'error' in extra ? (extra.error ?? null) : m.error;
     this.db.prepare(`
       UPDATE missions SET status = ?, updated_at = ?, started_at = ?, finished_at = ?, error = ? WHERE id = ?
     `).run(status, ts, startedAt, finishedAt, error, id);
-    if (m.status !== status) this.appendEvent(id, 'status', { from: m.status, to: status, error: error ?? undefined });
+    // The 'status' event's id (undefined when the status did not change).
+    return m.status !== status ? this.appendEvent(id, 'status', { from: m.status, to: status, error: error ?? undefined }) : undefined;
   }
 
   addUsage(id: string, u: { costUsd?: number; tokensIn?: number; tokensOut?: number }): void {
@@ -582,6 +583,23 @@ export class MissionStore {
   maxEventId(): number {
     const r = this.db.prepare(`SELECT MAX(id) AS id FROM mission_events`).get() as { id: number | null };
     return r?.id ?? 0;
+  }
+
+  /**
+   * Ids of stored events THIS process already published on its bus (the runner and
+   * the milestone tool publish as they write), so the cross-process event bridge
+   * (startMissionEventBridge) does not mirror them a second time. Bounded: a
+   * process without a bridge must not accumulate them forever.
+   */
+  private readonly busPublished = new Set<number>();
+  noteBusPublished(eventId: number | undefined): void {
+    if (typeof eventId !== 'number' || !(eventId > 0)) return;
+    this.busPublished.add(eventId);
+    if (this.busPublished.size > 5000) this.busPublished.delete(this.busPublished.values().next().value as number);
+  }
+  /** True (once) when this process already published the event; the mark is consumed. */
+  takeBusPublished(eventId: number): boolean {
+    return this.busPublished.delete(eventId);
   }
 
   /** Events of ALL missions with id > sinceId, oldest first (cross-process bridges). */
