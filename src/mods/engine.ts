@@ -302,12 +302,12 @@ export class ModEngine {
    * (the last hook's rewrite). Without hooks the terminal runs on a copy of `payload`.
    * Throws only what the terminal (QodeX's own behavior) throws.
    */
-  async emit<R = unknown>(
+  async emit(
     event: ModEventName,
     payload: unknown,
-    terminal?: (e: any) => Promise<R> | R,
+    terminal?: (e: any) => unknown,
     opts: EmitOptions = {},
-  ): Promise<{ result: R | undefined; payload: any }> {
+  ): Promise<{ result: any; payload: any }> {
     const hooks = this.chain(event, opts.only);
     let finalPayload: unknown = payload;
     const signal = opts.signal ?? new AbortController().signal;

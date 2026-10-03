@@ -54,9 +54,3 @@ export function builtinModsDirs(): string[] {
   const dirs = [path.join(HERE, 'builtin'), path.resolve(HERE, '..', '..', 'src', 'mods', 'builtin')];
   return [...new Set(dirs)];
 }
-
-/** The QodeX module a mod test imports as 'qodex/testing' (or 'claude-code/testing'). */
-export function testingModulePath(): string {
-  const ext = path.extname(fileURLToPath(import.meta.url)) || '.js';
-  return path.join(HERE, `testing${ext}`);
-}

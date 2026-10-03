@@ -91,6 +91,10 @@ import type { Diagnostic } from '../tools/diagnostics/parsers.js';
 import { buildCriticPrompt, parseCriticVerdict, buildCriticRepairMessage, type DiffFile } from './critic.js';
 import { GitSandbox } from './git-sandbox.js';
 import { logger } from '../utils/logger.js';
+import {
+  modsWrapsRun, modsRunTurn, modsTurnStep, modsKeepModTools, modsDescribeTools, modsWrapsToolCall, modsRunToolCall,
+  modsPermissionsFor, modsPromptSections, modsAgentSpawn, modsCompactSkip,
+} from '../mods/integration.js';
 
 export interface AgentEvent {
   type: 'thinking_start' | 'thinking_delta' | 'text_delta' | 'thinking_done'
@@ -583,6 +587,10 @@ export class AgentLoop {
         }
       }
 
+      // Mods: agent.spawn may refuse this sub-agent or pick its model.
+      const modSpawn = await modsAgentSpawn(this.router, { role, task: prompt, model: dispatchModel.model });
+      if (modSpawn.deny) return { finalText: '', toolCallsRun: 0, ok: false, error: `[MOD_BLOCKED] ${modSpawn.deny}` };
+      if (modSpawn.model) dispatchModel = modSpawn.model;
       modelUsed = `${dispatchModel.provider}/${dispatchModel.model}`;
       logger.info('Sub-agent model resolved', {
         role,
@@ -889,6 +897,7 @@ export class AgentLoop {
       sysPrompt = sysPrompt +
         `\n\n# Provider-specific guidance (${providerName})\n${providerPromptCfg.append}`;
     }
+    sysPrompt = await modsPromptSections(sysPrompt); // mods: prompt.section per "# " section
 
     // Static/volatile split: injections are routed into two buffers so the prompt-cache
     // boundary lands between them. `stableTail` holds session-stable guidance (code style,
@@ -1335,6 +1344,8 @@ export class AgentLoop {
     sessionId: string,
     options: AgentOptions,
   ): AsyncGenerator<AgentEvent> {
+    // Mods: turn.start / turn.complete wrap a top-level run (the wrapper re-enters run() once).
+    if (modsWrapsRun(options)) { yield* modsRunTurn(messages, options, o => this.run(messages, sessionId, o)); return; }
     await this.refreshMutableConfig();   // pick up dashboard toggles written since the last run
     // `let`: auto mode approves a plan mid-run (present_plan) and lifts plan mode for the
     // rest of this run — `mode` and `options.mode` then switch to normal together.
@@ -1868,6 +1879,7 @@ export class AgentLoop {
         // A per-turn set would drop families as the signal window slides, flipping the
         // tool block and invalidating the (cloud) prompt cache / (local) KV-cache prefix.
         for (const s of gated.schemas) this.sessionToolNames.add(s.function.name);
+        modsKeepModTools(schemasForModeAll, this.sessionToolNames); // tools mods registered always ship
         // The request's task class decides the playbook the system prompt got; ship the
         // tools that playbook names (web → browser_/vault_, desktop → computer_use_).
         const classPrefixes = requestClass === 'web' ? ['browser_', 'vault_']
@@ -1886,6 +1898,7 @@ export class AgentLoop {
       }
       const tools = (wasForceTextOnly || textToolMode) ? [] : schemasForMode;
       forceTextOnly = false;
+      await modsDescribeTools(tools); // mods: tool.describe (once per tool per session)
 
       // Critical debug log — when an OpenAI/DeepSeek model is "not making tool calls",
       // 95% of the time the tools array got filtered out unexpectedly OR the model is
@@ -1996,6 +2009,12 @@ export class AgentLoop {
               logger.warn('PreCompact hook dispatch failed', { err: e.message });
             }
           }
+          const modSkip = await modsCompactSkip(sessionId, this.estimateTokens(relieved)); // mods: session.compact
+          if (modSkip) {
+            yield { type: 'notice', data: { message: `🗜  Compaction skipped by a mod: ${modSkip}` } };
+            compactPass = 3; // fall through to pruning if the window is still over
+            continue;
+          }
           yield { type: 'progress', data: { message: `🗜  ${step.reason}` } } as any;
           const compacted = await this.runCompaction(relieved, ctxWindow, options.signal, step.keepLastTurns);
           compactPass += 1;
@@ -2077,6 +2096,8 @@ export class AgentLoop {
       // (text-tool mode carries no `tools`, so 'required' would be meaningless there).
       const forceCall = forceToolChoice && tools.length > 0;
       forceToolChoice = false;
+      // Mods: turn.step may send this request to another model (updates `route` in place).
+      await modsTurnStep(this.router, route, options, budget.getIterations());
       const stream = route.provider.complete({
         model: route.model,
         messages: outboundMessages,
@@ -3147,6 +3168,17 @@ export class AgentLoop {
     const refusal = this.modeRefusal(tc.function.name, options.mode, policy);
     if (refusal) return { content: refusal, isError: true, uiEvents };
 
+    // Mods: tool.call (may refuse / answer / rewrite args), tool.check, then tool.result —
+    // the rest of this method runs inside that chain on a re-entry.
+    if (modsWrapsToolCall(tc)) {
+      return modsRunToolCall(tc, {
+        cwd: this.effectiveCwd ?? this.cwd,
+        permissions: this.permissions,
+        canonical: (n) => this.registry.get(n)?.name,
+        signal: options.signal,
+      }, (call) => this.executeToolCall(call, transaction, sessionId, options, policy));
+    }
+
     // Per-tool abort controller. We compose two sources of abort:
     //   1. Outer agent signal (user pressed Ctrl+C) → cascades to inner
     //   2. Per-tool timeout → also triggers inner abort
@@ -3248,6 +3280,7 @@ export class AgentLoop {
       exec: (req) => resolveRuntime(this.config).exec(req),
       currentTurn: this.currentTurn,
     };
+    ctx.permissions = modsPermissionsFor(tc, ctx.permissions); // mods: a tool.check decision for this call
 
     // ─── Hooks: PreToolUse ─────────────────────────────────────────────────────
     // Run blocking hooks BEFORE tool execution. If any vetoes, return early with the
@@ -3677,6 +3710,7 @@ export class AgentLoop {
    * history (or the summarizer failed).
    */
   async compactConversation(messages: Message[], signal?: AbortSignal): Promise<{ messages: Message[]; savedTokens: number; turnsCompacted: number } | null> {
+    if (await modsCompactSkip(undefined, this.estimateTokens(messages))) return null; // mods: session.compact
     const { compactMessages } = await import('../utils/compaction.js');
     const estTokens = this.estimateTokens(messages);
     const { route: sumRoute } = routeWithOffload(

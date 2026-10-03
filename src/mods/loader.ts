@@ -24,7 +24,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { writeFileAtomic } from '../utils/atomic-write.js';
-import { builtinModsDirs, modsCacheDir, modsStateFile, projectModsDir, testingModulePath, userModsDir } from './paths.js';
+import { builtinModsDirs, modsCacheDir, modsStateFile, projectModsDir, userModsDir } from './paths.js';
 import { MOD_LIMITS, type ModInfo, type ModManifest, type ModRegisterFn, type ModScope } from './types.js';
 
 export interface ModsState {
@@ -346,6 +346,28 @@ let loadSeq = 0;
 const SPEC_RE = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g;
 const TESTING_SPECS = new Set(['qodex/testing', 'claude-code/testing', '@qodex/cli/mods/testing']);
 
+/** Global key the test kit installs itself under (src/mods/testing.ts). */
+export const MOD_TESTING_GLOBAL = Symbol.for('qodex.mods.testing');
+
+/**
+ * The module a mod test imports as 'qodex/testing' / 'claude-code/testing': a shim that
+ * re-exports the kit from globalThis, so it works whatever loaded QodeX (tsx, the built
+ * CLI, vitest) — the test file itself is imported natively.
+ */
+async function testingShimUrl(): Promise<string> {
+  const file = path.join(modsCacheDir(), 'qodex-testing-shim.mjs');
+  const body = [
+    "const kit = globalThis[Symbol.for('qodex.mods.testing')];",
+    "if (!kit) throw new Error('qodex/testing is only available under qodex mod test');",
+    'export const test = kit.test, expect = kit.expect, mock = kit.mock, tier = kit.tier, createTestHarness = kit.createTestHarness;',
+    'export default kit;',
+    '',
+  ].join('\n');
+  await fs.mkdir(modsCacheDir(), { recursive: true });
+  await fs.writeFile(file, body, 'utf-8');
+  return pathToFileURL(file).href;
+}
+
 async function resolveRelative(fromDir: string, spec: string): Promise<string | null> {
   const base = path.resolve(fromDir, spec);
   for (const cand of [base, `${base}.ts`, `${base}.mts`, `${base}.js`, `${base}.mjs`, path.join(base, 'index.ts'), path.join(base, 'index.js')]) {
@@ -385,7 +407,7 @@ async function prepareModule(file: string, loadId: string, seen: Map<string, str
   for (const m of source.matchAll(SPEC_RE)) {
     const spec = m[3]!;
     if (TESTING_SPECS.has(spec)) {
-      replacements.push([spec, pathToFileURL(testingModulePath()).href]);
+      replacements.push([spec, await testingShimUrl()]);
     } else if (spec.startsWith('./') || spec.startsWith('../')) {
       const target = await resolveRelative(path.dirname(file), spec);
       if (!target) continue;

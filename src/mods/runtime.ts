@@ -20,7 +20,7 @@ import { discoverMods, envModDirs, hashModDir, importModEntry, readModsState, re
 import { userModsDir } from './paths.js';
 import { ModTool, modToolName, MOD_TOOL_PREFIX } from './tool.js';
 import { clearModUi, emitModUi, modPaneOwner, modUiHasPaneHost, subscribeModUi, type ModUiEvent } from './ui-bus.js';
-import { MOD_LIMITS, type ModContextCategory, type ModInfo, type ModSurface, type ModUsage } from './types.js';
+import { MOD_LIMITS, type ModContextCategory, type ModInfo, type ModRegisterFn, type ModSurface, type ModUsage } from './types.js';
 
 export interface ModsBindings {
   config?: QodexConfig;
@@ -54,7 +54,7 @@ export interface RunSnapshot {
 }
 
 /** Built-in slash names and aliases a mod command may not take (kept in sync by a test). */
-async function reservedCommandNames(cwd: string): Promise<Map<string, string>> {
+export async function reservedCommandNames(cwd: string): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   try {
     const { SLASH_CATALOG, RESERVED_SLASH_NAMES } = await import('../cli/slash-catalog.js');
@@ -270,11 +270,11 @@ export class ModsRuntime {
     return !d.info.error && d.info.enabled && d.info.trusted && !this.loaded.has(d.info.name);
   }
 
-  private async loadOne(d: DiscoveredMod, savedConfig?: Record<string, unknown>): Promise<boolean> {
+  private async loadOne(d: DiscoveredMod, savedConfig?: Record<string, unknown>, inline?: ModRegisterFn): Promise<boolean> {
     const name = d.info.name;
     const life = newModLifecycle();
     try {
-      const register = await importModEntry(d.info.entry);
+      const register = inline ?? await importModEntry(d.info.entry);
       const api = createModApi({ name, root: d.info.dir }, this.host, life);
       const on = this.engine.addMod(name, d.rank, api);
       const options = Object.freeze(resolveModOptions(d.manifest, savedConfig));
@@ -287,7 +287,7 @@ export class ModsRuntime {
       } finally {
         if (timer) clearTimeout(timer);
       }
-      const hash = await hashModDir(d.info.dir);
+      const hash = inline ? '' : await hashModDir(d.info.dir);
       this.loaded.set(name, { discovered: d, life, hash });
       d.info.loaded = true;
       delete d.info.error;
@@ -351,6 +351,28 @@ export class ModsRuntime {
     if (!d.info.enabled) return { ok: false, error: `${name} is disabled` };
     if (!d.info.trusted) return { ok: false, error: `${name} is a project mod that is not trusted${d.info.trustState === 'changed' ? ' (its files changed since you trusted it)' : ''}` };
     return { ok: false, error: `${name} did not load` };
+  }
+
+  /**
+   * Load a mod from a register function instead of a dir (tests, embedding QodeX). Same
+   * rules as a mod on disk; `rank` 0 = user, 1 = project, 2 = built-in. No session.start —
+   * call startSession() (or the caller fires it).
+   */
+  async addInlineMod(
+    name: string,
+    register: ModRegisterFn,
+    opts: { rank?: number; options?: Record<string, unknown>; dir?: string; description?: string } = {},
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!MOD_LIMITS.nameRe.test(name)) return { ok: false, error: `"${name}" is not a valid mod name` };
+    this.unload(name);
+    const info: ModInfo = {
+      name, scope: opts.rank === 2 ? 'builtin' : opts.rank === 1 ? 'project' : 'user', dir: opts.dir ?? this.cwd, entry: '',
+      description: opts.description ?? '', enabled: true, trusted: true, loaded: false, events: [], commands: [], tools: [],
+    };
+    const d: DiscoveredMod = { info, manifest: null, layout: 'qodex', rank: opts.rank ?? 0 };
+    this.discovered = [...this.discovered.filter(x => x.info.name !== name), d];
+    const ok = await this.loadOne(d, opts.options, register);
+    return ok ? { ok } : { ok, error: info.error };
   }
 
   isLoaded(name: string): boolean {

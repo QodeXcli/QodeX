@@ -36,7 +36,10 @@ export interface ModEventMap {
   /** Once per named system-prompt section. `{ text }` replaces it, `{ text: null }` omits it. */
   'prompt.section': { payload: { name: string; text: string }; result: void | { text: string | null } };
 
-  /** A tool is about to run. `{ deny }` refuses, `{ result }` answers without running, next({...e, args}) rewrites. */
+  /**
+   * A tool is about to run. `{ deny }` refuses, `{ result }` answers without running, next({...e, args}) rewrites.
+   * Each argument is also mirrored as a top-level field (e.command), as Claude Code mods read them.
+   */
   'tool.call': { payload: { tool: string; args: Record<string, unknown>; callId: string; cwd: string }; result: void | { deny: string } | { result: string; isError?: boolean } };
   /** After the permission engine decided; `{ decision }` overrides (a mod can never turn a hard deny / Sentinel-critical into allow). */
   'tool.check': { payload: { tool: string; operation: string; decision: 'allow' | 'ask' | 'deny' }; result: void | { decision: 'allow' | 'ask' | 'deny' } };

@@ -51,7 +51,7 @@ export interface ModHost {
   fs?: Partial<ModApi['fs']>;
   process?: Partial<ModApi['process']>;
   http?: Partial<ModApi['http']>;
-  clock?: Partial<Pick<ModApi['clock'], 'now'>>;
+  clock?: Partial<ModApi['clock']>;
   env?: Partial<ModApi['env']>;
 }
 
@@ -97,6 +97,12 @@ export function createModApi(plugin: { name: string; root: string }, host: ModHo
     const text = `timer callback threw ${err instanceof Error ? err.message : String(err)}`;
     logger.warn(`mod ${name}: ${text}`);
     ui({ kind: 'error', plugin: name, text });
+  };
+  /** Keep a host-made timer so unload cancels it too. */
+  const track = (h: { cancel(): void }) => {
+    const handle = { cancel: () => { life.timers.delete(handle); h.cancel(); } };
+    life.timers.add(handle);
+    return handle;
   };
   const runCallback = (fn: () => void | Promise<void>) => outsideHook(() => {
     try {
@@ -226,15 +232,16 @@ export function createModApi(plugin: { name: string; root: string }, host: ModHo
     clock: Object.freeze({
       now: () => call(() => (host.clock?.now ? host.clock.now() : Date.now())),
       // Not untimed: a hook that sleeps spends its own time.
-      sleep: (ms: number) => new Promise<void>(resolve => {
+      sleep: (ms: number) => (host.clock?.sleep ? host.clock.sleep(ms) : new Promise<void>(resolve => {
         if (life.unloaded) { resolve(); return; }
         const t = setTimeout(() => { life.timers.delete(handle); resolve(); }, clampMs(ms, 0, MOD_LIMITS.processMaxMs));
         (t as { unref?: () => void }).unref?.();
         const handle = { cancel: () => { clearTimeout(t); resolve(); } };
         life.timers.add(handle);
-      }),
+      })),
       after: (ms: number, fn: () => void | Promise<void>) => {
         if (life.unloaded || typeof fn !== 'function') return { cancel() {} };
+        if (host.clock?.after) return track(host.clock.after(ms, () => runCallback(fn)));
         const t = setTimeout(() => { life.timers.delete(handle); void runCallback(fn); }, clampMs(ms, 0, 2_147_483_647));
         (t as { unref?: () => void }).unref?.();
         const handle = { cancel: () => { clearTimeout(t); life.timers.delete(handle); } };
@@ -243,6 +250,7 @@ export function createModApi(plugin: { name: string; root: string }, host: ModHo
       },
       every: (ms: number, fn: () => void | Promise<void>) => {
         if (life.unloaded || typeof fn !== 'function') return { cancel() {} };
+        if (host.clock?.every) return track(host.clock.every(ms, () => runCallback(fn)));
         let running = false;
         const t = setInterval(() => {
           if (running) return; // never pile up behind a slow callback
