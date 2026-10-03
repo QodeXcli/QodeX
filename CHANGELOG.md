@@ -35,7 +35,13 @@
    `claude-opus-5-5` (new default), `claude-sonnet-5-5`, `claude-fable-5-1`; `/model opus|sonnet|
    haiku|fable`. **`/checkup prompt-audit`** writes `PROMPT_AUDIT.md` + `prompt-audit.patch`
    (nothing applied). Built-in skills **build-eval** and **hillclimb**.
-5. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
+5. **Lean browser mode** (`browser.lean`, default `auto` = headless only): images, fonts and
+   audio/video are skipped while nobody needs the pixels; DOM, scripts, forms, cookies and the
+   HTTP cache are untouched (per-tab CDP interception of those resource types only, not
+   `context.route`, which turns the cache off). Never on your own Chrome or localhost / LAN
+   pages; off for the rest of the session on a screenshot, takeover, live view or bot check.
+   12-photo page: ~0 MB vs 5 MB downloaded, ~270 ms vs ~720 ms, ~100–180 MB less memory.
+6. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
    (echo matching); the mail watcher missed mail that arrived between a check and the IDLE wait,
    and `stop()` could wait out the IDLE timeout; Telegram `/unpair` confirmed before dropping the
    approval channel; challenge detection stringified the page-title promise.

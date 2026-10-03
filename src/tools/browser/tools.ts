@@ -714,6 +714,8 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
         }
       }
       await fs.mkdir(path.dirname(dest), { recursive: true });
+      // A screenshot needs the pixels: lean mode stops skipping images from now on.
+      const lean = qm ? await qm.suspendLean('screenshot') : null;
       const target = targetOf({ ref: args.ref, selector: args.selector });
       const legend: string[] = [];
       if (target) {
@@ -743,6 +745,9 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
         `  Page: ${await safeTitleOf(page) || '(untitled)'} — ${safeUrlOf(page)}`,
       ];
       if (legend.length) lines.push(`  Marks (ref → element):`, ...legend);
+      if (lean?.blockedOnPage) {
+        lines.push(`  Lean mode skipped ${lean.blockedOnPage} image/font/media request(s) when this page loaded, so parts may be blank. It is off now for this session — reload the page (browser_navigate to the same URL) to see them.`);
+      }
       for (const n of qm?.drainNotices() ?? []) lines.push(`• ${n}`);
       if (args.analyze) {
         const v = await new VisionAnalyzeTool().execute({ image_path: dest, prompt: args.analyze }, ctx);

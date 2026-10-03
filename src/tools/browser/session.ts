@@ -46,6 +46,7 @@ import { VAULT_KEY_ARTIFACTS } from '../../vault/paths.js';
 import { getBus } from '../../control/bus.js';
 import { isInteractiveHuman } from '../../control/approvals.js';
 import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
+import { LeanBlocker, leanEnabled, LEAN_BLOCK_ERROR, LEAN_FAILURE_TEXT, type LeanStatus } from './lean.js';
 import {
   detectChallenge,
   pickChallengeHeaders,
@@ -611,6 +612,8 @@ export interface QodexBrowserManagerOptions {
   launcherDeps?: LauncherDeps;
   /** 'ask' dialog policy: auto-dismiss after this many ms. Default 30000. */
   dialogAutoDismissMs?: number;
+  /** Pages lean mode never touches (tests). Default: loopback / LAN hosts and non-http(s) pages. */
+  leanExempt?: (pageUrl: string) => boolean;
 }
 
 /** Extended status: the contract fields plus diagnostics for `browser_status`. */
@@ -623,6 +626,8 @@ export interface QodexBrowserStatus extends BrowserStatus {
   pendingDialog?: { type: string; message: string };
   /** A CAPTCHA / bot check on a tab (the active one first): host only, no URL. */
   challenge?: { tab: number; vendor: string; state: string; host: string };
+  /** Lean mode (browser.lean), when this launch started lean. */
+  lean?: LeanStatus;
 }
 
 export class QodexBrowserManager implements BrowserManager {
@@ -637,6 +642,7 @@ export class QodexBrowserManager implements BrowserManager {
   private launching: Promise<void> | null = null;
   private closing: Promise<void> | null = null;
   private launchedCfg: BrowserConfig | null = null;
+  private lean = new LeanBlocker(false, () => true);
   private profileInUse = '';
   private exe: ResolvedExecutable | null = null;
   private browserVersion: string | undefined;
@@ -731,6 +737,7 @@ export class QodexBrowserManager implements BrowserManager {
     if (cfg.cdpUrl) await this.attachCdp(pw, cfg);
     else await this.launchPersistent(pw, cfg, over?.headless === undefined);
     this.launchedCfg = cfg;
+    this.lean = new LeanBlocker(leanEnabled(cfg, this.mode), this.opts.leanExempt ?? leanExemptPage);
 
     const ctx = this.ctx;
     ctx.on('page', (p: Page) => { this.attachPage(p); });
@@ -745,6 +752,7 @@ export class QodexBrowserManager implements BrowserManager {
       const first = this.tabList[0] ?? this.attachPage(await ctx.newPage(), { initial: true });
       this.activate(first);
     }
+    await this.lean.settled();
 
     getBus().publish({
       kind: 'browser',
@@ -871,6 +879,7 @@ export class QodexBrowserManager implements BrowserManager {
     this.tabList = [];
     this.activeTab = null;
     this.launchedCfg = null;
+    this.lean = new LeanBlocker(false, () => true);
     if (this.fallbackProfileDir) {
       // The browser has exited: drop the throwaway profile (its logins were never the
       // user's). Chromium may still flush a file or two while exiting, hence retries.
@@ -916,11 +925,15 @@ export class QodexBrowserManager implements BrowserManager {
     if (existing) return existing;
     const st: TabState = { id: `t${++this.tabSeq}`, page, title: '', console: [], errors: [], requests: [], refMode: null, pendingDialog: null, challenge: null };
     this.tabList.push(st);
+    if (this.ctx) void this.lean.attach(this.ctx as any, page);
 
     page.on('console', (msg: any) => {
       let location: string | undefined;
       try { location = msg.location()?.url || undefined; } catch { /* ignore */ }
-      pushCapped(st.console, { type: String(msg.type()), text: String(msg.text()), location, ts: Date.now() }, CONSOLE_CAP);
+      const text = String(msg.text());
+      // "Failed to load resource" for every image lean mode skipped is noise, not a page bug.
+      if (this.lean.enabled && text.includes(LEAN_BLOCK_ERROR)) return;
+      pushCapped(st.console, { type: String(msg.type()), text, location, ts: Date.now() }, CONSOLE_CAP);
     });
     page.on('pageerror', (err: any) => {
       pushCapped(st.errors, { message: String(err?.message ?? err), stack: err?.stack, ts: Date.now() }, ERROR_CAP);
@@ -939,9 +952,10 @@ export class QodexBrowserManager implements BrowserManager {
         .catch(() => pushCapped(st.requests, base, REQUEST_CAP));
     });
     page.on('requestfailed', (req: any) => {
+      const failure = safe(() => req.failure()?.errorText) ?? 'failed';
       pushCapped(st.requests, {
         url: String(req.url()), method: String(req.method()), resourceType: safe(() => req.resourceType()),
-        ok: false, failure: safe(() => req.failure()?.errorText) ?? 'failed', ts: Date.now(),
+        ok: false, failure: this.lean.enabled && failure === LEAN_BLOCK_ERROR ? LEAN_FAILURE_TEXT : failure, ts: Date.now(),
       }, REQUEST_CAP);
     });
     page.on('dialog', (d: any) => this.onDialog(st, d));
@@ -957,6 +971,7 @@ export class QodexBrowserManager implements BrowserManager {
         if (frame !== page.mainFrame()) return;
       } catch { return; }
       st.refMode = null;
+      this.lean.navigated(page);
       this.events.emit('tab-navigated', st.id);
       getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
       notifyObservers(o => o.navigated?.(st.id, page));
@@ -985,6 +1000,7 @@ export class QodexBrowserManager implements BrowserManager {
   private onPageClosed(st: TabState): void {
     const idx = this.tabList.indexOf(st);
     if (idx < 0) return;
+    this.lean.forget(st.page);
     if (st.pendingDialog) { clearTimeout(st.pendingDialog.timer); st.pendingDialog = null; }
     this.stopChallengeTimers(st);
     if (st.challenge) {
@@ -1138,7 +1154,21 @@ export class QodexBrowserManager implements BrowserManager {
       downloads: this.downloadList.length,
       pendingDialog: pending ? { type: pending.type, message: pending.message } : undefined,
       challenge: ch && chTab ? { tab: this.tabList.indexOf(chTab), vendor: ch.vendor, state: ch.state, host: ch.host } : undefined,
+      lean: this.ctx && this.lean.enabled ? this.lean.status() : undefined,
     };
+  }
+
+  /**
+   * Pixels matter from now on (a screenshot, the live view, a takeover, a bot check):
+   * lean mode stops skipping images / fonts / media for the rest of this session.
+   * Returns whether it was on and how many requests it skipped on the active tab since
+   * that tab's last navigation (those stay missing until the page is reloaded).
+   */
+  async suspendLean(reason: string): Promise<{ wasOn: boolean; blockedOnPage: number }> {
+    const page = this.activeTab?.page;
+    const blockedOnPage = page && this.lean.active ? this.lean.blockedOn(page) : 0;
+    const wasOn = await this.lean.suspend(reason);
+    return { wasOn, blockedOnPage };
   }
 
   private notice(n: string | (() => string)): void {
@@ -1249,6 +1279,9 @@ export class QodexBrowserManager implements BrowserManager {
   private setChallenge(st: TabState, next: ChallengeInfo | null): void {
     const previous = st.challenge;
     st.challenge = next;
+    // The person who solves it must see it whole (a cross-site CAPTCHA frame is never
+    // touched by lean mode, but the page around it may be).
+    if (next) void this.lean.suspend('bot check');
     if (next && !st.challengeBeat) {
       st.challengeBeat = setInterval(() => { void this.runChallengeCheck(st).catch(() => {}); }, 1500);
       (st.challengeBeat as any).unref?.();
@@ -1722,6 +1755,8 @@ export class QodexBrowserManager implements BrowserManager {
 
   async startScreencast(onFrame: (f: ScreencastFrame) => void, opts: { quality?: number; maxFps?: number } = {}): Promise<() => Promise<void>> {
     const fps = Math.min(30, Math.max(1, opts.maxFps ?? 8));
+    // Someone is watching: they get the real page, images included.
+    await this.lean.suspend('live view');
     const sub: CastSub = {
       onFrame,
       quality: Math.min(100, Math.max(1, Math.round(opts.quality ?? 60))),
@@ -1800,6 +1835,7 @@ export class QodexBrowserManager implements BrowserManager {
   async screenshotJpeg(quality = 70, opts: { clip?: ScreenshotClip } = {}): Promise<Buffer> {
     if (!this.ctx || !this.activeTab) throw new Error('[BROWSER_ERROR] The QodeX browser is not running.');
     const page = this.activeTab.page;
+    await this.lean.suspend('screenshot');
     const q = Math.min(100, Math.max(1, Math.round(Number.isFinite(quality) ? quality : 70)));
     const clip = opts.clip ? clampClip(opts.clip, await this.viewportOf(page)) : null;
     return page.screenshot(clip ? { type: 'jpeg', quality: q, clip } : { type: 'jpeg', quality: q });
@@ -1831,6 +1867,7 @@ export class QodexBrowserManager implements BrowserManager {
     const changed = this.takeoverOn !== on;
     this.takeoverOn = on;
     this.takeoverWho = on ? by : undefined;
+    if (on) void this.lean.suspend('takeover');
     if (changed) getBus().publish({ kind: 'browser', type: 'takeover', data: { on, by } });
     if (changed) notifyObservers(o => o.takeover?.(on));
     if (!on) {
@@ -2022,6 +2059,17 @@ function safe<T>(fn: () => T): T | undefined {
 }
 
 /** Loopback / private-network / .local hosts (dev servers): never paced. PURE. */
+/**
+ * Pages lean mode never touches: non-http(s) pages and loopback / LAN hosts (a dev
+ * server's images and fonts are part of what you are building). PURE.
+ */
+export function leanExemptPage(pageUrl: string): boolean {
+  let u: URL;
+  try { u = new URL(pageUrl); } catch { return true; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return true;
+  return isLocalHost(u.hostname);
+}
+
 export function isLocalHost(host: string): boolean {
   const h = String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) return true;

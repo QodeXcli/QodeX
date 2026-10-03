@@ -69,6 +69,17 @@ export interface BrowserConfig {
   handoffLinkTtlSec: number;
   /** Minimum gap between agent navigations / actions on the same public host (ms, ≤1000). Loopback / LAN hosts are never paced. */
   hostPacingMs: number;
+  /**
+   * Lean mode: the browser skips images, fonts and audio/video so pages load with less
+   * memory, CPU and bandwidth (the DOM, scripts, styles, forms and cookies are untouched,
+   * and so is the HTTP cache). 'auto' (default) = only when QodeX launched the browser
+   * headless — nobody is looking at it; 'on' = also in a visible window; 'off' = never.
+   * Never applied to your own Chrome (cdpUrl) or to loopback / LAN pages (dev servers).
+   * It switches itself off for the rest of the session as soon as a person or a vision
+   * model needs the pixels: a takeover, the live view, a screenshot, a bot check.
+   * QODEX_BROWSER_LEAN=1 / 0 forces it on / off.
+   */
+  lean: 'auto' | 'on' | 'off';
 }
 
 export interface DesktopConfig {
@@ -186,6 +197,7 @@ export const DEFAULT_BROWSER_CONFIG: BrowserConfig = {
   handoffTimeoutSec: 600,
   handoffLinkTtlSec: 600,
   hostPacingMs: 500,
+  lean: 'auto',
 };
 
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
@@ -333,6 +345,8 @@ export function resolveBrowserConfig(cfg: unknown, env: NodeJS.ProcessEnv = proc
     handoffTimeoutSec,
     handoffLinkTtlSec: Math.min(handoffTimeoutSec, num(s.handoffLinkTtlSec, Math.min(d.handoffLinkTtlSec, handoffTimeoutSec), 60, 86_400)),
     hostPacingMs: num(s.hostPacingMs, d.hostPacingMs, 0, 1000),
+    lean: env.QODEX_BROWSER_LEAN === '1' ? 'on' : env.QODEX_BROWSER_LEAN === '0' ? 'off'
+      : s.lean === true ? 'on' : s.lean === false ? 'off' : oneOf(s.lean, ['auto', 'on', 'off'] as const, d.lean),
   };
 }
 

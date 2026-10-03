@@ -60,13 +60,24 @@ revision. Override with `browser.executablePath` or `QODEX_BROWSER_EXECUTABLE`.
 `browser.cdpUrl: http://127.0.0.1:9222` (or `QODEX_BROWSER_CDP_URL`). QodeX opens its own tab
 and only disconnects on close — it never quits your browser.
 
+**Lean mode** (`browser.lean`, default `auto`). When nobody is looking at the browser (QodeX
+launched it headless: missions, schedules, `--print`), it skips images, fonts and audio/video.
+The DOM, scripts, styles, forms, cookies and the HTTP cache are untouched, so snapshots, clicks
+and sign-ups work the same. On a 12-photo gallery page it downloaded ~0 MB instead of 5 MB,
+loaded in ~270 ms instead of ~720 ms and used ~100–180 MB less memory. It never applies to
+your own Chrome (`cdpUrl`) or to localhost / LAN pages (dev servers), and it turns itself off
+for the rest of the session as soon as pixels matter: a screenshot, a takeover, the live view
+or a bot check. `browser_status` shows it; `lean: on` also uses it in a visible window, `off`
+never; `QODEX_BROWSER_LEAN=1|0` forces it. It is not a way to look less automated: it changes
+nothing a site sees about the browser.
+
 ```yaml
 # ~/.qodex/config.yaml
 browser:
-  headless: true          # QODEX_BROWSER_HEADED=1 to watch
+  headless: auto          # visible window at the TUI, headless otherwise; QODEX_BROWSER_HEADED=1 to watch
+  lean: auto              # auto (headless only) | on | off
   profile: default
   viewport: { width: 1280, height: 800 }
-  stealth: true
   dialogPolicy: accept    # accept | dismiss | ask
   snapshotAfterAction: true
   agentMaxSteps: 40
@@ -348,6 +359,7 @@ with their own session and budget.
 - **کپچا**: QodeX کپچا را هرگز خودش حل نمی‌کند؛ بررسی‌هایی را که خودشان رد می‌شوند صبر می‌کند و بقیه را با یک کارت تلگرام و لینک یک‌لمسی به شما می‌سپارد تا از گوشی حلش کنید، و بعد خودش ادامه می‌دهد. stealth به‌طور پیش‌فرض خاموش است.
 - **Mods**: ماژول‌های کوچکی که خودِ QodeX را تغییر می‌دهند (سازگار با mods در Claude Code)؛ `/mod new` تا QodeX برایتان بسازد. راهنما: docs/MODS.md
 - **گاوصندوق رمزها**: کلید در Keychain سیستم‌عامل، وارد کردن از Chrome/Firefox/Bitwarden/1Password، ورود یک‌مرحله‌ای با کد دومرحله‌ای، ساخت رمز قوی هنگام ثبت‌نام، و تایپ رمز توسط خودتان در فرم امن — ایجنت رمز را هرگز نمی‌بیند و فقط روی سایت اصلی پر می‌کند (ضد فیشینگ). راهنما: docs/VAULT_AND_CAPTCHA.md
+- **حالت سبک مرورگر** (`browser.lean`): وقتی کسی مرورگر را نگاه نمی‌کند (اجرای بدون پنجره)، تصویر، فونت و ویدیو دانلود نمی‌شود؛ صفحه، اسکریپت‌ها، فرم‌ها، کوکی‌ها و کش دست‌نخورده می‌مانند. در یک صفحهٔ ۱۲ عکسی: ۰ به‌جای ۵ مگابایت دانلود، ۲۷۰ به‌جای ۷۲۰ میلی‌ثانیه و ۱۰۰ تا ۱۸۰ مگابایت حافظهٔ کمتر. روی localhost و Chrome خودتان اعمال نمی‌شود و با اسکرین‌شات، در دست گرفتن کنترل، نمای زنده یا کپچا خودش خاموش می‌شود.
 - **مرکز کنترل وب**: تماشای زنده‌ی مرورگر ایجنت، در دست گرفتن کنترل، تأیید با یک کلیک — حتی از گوشی. `qodex control --lan`
 - **یادگیری از نمایش**: یک بار کار را انجام دهید، QodeX ضبط و بعداً تکرار می‌کند. `qodex workflow record`
 - **تلگرام / دیسکورد / اسلک / واتس‌اپ / سیگنال**: گفتگو با ایجنت، شروع مأموریت (`/mission`) و تأیید اقدامات از گوشی (`qodex bot` یا `qodex telegram`).

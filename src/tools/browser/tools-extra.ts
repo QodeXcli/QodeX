@@ -827,10 +827,15 @@ export class BrowserPdfTool extends Tool<z.infer<typeof PdfArgs>> {
       const bad = await checkOutputPath(dest, ['.pdf'], mgr);
       if (bad) return { content: `[BROWSER_ERROR] pdf: ${bad}`, isError: true };
       const page = await mgr.activePage();
+      // A PDF needs the pixels: lean mode stops skipping images from now on.
+      const lean = await asQodex(mgr)?.suspendLean('pdf');
       await fs.mkdir(path.dirname(dest), { recursive: true });
       await withAbort(page.pdf({ path: dest, printBackground: true }), ctx.signal);
       const stat = await fs.stat(dest);
-      return { content: `✓ PDF saved: ${dest} (${formatBytes(stat.size)}) — ${mgr.activeUrl()}`, metadata: { path: dest, bytes: stat.size } };
+      const note = lean?.blockedOnPage
+        ? `\n  Lean mode skipped ${lean.blockedOnPage} image/font/media request(s) when this page loaded, so parts may be blank. It is off now for this session — reload the page (browser_navigate to the same URL) and export again to include them.`
+        : '';
+      return { content: `✓ PDF saved: ${dest} (${formatBytes(stat.size)}) — ${mgr.activeUrl()}${note}`, metadata: { path: dest, bytes: stat.size } };
     } catch (e) {
       return browserErrorResult(e, 'pdf');
     }
@@ -852,7 +857,7 @@ export class BrowserStatusTool extends Tool<z.infer<typeof StatusArgs>> {
 
   async execute(_args: z.infer<typeof StatusArgs>, _ctx: ToolContext): Promise<ToolResult> {
     const mgr = await getBrowserManager();
-    const s = mgr.status() as ReturnType<typeof mgr.status> & { executableSource?: string; notice?: string; pendingDialog?: { type: string; message: string }; cdpUrl?: string; downloads?: number };
+    const s = mgr.status() as ReturnType<typeof mgr.status> & { executableSource?: string; notice?: string; pendingDialog?: { type: string; message: string }; cdpUrl?: string; downloads?: number; lean?: { on: boolean; blocked: number; suspended?: string } };
     const lines = [
       `Running: ${s.running ? 'yes' : 'no'}${s.running ? ` (${s.mode === 'cdp' ? `attached to your Chrome${s.cdpUrl ? ` at ${s.cdpUrl}` : ''}` : s.headless ? 'headless' : 'visible window'})` : ''}`,
       `Profile: ${s.profile} (logins persist between runs)`,
@@ -860,6 +865,11 @@ export class BrowserStatusTool extends Tool<z.infer<typeof StatusArgs>> {
       `Human takeover: ${s.takeover ? `ON${s.takeoverBy ? ` by ${s.takeoverBy}` : ''} — actions wait until it is handed back` : 'off'}`,
       `Downloads: ${s.downloads ?? 0} → ${s.downloadsDir}`,
     ];
+    if (s.lean) {
+      lines.push(s.lean.on
+        ? `Lean mode: on — images, fonts and media are skipped (${s.lean.blocked} so far); a screenshot or takeover turns it off`
+        : `Lean mode: off since a ${s.lean.suspended ?? 'request'} needed the pixels (${s.lean.blocked} skipped before)`);
+    }
     if (s.pendingDialog) lines.push(`Dialog waiting: (${s.pendingDialog.type}) "${s.pendingDialog.message.slice(0, 160)}"`);
     if (s.notice) lines.push(`Note: ${s.notice}`);
     if (s.running) {
