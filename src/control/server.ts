@@ -1545,6 +1545,7 @@ const ROUTE_METHODS = new Map<string, 'GET' | 'POST'>([
   ['/api/input', 'POST'],
   ['/api/takeover', 'POST'],
   ['/api/steer', 'POST'],
+  ['/api/stop', 'POST'],
 ]);
 
 async function handleRequest(rt: Running, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1637,6 +1638,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   if (path === '/api/input') return routeInput(rt, res, body.value);
   if (path === '/api/takeover') return routeTakeover(res, body.value);
   if (path === '/api/steer') return routeSteer(rt, res, body.value);
+  if (path === '/api/stop') return routeStop(res, body.value);
   if (approvalMatch) return routeApproval(res, approvalMatch[1] ?? '', body.value);
   if (actionMatch) return routeAction(res, actionMatch[1] ?? '', body.value);
   sendError(res, 404, `[NOT_FOUND] ${path.slice(0, 200)}`);
@@ -1820,6 +1822,14 @@ async function routeSteer(rt: Running, res: ServerResponse, body: unknown): Prom
   }
   getBus().publish({ kind: 'agent', source: 'control', type: 'steer', data: { note: note.length > 500 ? note.slice(0, 500) + '…' : note } });
   sendJson(res, 200, { ok: true });
+}
+
+/** Emergency stop: `{all: true}` also cancels active missions. */
+async function routeStop(res: ServerResponse, body: unknown): Promise<void> {
+  const all = asObject(body).all === true;
+  const { emergencyStop } = await import('./emergency-stop.js');
+  const report = await emergencyStop({ missions: all, by: 'control center' });
+  sendJson(res, 200, { ok: true, stopped: report.stopped, errors: report.errors });
 }
 
 function routeApproval(res: ServerResponse, rawId: string, body: unknown): void {

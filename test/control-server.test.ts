@@ -27,6 +27,7 @@ import {
   type ControlCenterInfo,
 } from '../src/control/server.js';
 import { getBus } from '../src/control/bus.js';
+import { registerStopHandler } from '../src/control/emergency-stop.js';
 import { getApprovalBroker } from '../src/control/approvals.js';
 import {
   setBrowserManagerForTests,
@@ -588,6 +589,22 @@ describe('control center — live frames', () => {
 // ── steer + actions ──────────────────────────────────────────────────────────
 
 describe('control center — steer and actions', () => {
+  it('POST /api/stop runs the emergency stop (same-origin only)', async () => {
+    let calls = 0;
+    const off = registerStopHandler('control test run', () => { calls++; return 'the running task'; });
+    try {
+      const cross = await post('/api/stop', {}, { origin: 'http://evil.example' });
+      expect(cross.status).toBe(403);
+      expect(calls).toBe(0);
+      const r = await post('/api/stop', {});
+      expect(r.status).toBe(200);
+      const j = await r.json() as { ok: boolean; stopped: string[] };
+      expect(j.ok).toBe(true);
+      expect(j.stopped).toContain('the running task');
+      expect(calls).toBe(1);
+    } finally { off(); }
+  });
+
   it('delivers steering notes and logs them on the bus', async () => {
     const r = await post('/api/steer', { note: '  use the cheaper shipping option  ' });
     expect(r.status).toBe(200);

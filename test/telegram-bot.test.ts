@@ -8,6 +8,7 @@ import { TelegramBot, type TelegramBotOptions, type TelegramMissionAdapter, type
 import { htmlToPlain } from '../src/channels/telegram/format.js';
 import { ApprovalBroker } from '../src/control/approvals.js';
 import { getBus } from '../src/control/bus.js';
+import { registerStopHandler } from '../src/control/emergency-stop.js';
 import type { BrowserManager } from '../src/tools/browser/types.js';
 import { MissionStore } from '../src/missions/store.js';
 import { createTelegramMissionAdapter } from '../src/missions/telegram-adapter.js';
@@ -464,6 +465,27 @@ describe('commands', () => {
     tg.text(OWNER, '/cancel');
     await waitUntil(() => tg.sent(OWNER).length === 5);
     expect(tg.sent(OWNER)[4].body.text).toContain('Usage');
+  });
+
+  it('/stop runs the emergency stop; /stop all also cancels active missions', async () => {
+    await pairOwner();
+    const missions = fakeMissions();
+    let stopped = 0;
+    const off = registerStopHandler('tg test run', () => { stopped++; return 'the running task'; });
+    try {
+      await startBot({ missions });
+      tg.text(OWNER, '/stop');
+      await waitUntil(() => tg.sent(OWNER).length === 1);
+      expect(stopped).toBe(1);
+      expect(tg.sent(OWNER)[0].body.text).toContain('the running task');
+      expect(tg.sent(OWNER)[0].body.text).toContain('/stop all');
+      expect(missions.cancelled).toEqual([]);
+
+      tg.text(OWNER, '/stop all');
+      await waitUntil(() => tg.sent(OWNER).length === 2);
+      expect(missions.cancelled).toEqual(['m_abcdef']);
+      expect(tg.sent(OWNER)[1].body.text).toContain('mission m_abcdef');
+    } finally { off(); }
   });
 
   it('replies "not available" for mission commands without an adapter', async () => {

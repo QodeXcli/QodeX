@@ -494,6 +494,8 @@ export class TelegramBot {
         return this.cmdStartMission(chatId, cmd.args, lang);
       case 'cancel':
         return this.cmdCancel(chatId, cmd.args, lang);
+      case 'stop':
+        return this.cmdStop(chatId, cmd.args);
       case 'screen':
       case 'screenshot':
         return this.cmdScreen(chatId, lang);
@@ -705,6 +707,27 @@ export class TelegramBot {
     let ok = false;
     try { ok = await this.missions.cancel(r.id); } catch (err) { this.log('warn', `Telegram /cancel failed: ${errMsg(err)}`); }
     await this.send(chatId, ok ? S.cancelOk(r.id) : S.cancelFailed(r.id));
+  }
+
+  /**
+   * Emergency stop from the phone: the running task, side runs and managed processes in
+   * this process; `/stop all` also cancels every active mission (through the adapter).
+   */
+  private async cmdStop(chatId: number, arg: string): Promise<void> {
+    const all = arg.trim().toLowerCase() === 'all';
+    const { emergencyStop, formatStopReport } = await import('../../control/emergency-stop.js');
+    const report = await emergencyStop({ missions: false, by: 'Telegram' });
+    if (all && this.missions) {
+      try {
+        const active = (await this.missions.list(100)).filter((m) => F.ACTIVE_MISSION_STATUSES.has(m.status));
+        for (const m of active) {
+          let ok = false;
+          try { ok = await this.missions.cancel(m.id); } catch (err) { report.errors.push(`mission ${m.id}: ${errMsg(err)}`); continue; }
+          if (ok) report.stopped.push(`mission ${m.id}`);
+        }
+      } catch (err) { report.errors.push(`missions: ${errMsg(err)}`); }
+    }
+    await this.send(chatId, F.esc(formatStopReport(report, all), 3000));
   }
 
   /** Exact id, else a unique prefix among recent missions. */
