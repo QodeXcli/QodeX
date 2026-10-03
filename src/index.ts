@@ -220,6 +220,7 @@ program
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
   .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
+  .option('--strict-budget', 'Budget caps stop the run at once: no wrap-up allowance to leave the work consistent (headless -p)')
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
@@ -355,6 +356,10 @@ program
       console.error('--receipt needs a contract: add at least one of --verify / --budget-tokens / --budget-usd / --max-wall / --scope.');
       process.exit(1);
     }
+    if (opts.strictBudget && !opts.print) {
+      console.error('--strict-budget requires headless mode (-p/--print).');
+      process.exit(1);
+    }
 
     // Headless mode
     if (opts.print) {
@@ -371,6 +376,7 @@ program
         resumeSessionId,
         contract: contract ?? undefined,
         receiptPath: opts.receipt,
+        strictBudget: !!opts.strictBudget,
       });
       process.exit(code);
     }

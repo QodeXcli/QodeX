@@ -707,6 +707,8 @@ export function App(props: AppProps): React.ReactElement {
         askUser,
         maxIterationsOverride: maxIterOverrideRef.current,
         reasoningEffort: effortOverrideRef.current,
+        // A reached budget cap gets one wrap-up allowance (config budget.wrapUp).
+        wrapUpAllowance: true,
         onToolUI: (uiEvent) => {
           if (uiEvent.type === 'diff') {
             pendingDiffRef.current = uiEvent;
