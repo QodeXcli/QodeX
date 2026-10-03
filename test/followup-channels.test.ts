@@ -8,8 +8,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'fs';
+import * as fsSync from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFile } from 'child_process';
+import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { MissionStore, setMissionStoreForTests } from '../src/missions/store.js';
 import { startMissionEventBridge } from '../src/missions/index.js';
 import { runMission, missionAskUser, type AgentLike } from '../src/missions/runner.js';
@@ -272,4 +276,59 @@ describe('qodex workflow', () => {
     expect(longs).toContain('--browser-profile');
     expect(longs).not.toContain('--profile');
   });
+});
+
+// ── real CLI: root flags written after a subcommand ──────────────────────────
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Resolved like an import, so it also works from a git worktree without its own node_modules.
+const TSX = createRequire(import.meta.url).resolve('tsx/cli');
+const ENTRY = path.join(ROOT, 'src', 'index.ts');
+
+function runCli(home: string, args: string[]): Promise<{ code: number; out: string; stdout: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, QODEX_SKIP_SETUP: '1' };
+  delete env.QODEX_PROFILE;
+  delete env.QODEX_BROWSER_CDP_URL;
+  return new Promise(resolve => {
+    execFile(process.execPath, [TSX, ENTRY, ...args], { env, cwd: home, timeout: 110_000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (typeof (err as any).code === 'number' ? (err as any).code : 1) : 0, out: `${stdout}\n${stderr}`, stdout });
+    });
+  });
+}
+
+describe('CLI: root flags after a subcommand reach the subcommand', () => {
+  it('workflow run -p is --param, browser open -p/--profile is a browser profile, --json reaches vault list; --profile before the subcommand stays the config overlay', async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'qx-followup-cli-'));
+    try {
+      const qx = path.join(home, '.qodex');
+      await fs.mkdir(path.join(qx, 'workflows'), { recursive: true });
+      await fs.writeFile(path.join(qx, 'workflows', 'search.json'), JSON.stringify({
+        name: 'search', description: 'Search the shop', version: 1, createdAt: '2026-10-01T00:00:00.000Z', source: 'human',
+        params: [{ name: 'query' }],
+        steps: [{ kind: 'navigate', url: 'https://shop.example/' }, { kind: 'fill', selector: '[name="q"]', value: '{{query}}' }],
+      }));
+      // A profile "in use" makes `browser open` stop before launching anything — and name the profile it got.
+      const profileDir = path.join(qx, 'browser', 'profiles', 'work');
+      await fs.mkdir(profileDir, { recursive: true });
+      fsSync.symlinkSync('another-machine', path.join(profileDir, 'SingletonLock'));
+
+      const [param, longProfile, shortProfile, overlay, vault] = await Promise.all([
+        runCli(home, ['workflow', 'run', 'search', '-p', 'query=hello', '--dry-run']),
+        runCli(home, ['browser', 'open', '--profile', 'work']),
+        runCli(home, ['browser', 'open', '-p', 'work']),
+        runCli(home, ['--profile', 'nosuch', 'workflow', 'list']),
+        runCli(home, ['vault', 'list', '--json']),
+      ]);
+      expect(param.out).toContain('with "hello"');
+      expect(param.code).toBe(0);
+      for (const r of [longProfile, shortProfile]) {
+        expect(r.out).toContain('Profile "work" is in use');
+        expect(r.out).not.toContain('Unknown profile');
+      }
+      expect(overlay.out).toContain('Unknown profile "nosuch"');
+      expect(JSON.parse(vault.stdout.trim())).toEqual([]);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 120_000);
 });
