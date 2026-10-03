@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
+import { confirmEdit, emitEditDiff, reviseResult } from './edit-approval.js';
 
 const Edit = z.object({
   old_string: z.string().describe('Exact text to find. Must be unique unless replace_all=true.'),
@@ -146,6 +147,39 @@ export class MultiFileEditTool extends Tool<z.infer<typeof MultiFileEditArgs>> {
             syntaxFailures.map(f => '  - ' + f).join('\n'),
           isError: true,
         };
+      }
+    }
+
+    // PASS 1.75: permission — the same approval as write_file / edit_text, per changed
+    // file, BEFORE anything is written (this tool used to write without any check, in
+    // any mode, absolute paths included). A reject or "continue" on any file stops the
+    // whole batch, so it stays all-or-nothing. "always yes" on one file switches the
+    // session to auto mode, so the remaining in-project files stop asking.
+    const changedPlans = plans.filter(p => p.changed);
+    for (let i = 0; i < changedPlans.length; i++) {
+      const plan = changedPlans[i]!;
+      const rel = path.relative(ctx.cwd, plan.path) || plan.path;
+      const permReq = { tool: 'multi_file_edit', operation: rel, description: `Edit ${rel}`, cwd: ctx.cwd };
+      const decision = ctx.permissions.evaluate(permReq);
+      if (decision === 'deny') {
+        return { content: `[PERMISSION_DENIED] Cannot write ${rel} (blocked by policy). NO files were modified.`, isError: true };
+      }
+      if (decision === 'ask') {
+        const dec = await confirmEdit(ctx, {
+          rel, before: plan.originalContent, after: plan.finalContent, absPath: plan.path, permReq,
+          label: `Apply ${plan.editCount} edit${plan.editCount > 1 ? 's' : ''} to ${rel}? (file ${i + 1}/${changedPlans.length} of one atomic multi-file edit)`,
+        });
+        if (dec.kind === 'reject') {
+          return { content: dec.message ?? `[USER_REJECTED] User declined the edit to ${rel}. NO files were modified.`, isError: true };
+        }
+        if (dec.kind === 'revise') {
+          const r = reviseResult(rel);
+          return { ...r, content: `${r.content} NO files were modified by this multi_file_edit.` };
+        }
+        plan.finalContent = dec.content; // may be the user-edited version from [E] Edit
+        plan.changed = plan.finalContent !== plan.originalContent;
+      } else {
+        emitEditDiff(ctx, rel, plan.originalContent, plan.finalContent);
       }
     }
 
