@@ -158,6 +158,9 @@ export function registerBrowserManagerFactory(f: () => BrowserManager): void {
 export async function getBrowserManager(): Promise<BrowserManager> {
   if (instance) return instance;
   if (!factory) await import('./session.js');
+  // Another caller may have created it while we awaited the import: never create a
+  // second manager (the first one's browser would be orphaned, holding the profile).
+  if (instance) return instance;
   if (!factory) throw new Error('QodeX browser manager is unavailable (session module did not register).');
   instance = factory();
   return instance;

@@ -94,7 +94,15 @@ export class BrowserAgentTool extends Tool<z.infer<typeof BrowserAgentArgs>> {
     const started = Date.now();
     let result: Awaited<ReturnType<typeof runner>>;
     try {
-      result = await runner(prompt, { maxIterations: maxSteps, signal: ctx.signal, sessionId, role: 'browser' });
+      // The caller's approval channel goes down with the task (Sentinel prompts of the
+      // sub-agent reach the same human / remote channel as the parent's — as `task` does).
+      result = await runner(prompt, {
+        maxIterations: maxSteps,
+        signal: ctx.signal,
+        sessionId,
+        role: 'browser',
+        askUser: typeof ctx.askUser === 'function' ? ctx.askUser : undefined,
+      });
     } catch (e: any) {
       return { content: `[SUBAGENT_FAILED] browser_agent crashed: ${e?.message ?? String(e)}`, isError: true };
     }

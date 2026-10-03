@@ -36,9 +36,12 @@ import { resolveBrowserConfig, type BrowserConfig } from '../../config/agent-con
 import {
   QODEX_BROWSER_PROFILES_DIR,
   QODEX_BROWSER_DOWNLOADS_DIR,
+  QODEX_VAULT_FILE,
+  QODEX_VAULT_KEY_FILE,
   browserProfileDir,
   sanitizeName,
 } from '../../config/paths.js';
+import { QODEX_HOME } from '../../config/defaults.js';
 import { getBus } from '../../control/bus.js';
 import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
 import {
@@ -46,7 +49,8 @@ import {
   snapshotWithBoxes,
   DESCRIBE_ELEMENT_FN,
   DESCRIBE_AT_POINT_FN,
-  DESCRIBE_ELEMENT_JS,
+  FOCUS_PROBE_FN,
+  FRAME_CONTENT_ORIGIN_FN,
   REF_RE,
   type SnapshotOptions,
   type SnapshotResult,
@@ -112,6 +116,8 @@ interface TabState {
   /** Ref flavour of the latest snapshot on this tab (aria-ref vs data-qx-ref). */
   refMode: 'aria' | 'dom' | null;
   pendingDialog: { entry: DialogEntry; dialog: any; timer: NodeJS.Timeout } | null;
+  /** Serializes guardProtectedPage runs (navigation event + tool call racing). */
+  guardChain?: Promise<void>;
 }
 
 interface CastSub {
@@ -146,6 +152,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => { const t = setTimeout(r, ms); (t as any).unref?.(); });
 }
 
+/** `p`'s value, or `fallback` after `ms` / on rejection. Never rejects. */
+function withTimeoutValue<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    (t as any).unref?.();
+    p.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
+
 // ── small pure helpers shared with the tools ────────────────────────────────
 
 /**
@@ -163,6 +178,17 @@ export function normalizeUrl(raw: string): string {
   if (s.startsWith('//')) return 'https:' + s;
   if (/^[^\s/?#:@]+\.[^\s/?#:@.]{2,}(:\d+)?([/?#]|$)/u.test(s)) return 'https://' + s;
   return s;
+}
+
+/**
+ * A snapshot ref written into a `selector` field ("e12", "ref=e12", "[ref=e12]",
+ * "f1e3") → the bare ref; anything else → null. The tools act on such a selector
+ * as that ref, so every introspection path (Sentinel's describeSelector) must
+ * resolve it the same way. PURE.
+ */
+export function refFromSelector(selector: string | undefined | null): string | null {
+  const bare = String(selector ?? '').trim().replace(/^\[?ref=/, '').replace(/\]$/, '');
+  return REF_RE.test(bare) ? bare : null;
 }
 
 const KEY_ALIASES: Record<string, string> = {
@@ -231,6 +257,177 @@ export function dedupFilename(suggested: string, taken: (name: string) => boolea
     if (!taken(cand)) return cand;
   }
   return `${stem}-${Date.now()}${ext}`;
+}
+
+// ── QodeX's own secret files (vault, browser profiles, .env) ────────────────
+
+/** Files that hold QodeX secrets / browser sessions, plus extra protected dirs (e.g. a manager's own profiles dir). */
+function protectedLocations(extraDirs: string[] = []): { files: string[]; dirs: string[] } {
+  return {
+    files: [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env')],
+    dirs: [QODEX_BROWSER_PROFILES_DIR, ...extraDirs],
+  };
+}
+
+/** Case-insensitive file systems (macOS, Windows) make `.QODEX` the same as `.qodex`. */
+function normForCompare(p: string): string {
+  const abs = path.resolve(p);
+  return process.platform === 'darwin' || process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+/** Is `p` (lexically, no symlink resolution) one of QodeX's secret files or inside a profiles dir? PURE. */
+export function isProtectedQodexPath(p: string, extraDirs: string[] = []): boolean {
+  const abs = normForCompare(p);
+  const loc = protectedLocations(extraDirs);
+  if (loc.files.some(f => abs === normForCompare(f))) return true;
+  return loc.dirs.some(d => {
+    const dir = normForCompare(d);
+    return abs === dir || abs.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  });
+}
+
+/**
+ * Real location of `p`: symlinks resolved, including a DANGLING final link (a
+ * link to a vault file that does not exist yet would otherwise be created
+ * through) and missing trailing components (resolved via their parent).
+ */
+export async function realPathLoose(p: string, depth = 0): Promise<string> {
+  const abs = path.resolve(p);
+  if (depth > 32) return abs;
+  try { return await fs.realpath(abs); } catch { /* missing or dangling */ }
+  try {
+    const st = await fs.lstat(abs);
+    if (st.isSymbolicLink()) return realPathLoose(path.resolve(path.dirname(abs), await fs.readlink(abs)), depth + 1);
+  } catch { /* does not exist */ }
+  const parent = path.dirname(abs);
+  if (parent === abs) return abs;
+  return path.join(await realPathLoose(parent, depth + 1), path.basename(abs));
+}
+
+/** isProtectedQodexPath on the path itself AND on its real location (symlinks followed), against real protected locations too. */
+export async function isProtectedQodexPathReal(p: string, extraDirs: string[] = []): Promise<boolean> {
+  if (isProtectedQodexPath(p, extraDirs)) return true;
+  const real = await realPathLoose(p);
+  if (isProtectedQodexPath(real, extraDirs)) return true;
+  // ~/.qodex itself may live behind a symlink (e.g. /var → /private/var on macOS).
+  const loc = protectedLocations(extraDirs);
+  const realFiles = await Promise.all(loc.files.map(f => realPathLoose(f)));
+  const realDirs = await Promise.all(loc.dirs.map(d => realPathLoose(d)));
+  const r = normForCompare(real);
+  return realFiles.some(f => normForCompare(f) === r) || realDirs.some(d => {
+    const dir = normForCompare(d);
+    return r === dir || r.startsWith(dir + path.sep);
+  });
+}
+
+/** Local path of a `file:` URL (also behind `view-source:`), or null. PURE. */
+export function fileUrlPath(rawUrl: string): string | null {
+  const url = String(rawUrl ?? '').trim().replace(/^view-source:/i, '');
+  if (!/^file:/i.test(url)) return null;
+  try {
+    const u = new URL(url);
+    let p = decodeURIComponent(u.pathname);
+    if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** `file:` URLs (also behind `view-source:`) that point into QodeX's own profile / vault files. PURE. */
+export function isProtectedFileUrl(rawUrl: string, extraDirs: string[] = []): boolean {
+  if (!/^\s*(view-source:)?file:/i.test(String(rawUrl ?? ''))) return false;
+  const p = fileUrlPath(rawUrl);
+  if (p === null) return /\.qodex/i.test(rawUrl);
+  return isProtectedQodexPath(p, extraDirs);
+}
+
+/** isProtectedFileUrl with symlinks followed. */
+export async function isProtectedFileUrlReal(rawUrl: string, extraDirs: string[] = []): Promise<boolean> {
+  if (!/^\s*(view-source:)?file:/i.test(String(rawUrl ?? ''))) return false;
+  const p = fileUrlPath(rawUrl);
+  if (p === null) return /\.qodex/i.test(rawUrl);
+  return isProtectedQodexPathReal(p, extraDirs);
+}
+
+/** A CDP endpoint with its password and query values hidden (browserless-style `?token=`). PURE. */
+export function redactCdpUrl(raw: string | undefined): string | undefined {
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    if (u.password) u.password = '***';
+    for (const k of [...u.searchParams.keys()]) u.searchParams.set(k, '***');
+    return u.toString().replace(/%2A%2A%2A/g, '***');
+  } catch {
+    return String(raw).replace(/([?&][^=&#]+=)[^&#]*/g, '$1***').replace(/\/\/([^/@:]*):[^/@]*@/, '//$1:***@');
+  }
+}
+
+/** `text` with the secret parts of `url` (password, query values) removed. PURE. */
+function maskUrlSecrets(text: string, url: string | undefined): string {
+  if (!url) return text;
+  let out = text.split(url).join(redactCdpUrl(url) ?? '');
+  try {
+    const u = new URL(url);
+    const parts = [u.password, ...[...u.searchParams.values()]].filter(v => v && v.length >= 4);
+    for (const v of parts) out = out.split(v).join('***');
+  } catch { /* not a URL */ }
+  return out;
+}
+
+/** Fields whose typed content must never be recorded / broadcast in clear: passwords, one-time codes, card numbers. PURE. */
+export function isSecretElement(el: ElementInfo | null | undefined): boolean {
+  if (!el) return false;
+  return el.isPassword === true || /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i.test(el.autocomplete ?? '');
+}
+
+/**
+ * Typed content in action-record args → "***" when it went into a secret field
+ * (`unknownTarget`: focus was somewhere we could not inspect — redact to be safe).
+ * Covers text/value and a single printable `key` ("q", "Alt+q", "Shift+!"). PURE.
+ */
+export function redactTypedArgs(args: Record<string, unknown>, el: ElementInfo | null | undefined, unknownTarget = false): Record<string, unknown> {
+  if (!unknownTarget && !isSecretElement(el)) return args;
+  const out = { ...args };
+  for (const k of ['text', 'value']) if (k in out) out[k] = '***';
+  if (typeof out.key === 'string') {
+    const parts = out.key.split('+');
+    const last = out.key.endsWith('++') ? '+' : parts[parts.length - 1];
+    if ([...last].length === 1) out.key = '***';
+  }
+  return out;
+}
+
+/** File inside a `<profile>-<pid>` throwaway profile (written by QodeX). */
+const FALLBACK_MARKER = '.qodex-fallback-profile';
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
+}
+
+/**
+ * Delete `<profile>-<pid>` fallback profiles left by QodeX processes that are gone
+ * (a crash skips the delete-on-close). Live pids are never touched.
+ */
+export async function pruneStaleFallbackProfiles(profilesDir: string, profile: string): Promise<string[]> {
+  const removed: string[] = [];
+  let names: string[] = [];
+  try { names = await fs.readdir(profilesDir); } catch { return removed; }
+  const re = new RegExp(`^${profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d+)$`);
+  for (const name of names) {
+    const m = re.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (!pid || pid === process.pid || pidAlive(pid)) continue;
+    try {
+      await fs.access(path.join(profilesDir, name, FALLBACK_MARKER));
+    } catch { continue; } // not created as a fallback: a real profile
+    try {
+      await fs.rm(path.join(profilesDir, name), { recursive: true, force: true });
+      removed.push(name);
+    } catch { /* in use / permissions: leave it */ }
+  }
+  return removed;
 }
 
 /** Profile lock by another Chromium (Linux/macOS/Windows wording). */
@@ -358,6 +555,9 @@ export class QodexBrowserManager implements BrowserManager {
   private exe: ResolvedExecutable | null = null;
   private browserVersion: string | undefined;
   private profileNotice: string | undefined;
+  /** Throwaway `<profile>-<pid>` dir used because the real profile was locked; deleted on close. */
+  private fallbackProfileDir: string | null = null;
+  private fallbackCleanup: Promise<void> | null = null;
 
   private tabList: TabState[] = [];
   private activeTab: TabState | null = null;
@@ -468,7 +668,7 @@ export class QodexBrowserManager implements BrowserManager {
       browser = await pw.chromium.connectOverCDP(cfg.cdpUrl);
     } catch (e) {
       throw new Error(
-        `[BROWSER_LAUNCH_FAILED] Could not attach to Chrome at ${cfg.cdpUrl}: ${firstLine(e)}. ` +
+        `[BROWSER_LAUNCH_FAILED] Could not attach to Chrome at ${redactCdpUrl(cfg.cdpUrl)}: ${maskUrlSecrets(firstLine(e), cfg.cdpUrl)}. ` +
         'Start Chrome with --remote-debugging-port=9222 (and a separate --user-data-dir), or clear browser.cdpUrl / QODEX_BROWSER_CDP_URL to let QodeX launch its own browser.',
       );
     }
@@ -518,11 +718,18 @@ export class QodexBrowserManager implements BrowserManager {
     } catch (e) {
       if (isProfileLockedError(e)) {
         const alt = `${profile}-${process.pid}`;
+        // Throwaway copies of earlier (now dead) QodeX processes would pile up — one
+        // full Chromium profile per locked launch (e.g. every mission worker).
+        await pruneStaleFallbackProfiles(this.profilesDir, profile);
         try {
           ctx = await open(alt, options);
         } catch (e2) {
           throw explainLaunchError(e2, exe);
         }
+        this.fallbackProfileDir = browserProfileDir(alt, this.profilesDir);
+        // Marks it as a QodeX throwaway, so pruning never touches a user profile
+        // that merely LOOKS like "<name>-<digits>" (e.g. "work-2024").
+        await fs.writeFile(path.join(this.fallbackProfileDir, FALLBACK_MARKER), String(process.pid)).catch(() => {});
         this.profileNotice = `Browser profile "${profile}" is in use by another browser; this session uses "${alt}" (logins saved in "${profile}" are not available until that browser closes).`;
         this.notice(this.profileNotice);
         logger.warn(this.profileNotice);
@@ -564,6 +771,15 @@ export class QodexBrowserManager implements BrowserManager {
     this.tabList = [];
     this.activeTab = null;
     this.launchedCfg = null;
+    if (this.fallbackProfileDir) {
+      // The browser has exited: drop the throwaway profile (its logins were never the
+      // user's). Chromium may still flush a file or two while exiting, hence retries.
+      const dir = this.fallbackProfileDir;
+      this.fallbackProfileDir = null;
+      this.fallbackCleanup = fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        .catch(() => {})
+        .finally(() => { this.fallbackCleanup = null; });
+    }
     if (wasRunning) getBus().publish({ kind: 'browser', type: 'closed', data: { profile: this.profileInUse } });
   }
 
@@ -585,6 +801,7 @@ export class QodexBrowserManager implements BrowserManager {
         logger.debug('browser close failed', { err: firstLine(e) });
       }
       this.onContextClosed(ctx);
+      if (this.fallbackCleanup) await this.fallbackCleanup;
     })().finally(() => { this.closing = null; });
     return this.closing;
   }
@@ -627,6 +844,10 @@ export class QodexBrowserManager implements BrowserManager {
     page.on('download', (d: any) => this.onDownload(st, d));
     page.on('close', () => this.onPageClosed(st));
     page.on('framenavigated', (frame: any) => {
+      // Leave QodeX's secret files at once (also for the live view / a human).
+      if (/^(view-source:)?file:/i.test(safe(() => String(frame.url())) ?? '')) {
+        void this.guardProtectedPage(st).catch(() => {});
+      }
       try {
         if (frame !== page.mainFrame()) return;
       } catch { return; }
@@ -696,7 +917,43 @@ export class QodexBrowserManager implements BrowserManager {
       st = this.attachPage(p, { initial: true });
       this.activate(st);
     }
+    await this.guardProtectedPage(st);
     return st.page;
+  }
+
+  /** Dirs protected for THIS manager on top of the defaults (its own profiles dir). */
+  protectedDirs(): string[] {
+    return [this.profilesDir];
+  }
+
+  /**
+   * A tab (or one of its frames) that ended up on QodeX's own secret files — a
+   * file:// directory listing → click, a redirect, a human in the live view — is
+   * sent to about:blank before anything can read it. browser_navigate refuses such
+   * URLs up front; this closes the other ways in. Throws when it cannot leave.
+   */
+  private guardProtectedPage(st: TabState): Promise<void> {
+    const run = (st.guardChain ?? Promise.resolve()).then(() => this.guardProtectedPageOnce(st));
+    st.guardChain = run.catch(() => {});
+    return run;
+  }
+
+  private async guardProtectedPageOnce(st: TabState): Promise<void> {
+    let urls: string[] = [];
+    try { urls = st.page.frames().map((f: any) => String(f.url())); } catch { urls = [safeUrl(st.page)]; }
+    const fileUrls = urls.filter(u => /^(view-source:)?file:/i.test(u));
+    if (!fileUrls.length) return;
+    let hit = false;
+    for (const u of fileUrls) {
+      if (await isProtectedFileUrlReal(u, this.protectedDirs())) { hit = true; break; }
+    }
+    if (!hit) return;
+    try { await st.page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 }); } catch (e) { logger.debug('leaving a protected page failed', { err: firstLine(e) }); }
+    const still = safeUrl(st.page);
+    this.notice('Closed a page showing QodeX\'s own secret files (credential vault / browser profile) — they are never readable through the browser.');
+    if (/^(view-source:)?file:/i.test(still) && await isProtectedFileUrlReal(still, this.protectedDirs())) {
+      throw new Error('[BROWSER_ERROR] The active tab shows QodeX\'s own secret files and could not be closed — call browser_tabs action=close.');
+    }
   }
 
   private tabInfo(st: TabState, index: number): TabInfo {
@@ -757,7 +1014,8 @@ export class QodexBrowserManager implements BrowserManager {
       takeoverBy: this.takeoverWho,
       downloadsDir: this.downloadsDir,
       executableSource: this.exe?.source,
-      cdpUrl: cfg.cdpUrl || undefined,
+      // A remote CDP endpoint may carry a token (`?token=`, user:pass@): never show it.
+      cdpUrl: redactCdpUrl(cfg.cdpUrl || undefined),
       notice: this.profileNotice,
       downloads: this.downloadList.length,
       pendingDialog: pending ? { type: pending.type, message: pending.message } : undefined,
@@ -834,6 +1092,10 @@ export class QodexBrowserManager implements BrowserManager {
 
   async locator(target: { ref?: string; selector?: string }): Promise<any> {
     const page = await this.activePage();
+    // A snapshot ref written into `selector` ("e12" — never a valid CSS tag, custom
+    // elements need a hyphen) means that ref, for every caller (tools, vault, replay).
+    const hasRef = target.ref !== undefined && target.ref !== null && String(target.ref).trim() !== '';
+    if (!hasRef && refFromSelector(target.selector)) target = { ref: refFromSelector(target.selector)! };
     if (target.ref !== undefined && target.ref !== null && String(target.ref).trim() !== '') {
       const ref = String(target.ref).trim().replace(/^\[?ref=/, '').replace(/\]$/, '');
       if (!REF_RE.test(ref)) {
@@ -878,6 +1140,11 @@ export class QodexBrowserManager implements BrowserManager {
 
   async describeSelector(selector: string): Promise<ElementInfo | null> {
     if (!this.ctx) return null;
+    // The tools accept a snapshot ref in the `selector` field ("e12", "ref=e12",
+    // "[ref=e12]") and act on that ref — describe the SAME element, or Sentinel
+    // would classify a CSS tag selector that matches nothing (approval bypass).
+    const asRef = refFromSelector(selector);
+    if (asRef) return this.describeRef(asRef);
     try {
       const page = await this.activePage();
       const loc = page.locator(selector).first();
@@ -886,6 +1153,61 @@ export class QodexBrowserManager implements BrowserManager {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The element with keyboard focus on `page` (default: the active tab),
+   * descending into frames — cross-origin ones too, which page JS cannot see into
+   * but Playwright can evaluate in. null = nothing focused; 'unknown' = focus is
+   * inside a frame that could not be inspected (callers then redact typing).
+   */
+  async focusedElement(page?: Page): Promise<ElementInfo | null | 'unknown'> {
+    const p = page ?? this.activeTab?.page;
+    if (!p) return null;
+    let main: any;
+    try { main = p.mainFrame(); } catch { return 'unknown'; }
+    const probe = (f: any): Promise<any> => withTimeoutValue(Promise.resolve().then(() => f.evaluate(FOCUS_PROBE_FN)), 1500, null);
+    const top = await probe(main);
+    if (!top) return 'unknown';
+    if (top.state === 'none') return null;
+    if (top.state === 'el') return top.info ?? 'unknown';
+    let frames: any[] = [];
+    try { frames = p.frames().filter((f: any) => f !== main).slice(0, 50); } catch { frames = []; }
+    const found = (await Promise.all(frames.map(probe))).find(r => r?.state === 'el' && r.focus);
+    return found?.info ?? 'unknown';
+  }
+
+  /** ElementInfo at viewport point (x, y), descending into (cross-origin) frames. */
+  async describeAtPoint(page: Page, x: number, y: number): Promise<ElementInfo | null> {
+    let frame: any;
+    try { frame = page.mainFrame(); } catch { return null; }
+    let px = x;
+    let py = y;
+    for (let depth = 0; depth < 5; depth++) {
+      const info: ElementInfo | null = await withTimeoutValue(
+        Promise.resolve().then(() => frame.evaluate(DESCRIBE_AT_POINT_FN, { x: px, y: py })), 1500, null,
+      );
+      if (!info || (info.tag !== 'iframe' && info.tag !== 'frame')) return info;
+      let next: any = null;
+      let children: any[] = [];
+      try { children = frame.childFrames(); } catch { children = []; }
+      for (const child of children) {
+        try {
+          const fe = await child.frameElement();
+          const o = await fe.evaluate(FRAME_CONTENT_ORIGIN_FN);
+          void Promise.resolve(fe.dispose?.()).catch(() => {});
+          if (o && px >= o.left && px <= o.left + o.w && py >= o.top && py <= o.top + o.h) {
+            next = child;
+            px -= o.x;
+            py -= o.y;
+            break;
+          }
+        } catch { /* detached frame */ }
+      }
+      if (!next) return info;
+      frame = next;
+    }
+    return null;
   }
 
   // ── dialogs ───────────────────────────────────────────────────────────────
@@ -1026,25 +1348,35 @@ export class QodexBrowserManager implements BrowserManager {
    * null on timeout.
    */
   async waitForDownload(timeoutMs: number, signal?: AbortSignal): Promise<DownloadEntry | null> {
-    const unclaimed = [...this.downloadList].reverse().find(d => !d.claimed);
-    const waitDone = (d: DownloadEntry) => (this.downloadDone.get(d.id) ?? Promise.resolve(d)).then(r => { r.claimed = true; return r; });
     return new Promise<DownloadEntry | null>((resolve, reject) => {
       let finished = false;
+      // The one download this wait follows. Only a download actually RETURNED is
+      // claimed: one that finishes after this wait timed out, or a second one that
+      // started meanwhile, stays available for the next wait.
+      let following: DownloadEntry | null = null;
       const finish = (v: DownloadEntry | null, err?: Error) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
         this.events.off('download-start', onStart);
         signal?.removeEventListener('abort', onAbort);
+        if (v) v.claimed = true;
         if (err) reject(err); else resolve(v);
       };
-      const onStart = (d: DownloadEntry) => { void waitDone(d).then(r => finish(r)); };
+      const follow = (d: DownloadEntry) => {
+        if (following) return;
+        following = d;
+        this.events.off('download-start', onStart);
+        void (this.downloadDone.get(d.id) ?? Promise.resolve(d)).then(r => finish(r), () => finish(d));
+      };
+      const onStart = (d: DownloadEntry) => { if (!d.claimed) follow(d); };
       const onAbort = () => finish(null, new Error('[ABORTED] Stopped waiting for the download.'));
       const timer = setTimeout(() => finish(null), Math.max(0, timeoutMs));
       (timer as any).unref?.();
       if (signal?.aborted) return onAbort();
       signal?.addEventListener('abort', onAbort, { once: true });
-      if (unclaimed) void waitDone(unclaimed).then(r => finish(r));
+      const unclaimed = [...this.downloadList].reverse().find(d => !d.claimed);
+      if (unclaimed) follow(unclaimed);
       else this.events.on('download-start', onStart);
     });
   }
@@ -1180,16 +1512,16 @@ export class QodexBrowserManager implements BrowserManager {
       const vp = await this.viewportOf(page);
       return { x: (x * vp.width) / fw, y: (y * vp.height) / fh };
     };
-    const focused = async (): Promise<ElementInfo | null> => {
-      try {
-        return await page.evaluate(new Function(`var el = document.activeElement; while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; return el && el !== document.body ? (${DESCRIBE_ELEMENT_JS})(el) : null;`) as any);
-      } catch { return null; }
+    // Focus may sit in a (cross-origin) login iframe; when it cannot be inspected,
+    // the typed text is redacted rather than recorded / broadcast in clear.
+    const focused = async (): Promise<{ el: ElementInfo | null; unknown: boolean }> => {
+      const f = await this.focusedElement(page);
+      return f === 'unknown' ? { el: null, unknown: true } : { el: f, unknown: false };
     };
     switch (ev.type) {
       case 'click': {
         const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
-        let element: ElementInfo | null = null;
-        try { element = await page.evaluate(DESCRIBE_AT_POINT_FN, p); } catch { element = null; }
+        const element = await this.describeAtPoint(page, p.x, p.y);
         await page.mouse.click(p.x, p.y, { button: ev.button ?? 'left', clickCount: ev.clickCount ?? 1 });
         this.recordAction({ tool: 'browser_click', args: { x: Math.round(p.x), y: Math.round(p.y), button: ev.button ?? 'left', click_count: ev.clickCount ?? 1 }, url: safeUrl(page), title: await safeTitle(page), element: element ?? undefined, actor: 'human' });
         return;
@@ -1200,16 +1532,16 @@ export class QodexBrowserManager implements BrowserManager {
         return;
       }
       case 'type': {
-        const el = await focused();
+        const { el, unknown } = await focused();
         await page.keyboard.type(ev.text);
-        this.recordAction({ tool: 'browser_type', args: { text: el?.isPassword ? '***' : ev.text }, url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
+        this.recordAction({ tool: 'browser_type', args: redactTypedArgs({ text: ev.text }, el, unknown), url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
         return;
       }
       case 'key': {
-        const el = await focused();
+        const { el, unknown } = await focused();
         const key = normalizeKey(ev.key);
         await page.keyboard.press(key);
-        this.recordAction({ tool: 'browser_press', args: { key }, url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
+        this.recordAction({ tool: 'browser_press', args: redactTypedArgs({ key }, el, unknown), url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
         return;
       }
       case 'scroll': {
@@ -1250,10 +1582,8 @@ export class QodexBrowserManager implements BrowserManager {
     for (const l of [...this.actionListeners]) {
       try { l(full); } catch (e) { logger.debug('browser action listener failed', { err: firstLine(e) }); }
     }
-    const args: Record<string, unknown> = { ...full.args };
-    if (full.element?.isPassword) {
-      for (const k of ['text', 'value']) if (k in args) args[k] = '***';
-    }
+    // Defense in depth for the broadcast copy (callers already redact their records).
+    const args = redactTypedArgs({ ...full.args }, full.element);
     getBus().publish({
       kind: 'browser',
       type: 'action',

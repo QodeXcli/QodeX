@@ -219,6 +219,133 @@ export function stripBoxes(snapshot: string): string {
   return snapshot.replace(/ \[box=[-\d.,]+\]/g, '');
 }
 
+/** How a hidden secret field value is shown to the model. */
+export const HIDDEN_VALUE = '[hidden]';
+
+/** Playwright's YAML quoting of snapshot values (`yamlEscapeValueIfNeeded`), for matching. */
+function yamlQuoted(v: string): string {
+  return '"' + v.replace(/[\\"\x00-\x1f\x7f-\x9f]/g, c => {
+    switch (c) {
+      case '\\': return '\\\\';
+      case '"': return '\\"';
+      case '\b': return '\\b';
+      case '\f': return '\\f';
+      case '\n': return '\\n';
+      case '\r': return '\\r';
+      case '\t': return '\\t';
+      default: return '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0');
+    }
+  }) + '"';
+}
+
+/** `- role "name" [attr]...: value` → [prefix, value]. */
+const FIELD_VALUE_RE = /^(\s*- [a-z][a-z-]*(?: "(?:[^"\\]|\\.)*")?(?: \[[^\]\n]*\])*): (.+)$/i;
+
+/**
+ * Hide the values of secret form fields in a snapshot. Playwright's aria snapshot
+ * prints a textbox's VALUE (`- textbox "Password" [ref=e6]: hunter2`) — including
+ * <input type=password> — so a password filled from the vault (browser_fill_secret),
+ * a saved login or a card number typed by the human would otherwise reach the
+ * model. `secrets` are the current values of the page's secret inputs
+ * (collectSecretValues). A field line whose value equals one is shown as
+ * `[hidden]`; long secrets (≥ 8 chars) are also masked anywhere else (a page that
+ * echoes them back). PURE.
+ */
+export function maskSecretValues(snapshot: string, secrets: string[]): string {
+  const vals = Array.from(new Set(secrets.filter(s => typeof s === 'string' && s.length > 0)));
+  if (!vals.length) return snapshot;
+  const exact = new Set<string>();
+  for (const v of vals) { exact.add(v); exact.add(yamlQuoted(v)); }
+  const long = vals.filter(v => v.length >= 8).sort((a, b) => b.length - a.length);
+  return snapshot
+    .split('\n')
+    .map(line => {
+      const m = FIELD_VALUE_RE.exec(line);
+      if (m && exact.has(m[2].trim())) return `${m[1]}: ${HIDDEN_VALUE}`;
+      let out = line;
+      for (const v of long) {
+        for (const form of [v, yamlQuoted(v).slice(1, -1)]) {
+          if (form && out.includes(form)) out = out.split(form).join(HIDDEN_VALUE);
+        }
+      }
+      return out;
+    })
+    .join('\n');
+}
+
+/**
+ * In-page (one frame): current values of secret inputs — password fields and
+ * autocomplete current/new-password, one-time-code, cc-number, cc-csc — including
+ * inside open shadow roots. The values only travel to QodeX (to mask them), never
+ * into a tool result.
+ */
+const COLLECT_SECRETS_FN: (...args: unknown[]) => unknown = new Function(`
+  var out = [];
+  var SECRET_AC = /(^|\\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\\s|$)/i;
+  function scan(root, depth) {
+    if (!root || depth > 8 || out.length >= 50) return;
+    var inputs = root.querySelectorAll('input');
+    for (var i = 0; i < inputs.length && out.length < 50; i++) {
+      var el = inputs[i];
+      var t = String(el.getAttribute('type') || '').toLowerCase();
+      var ac = String(el.getAttribute('autocomplete') || '');
+      var v = '';
+      try { v = String(el.value || ''); } catch (e) { v = ''; }
+      if (v && (t === 'password' || el.type === 'password' || SECRET_AC.test(ac))) out.push(v);
+    }
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) if (all[j].shadowRoot) scan(all[j].shadowRoot, depth + 1);
+  }
+  scan(document, 0);
+  return out;
+`) as any;
+
+/**
+ * Current values of the page's secret inputs across ALL frames (Playwright can
+ * evaluate in cross-origin frames too). Best-effort: a frame that cannot be
+ * evaluated contributes nothing.
+ */
+export async function collectSecretValues(page: any, timeoutMs = 2000): Promise<string[]> {
+  let frames: any[] = [];
+  try { frames = typeof page?.frames === 'function' ? page.frames() : []; } catch { frames = []; }
+  if (!frames.length) {
+    try { frames = page?.mainFrame ? [page.mainFrame()] : []; } catch { frames = []; }
+  }
+  const results = await Promise.all(frames.slice(0, 50).map((f: any) => new Promise<string[]>(resolve => {
+    const t = setTimeout(() => resolve([]), timeoutMs);
+    (t as any).unref?.();
+    Promise.resolve()
+      .then(() => f.evaluate(COLLECT_SECRETS_FN))
+      .then(
+        (r: unknown) => { clearTimeout(t); resolve(Array.isArray(r) ? r.filter((x: unknown): x is string => typeof x === 'string') : []); },
+        () => { clearTimeout(t); resolve([]); },
+      );
+  })));
+  return results.flat();
+}
+
+/**
+ * Mask secrets in free-form tool output (e.g. a browser_evaluate result): the
+ * whole text equal to a secret, JSON-quoted occurrences of any length, and
+ * everything maskSecretValues covers. PURE.
+ */
+export function maskSecretText(text: string, secrets: string[]): string {
+  const vals = Array.from(new Set(secrets.filter(s => typeof s === 'string' && s.length > 0)));
+  if (!vals.length) return text;
+  if (vals.includes(text.trim())) return HIDDEN_VALUE;
+  let out = text;
+  for (const v of vals.sort((a, b) => b.length - a.length)) {
+    const q = JSON.stringify(v);
+    if (out.includes(q)) out = out.split(q).join(JSON.stringify(HIDDEN_VALUE));
+  }
+  return maskSecretValues(out, vals);
+}
+
+/** Mask the current secret field values of `page` in `text` (see maskSecretText). */
+export async function maskPageSecrets(page: any, text: string): Promise<string> {
+  return maskSecretText(text, await collectSecretValues(page));
+}
+
 // ── in-page sources ─────────────────────────────────────────────────────────
 
 /**
@@ -350,14 +477,31 @@ export const DESCRIBE_AT_POINT_FN: (...args: unknown[]) => unknown = new Functio
   return el ? (${DESCRIBE_ELEMENT_JS})(el) : null;
 `) as any;
 
-/** In-page: is the focused element a password field? (redaction of human typing) */
-export const FOCUSED_IS_PASSWORD_FN: (...args: unknown[]) => unknown = new Function(`
+/**
+ * In-page (one frame): what has keyboard focus in THIS frame's document —
+ * `{state:'none'|'frame'|'el', focus, info?}`. 'frame' means focus is inside a
+ * child <iframe>/<frame> (its document must be probed separately — Playwright can
+ * evaluate in cross-origin frames, page JS cannot). `focus` = document.hasFocus().
+ */
+export const FOCUS_PROBE_FN: (...args: unknown[]) => unknown = new Function(`
   var el = document.activeElement;
   while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
-  if (!el || !el.tagName) return false;
-  var t = String(el.getAttribute('type') || '').toLowerCase();
-  var ac = String(el.getAttribute('autocomplete') || '');
-  return t === 'password' || /(current|new)-password/i.test(ac);
+  var focus = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+  if (!el || el === document.body || el === document.documentElement) return { state: 'none', focus: focus };
+  var t = el.tagName;
+  if (t === 'IFRAME' || t === 'FRAME') return { state: 'frame', focus: focus };
+  return { state: 'el', focus: focus, info: (${DESCRIBE_ELEMENT_JS})(el) };
+`) as any;
+
+/** In-page, on an <iframe> element: viewport origin of its content box (for point → frame coordinates). */
+export const FRAME_CONTENT_ORIGIN_FN: (...args: unknown[]) => unknown = new Function('el', `
+  var r = el.getBoundingClientRect();
+  var cs = getComputedStyle(el);
+  return {
+    x: r.left + el.clientLeft + (parseFloat(cs.paddingLeft) || 0),
+    y: r.top + el.clientTop + (parseFloat(cs.paddingTop) || 0),
+    w: r.width, h: r.height, left: r.left, top: r.top,
+  };
 `) as any;
 
 /**
@@ -661,12 +805,17 @@ export async function takeSnapshotDetailed(page: any, opts: SnapshotOptions = {}
     }
   }
 
+  // The AI snapshot prints field VALUES, password inputs included: hide secrets
+  // (vault fills, saved logins, card numbers) before anything reaches the model.
+  const secrets = await collectSecretValues(page);
+  raw = maskSecretValues(raw, secrets);
   const refCount = (raw.match(/\[ref=/g) || []).length;
   let body = opts.interactiveOnly ? filterInteractive(raw) : truncateLongUrls(raw, 300);
   if (!body.trim()) body = opts.interactiveOnly ? '(no interactive elements visible)' : '(empty page)';
   const cut = truncateSnapshot(body, maxChars);
-  const { header, title, url } = await pageHeader(page, opts.tabs);
-  return { text: `${header}\n\n${cut.text}`, body: cut.text, mode, title, url, truncated: cut.truncated, refCount };
+  const ph = await pageHeader(page, opts.tabs);
+  const header = maskSecretValues(ph.header, secrets);
+  return { text: `${header}\n\n${cut.text}`, body: cut.text, mode, title: maskSecretValues(ph.title, secrets), url: ph.url, truncated: cut.truncated, refCount };
 }
 
 /** Header (`Page:`/`URL:`/`Tabs:`) + snapshot text. */
@@ -679,8 +828,12 @@ export async function takeSnapshot(page: any, opts: SnapshotOptions = {}): Promi
  * from `[box=...]`; in fallback mode from the DOM walker's tagged elements.
  */
 export async function snapshotWithBoxes(page: any, opts: { timeoutMs?: number } = {}): Promise<{ text: string; marks: MarkBox[]; mode: 'aria' | 'dom' }> {
-  const raw = await tryAria(page, { boxes: true, timeoutMs: opts.timeoutMs });
-  if (raw !== null) return { text: stripBoxes(raw), marks: parseBoxes(raw), mode: 'aria' };
+  const aria = await tryAria(page, { boxes: true, timeoutMs: opts.timeoutMs });
+  if (aria !== null) {
+    // Unnamed fields borrow their inline VALUE as the mark name: mask secrets first.
+    const raw = maskSecretValues(aria, await collectSecretValues(page));
+    return { text: stripBoxes(raw), marks: parseBoxes(raw), mode: 'aria' };
+  }
   const text = String(await page.locator('body').first().evaluate(DOM_WALK_FN, { interactiveOnly: true }) ?? '');
   const marks: MarkBox[] = await page.evaluate(new Function(`
     return Array.prototype.map.call(document.querySelectorAll('[data-qx-ref]'), function (el) {

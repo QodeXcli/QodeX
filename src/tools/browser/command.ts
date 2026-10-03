@@ -297,7 +297,7 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
     .action(async () => {
       const cfgRaw = await loadCfg();
       const cfg = resolveBrowserConfig(cfgRaw ?? null);
-      const { isPlaywrightAvailable } = await import('./session.js');
+      const { isPlaywrightAvailable, redactCdpUrl } = await import('./session.js');
       const { resolveBrowserExecutable, missingBrowserHint } = await import('./launcher.js');
       const hasPw = await isPlaywrightAvailable();
       let pwVersion = '';
@@ -316,7 +316,7 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
       const profiles = await listProfiles(profilesDir);
       out('QodeX Browser');
       out(`  Playwright:  ${hasPw ? `installed${pwVersion ? ` v${pwVersion}` : ''}` : 'NOT installed — npm install playwright'}`);
-      if (cfg.cdpUrl) out(`  Mode:        attach to your Chrome over CDP at ${cfg.cdpUrl}`);
+      if (cfg.cdpUrl) out(`  Mode:        attach to your Chrome over CDP at ${redactCdpUrl(cfg.cdpUrl)}`);
       else {
         out(`  Executable:  ${exe.executablePath ?? (exe.channel ? `channel "${exe.channel}"` : 'none found')}${exe.source !== 'none' ? `  [${exe.source}]` : ''}`);
         if (exe.source === 'none') out(`               ${missingBrowserHint()}`);

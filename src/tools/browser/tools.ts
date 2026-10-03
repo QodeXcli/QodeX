@@ -37,10 +37,12 @@ import * as path from 'path';
 import * as os from 'os';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { getBrowserManager, type BrowserManager, type ElementInfo } from './types.js';
-import { QodexBrowserManager, normalizeUrl, formatBytes } from './session.js';
-import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, REF_RE } from './snapshot.js';
-import { QODEX_SCREENSHOTS_DIR, QODEX_BROWSER_PROFILES_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../../config/paths.js';
-import { QODEX_HOME } from '../../config/defaults.js';
+import {
+  QodexBrowserManager, normalizeUrl, formatBytes, refFromSelector, redactTypedArgs,
+  isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal,
+} from './session.js';
+import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets } from './snapshot.js';
+import { QODEX_SCREENSHOTS_DIR } from '../../config/paths.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import { logger } from '../../utils/logger.js';
 
@@ -77,8 +79,8 @@ export function targetOf(args: { ref?: string; selector?: string }): { ref?: str
   const sel = args.selector?.trim();
   if (ref) return { ref };
   if (sel) {
-    const bare = sel.replace(/^\[?ref=/, '').replace(/\]$/, '');
-    if (REF_RE.test(bare)) return { ref: bare };
+    const bare = refFromSelector(sel);
+    if (bare) return { ref: bare };
     return { selector: sel };
   }
   return null;
@@ -95,12 +97,13 @@ export function describeTarget(el: ElementInfo | null | undefined, target: { ref
   return target?.ref ? `element [ref=${target.ref}]` : target?.selector ? `"${target.selector}"` : 'the page';
 }
 
-/** Replace typed text with *** when the target is a password field. */
-export function redactForRecord(args: Record<string, unknown>, el: ElementInfo | null | undefined): Record<string, unknown> {
-  if (!el?.isPassword) return args;
-  const out = { ...args };
-  for (const k of ['text', 'value']) if (k in out) out[k] = '***';
-  return out;
+/**
+ * Replace typed text with *** when the target is a secret field (password,
+ * one-time code, card number) — or, with `unknownTarget`, when focus was in a
+ * frame that could not be inspected.
+ */
+export function redactForRecord(args: Record<string, unknown>, el: ElementInfo | null | undefined, unknownTarget = false): Record<string, unknown> {
+  return redactTypedArgs(args, el, unknownTarget);
 }
 
 /** Reject an aborted run early with a clear marker. */
@@ -218,6 +221,12 @@ export interface BrowserActionSpec {
   target?: { ref?: string; selector?: string } | null;
   /** Fail with a clear error when no ref/selector is given. */
   requireTarget?: boolean;
+  /**
+   * Without a ref/selector the action goes to the FOCUSED element (typing, key
+   * presses): describe that element so a password field is redacted in the
+   * record and named in the result.
+   */
+  focusTarget?: boolean;
   snapshot?: boolean;
   timeoutMs?: number;
   /** Args for the action feed (text/value redacted for password fields). `null` = don't record. */
@@ -254,10 +263,15 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
     }
     let locator: any = null;
     let element: ElementInfo | null = null;
+    let focusUnknown = false;
     if (target) {
       locator = await mgr.locator(target);
       element = qm ? await qm.describeLocator(locator) : (target.ref ? await mgr.describeRef(target.ref) : null);
       if (element && target.ref) element = { ...element, ref: target.ref };
+    } else if (spec.focusTarget && qm) {
+      const f = await qm.focusedElement(page);
+      if (f === 'unknown') focusUnknown = true;
+      else element = f;
     }
 
     // A dialog opened by the action blocks the page; stop waiting for the action then.
@@ -284,7 +298,7 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
     if (spec.recordArgs !== null) {
       mgr.recordAction({
         tool: spec.tool,
-        args: redactForRecord(spec.recordArgs ?? {}, element),
+        args: redactForRecord(spec.recordArgs ?? {}, element, focusUnknown),
         url: before.url,
         title: before.title,
         element: element ?? undefined,
@@ -306,43 +320,28 @@ export function resolveUserPath(p: string, cwd: string): string {
   return path.resolve(cwd, s);
 }
 
-/** True for files that hold QodeX secrets / browser sessions (never upload or open them). */
-export function isProtectedQodexPath(p: string): boolean {
-  const abs = path.resolve(p);
-  const within = (dir: string) => abs === path.resolve(dir) || abs.startsWith(path.resolve(dir) + path.sep);
-  return (
-    within(QODEX_BROWSER_PROFILES_DIR) ||
-    abs === path.resolve(QODEX_VAULT_FILE) ||
-    abs === path.resolve(QODEX_VAULT_KEY_FILE) ||
-    abs === path.resolve(path.join(QODEX_HOME, '.env'))
-  );
+// True for files that hold QodeX secrets / browser sessions (never upload or open
+// them); `isProtectedFileUrl` for `file:` URLs into them. Defined in session.ts
+// (the manager also closes such pages) and re-exported here for the tools.
+export { isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal };
+
+/** Extra protected dirs of the active manager (its own profiles dir, when not the default). */
+function managerProtectedDirs(mgr: BrowserManager | null): string[] {
+  const qm = mgr ? asQodex(mgr) : null;
+  return qm ? [qm.profilesDir] : [];
 }
 
 /**
  * Where an output file (screenshot / PDF) may be written. These tools bypass the
  * write_file permission gate, so they may only create files with the expected
- * extension and never touch QodeX's own secret/profile files. Returns an error
- * message, or null when the path is acceptable.
+ * extension and never touch QodeX's own secret/profile files — also not through
+ * a symlink. Returns an error message, or null when the path is acceptable.
  */
-export function checkOutputPath(abs: string, exts: string[]): string | null {
+export async function checkOutputPath(abs: string, exts: string[], mgr: BrowserManager | null = null): Promise<string | null> {
   const ext = path.extname(abs).toLowerCase();
   if (!exts.includes(ext)) return `the output path must end with ${exts.join(' or ')} (got "${path.basename(abs)}")`;
-  if (isProtectedQodexPath(abs)) return 'refusing to write into QodeX browser-profile / vault files';
+  if (await isProtectedQodexPathReal(abs, managerProtectedDirs(mgr))) return 'refusing to write into QodeX browser-profile / vault files';
   return null;
-}
-
-/** `file:` URLs (also behind `view-source:`) that point into QodeX's own profile / vault files. */
-export function isProtectedFileUrl(rawUrl: string): boolean {
-  const url = rawUrl.trim().replace(/^view-source:/i, '');
-  if (!/^file:/i.test(url)) return false;
-  try {
-    const u = new URL(url);
-    let p = decodeURIComponent(u.pathname);
-    if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
-    return isProtectedQodexPath(p);
-  } catch {
-    return /\.qodex/i.test(url);
-  }
 }
 
 // ── browser_navigate ────────────────────────────────────────────────────────
@@ -379,13 +378,13 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
 
   async execute(args: z.infer<typeof NavigateArgs>, ctx: ToolContext): Promise<ToolResult> {
     const url = normalizeUrl(args.url);
-    if (isProtectedFileUrl(url)) {
-      return { content: '[BROWSER_ERROR] Refusing to open QodeX browser-profile / vault files in the browser.', isError: true };
-    }
     const waitUntil = args.wait_until ?? 'domcontentloaded';
     const timeout = args.timeout_ms ?? 30_000;
     try {
       const mgr = await getBrowserManager();
+      if (await isProtectedFileUrlReal(url, managerProtectedDirs(mgr))) {
+        return { content: '[BROWSER_ERROR] Refusing to open QodeX browser-profile / vault files in the browser.', isError: true };
+      }
       await waitForHuman(mgr, ctx);
       throwIfAborted(ctx.signal);
       const qm = asQodex(mgr);
@@ -418,7 +417,8 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
       let htmlSection = '';
       if (args.return_html === true || timedOut) {
         try {
-          const html = String(await page.content());
+          // Frameworks mirror field values into the value="" attribute: mask secrets.
+          const html = await maskPageSecrets(page, String(await page.content()));
           const max = 25_000;
           const slice = html.length > max ? html.slice(0, max) + `\n\n…[truncated, ${html.length - max} more chars]` : html;
           htmlSection = `\n\n--- HTML (${html.length} chars) ---\n${slice}`;
@@ -556,10 +556,10 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
       const mgr = await getBrowserManager();
       if (!mgr.isRunning()) return notRunningResult();
       const qm = asQodex(mgr);
-      const page = await mgr.activePage();
       const dest = args.path ? resolveUserPath(args.path, ctx.cwd) : path.join(QODEX_SCREENSHOTS_DIR, `shot-${Date.now()}.png`);
-      const bad = checkOutputPath(dest, ['.png', '.jpg', '.jpeg']);
+      const bad = await checkOutputPath(dest, ['.png', '.jpg', '.jpeg'], mgr);
       if (bad) return { content: `[BROWSER_ERROR] screenshot: ${bad}`, isError: true };
+      const page = await mgr.activePage();
       await fs.mkdir(path.dirname(dest), { recursive: true });
       const target = targetOf({ ref: args.ref, selector: args.selector });
       const legend: string[] = [];
@@ -648,13 +648,14 @@ const AsyncFunction: new (...args: string[]) => (...a: unknown[]) => Promise<unk
 
 /** Build the in-page function for browser_evaluate (exported for tests). */
 export function compileEvaluateScript(script: string): (...a: unknown[]) => Promise<unknown> {
-  const body = script.trim();
-  if (!/\breturn\b/.test(body)) {
-    // Expression form ("document.title", "() => x"): return it (calling it if it is a function).
-    try {
-      return new AsyncFunction('arg', `const __qx = (${body}\n);\nreturn typeof __qx === 'function' ? await __qx(arg) : __qx;`);
-    } catch { /* not an expression: treat as statements */ }
-  }
+  const body = script.trim().replace(/;\s*$/, '');
+  // Anything that parses as ONE expression is evaluated as such (and called when it
+  // is a function) — also when its text contains `return` inside a nested function
+  // ("() => { ...; return x }", an IIFE): as a function BODY it would only be
+  // declared and its result silently lost. Statements fall back to the body form.
+  try {
+    return new AsyncFunction('arg', `const __qx = (${body}\n);\nreturn typeof __qx === 'function' ? await __qx(arg) : __qx;`);
+  } catch { /* not an expression: treat as statements */ }
   return new AsyncFunction('arg', body);
 }
 
@@ -703,6 +704,9 @@ export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
       else {
         try { formatted = JSON.stringify(result, null, 2) ?? String(result); } catch { formatted = String(result); }
       }
+      // A script reading a password / card field (e.g. one filled from the vault)
+      // must not carry its value into the conversation.
+      formatted = await maskPageSecrets(page, formatted);
       const notes = asQodex(mgr)?.drainNotices() ?? [];
       return {
         content: `Result:\n${formatted.slice(0, 5000)}${formatted.length > 5000 ? `\n…[truncated, ${formatted.length - 5000} more chars]` : ''}${notes.length ? '\n' + notes.map(n => `• ${n}`).join('\n') : ''}`,
@@ -760,9 +764,24 @@ export class BrowserGetTextTool extends Tool<z.infer<typeof GetTextArgs>> {
 
 // ── browser_wait_for ────────────────────────────────────────────────────────
 
+/**
+ * browser_wait_for kind=url matcher. A pattern with `*` is a wildcard pattern
+ * (`*` / `**` = any text; anchored to the whole URL only when it starts with a
+ * scheme); anything else is a substring — `?` is NOT a wildcard, so
+ * "/search?q=kettle" matches literally (Playwright's glob would treat it as a
+ * pattern for the whole URL and never match). PURE.
+ */
+export function urlMatcher(pattern: string): (href: string) => boolean {
+  const v = pattern.trim();
+  if (!v.includes('*')) return href => href.includes(v);
+  const body = v.split(/\*+/).map(part => part.replace(/[.+?^${}()|[\]\\/]/g, '\\$&')).join('.*');
+  const re = new RegExp(/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? `^${body}$` : body, 'i');
+  return href => re.test(href);
+}
+
 const WaitForArgs = z.object({
   kind: z.enum(['selector', 'url', 'networkidle', 'function', 'text', 'time']).describe(
-    'What to wait for: "selector" = element visible, "text" = visible text appears, "url" = URL matches (glob/substring), ' +
+    'What to wait for: "selector" = element visible, "text" = visible text appears, "url" = URL contains the text (or matches a pattern with * wildcards), ' +
     '"networkidle" = no network for 500ms, "function" = JS expression becomes truthy, "time" = sleep `value` ms.',
   ),
   value: z.string().describe('Selector / text / URL pattern / JS expression / milliseconds. Not needed for networkidle.').optional(),
@@ -799,9 +818,8 @@ export class BrowserWaitForTool extends Tool<z.infer<typeof WaitForArgs>> {
         msg = `✓ Text visible: "${args.value}"`;
       } else if (args.kind === 'url') {
         const miss = need('url'); if (miss) return miss;
-        const v = args.value!;
-        const matcher = /[*?]/.test(v) ? v : (u: URL) => u.href.includes(v);
-        await withAbort(page.waitForURL(matcher, { timeout }), ctx.signal);
+        const matcher = urlMatcher(args.value!);
+        await withAbort(page.waitForURL((u: URL) => matcher(u.href), { timeout }), ctx.signal);
         msg = `✓ URL matched: ${safeUrlOf(page)}`;
       } else if (args.kind === 'networkidle') {
         await withAbort(page.waitForLoadState('networkidle', { timeout }), ctx.signal);

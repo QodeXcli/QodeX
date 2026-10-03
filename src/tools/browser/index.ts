@@ -101,11 +101,17 @@ export {
   BrowserStatusTool,
   BrowserAgentTool,
 };
-export { QodexBrowserManager, getSession, closeBrowser, isPlaywrightAvailable, normalizeUrl, normalizeKey } from './session.js';
+export {
+  QodexBrowserManager, getSession, closeBrowser, isPlaywrightAvailable, normalizeUrl, normalizeKey,
+  refFromSelector, isSecretElement, redactTypedArgs, isProtectedQodexPath, isProtectedFileUrl, redactCdpUrl,
+} from './session.js';
 export type { QodexBrowserManagerOptions, QodexBrowserStatus, DownloadEntry, DialogEntry } from './session.js';
 export { resolveBrowserExecutable } from './launcher.js';
 export type { ResolvedExecutable, LauncherDeps } from './launcher.js';
-export { takeSnapshot, takeSnapshotDetailed, snapshotWithBoxes, extractContent, filterInteractive, truncateSnapshot } from './snapshot.js';
+export {
+  takeSnapshot, takeSnapshotDetailed, snapshotWithBoxes, extractContent, filterInteractive, truncateSnapshot,
+  maskSecretValues, maskSecretText, collectSecretValues,
+} from './snapshot.js';
 export { buildBrowserCommand } from './command.js';
 export { buildBrowserAgentPrompt } from './agent-tool.js';
 export { getBrowserManager, peekBrowserManager, setBrowserManagerForTests } from './types.js';
