@@ -158,6 +158,10 @@ export class TelegramApiError extends Error {
   get isTooLong(): boolean { return this.status === 400 && /too long|MESSAGE_TOO_LONG/i.test(this.description); }
   /** editMessageText with identical content — harmless. */
   get isNotModified(): boolean { return this.status === 400 && /message is not modified/i.test(this.description); }
+  /** A URL button Telegram won't accept (loopback / LAN / bad scheme) — resend without it. */
+  get isButtonUrlInvalid(): boolean {
+    return this.status === 400 && /BUTTON_URL_INVALID|wrong HTTP URL|URL host is empty|unsupported URL protocol/i.test(this.description);
+  }
 }
 
 /** Abort error thrown when the caller's signal fires (distinguishable from transport errors). */
@@ -251,6 +255,8 @@ export interface SendPhotoOptions {
   parseMode?: 'HTML' | null;
   filename?: string;
   contentType?: string;
+  /** Inline keyboard under the photo (sent as the JSON `reply_markup` form field). */
+  replyMarkup?: InlineKeyboardMarkup;
   signal?: AbortSignal;
 }
 
@@ -371,6 +377,7 @@ export class TelegramApi {
       chat_id: chatId,
       caption: opts.caption,
       parse_mode: opts.caption && opts.parseMode !== null ? (opts.parseMode ?? 'HTML') : undefined,
+      reply_markup: opts.replyMarkup ? JSON.stringify(opts.replyMarkup) : undefined,
     }, {
       field: 'photo',
       filename: opts.filename ?? 'screen.jpg',
@@ -378,6 +385,33 @@ export class TelegramApi {
       data: photo,
     });
     return this.call<TgMessage>('sendPhoto', undefined, { signal: opts.signal, multipart: mp, timeoutMs: Math.max(this.timeoutMs, 60_000) });
+  }
+
+  /**
+   * Edit a photo's caption. Omitting `replyMarkup` removes the inline keyboard
+   * (an empty keyboard is sent, which is how Telegram drops the buttons).
+   */
+  editMessageCaption(chatId: number | string, messageId: number, caption: string, opts: { parseMode?: 'HTML' | null; replyMarkup?: InlineKeyboardMarkup; signal?: AbortSignal } = {}): Promise<TgMessage | true> {
+    return this.call<TgMessage | true>('editMessageCaption', {
+      chat_id: chatId,
+      message_id: messageId,
+      caption,
+      parse_mode: opts.parseMode === null ? undefined : (opts.parseMode ?? 'HTML'),
+      reply_markup: opts.replyMarkup ?? { inline_keyboard: [] },
+    }, { signal: opts.signal });
+  }
+
+  /** Replace (or, with none, remove) a message's inline keyboard. */
+  editMessageReplyMarkup(chatId: number | string, messageId: number, replyMarkup?: InlineKeyboardMarkup, signal?: AbortSignal): Promise<TgMessage | true> {
+    return this.call<TgMessage | true>('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup ?? { inline_keyboard: [] },
+    }, { signal });
+  }
+
+  deleteMessage(chatId: number | string, messageId: number, signal?: AbortSignal): Promise<true> {
+    return this.call<true>('deleteMessage', { chat_id: chatId, message_id: messageId }, { signal });
   }
 
   getWebhookInfo(signal?: AbortSignal): Promise<TgWebhookInfo> {

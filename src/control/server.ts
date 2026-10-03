@@ -54,6 +54,23 @@ import { resolveControlConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { lanUrls, makeAccessToken, startTunnel, type TunnelHandle } from '../artifacts/live-share.js';
 import { renderDashboard, DASHBOARD_SCRIPT_CSP_SOURCE, type DashboardLang } from './dashboard.js';
+import {
+  answerHandoff,
+  clampLinkTtlMs,
+  findHandoffApproval,
+  getHandoffLinks,
+  handoffIdOfOwner,
+  handoffMetaOf,
+  handoffOwner,
+  isHandoffActive,
+  lastHandoffOutcome,
+  noteHandoffBusEvent,
+  setHandoffLocalUrlProvider,
+  DEFAULT_HANDOFF_LINK_TTL_MS,
+  HANDOFF_ID_RE,
+  HANDOFF_TOKEN_RE,
+  type HandoffOutcome,
+} from './handoff.js';
 import { logger } from '../utils/logger.js';
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -76,6 +93,8 @@ const FRAME_RETRY_MS = 5000;
  *  (doubling per consecutive stall, up to 8x). */
 const FRAME_STALL_MS = 4000;
 const COOKIE_PREFIX = 'qx_ctl';
+/** Cookie of a scoped hand-off link (`?h=`): opens one hand-off's live view only. */
+const HANDOFF_COOKIE_PREFIX = 'qx_ho';
 const COOKIE_MAX_AGE_S = 7 * 24 * 3600;
 /** Default grace before an orphaned control-center takeover is handed back. */
 const DEFAULT_TAKEOVER_RELEASE_MS = 5 * 60_000;
@@ -236,10 +255,29 @@ export function controlCookieName(port: number): string {
   return `${COOKIE_PREFIX}_${port}`;
 }
 
-export type ControlAuth = { ok: false } | { ok: true; via: 'query' | 'bearer' | 'cookie' };
+/** Cookie name of a hand-off link login on `port` (`qx_ho_<port>`). */
+export function handoffCookieName(port: number): string {
+  return `${HANDOFF_COOKIE_PREFIX}_${port}`;
+}
 
-/** Decide whether a request carries the access token, and how. PURE. */
-export function authenticateRequest(token: string, port: number, req: { url?: string; headers: IncomingHttpHeaders }): ControlAuth {
+export type ControlAuth =
+  | { ok: false }
+  | { ok: true; via: 'query' | 'bearer' | 'cookie' }
+  /** A scoped hand-off link (`?h=` or its cookie): the live view of ONE hand-off, nothing else. */
+  | { ok: true; via: 'handoff'; handoffId: string; from: 'query' | 'cookie' };
+
+/**
+ * Decide whether a request carries the access token, and how. PURE, given
+ * `handoff` — which maps a candidate hand-off token to the id of the RUNNING
+ * hand-off it opens (null for an unknown, expired or ended one). The full token
+ * always wins over a hand-off token.
+ */
+export function authenticateRequest(
+  token: string,
+  port: number,
+  req: { url?: string; headers: IncomingHttpHeaders },
+  handoff?: (candidate: string) => string | null,
+): ControlAuth {
   const { query } = splitUrl(req.url ?? '/');
   if (query && tokenMatches(token, queryParam(query, 'k'))) return { ok: true, via: 'query' };
   const authz = req.headers.authorization;
@@ -250,6 +288,18 @@ export function authenticateRequest(token: string, port: number, req: { url?: st
   const cookies = parseCookies(typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined);
   for (const name of [controlCookieName(port), COOKIE_PREFIX]) {
     if (tokenMatches(token, cookies.get(name))) return { ok: true, via: 'cookie' };
+  }
+  if (handoff) {
+    const h = query ? queryParam(query, 'h') : null;
+    if (h) {
+      const id = handoff(h);
+      if (id) return { ok: true, via: 'handoff', handoffId: id, from: 'query' };
+    }
+    const c = cookies.get(handoffCookieName(port));
+    if (c) {
+      const id = handoff(c);
+      if (id) return { ok: true, via: 'handoff', handoffId: id, from: 'cookie' };
+    }
   }
   return { ok: false };
 }
@@ -273,10 +323,12 @@ export function stripTokenFromUrl(raw: string): string {
   // Compare DECODED keys, exactly like authenticateRequest/queryParam does: a raw
   // check would keep `%6B=<token>` in the bounce target — leaking the token into
   // the address bar/history and bouncing forever (the kept param re-authenticates).
+  // `h` (a hand-off link token) goes the same way as `k`.
   const kept = query.split('&').filter(part => {
     if (!part || /[\u0000-\u001f\u007f]/.test(part)) return false;
     const eq = part.indexOf('=');
-    return safeDecode(eq >= 0 ? part.slice(0, eq) : part, true) !== 'k';
+    const key = safeDecode(eq >= 0 ? part.slice(0, eq) : part, true);
+    return key !== 'k' && key !== 'h';
   });
   return kept.length ? `${safePath}?${kept.join('&')}` : safePath;
 }
@@ -405,8 +457,35 @@ export function validateHumanInput(body: unknown): { ok: true; event: HumanInput
     case 'forward':
     case 'reload':
       return { ok: true, event: { type } };
+    // The human's own press-and-hold / drag ('down' → 'move'… → 'up').
+    case 'down': {
+      if (!finiteIn(b.x, 0, COORD) || !finiteIn(b.y, 0, COORD)) return { ok: false, error: 'down needs numeric x and y' };
+      const f = frame();
+      if (typeof f === 'string') return { ok: false, error: f };
+      const ev: HumanInputEvent = { type: 'down', x: b.x, y: b.y, ...f };
+      if (b.button !== undefined) {
+        if (b.button !== 'left' && b.button !== 'right' && b.button !== 'middle') return { ok: false, error: 'button must be left, right or middle' };
+        ev.button = b.button;
+      }
+      return { ok: true, event: ev };
+    }
+    case 'up': {
+      const f = frame();
+      if (typeof f === 'string') return { ok: false, error: f };
+      const ev: HumanInputEvent = { type: 'up', ...f };
+      if (b.x !== undefined || b.y !== undefined) {
+        if (!finiteIn(b.x, 0, COORD) || !finiteIn(b.y, 0, COORD)) return { ok: false, error: 'up x/y must be numbers' };
+        ev.x = b.x;
+        ev.y = b.y;
+      }
+      if (b.button !== undefined) {
+        if (b.button !== 'left' && b.button !== 'right' && b.button !== 'middle') return { ok: false, error: 'button must be left, right or middle' };
+        ev.button = b.button;
+      }
+      return { ok: true, event: ev };
+    }
     default:
-      return { ok: false, error: 'type must be one of click, move, scroll, type, key, navigate, back, forward, reload' };
+      return { ok: false, error: 'type must be one of click, move, down, up, scroll, type, key, navigate, back, forward, reload' };
   }
 }
 
@@ -487,6 +566,8 @@ export function maskSecrets(text: string): string {
   return String(text ?? '')
     // Control-center links (`…/?k=<token>`, e.g. a mission's live URL) are login links.
     .replace(/([?&]k=)[A-Za-z0-9._~-]{16,}/g, '$1***')
+    // …and so are hand-off links (`…/?h=<token>&handoff=<id>`).
+    .replace(/([?&]h=)[A-Za-z0-9_-]{16,}/g, '$1***')
     .replace(/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '$1-***')
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, 'gh*_***')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***')
@@ -831,6 +912,8 @@ interface Running {
 }
 
 let current: Running | null = null;
+// The terminal's hand-off hint shows how to open the live view locally (owner link).
+setHandoffLocalUrlProvider(() => (current ? infoOf(current).url : null));
 /** Serializes start/stop so concurrent callers never race two servers into existence. */
 let opChain: Promise<unknown> = Promise.resolve();
 
@@ -1061,6 +1144,7 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
       for (const c of rt.eventClients) c.send('bus', json);
     }
     if (ev.kind === 'browser') rt.frames.onBrowserEvent(ev.type);
+    onHandoffBusEvent(ev);
   });
 
   if (takeoverReleaseMs > 0) {
@@ -1226,6 +1310,8 @@ export function stopControlCenter(): Promise<boolean> {
     current = null;
     await shutdown(rt, { releaseTakeover: true });
     if (mailControlRelease) { try { mailControlRelease(); } catch { /* ignore */ } mailControlRelease = null; }
+    // Hand-off links point at this server: they die with it.
+    getHandoffLinks().clear();
     return true;
   });
 }
@@ -1433,7 +1519,7 @@ function scrubAgentCookies(rt: Running, delayMs: number): void {
         // Any control-center login (this one's, a mission worker's, another terminal's):
         // the agent's browser must never hold one.
         const planted = ((await ctx.cookies()) as Array<{ name?: string; value?: string }>)
-          .filter(c => /^qx_ctl(_\d{1,5})?$/.test(String(c?.name)));
+          .filter(c => /^qx_(ctl|ho)(_\d{1,5})?$/.test(String(c?.name)));
         if (!planted.length) return;
         for (const name of new Set(planted.map(c => String(c.name)))) await ctx.clearCookies({ name });
         getBus().publish({ kind: 'notice', level: 'warn', message: 'Removed the control-center login from the agent\'s browser (it had opened the private link).' });
@@ -1563,9 +1649,11 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   const isRead = method === 'GET' || method === 'HEAD';
 
   // 1. Authentication — always, for every route.
-  const auth = authenticateRequest(rt.token, rt.port, req);
+  const auth = authenticateRequest(rt.token, rt.port, req, activeHandoffOf);
   if (!auth.ok) {
     if (!isRead) drainAndIgnore(req);
+    // A hand-off link whose hand-off is over: say so (it most likely just cleared).
+    if (endedHandoffResponse(rt, req, res, query, isRead)) return;
     if (isRead && wantsHtml(req)) sendHtml(res, 401, unauthorizedPage(), "'none'");
     else sendError(res, 401, '[UNAUTHORIZED] Missing or invalid access token. Open the full link printed by `qodex control` (it ends with ?k=…), or send Authorization: Bearer <token>.');
     return;
@@ -1607,6 +1695,18 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
     return;
   }
 
+  // 2b. `?h=` hand-off login: same bounce, with a cookie that dies with the hand-off.
+  if (auth.via === 'handoff' && auth.from === 'query' && isRead) {
+    handoffLoginBounce(rt, req, res, rawUrl);
+    return;
+  }
+  // A full login that still carries a hand-off token in its URL: drop it from the address bar.
+  if (auth.ok && auth.via !== 'handoff' && isRead && wantsHtml(req) && queryParam(query, 'h') !== null) {
+    const page = bouncePage(stripTokenFromUrl(rawUrl));
+    sendHtml(res, 200, page.html, page.scriptSrc);
+    return;
+  }
+
   // 3. CSRF guard for anything that changes state.
   if (!isRead && !originAllowed(req.headers)) {
     drainAndIgnore(req);
@@ -1614,7 +1714,15 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
     return;
   }
 
-  // 4. Routes.
+  // 4. Routes. A hand-off link opens its hand-off's live view and nothing else.
+  if (auth.via === 'handoff') return handleHandoffScoped(rt, req, res, auth.handoffId, path, method, isRead);
+  const handoffMatch = path.match(/^\/api\/handoff\/([^/]+)$/);
+  if (handoffMatch) {
+    if (method !== 'POST') { if (!isRead) drainAndIgnore(req); sendError(res, 405, '[METHOD_NOT_ALLOWED] Use POST.', { Allow: 'POST' }); return; }
+    const hb = await readJsonBody(req, res);
+    if (!hb.ok) return;
+    return routeHandoffAnswer(res, handoffMatch[1] ?? '', hb.value, null);
+  }
   const approvalMatch = path.match(/^\/api\/approvals\/([^/]+)$/);
   const actionMatch = path.match(/^\/api\/actions\/([^/]+)$/);
   const expected = ROUTE_METHODS.get(path) ?? (approvalMatch || actionMatch ? 'POST' : undefined);
@@ -1674,6 +1782,8 @@ async function routeState(rt: Running, res: ServerResponse, query: string): Prom
     }
   }
   state.recent = recentN > 0 ? getBus().recent(recentN).map(ev => JSON.parse(busEventJson(ev)) as unknown) : [];
+  const handoffParam = queryParam(query, 'handoff');
+  if (handoffParam && HANDOFF_ID_RE.test(handoffParam)) state.handoff = handoffState(handoffParam);
   sendJson(res, 200, state);
 }
 
@@ -1755,7 +1865,8 @@ export function looksLikeControlLink(url: string): boolean {
   try { u = new URL(url); } catch { return false; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
   const k = u.searchParams.get('k');
-  if (!k || !/^[A-Za-z0-9._~-]{16,256}$/.test(k)) return false;
+  const h = u.searchParams.get('h');
+  if ((!k || !/^[A-Za-z0-9._~-]{16,256}$/.test(k)) && (!h || !HANDOFF_TOKEN_RE.test(h))) return false;
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/^::ffff:/, '');
   return isLoopbackHost(host) || isWildcardHost(host) || host === '::1' || host.endsWith('.localhost')
     || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host) || /^f[cd][0-9a-f]{2}:/.test(host)
@@ -1763,9 +1874,14 @@ export function looksLikeControlLink(url: string): boolean {
     || /\.(trycloudflare\.com|ngrok-free\.app|ngrok\.app|ngrok\.io|ngrok-free\.dev)$/.test(host);
 }
 
-async function routeInput(rt: Running, res: ServerResponse, body: unknown): Promise<void> {
+async function routeInput(rt: Running, res: ServerResponse, body: unknown, scope: { handoffId: string } | null = null): Promise<void> {
   const v = validateHumanInput(body);
   if (!v.ok) { sendError(res, 400, `[INVALID_INPUT] ${v.error}`); return; }
+  if (scope && (v.event.type === 'navigate' || v.event.type === 'back' || v.event.type === 'forward')) {
+    // A hand-off link is for solving the check in front of you, not for driving the browser elsewhere.
+    sendError(res, 403, '[HANDOFF_SCOPE] A hand-off link cannot navigate the browser — solve the check on this page (reload is allowed).');
+    return;
+  }
   if (v.event.type === 'navigate' && (pointsAtControlCenter(v.event.url, rt.port, rt.tunnelUrl) || looksLikeControlLink(v.event.url))) {
     sendError(res, 400, '[CONTROL_CENTER_URL] The control center must not be opened inside the agent\'s browser (it would hand the agent your control login). Open it in your own browser instead.');
     return;
@@ -1773,6 +1889,10 @@ async function routeInput(rt: Running, res: ServerResponse, body: unknown): Prom
   const mgr = peekBrowserManager();
   if (!mgr || !mgr.isTakeover()) {
     sendError(res, 409, '[TAKEOVER_REQUIRED] Take over control first (POST /api/takeover {"on":true}); input is ignored while the agent is in control.');
+    return;
+  }
+  if (scope && takeoverHolder(mgr) !== handoffOwner(scope.handoffId)) {
+    sendError(res, 409, '[TAKEOVER_REQUIRED] This hand-off does not hold the browser right now.');
     return;
   }
   // Launching from here is only allowed through an explicit navigation while the human holds control.
@@ -1792,6 +1912,15 @@ async function routeInput(rt: Running, res: ServerResponse, body: unknown): Prom
 async function routeTakeover(res: ServerResponse, body: unknown): Promise<void> {
   const on = asObject(body).on;
   if (typeof on !== 'boolean') { sendError(res, 400, '[INVALID_INPUT] Body must be {"on": true|false}.'); return; }
+  // A hand-off holds the browser for the human: never overwrite its owner. "Hand back"
+  // means "I solved it" — the hand-off checks the page again and resumes by itself.
+  const held = peekBrowserManager();
+  const heldBy = held ? handoffIdOfOwner(takeoverHolder(held)) : null;
+  if (held && heldBy) {
+    const answered = on ? false : answerHandoff(heldBy, 'done', 'control');
+    sendJson(res, 200, { ok: true, takeover: held.isTakeover(), browser: browserStatus(held), handoff: { id: heldBy, answered } });
+    return;
+  }
   let mgr = peekBrowserManager();
   if (!mgr && on) {
     try {
@@ -1882,4 +2011,268 @@ export function actionErrorStatus(message: string): number {
   if (/(^|_)(NOT_PENDING|CONFLICT)$/.test(code)) return 409;
   if (/^(BAD_REQUEST|INVALID_[A-Z0-9_]+|[A-Z0-9]+_INVALID|[A-Z0-9]+_BAD_[A-Z0-9_]+)$/.test(code)) return 400;
   return 500;
+}
+
+// ── hand-off links (scoped live view of ONE hand-off) ─────────────────────────
+
+/** The running hand-off a candidate link token opens, else null (unknown / expired / ended). */
+function activeHandoffOf(candidate: string): string | null {
+  const r = getHandoffLinks().lookup(candidate, id => isHandoffActive(id));
+  return r.status === 'active' ? r.handoffId : null;
+}
+
+/** Who holds the takeover right now ('' = nobody). Never throws. */
+function takeoverHolder(mgr: BrowserManager | null): string {
+  if (!mgr) return '';
+  try {
+    return mgr.isTakeover() ? String(mgr.status().takeoverBy ?? '') : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Bus side of hand-offs: remember outcomes; a takeover that ends never leaves a mouse button held. */
+function onHandoffBusEvent(ev: BusEvent): void {
+  noteHandoffBusEvent(ev);
+  if (ev.kind === 'browser' && ev.type === 'takeover' && (ev.data as { on?: unknown } | undefined)?.on === false) {
+    try {
+      const mgr = peekBrowserManager();
+      void mgr?.releaseHumanMouse?.().catch(() => {});
+    } catch { /* manager gone */ }
+  }
+}
+
+/** Opt-in (config `control.handoffTunnel: true`): a hand-off may open a public tunnel by itself. */
+function handoffTunnelOptIn(): boolean {
+  try {
+    const cfg = getActiveConfig() as unknown;
+    const resolved = resolveControlConfig(cfg) as { handoffTunnel?: unknown };
+    if (typeof resolved.handoffTunnel === 'boolean') return resolved.handoffTunnel;
+    const control = cfg && typeof cfg === 'object' ? (cfg as Record<string, unknown>).control : undefined;
+    return !!control && typeof control === 'object' && (control as Record<string, unknown>).handoffTunnel === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a phone can reach this control center: its tunnel, else a LAN address, else loopback. */
+function handoffBase(rt: Running): { url: string; kind: 'tunnel' | 'lan' | 'loopback' } {
+  if (rt.tunnel?.url) return { url: rt.tunnel.url.replace(/\/+$/, ''), kind: 'tunnel' };
+  if (isWildcardHost(rt.host)) {
+    const lan = lanUrls(rt.port)[0];
+    if (lan) return { url: lan.replace(/\/+$/, ''), kind: 'lan' };
+  } else if (!isLoopbackHost(rt.host)) {
+    return { url: `http://${rt.host.includes(':') ? `[${rt.host}]` : rt.host}:${rt.port}`, kind: 'lan' };
+  }
+  return { url: `http://127.0.0.1:${rt.port}`, kind: 'loopback' };
+}
+
+export interface HandoffLink {
+  /** `<base>/?h=<token>&handoff=<id>` — hand it to ONE place (a Telegram URL button), never to text or logs. */
+  url: string;
+  /** How a phone reaches it: a public tunnel, this Wi-Fi, or this computer only. */
+  base: 'tunnel' | 'lan' | 'loopback';
+  /** The same view without the token (works only where the owner is already logged in). */
+  plainUrl: string;
+  handoffId: string;
+  expiresAt: number;
+  /** Kill the link now (e.g. Telegram refused the button that carried it). */
+  revoke: () => void;
+}
+
+/**
+ * Mint a short-lived link that opens the live view of hand-off `handoffId` only
+ * (no approvals, actions, missions, steering, stop or vault). The token is stored
+ * hashed; the link dies at `ttlMs` (clamped 15s-24h) or when the hand-off ends.
+ * Null when no control center runs (or the hand-off is not running). A public
+ * tunnel is opened only with config `control.handoffTunnel: true` (or `opts.tunnel`).
+ */
+export async function mintHandoffLink(handoffId: string, ttlMs: number = DEFAULT_HANDOFF_LINK_TTL_MS, opts: { tunnel?: boolean } = {}): Promise<HandoffLink | null> {
+  if (!HANDOFF_ID_RE.test(String(handoffId ?? '')) || !isHandoffActive(handoffId)) return null;
+  const wantTunnel = opts.tunnel ?? handoffTunnelOptIn();
+  if (wantTunnel && (!current || !current.tunnel)) {
+    try {
+      await startControlCenter({ tunnel: true });
+    } catch (e) {
+      logger.warn('Hand-off: could not open the control center tunnel', { err: errMessage(e) });
+    }
+  }
+  const rt = current;
+  if (!rt || !isHandoffActive(handoffId)) return null;
+  const base = handoffBase(rt);
+  const store = getHandoffLinks();
+  const { token, expiresAt } = store.mint(handoffId, clampLinkTtlMs(ttlMs));
+  const q = `handoff=${encodeURIComponent(handoffId)}`;
+  return {
+    url: `${base.url}/?h=${token}&${q}`,
+    base: base.kind,
+    plainUrl: `${base.url}/?${q}`,
+    handoffId,
+    expiresAt,
+    revoke: () => { store.revokeToken(token); },
+  };
+}
+
+/** `?h=` login: set the hand-off cookie (lives no longer than the link) and bounce without the token. */
+function handoffLoginBounce(rt: Running, req: IncomingMessage, res: ServerResponse, rawUrl: string): void {
+  const { query } = splitUrl(rawUrl);
+  const token = queryParam(query, 'h') ?? '';
+  const r = getHandoffLinks().lookup(token, id => isHandoffActive(id));
+  const maxAge = r.status === 'active' ? Math.max(1, Math.ceil((r.expiresAt - Date.now()) / 1000)) : 0;
+  const secure = requestIsHttps(req) ? '; Secure' : '';
+  const cookie = `${handoffCookieName(rt.port)}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
+  const target = stripTokenFromUrl(rawUrl);
+  if (!isLocalRedirect(target)) {
+    res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: '/', 'Content-Length': '0' });
+    res.end();
+  } else if (wantsHtml(req)) {
+    const page = bouncePage(target);
+    sendHtml(res, 200, page.html, page.scriptSrc, { 'Set-Cookie': cookie });
+  } else {
+    res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: target, 'Content-Length': '0' });
+    res.end();
+  }
+  scrubAgentCookies(rt, 1500);
+}
+
+function handoffEndedPage(outcome: HandoffOutcome | null): string {
+  const cleared = outcome === 'cleared' || outcome === 'done';
+  const en = cleared ? '✓ The check is cleared — QodeX continues by itself.' : 'This hand-off is over — QodeX continues by itself.';
+  const fa = cleared ? '✓ بررسی برطرف شد — QodeX خودش ادامه می‌دهد.' : 'این واگذاری تمام شده است — QodeX خودش ادامه می‌دهد.';
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<meta name="referrer" content="no-referrer"><title>QodeX — hand-off over</title></head>'
+    + '<body style="background:#0b0f14;color:#e5e7eb;font-family:system-ui,Tahoma,sans-serif;padding:24px;line-height:1.7">'
+    + `<h1 style="font-size:20px">${escapeHtml(en)}</h1><p>You can close this page.</p>`
+    + `<p dir="rtl" lang="fa">${escapeHtml(fa)} می‌توانید این صفحه را ببندید.</p>`
+    + '</body></html>';
+}
+
+/** A request whose only credential is the link of an ended / expired hand-off → 410 with the outcome. */
+function endedHandoffResponse(rt: Running, req: IncomingMessage, res: ServerResponse, query: string, isRead: boolean): boolean {
+  const cookies = parseCookies(typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined);
+  const candidate = (query ? queryParam(query, 'h') : null) ?? cookies.get(handoffCookieName(rt.port)) ?? null;
+  if (!candidate) return false;
+  const r = getHandoffLinks().lookup(candidate, id => isHandoffActive(id));
+  if (r.status !== 'ended' && r.status !== 'expired') return false;
+  const outcome = r.status === 'ended' ? lastHandoffOutcome(r.handoffId) : null;
+  const clear = { 'Set-Cookie': `${handoffCookieName(rt.port)}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` };
+  if (isRead && wantsHtml(req)) sendHtml(res, 410, handoffEndedPage(outcome), "'none'", clear);
+  else sendJson(res, 410, { ok: false, error: '[HANDOFF_ENDED] This hand-off is over — QodeX continues by itself.', outcome }, clear);
+  // An expired token has said its last word; an ended one is kept (until its TTL) to explain itself.
+  if (r.status === 'expired') getHandoffLinks().revokeToken(candidate);
+  return true;
+}
+
+/** What a hand-off viewer may see of the browser: its state and the active tab (no query strings). */
+function scopedBrowserStatus(mgr: BrowserManager | null, handoffId: string): Record<string, unknown> | null {
+  const st = browserStatus(mgr);
+  if (!st) return null;
+  const active = st.tabs.find(t => t.active) ?? st.tabs[0];
+  let url = '';
+  if (active?.url) {
+    try { const u = new URL(active.url); url = /^https?:$/.test(u.protocol) ? `${u.origin}${u.pathname}` : ''; } catch { url = ''; }
+  }
+  const mine = st.takeover && st.takeoverBy === handoffOwner(handoffId);
+  return {
+    running: st.running,
+    mode: st.mode,
+    headless: st.headless,
+    takeover: st.takeover,
+    takeoverBy: st.takeover ? (mine ? handoffOwner(handoffId) : 'other') : undefined,
+    tabs: active ? [{ index: 0, id: active.id, url, title: String(active.title ?? '').slice(0, 200), active: true }] : [],
+  };
+}
+
+/** The hand-off as the dashboard sees it. */
+function handoffState(handoffId: string): Record<string, unknown> {
+  const p = findHandoffApproval(handoffId);
+  return {
+    id: handoffId,
+    active: isHandoffActive(handoffId),
+    pending: !!p,
+    approval: p ? publicApproval(p) : null,
+    meta: p ? handoffMetaOf(p.meta) : null,
+    outcome: lastHandoffOutcome(handoffId),
+  };
+}
+
+const HANDOFF_ROUTE_METHODS = new Map<string, 'GET' | 'POST'>([
+  ['/', 'GET'],
+  ['/index.html', 'GET'],
+  ['/api/state', 'GET'],
+  ['/api/frames', 'GET'],
+  ['/api/frame.jpg', 'GET'],
+  ['/api/input', 'POST'],
+  ['/api/takeover', 'POST'],
+]);
+
+/** Routes a hand-off link may use: the live view of its hand-off, its input while it holds the browser, and its answer. */
+async function handleHandoffScoped(rt: Running, req: IncomingMessage, res: ServerResponse, handoffId: string, path: string, method: string, isRead: boolean): Promise<void> {
+  if (path === '/favicon.ico') { res.writeHead(204, BASE_HEADERS); res.end(); return; }
+  const answerMatch = path.match(/^\/api\/handoff\/([^/]+)$/);
+  const expected = HANDOFF_ROUTE_METHODS.get(path) ?? (answerMatch ? 'POST' : undefined);
+  if (!expected) {
+    if (!isRead) drainAndIgnore(req);
+    sendError(res, 403, '[HANDOFF_SCOPE] This hand-off link only opens the live view of one hand-off (no approvals, actions, missions, steering or stop).');
+    return;
+  }
+  const methodOk = expected === 'GET' ? isRead : method === expected;
+  if (!methodOk) {
+    if (!isRead) drainAndIgnore(req);
+    sendError(res, 405, `[METHOD_NOT_ALLOWED] Use ${expected}.`, { Allow: expected === 'GET' ? 'GET, HEAD' : expected });
+    return;
+  }
+  if (path === '/' || path === '/index.html') {
+    sendHtml(res, 200, renderDashboard({ title: rt.title || undefined, lang: pickLang(rt, req), handoff: { id: handoffId, scoped: true } }), DASHBOARD_SCRIPT_CSP_SOURCE);
+    return;
+  }
+  if (path === '/api/state') {
+    const mgr = peekBrowserManager();
+    sendJson(res, 200, { ok: true, scoped: true, title: rt.title || null, browser: scopedBrowserStatus(mgr, handoffId), handoff: handoffState(handoffId), ts: Date.now() });
+    return;
+  }
+  if (path === '/api/frames') return routeFrames(rt, req, res);
+  if (path === '/api/frame.jpg') return routeFrameJpg(rt, res);
+  const body = await readJsonBody(req, res);
+  if (!body.ok) return;
+  if (path === '/api/input') return routeInput(rt, res, body.value, { handoffId });
+  if (path === '/api/takeover') return routeHandoffTakeover(res, body.value, handoffId);
+  if (answerMatch) return routeHandoffAnswer(res, answerMatch[1] ?? '', body.value, handoffId);
+  sendError(res, 404, `[NOT_FOUND] ${path.slice(0, 200)}`);
+}
+
+/** Take over / hand back from a hand-off link: only ever this hand-off's own takeover. */
+function routeHandoffTakeover(res: ServerResponse, body: unknown, handoffId: string): void {
+  const on = asObject(body).on;
+  if (typeof on !== 'boolean') { sendError(res, 400, '[INVALID_INPUT] Body must be {"on": true|false}.'); return; }
+  const mgr = peekBrowserManager();
+  if (!mgr) { sendError(res, 409, '[BROWSER_NOT_RUNNING] No browser is running in this QodeX process.'); return; }
+  const owner = handoffOwner(handoffId);
+  const holder = takeoverHolder(mgr);
+  let answered = false;
+  if (on) {
+    if (holder && holder !== owner) { sendError(res, 409, '[TAKEOVER_HELD] Someone else holds the browser right now.'); return; }
+    if (!holder) {
+      try { mgr.setTakeover(true, owner); } catch (e) { sendError(res, 500, `[TAKEOVER_FAILED] ${errMessage(e)}`); return; }
+    }
+  } else {
+    // Handing back = "I solved it": the hand-off checks the page and resumes by itself.
+    answered = answerHandoff(handoffId, 'done', 'control');
+  }
+  sendJson(res, 200, { ok: true, takeover: mgr.isTakeover(), browser: scopedBrowserStatus(mgr, handoffId), handoff: { id: handoffId, answered } });
+}
+
+/** POST /api/handoff/<id> {answer: 'done' | 'cancel'} — the human's "I solved it" / "I can't". */
+function routeHandoffAnswer(res: ServerResponse, rawId: string, body: unknown, scopeId: string | null): void {
+  const id = safeDecode(rawId);
+  if (!id || !HANDOFF_ID_RE.test(id)) { sendError(res, 400, '[INVALID_INPUT] Bad hand-off id.'); return; }
+  if (scopeId !== null && id !== scopeId) { sendError(res, 403, '[HANDOFF_SCOPE] This link belongs to another hand-off.'); return; }
+  const answer = asObject(body).answer;
+  if (answer !== 'done' && answer !== 'cancel') { sendError(res, 400, '[INVALID_INPUT] Body must be {"answer": "done" | "cancel"}.'); return; }
+  if (!isHandoffActive(id)) { sendError(res, 404, '[HANDOFF_NOT_FOUND] That hand-off is over (or does not exist).'); return; }
+  if (!answerHandoff(id, answer, 'control')) {
+    sendError(res, 409, '[HANDOFF_CHECKING] QodeX is checking the page right now — try again in a moment.');
+    return;
+  }
+  sendJson(res, 200, { ok: true, answered: answer });
 }

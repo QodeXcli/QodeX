@@ -44,7 +44,8 @@ import {
 } from '../../control/approvals.js';
 import { getBus, type AgentBus, type BusEvent } from '../../control/bus.js';
 import { formatMailNotice, handleTelegramMailCommand } from './mail.js';
-import { peekBrowserManager, type BrowserManager } from '../../tools/browser/types.js';
+import { peekBrowserManager, type BrowserManager, type ScreenshotClip } from '../../tools/browser/types.js';
+import { handoffMetaOf, maskHandoffTokens, type HandoffFrameBox, type HandoffMeta } from '../../control/handoff.js';
 import { logger } from '../../utils/logger.js';
 
 // ── mission adapter contract (wired by the integration to the missions module) ──
@@ -111,6 +112,19 @@ export interface TelegramMissionAdapter {
   eventsSince?(afterId: number | null): Promise<{ events: TelegramMissionEvent[]; cursor: number }>;
 }
 
+// ── hand-off link contract (the control center mints these) ──────────────────
+
+/** A scoped, short-lived link to the live view of one hand-off (src/control/server.ts mintHandoffLink). */
+export interface TelegramHandoffLink {
+  /** Carries the hand-off token: it goes into ONE place — the card's URL button. Never into text or logs. */
+  url: string;
+  base: 'tunnel' | 'lan' | 'loopback';
+  /** The same view without the token (opens only where the owner is already logged in). */
+  plainUrl?: string;
+  expiresAt?: number;
+  revoke?: () => void;
+}
+
 // ── options ──────────────────────────────────────────────────────────────────
 
 export interface TelegramBotOptions {
@@ -135,6 +149,12 @@ export interface TelegramBotOptions {
   notifyRateLimit?: { max: number; windowMs: number };
   /** /screen gives up after this long (a busy page can stall a screenshot). Default 15s. */
   screenshotTimeoutMs?: number;
+  /**
+   * Mint the one-tap link of a hand-off card (a CAPTCHA / bot check the human solves).
+   * Default: the control center's mintHandoffLink (null when none runs). Return null
+   * for no link.
+   */
+  handoffLink?: (handoffId: string, ttlMs: number) => Promise<TelegramHandoffLink | null>;
   backoff?: { initialMs?: number; maxMs?: number; conflictMinMs?: number };
   /** Injectable for tests. Must resolve (not reject) early when the signal aborts. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -143,12 +163,30 @@ export interface TelegramBotOptions {
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
+/** A hand-off card's extras: prepared once per approval, shared by every chat. */
+interface HandoffCard {
+  meta: HandoffMeta | null;
+  prompt: string;
+  missionId?: string;
+  /** Prepared screenshot (null = none / failed). */
+  photo?: Buffer | null;
+  /** Minted link (null = none). */
+  link?: TelegramHandoffLink | null;
+  /** Telegram refused the URL button (loopback / LAN): cards go out without it. */
+  linkRejected?: boolean;
+  /** Token-less Wi-Fi address shown instead of a refused LAN button. */
+  lanUrl?: string;
+  prepared?: Promise<void>;
+}
+
 interface DeliveredApproval {
   id: string;
   source: 'broker' | 'mission';
   card: F.ApprovalCardInput;
   options: string[];
-  messages: Array<{ chatId: number; messageId: number; lang: F.Lang }>;
+  /** Set for a hand-off (photo + one-tap link + Done / Can't solve). */
+  handoff?: HandoffCard;
+  messages: Array<{ chatId: number; messageId: number; lang: F.Lang; photo?: boolean }>;
   ready: Promise<void>;
   createdAt: number;
   /** Chats whose card could not be sent (network, 5xx, 429...) → retried from tick() with backoff. */
@@ -235,6 +273,7 @@ export class TelegramBot {
   private readonly random: () => number;
   private readonly now: () => number;
   private readonly logFn: (level: 'info' | 'warn' | 'error', message: string) => void;
+  private readonly handoffLinkFn: (handoffId: string, ttlMs: number) => Promise<TelegramHandoffLink | null>;
 
   private me: TgUser | null = null;
   private offset: number | undefined;
@@ -290,6 +329,10 @@ export class TelegramBot {
     this.random = opts.random ?? Math.random;
     this.now = opts.now ?? Date.now;
     this.logFn = opts.log ?? ((level, message) => logger[level](message));
+    this.handoffLinkFn = opts.handoffLink ?? (async (id, ttlMs) => {
+      const { mintHandoffLink } = await import('../../control/server.js');
+      return mintHandoffLink(id, ttlMs);
+    });
 
     this.channel = {
       name: 'telegram',
@@ -816,6 +859,9 @@ export class TelegramBot {
 
   private createEntry(id: string, source: 'broker' | 'mission', card: F.ApprovalCardInput, options: string[]): DeliveredApproval {
     const entry: DeliveredApproval = { id, source, card, options: [...options], messages: [], ready: Promise.resolve(), createdAt: this.now(), failed: new Map() };
+    if (card.handoff || card.category === 'challenge') {
+      entry.handoff = { meta: card.handoff ?? null, prompt: card.prompt, missionId: card.missionId };
+    }
     this.delivered.set(id, entry);
     if (this.delivered.size > MAX_DELIVERED) {
       const oldest = this.delivered.keys().next().value as string;
@@ -839,6 +885,7 @@ export class TelegramBot {
   private deliverTo(entry: DeliveredApproval, chats: PairedChat[]): Promise<void> {
     const run = async () => {
       const cbId = this.callbackIdFor(entry.id);
+      if (entry.handoff) { await this.deliverHandoffTo(entry, chats, cbId); return; }
       for (const chat of chats) {
         if (!this.isLive(entry)) return;
         const lang = F.langOf(chat.lang);
@@ -913,6 +960,14 @@ export class TelegramBot {
     try {
       await entry.ready.catch(() => {});
       for (const m of entry.messages) {
+        if (entry.handoff) {
+          // Hand-off card: the outcome replaces the hint, and the keyboard — the only
+          // place the link's token ever was — goes away ("✓ Challenge cleared, continuing").
+          const h = entry.handoff;
+          const caption = `${F.formatHandoffCard({ host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt, step: !!h.meta && !h.meta.vendor && !h.meta.frameBox }, m.lang)}\n\n<b>${F.formatHandoffOutcome(result, m.lang)}</b>`;
+          await this.editCard(m.chatId, m.messageId, caption, !!m.photo);
+          continue;
+        }
         const outcome = F.formatOutcome(result, entry.options, m.lang);
         await this.edit(m.chatId, m.messageId, F.formatResolvedApproval(entry.card, outcome, m.lang));
       }
@@ -1012,7 +1067,7 @@ export class TelegramBot {
       this.log('info', `Telegram: approval ${id} answered "${option}" by chat ${chatId}`);
       if (!tracked) {
         const outcome = F.formatOutcome({ answer: option, by: 'telegram' }, found.options, lang);
-        await this.edit(chatId, message.message_id, F.formatResolvedApproval(found.card, outcome, lang));
+        await this.editCard(chatId, message.message_id, F.formatResolvedApproval(found.card, outcome, lang), isPhotoMessage(message));
       }
     } else if (res === 'error') {
       await this.answerCb(cq.id, S.approvalRetry); // buttons stay: the approval is still pending
@@ -1030,8 +1085,13 @@ export class TelegramBot {
   private async showPastOutcome(chatId: number, message: TgMessage, id: string, lang: F.Lang): Promise<void> {
     const past = this.outcomes.get(id);
     if (!past) { await this.markCardExpired(chatId, message, lang); return; }
-    const outcome = F.formatOutcome(past.result, past.options, lang);
-    await this.edit(chatId, message.message_id, F.formatResolvedApproval(past.card, outcome, lang));
+    const outcome = past.card.handoff || past.card.category === 'challenge'
+      ? `<b>${F.formatHandoffOutcome(past.result, lang)}</b>`
+      : F.formatOutcome(past.result, past.options, lang);
+    const head = past.card.handoff || past.card.category === 'challenge'
+      ? F.formatHandoffCard({ host: past.card.handoff?.host, vendor: past.card.handoff?.vendor, missionId: past.card.missionId, prompt: past.card.prompt, step: !!past.card.handoff && !past.card.handoff.vendor && !past.card.handoff.frameBox }, lang)
+      : F.formatApproval(past.card, lang);
+    await this.editCard(chatId, message.message_id, `${head}\n\n${outcome}`, isPhotoMessage(message));
   }
 
   /** A text reply to an approval card ("yes", "بله", "no"...). */
@@ -1055,8 +1115,9 @@ export class TelegramBot {
 
   /** Remove the buttons from a card nobody can answer anymore. */
   private async markCardExpired(chatId: number, message: TgMessage, lang: F.Lang): Promise<void> {
-    const original = F.escapeHtml(F.truncate(message.text ?? '', 3500));
-    await this.edit(chatId, message.message_id, `${original}\n\n${F.formatOutcome(null, [], lang)}`);
+    const photo = isPhotoMessage(message);
+    const original = F.escapeHtml(F.truncate((photo ? message.caption : message.text) ?? '', photo ? 900 : 3500));
+    await this.editCard(chatId, message.message_id, `${original}\n\n${F.formatOutcome(null, [], lang)}`, photo);
   }
 
   private callbackIdFor(id: string): string {
@@ -1308,7 +1369,135 @@ export class TelegramBot {
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string): void {
-    try { this.logFn(level, this.api.redact(message)); } catch { /* logging must never break the bot */ }
+    // (hand-off link tokens too: they ride only in a card's URL button)
+    try { this.logFn(level, maskHandoffTokens(this.api.redact(message))); } catch { /* logging must never break the bot */ }
+  }
+
+  // ── hand-off cards ─────────────────────────────────────────────────────────
+
+  /**
+   * Hand-off card: a screenshot clipped to the challenge (when this process's browser
+   * shows it), Done / Can't-solve buttons and a URL button with the scoped one-tap
+   * link. Telegram refuses loopback / LAN URLs in buttons (BUTTON_URL_INVALID): the
+   * card then goes out without the button — plus the token-less Wi-Fi address when
+   * the link was a LAN one, never a loopback one — instead of failing 8 times.
+   */
+  private async deliverHandoffTo(entry: DeliveredApproval, chats: PairedChat[], cbId: string): Promise<void> {
+    await this.prepareHandoff(entry);
+    for (const chat of chats) {
+      if (!this.isLive(entry)) return;
+      const lang = F.langOf(chat.lang);
+      const sent = await this.sendHandoffCard(chat.chatId, entry, cbId, lang);
+      if (sent) {
+        entry.messages.push({ chatId: chat.chatId, messageId: sent.messageId, lang, photo: sent.photo });
+        entry.failed.delete(chat.chatId);
+        continue;
+      }
+      const attempts = (entry.failed.get(chat.chatId)?.attempts ?? 0) + 1;
+      entry.failed.set(chat.chatId, { attempts, nextTry: this.now() + Math.min(60_000, this.tickMs * 2 ** (attempts - 1)) });
+      if (attempts === MAX_DELIVERY_ATTEMPTS) {
+        this.log('warn', `Telegram: giving up delivering hand-off ${entry.id} to chat ${chat.chatId} after ${attempts} attempts (/approvals re-sends it)`);
+      }
+    }
+  }
+
+  /** Screenshot + link, once per hand-off (every chat gets the same). Only for THIS process's browser. */
+  private prepareHandoff(entry: DeliveredApproval): Promise<void> {
+    const h = entry.handoff!;
+    if (!h.prepared) {
+      h.prepared = (async () => {
+        // A detached mission's hand-off lives in another process: this bot's browser and
+        // control center are not the ones it needs.
+        if (entry.source !== 'broker') { h.photo = null; h.link = null; return; }
+        h.photo = await this.handoffPhoto(h.meta);
+        h.link = h.meta ? await this.handoffLinkFor(h.meta) : null;
+      })().catch(() => { h.photo ??= null; h.link ??= null; });
+    }
+    return h.prepared;
+  }
+
+  private async handoffPhoto(meta: HandoffMeta | null): Promise<Buffer | null> {
+    const mgr = this.safeBrowser();
+    try {
+      if (!mgr || !mgr.isRunning()) return null;
+      const clip = meta?.frameBox ? padClip(meta.frameBox) : undefined;
+      const jpeg = await withTimeout(
+        Promise.resolve().then(() => mgr.screenshotJpeg(70, clip ? { clip } : undefined)),
+        this.screenshotTimeoutMs,
+        '[SCREENSHOT_TIMEOUT] The browser did not return a screenshot in time.',
+      );
+      return Buffer.isBuffer(jpeg) && jpeg.length > 0 ? jpeg : null;
+    } catch (err) {
+      this.log('warn', `Telegram: hand-off screenshot failed: ${firstLine(errMsg(err))}`);
+      return null;
+    }
+  }
+
+  private async handoffLinkFor(meta: HandoffMeta): Promise<TelegramHandoffLink | null> {
+    try {
+      const ttlMs = Math.round((meta.linkTtlSec ?? 600) * 1000);
+      const link = await withTimeout(this.handoffLinkFn(meta.id, ttlMs), 60_000, '[HANDOFF_LINK_TIMEOUT] No hand-off link in time.');
+      return link && typeof link.url === 'string' && /^https?:\/\//i.test(link.url) ? link : null;
+    } catch (err) {
+      this.log('warn', `Telegram: no hand-off link: ${firstLine(errMsg(err))}`);
+      return null;
+    }
+  }
+
+  private async sendHandoffCard(chatId: number, entry: DeliveredApproval, cbId: string, lang: F.Lang): Promise<{ messageId: number; photo: boolean } | null> {
+    const h = entry.handoff!;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const link = h.link && !h.linkRejected ? h.link : null;
+      const ttlMin = link
+        ? Math.max(1, Math.round(((link.expiresAt ?? this.now() + (h.meta?.linkTtlSec ?? 600) * 1000) - this.now()) / 60_000))
+        : undefined;
+      const caption = F.formatHandoffCard(
+        { host: h.meta?.host, vendor: h.meta?.vendor, missionId: h.missionId, prompt: h.prompt, step: !!h.meta && !h.meta.vendor && !h.meta.frameBox },
+        lang,
+        { linkTtlMin: ttlMin, lanUrl: link ? undefined : h.lanUrl, local: !link && !h.lanUrl && entry.source === 'broker' },
+      );
+      const replyMarkup = F.handoffKeyboard(cbId, entry.options, lang, link?.url);
+      try {
+        if (h.photo) {
+          const m = await this.withRetry(() => this.api.sendPhoto(chatId, h.photo!, { caption, replyMarkup, filename: 'qodex-check.jpg' }));
+          return { messageId: m.message_id, photo: true };
+        }
+        const m = await this.withRetry(() => this.api.sendMessage(chatId, caption, { replyMarkup }));
+        return { messageId: m.message_id, photo: false };
+      } catch (err) {
+        if (err instanceof TelegramApiError && err.isButtonUrlInvalid && link) {
+          h.linkRejected = true;
+          try { link.revoke?.(); } catch { /* already gone */ }
+          if (link.base === 'lan' && link.plainUrl) h.lanUrl = link.plainUrl;
+          this.log('info', `Telegram refused the hand-off link button (${link.base} address); sending the card without it`);
+          continue;
+        }
+        if (err instanceof TelegramApiError && h.photo && err.status === 400) {
+          h.photo = null; // a photo Telegram won't take: the card still goes out as text
+          continue;
+        }
+        this.log('warn', `Telegram hand-off card to ${chatId} failed: ${this.api.redact(errMsg(err))}`);
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /** Edit a card's text — or a photo card's caption — removing its keyboard; a photo that can't be edited is deleted. Never throws. */
+  private async editCard(chatId: number, messageId: number, html: string, photo: boolean): Promise<void> {
+    if (!photo) { await this.edit(chatId, messageId, html); return; }
+    const plain = F.htmlToPlain(html);
+    try {
+      if (plain.length > F.MAX_CAPTION_CHARS - 24) await this.withRetry(() => this.api.editMessageCaption(chatId, messageId, F.truncate(plain, F.MAX_CAPTION_CHARS - 24), { parseMode: null }));
+      else await this.withRetry(() => this.api.editMessageCaption(chatId, messageId, html));
+    } catch (err) {
+      if (err instanceof TelegramApiError && err.isNotModified) return;
+      try {
+        await this.withRetry(() => this.api.deleteMessage(chatId, messageId));
+      } catch (err2) {
+        this.log('warn', `Telegram: retracting card ${chatId}/${messageId} failed: ${this.api.redact(errMsg(err2))}`);
+      }
+    }
   }
 }
 
@@ -1316,7 +1505,22 @@ export class TelegramBot {
 
 function brokerCard(p: PendingApproval): F.ApprovalCardInput {
   const missionId = typeof p.meta?.missionId === 'string' ? p.meta.missionId : undefined;
-  return { id: p.id, prompt: p.prompt, options: p.options, category: p.category, risk: p.risk, source: p.source, missionId };
+  const handoff = handoffMetaOf(p.meta);
+  return { id: p.id, prompt: p.prompt, options: p.options, category: p.category, risk: p.risk, source: p.source, missionId, ...(handoff ? { handoff } : {}) };
+}
+
+/** A photo message (a hand-off card) is edited through its caption. */
+function isPhotoMessage(m: TgMessage): boolean {
+  return m.text === undefined && m.caption !== undefined;
+}
+
+/** The challenge box with some context around it (and a sane minimum), for the card's screenshot. PURE. */
+export function padClip(box: HandoffFrameBox, margin = 24): ScreenshotClip {
+  const w = Math.max(320, box.width + margin * 2);
+  const h = Math.max(160, box.height + margin * 2);
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  return { x: Math.max(0, Math.round(cx - w / 2)), y: Math.max(0, Math.round(cy - h / 2)), width: Math.round(w), height: Math.round(h) };
 }
 
 /** A mission approval row without usable options gets the broker's default ['yes','no'] (never an empty keyboard). */

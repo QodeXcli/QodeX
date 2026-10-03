@@ -40,3 +40,6 @@ export {
   type ControlAuth,
 } from './server.js';
 export { renderDashboard, DASHBOARD_STRINGS, type DashboardLang, type DashboardOptions } from './dashboard.js';
+// Human hand-offs (CAPTCHA / bot checks): scoped short-lived live-view links and helpers.
+export { mintHandoffLink, handoffCookieName, type HandoffLink } from './server.js';
+export * from './handoff.js';

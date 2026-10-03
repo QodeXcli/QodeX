@@ -80,6 +80,8 @@ import {
   type BrowserActionRecord,
   type HumanInputEvent,
   type LaunchOverrides,
+  type ScreenshotClip,
+  HUMAN_HOLD_MAX_MS,
 } from './types.js';
 
 type Page = any;
@@ -627,9 +629,8 @@ export class QodexBrowserManager implements BrowserManager {
   private hostLast = new Map<string, number>();
   /** Consecutive agent loads of a URL (origin + path) that ended on a challenge. */
   private challengeLoads = new Map<string, number>();
-  /** A human press-and-hold in progress (relayed 'down'): forced 'up' after HOLD_CAP_MS. */
-  private hold: { page: Page; button: 'left' | 'right' | 'middle'; timer: NodeJS.Timeout } | null = null;
-  static readonly HOLD_CAP_MS = 20_000;
+  /** Longest a relayed human press-and-hold lasts before the manager forces the 'up'. */
+  static HOLD_CAP_MS = HUMAN_HOLD_MAX_MS;
 
   private actionListeners = new Set<(rec: BrowserActionRecord) => void>();
   private events = new EventEmitter();
@@ -833,7 +834,7 @@ export class QodexBrowserManager implements BrowserManager {
       this.stopChallengeTimers(st);
     }
     for (const sub of this.casts) { sub.session = null; sub.page = null; }
-    if (this.hold) { clearTimeout(this.hold.timer); this.hold = null; }
+    if (this.humanHold) { clearTimeout(this.humanHold.timer); this.humanHold = null; }
     this.ctx = null;
     this.cdpBrowser = null;
     this.mode = 'none';
@@ -1765,19 +1766,24 @@ export class QodexBrowserManager implements BrowserManager {
     return { ...(this.launchedCfg ?? this.currentConfig()).viewport };
   }
 
-  /**
-   * One JPEG of the active tab's viewport — or only `clip` (viewport CSS px, e.g. a
-   * hand-off's challenge frameBox, so a phone card shows the widget and nothing else).
-   */
-  async screenshotJpeg(quality = 70, opts: { clip?: { x: number; y: number; width: number; height: number } } = {}): Promise<Buffer> {
+  async screenshotJpeg(quality = 70, opts: { clip?: ScreenshotClip } = {}): Promise<Buffer> {
     if (!this.ctx || !this.activeTab) throw new Error('[BROWSER_ERROR] The QodeX browser is not running.');
-    const q = Math.min(100, Math.max(1, Math.round(quality)));
-    const c = opts.clip;
-    if (c && [c.x, c.y, c.width, c.height].every(n => Number.isFinite(n)) && c.width >= 1 && c.height >= 1) {
-      const clip = { x: Math.max(0, c.x), y: Math.max(0, c.y), width: Math.round(c.width), height: Math.round(c.height) };
-      return this.activeTab.page.screenshot({ type: 'jpeg', quality: q, clip });
-    }
-    return this.activeTab.page.screenshot({ type: 'jpeg', quality: q });
+    const page = this.activeTab.page;
+    const q = Math.min(100, Math.max(1, Math.round(Number.isFinite(quality) ? quality : 70)));
+    const clip = opts.clip ? clampClip(opts.clip, await this.viewportOf(page)) : null;
+    return page.screenshot(clip ? { type: 'jpeg', quality: q, clip } : { type: 'jpeg', quality: q });
+  }
+
+  /** The mouse button a human is holding through the live view (press-and-hold / drag). */
+  private humanHold: { page: Page; button: 'left' | 'right' | 'middle'; timer: NodeJS.Timeout } | null = null;
+
+  /** Release the button the human holds (lost 'up', takeover ended, hold cap). Never throws. */
+  async releaseHumanMouse(): Promise<void> {
+    const hold = this.humanHold;
+    if (!hold) return;
+    this.humanHold = null;
+    clearTimeout(hold.timer);
+    try { await hold.page.mouse.up({ button: hold.button }); } catch { /* page gone */ }
   }
 
   // ── takeover / human input ────────────────────────────────────────────────
@@ -1876,25 +1882,29 @@ export class QodexBrowserManager implements BrowserManager {
         await page.mouse.move(p.x, p.y);
         return;
       }
+      // The human's own press-and-hold / drag, relayed one event at a time. Not
+      // recorded as workflow steps (a hold on a bot check is never a replayable step).
       case 'down': {
-        // Only ever the human's own gesture (control-center live view). One hold at a time.
-        await this.releaseHold();
+        await this.releaseHumanMouse(); // a lost 'up' must not leave a button stuck
         const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
         const button = ev.button ?? 'left';
         await page.mouse.move(p.x, p.y);
         await page.mouse.down({ button });
-        const timer = setTimeout(() => { void this.releaseHold().catch(() => {}); }, QodexBrowserManager.HOLD_CAP_MS);
-        (timer as any).unref?.();
-        this.hold = { page, button, timer };
+        const timer = setTimeout(() => { void this.releaseHumanMouse(); }, QodexBrowserManager.HOLD_CAP_MS);
+        timer.unref?.();
+        this.humanHold = { page, button, timer };
         return;
       }
       case 'up': {
+        const hold = this.humanHold;
+        this.humanHold = null;
+        if (hold) clearTimeout(hold.timer);
+        const target = hold?.page ?? page;
         if (ev.x !== undefined && ev.y !== undefined) {
           const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
-          await page.mouse.move(p.x, p.y);
+          try { await target.mouse.move(p.x, p.y); } catch { /* still release below */ }
         }
-        if (this.hold) await this.releaseHold();
-        else await page.mouse.up({ button: ev.button ?? 'left' });
+        await target.mouse.up({ button: ev.button ?? hold?.button ?? 'left' });
         return;
       }
       case 'type': {
@@ -1934,15 +1944,6 @@ export class QodexBrowserManager implements BrowserManager {
         return;
       }
     }
-  }
-
-  /** End a relayed press-and-hold (the 'up', the hold cap, or a new 'down'). */
-  private async releaseHold(): Promise<void> {
-    const h = this.hold;
-    if (!h) return;
-    this.hold = null;
-    clearTimeout(h.timer);
-    try { await h.page.mouse.up({ button: h.button }); } catch { /* page gone */ }
   }
 
   // ── action feed ───────────────────────────────────────────────────────────
@@ -2074,4 +2075,15 @@ export async function isPlaywrightAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** A screenshot clip inside the viewport (≥ 1px, whole pixels), or null when it misses it. PURE. */
+export function clampClip(clip: ScreenshotClip, vp: { width: number; height: number }): ScreenshotClip | null {
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+  const x0 = Math.max(0, Math.floor(n(clip?.x)));
+  const y0 = Math.max(0, Math.floor(n(clip?.y)));
+  const x1 = Math.min(vp.width, Math.ceil(n(clip?.x) + n(clip?.width)));
+  const y1 = Math.min(vp.height, Math.ceil(n(clip?.y) + n(clip?.height)));
+  if (![x0, y0, x1, y1].every(Number.isFinite) || x1 - x0 < 1 || y1 - y0 < 1) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
