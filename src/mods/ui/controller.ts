@@ -15,7 +15,7 @@ import { MOD_LIMITS, type ModElement, type ModRenderSite, type ModSurface } from
 import { getModsUiHost, onModsUiHostChange, type ModRenderOutput, type ModRenderRequest, type ModsUiHost, type ModUiEvent } from './host.js';
 import { cleanText, collectButtons, validateModTree, type ModButtonRef } from './validate.js';
 
-export interface ModHistoryLine { kind: 'log' | 'notice'; plugin: string; text: string }
+export interface ModHistoryLine { kind: 'log' | 'notice' | 'error'; plugin: string; text: string }
 
 export type ModsFocus = { kind: 'pane'; id: string } | { kind: 'band' };
 
@@ -73,6 +73,8 @@ const MAX_LINE_CHARS = 2000;
 export interface ModsUiControllerOptions {
   /** A log/notice line (or a refused-tree line) for the transcript. */
   onHistory: (line: ModHistoryLine) => void;
+  /** $.prompt.submit from a mod: queue it as the next prompt. Without it, prompts are dropped. */
+  onPrompt?: (p: { plugin: string; text: string; asUser: boolean }) => void;
   surface?: ModSurface;
   now?: () => number;
 }
@@ -214,17 +216,26 @@ export class ModsUiController {
         this.addToast(ev.plugin, ev.text, ev.timeoutMs);
         return;
       case 'log':
-      case 'notice': {
+      case 'notice':
+      case 'error': {
         const text = cleanText(String(ev.text ?? '')).trim().slice(0, MAX_LINE_CHARS);
         if (text) this.history({ kind: ev.kind, plugin: ev.plugin, text });
         return;
       }
       case 'open':
+      case 'pane.open':
         this.openPane(ev);
         return;
       case 'close':
+      case 'pane.close':
         this.removePane(ev.id, false);
         return;
+      case 'prompt': {
+        const text = String(ev.text ?? '').trim();
+        if (!text) return;
+        try { this.opts.onPrompt?.({ plugin: ev.plugin, text, asUser: ev.asUser === true }); } catch { /* ignore */ }
+        return;
+      }
       case 'invalidate':
         this.invalidate();
         return;
@@ -261,7 +272,7 @@ export class ModsUiController {
     if (publish) this.publish();
   }
 
-  private openPane(ev: Extract<ModUiEvent, { kind: 'open' }>): void {
+  private openPane(ev: Extract<ModUiEvent, { kind: 'open' | 'pane.open' }>): void {
     if (typeof ev.id !== 'string' || !MOD_LIMITS.nameRe.test(ev.id)) return;
     const pane = {
       id: ev.id,

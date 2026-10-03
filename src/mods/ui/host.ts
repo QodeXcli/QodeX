@@ -28,7 +28,17 @@ export type ModUiEvent =
   /** $.ui.invalidate(): run the ui.render hooks again (the TUI throttles to 10/s). No plugin = everything. */
   | { kind: 'invalidate'; plugin?: string }
   /** A mod was unloaded, disabled or is reloading: drop its status line, panes and refusal memory. */
-  | { kind: 'unload'; plugin: string };
+  | { kind: 'unload'; plugin: string }
+  /** Aliases of open / close (the names the runtime's bus uses); handled the same way. */
+  | { kind: 'pane.open'; plugin: string; id: string; title?: string; rows?: number; focus?: boolean; closeOnEscape?: boolean }
+  | { kind: 'pane.close'; plugin: string; id: string }
+  /** A hook failed or a mod did not load: a red history line. The model never reads it. */
+  | { kind: 'error'; plugin: string; text: string }
+  /**
+   * $.prompt.submit: the TUI queues `text` as the next prompt (it runs once the session is
+   * idle). The runtime has already added the "[from mod <name>]" line unless asUser.
+   */
+  | { kind: 'prompt'; plugin: string; text: string; asUser?: boolean };
 
 /** One `ui.render` request for a site, as the TUI asks for it. */
 export interface ModRenderRequest {

@@ -78,7 +78,7 @@ type HistoryItem =
   | { type: 'system'; text: string; id: string }
   | { type: 'error'; text: string; id: string }
   /** $.ui.log / $.ui.notice from a mod: display only, never part of the model's messages. */
-  | { type: 'mod'; kind: 'log' | 'notice'; plugin: string; text: string; id: string };
+  | { type: 'mod'; kind: 'log' | 'notice' | 'error'; plugin: string; text: string; id: string };
 
 const EDIT_DIFF_TOOLS = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
 
@@ -266,6 +266,15 @@ export function App(props: AppProps): React.ReactElement {
   const mods = useModsUiController({
     busy, columns: cols, rows, promptEmpty: input === '', mode,
     onHistory: line => setHistory(h => [...h, { type: 'mod', ...line, id: nextId() }]),
+    // $.prompt.submit: queued like a typed prompt, so it runs when the agent is free.
+    // Never as a slash command — a mod does not get to type /auto or /mode for the user.
+    onPrompt: p => {
+      if (p.text.startsWith('/')) {
+        setHistory(h => [...h, { type: 'mod', kind: 'error', plugin: p.plugin, text: 'prompt.submit refused: a mod cannot run slash commands', id: nextId() }]);
+        return;
+      }
+      setQueued(q => [...q, p.text]);
+    },
   });
 
   // Throttle the live streaming region: setting state on every text_delta (one per

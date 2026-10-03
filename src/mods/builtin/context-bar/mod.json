@@ -2,5 +2,5 @@
   "name": "context-bar",
   "description": "/context-bar shows what fills the context window: a stacked bar above the prompt, one color per kind of context",
   "version": "1.0.0",
-  "enabledByDefault": true
+  "defaultEnabled": true
 }

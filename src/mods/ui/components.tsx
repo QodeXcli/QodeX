@@ -25,10 +25,18 @@ export interface ModsUiBinding {
  * follows the registered mods host, kept told of the busy state, terminal size, prompt
  * emptiness and mode. `onHistory` receives $.ui.log / $.ui.notice lines (and refusals).
  */
-export function useModsUiController(opts: ModsUiContext & { onHistory: (line: ModHistoryLine) => void }): ModsUiBinding {
+export function useModsUiController(opts: ModsUiContext & {
+  onHistory: (line: ModHistoryLine) => void;
+  onPrompt?: (p: { plugin: string; text: string; asUser: boolean }) => void;
+}): ModsUiBinding {
   const onHistory = useRef(opts.onHistory);
   onHistory.current = opts.onHistory;
-  const [ctl] = useState(() => new ModsUiController({ onHistory: line => onHistory.current(line) }));
+  const onPrompt = useRef(opts.onPrompt);
+  onPrompt.current = opts.onPrompt;
+  const [ctl] = useState(() => new ModsUiController({
+    onHistory: line => onHistory.current(line),
+    onPrompt: p => onPrompt.current?.(p),
+  }));
   useEffect(() => ctl.start(), [ctl]);
   const { busy, columns, rows, promptEmpty, mode } = opts;
   useEffect(() => {
@@ -150,9 +158,10 @@ export function ModsSpinnerWord(props: { spinner: ModsUiSnapshot['spinner']; wor
   return own;
 }
 
-/** A transcript line from $.ui.log ("● mod: …", dim) or $.ui.notice ("💡 mod: …"). */
+/** A transcript line from $.ui.log ("● mod: …", dim), $.ui.notice ("💡 mod: …") or a mod error (red). */
 export function ModHistoryLineView(props: { line: ModHistoryLine }): React.ReactElement {
   const { kind, plugin, text } = props.line;
+  if (kind === 'error') return <Text color="red" dimColor>● {plugin}: {text}</Text>;
   if (kind === 'notice') {
     return (
       <Text>

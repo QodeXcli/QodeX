@@ -152,6 +152,11 @@ describe('mods UI in the TUI', () => {
       await app.press('h');
       await app.press('i');
       await until(() => /❯ hi\s/.test(app.frame()), 'typing in the prompt');
+
+      // A mod may queue a prompt, but never a slash command.
+      f.emit({ kind: 'prompt', plugin: 'hello', text: '/auto auto', asUser: true });
+      await until(() => app.frame().includes('prompt.submit refused'), 'the refusal line');
+      expect(app.frame()).not.toContain('queued');
     } finally {
       app.unmount();
       setModsUiHost(null);

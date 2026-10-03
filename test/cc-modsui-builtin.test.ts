@@ -161,13 +161,13 @@ describe('built-in mod dirs', () => {
       const m = JSON.parse(fs.readFileSync(path.join(BUILTIN, n, 'mod.json'), 'utf8'));
       expect(m.name).toBe(n);
       expect(typeof m.description).toBe('string');
-      expect(typeof m.enabledByDefault).toBe('boolean');
+      expect(typeof m.defaultEnabled).toBe('boolean');
       expect(fs.existsSync(path.join(BUILTIN, n, 'register.js'))).toBe(true);
     }
   });
 
   it('defaults: context-bar on, you-should-know and sample-hello off', () => {
-    const on = (n: string) => JSON.parse(fs.readFileSync(path.join(BUILTIN, n, 'mod.json'), 'utf8')).enabledByDefault;
+    const on = (n: string) => JSON.parse(fs.readFileSync(path.join(BUILTIN, n, 'mod.json'), 'utf8')).defaultEnabled;
     expect([on('context-bar'), on('you-should-know'), on('sample-hello')]).toEqual([true, false, false]);
   });
 

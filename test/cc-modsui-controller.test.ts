@@ -381,3 +381,33 @@ describe('chord, sanitizing and repaint economy', () => {
     expect(ctl.getSnapshot().band).toHaveLength(1);
   });
 });
+
+describe("the runtime bus's names", () => {
+  it('pane.open / pane.close work like open / close; error lines go to the transcript', async () => {
+    const f = fakeHost();
+    f.sites['Pane:p'] = { trees: [{ plugin: 'm', tree: Text('body') }] };
+    ctl.attach(f.host);
+    f.emit({ kind: 'pane.open', plugin: 'm', id: 'p', title: 'P', closeOnEscape: true });
+    await flush();
+    expect(ctl.getSnapshot().panes).toMatchObject([{ id: 'p', title: 'P', closeOnEscape: true, tree: { type: 'Text' } }]);
+    f.emit({ kind: 'pane.close', plugin: 'm', id: 'p' });
+    expect(ctl.getSnapshot().panes).toEqual([]);
+    f.emit({ kind: 'error', plugin: 'm', text: 'tool.call hook skipped: threw boom' });
+    expect(history).toEqual([{ kind: 'error', plugin: 'm', text: 'tool.call hook skipped: threw boom' }]);
+  });
+
+  it('prompt events reach onPrompt (and are dropped without one)', async () => {
+    const prompts: unknown[] = [];
+    const withPrompt = new ModsUiController({ onHistory: () => {}, onPrompt: p => prompts.push(p) });
+    const f = fakeHost();
+    withPrompt.attach(f.host);
+    f.emit({ kind: 'prompt', plugin: 'm', text: '[from mod m]\nrun the tests', asUser: false });
+    f.emit({ kind: 'prompt', plugin: 'm', text: '   ' });
+    expect(prompts).toEqual([{ plugin: 'm', text: '[from mod m]\nrun the tests', asUser: false }]);
+    withPrompt.dispose();
+    const g = fakeHost();
+    ctl.attach(g.host);
+    expect(() => g.emit({ kind: 'prompt', plugin: 'm', text: 'x' })).not.toThrow();
+  });
+});
+
