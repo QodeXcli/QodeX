@@ -96,7 +96,7 @@ export function redactToken(text: string, token?: string): string {
   return out.replace(TOKEN_SHAPE, (_m, bot) => (bot ? 'bot<redacted>' : '<redacted>'));
 }
 
-/** Mask a token for display: `123456:AB…(redacted)`. Never returns the secret part. */
+/** Mask a token for display: `123456:…(redacted)`. Never returns the secret part. */
 export function maskToken(token: string): string {
   const t = String(token ?? '').trim();
   if (!t) return '(not set)';
