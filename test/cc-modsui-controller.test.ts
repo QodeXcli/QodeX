@@ -117,6 +117,34 @@ describe('rendering', () => {
     expect(ctl.getSnapshot().band).toEqual([]);
   });
 
+  it('a site that never answers does not freeze the others; it keeps what it showed', async () => {
+    const f = fakeHost();
+    let label = 'band 1';
+    let paneHangs = false;
+    f.sites.AbovePrompt = () => ({ trees: [{ plugin: 'fast', tree: Text(label) }] });
+    const realRender = f.host.renderSite.bind(f.host);
+    f.host.renderSite = (req) => (paneHangs && req.component === 'Pane' ? new Promise(() => {}) : realRender(req));
+    f.sites['Pane:slow'] = { trees: [{ plugin: 'slow', tree: Text('pane body') }] };
+    ctl.attach(f.host);
+    f.emit({ kind: 'open', plugin: 'slow', id: 'slow' });
+    await flush();
+    expect(ctl.getSnapshot().panes[0]!.tree).toMatchObject({ children: ['pane body'] });
+
+    // The pane's hook now awaits something slow (a fetch, a model call…).
+    paneHangs = true;
+    label = 'band 2';
+    ctl.invalidate();
+    await flush(2500);
+    const band = ctl.getSnapshot().band[0]!.tree as Extract<ModElement, { type: 'Text' }>;
+    expect(band.children).toEqual(['band 2']);
+    expect(ctl.getSnapshot().panes[0]!.tree).toMatchObject({ children: ['pane body'] });
+    // And redraws keep coming.
+    label = 'band 3';
+    ctl.invalidate();
+    await flush(2500);
+    expect((ctl.getSnapshot().band[0]!.tree as Extract<ModElement, { type: 'Text' }>).children).toEqual(['band 3']);
+  });
+
   it('spinner: suffix from the engine props while busy, nothing when idle', async () => {
     const f = fakeHost();
     f.sites.Spinner = { trees: [{ plugin: 'engine', tree: { type: 'engine', ref: 'Spinner' } }], engineProps: { suffix: ' · tool calls: 3…' } };

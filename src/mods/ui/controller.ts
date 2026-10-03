@@ -68,6 +68,12 @@ const EMPTY: ModsUiSnapshot = Object.freeze({
 
 const REDRAW_MS = Math.ceil(1000 / MOD_LIMITS.redrawPerSecond);
 const CHORD_MS = 1500;
+/**
+ * How long one site's ui.render chain may take before this pass moves on without it.
+ * Time a hook spends inside $ calls ($.http.fetch, $.model.complete…) is not part of its
+ * own 10 s budget, so a slow hook could otherwise hold every mod's drawing for minutes.
+ */
+const SITE_MS = 2000;
 const MAX_TOASTS = 3;
 const MAX_STATUS_CHARS = 300;
 const MAX_LINE_CHARS = 2000;
@@ -377,12 +383,21 @@ export class ModsUiController {
     const { columns, rows, busy } = this.ctx;
     const viewport = { columns, rows };
     const bodyColumns = Math.max(10, columns - 2);
-    const call = async (req: ModRenderRequest): Promise<ModRenderOutput> => {
+    // null = the site did not answer in time: it keeps what it shows now.
+    const call = async (req: ModRenderRequest): Promise<ModRenderOutput | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const out = await host.renderSite(req);
+        const late = new Promise<null>(resolve => {
+          timer = setTimeout(() => resolve(null), SITE_MS);
+          (timer as { unref?: () => void }).unref?.();
+        });
+        const out = await Promise.race([Promise.resolve(host.renderSite(req)).catch(() => undefined), late]);
+        if (out === null) return null;
         return out && Array.isArray(out.trees) ? out : { trees: [] };
       } catch {
         return { trees: [] };
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     };
     const panes = [...this.panes];
@@ -390,7 +405,7 @@ export class ModsUiController {
       call({ component: 'AbovePrompt', surface: this.surface, props: { isWorking: busy, maxRows: this.bandMaxRows(), bodyColumns }, viewport }),
       busy
         ? call({ component: 'Spinner', surface: this.surface, props: { word: 'crafting', message: '', suffix: '', mode: this.ctx.mode ?? 'normal' }, viewport })
-        : Promise.resolve<ModRenderOutput>({ trees: [] }),
+        : Promise.resolve<ModRenderOutput | null>({ trees: [] }),
       ...panes.map(p => call({
         component: 'Pane', requestId: p.id, surface: this.surface,
         props: { title: p.title, isFocused: this.focus?.kind === 'pane' && this.focus.id === p.id, bodyColumns: Math.max(10, columns - 4), placement: 'inline' },
@@ -399,22 +414,26 @@ export class ModsUiController {
     ]);
     if (this.disposed || host !== this.host) return;
 
-    const band: Array<{ plugin: string; tree: ModElement }> = [];
-    for (const t of bandOut!.trees) {
-      const tree = this.accept(t.plugin, 'AbovePrompt', t.tree);
-      if (tree && tree.type !== 'engine') band.push({ plugin: t.plugin, tree });
+    if (bandOut) {
+      const band: Array<{ plugin: string; tree: ModElement }> = [];
+      for (const t of bandOut.trees) {
+        const tree = this.accept(t.plugin, 'AbovePrompt', t.tree);
+        if (tree && tree.type !== 'engine') band.push({ plugin: t.plugin, tree });
+      }
+      this.band = band;
     }
-    this.band = band;
 
     panes.forEach((p, i) => {
       if (!this.panes.some(x => x.id === p.id)) return; // closed meanwhile
-      const out = paneOuts[i]!;
+      const out = paneOuts[i];
+      if (!out) return; // too slow this pass: keep what it shows
       const pick = out.trees.find(t => t.plugin === p.plugin) ?? out.trees[0];
       const tree = pick ? this.accept(pick.plugin, 'Pane', pick.tree) : null;
       this.paneTrees.set(p.id, tree && tree.type !== 'engine' ? tree : null);
     });
 
-    this.spinner = busy ? this.spinnerFrom(spinnerOut!) : null;
+    if (!busy) this.spinner = null;
+    else if (spinnerOut) this.spinner = this.spinnerFrom(spinnerOut);
     const focusBefore = `${JSON.stringify(this.focus)}\u0000${this.focusedPlugin}\u0000${this.focusedKey}`;
     this.fixFocus();
     // Most passes redraw the same thing (a mod invalidating on every tool result): only

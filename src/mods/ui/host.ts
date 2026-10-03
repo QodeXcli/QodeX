@@ -72,7 +72,11 @@ export interface ModRenderOutput {
 export interface ModsUiHost {
   /** Listen to the UI bus. Returns the unsubscribe function. */
   subscribe(listener: (ev: ModUiEvent) => void): () => void;
-  /** Run the `ui.render` hooks for one site. Must not reject (resolve `{ trees: [] }` on failure). */
+  /**
+   * Run the `ui.render` hooks for one site. Must not reject (resolve `{ trees: [] }` on
+   * failure). The TUI waits at most 2 s for a site; a later answer is dropped and the
+   * site keeps what it showed, so one slow hook never holds the other mods' drawing.
+   */
   renderSite(req: ModRenderRequest): Promise<ModRenderOutput>;
   /**
    * A Button the mod drew was pressed (hotkey or Enter): fire `ui.press` through the chain,
