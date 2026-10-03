@@ -153,6 +153,8 @@ export class TelegramApiError extends Error {
   }
   /** Telegram could not parse our HTML entities (fall back to plain text). */
   get isParseError(): boolean { return this.status === 400 && /parse entities|can't parse|unsupported start tag/i.test(this.description); }
+  /** Text over 4096 characters (after entity parsing) — resend shortened. */
+  get isTooLong(): boolean { return this.status === 400 && /too long/i.test(this.description); }
   /** editMessageText with identical content — harmless. */
   get isNotModified(): boolean { return this.status === 400 && /message is not modified/i.test(this.description); }
 }
@@ -262,11 +264,20 @@ export class TelegramApi {
   private readonly base: string;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
+  /** Last HTTP `Date` header from the API and the local time it arrived. */
+  private serverDateMs: number | null = null;
+  private serverDateAt = 0;
 
   constructor(opts: TelegramApiOptions) {
     const token = String(opts.token ?? '').trim();
     if (!token) throw new Error('[TELEGRAM_NOT_CONFIGURED] No bot token. Run `qodex telegram setup`.');
     if (/[\s/?#]/.test(token)) throw new Error('[TELEGRAM_BAD_TOKEN] The bot token contains invalid characters.');
+    // The token travels in every request URL. `telegram.botTokenEnv` / `apiBase` can come
+    // from a project's .qodex/config.yaml, so never send a value that is not even shaped
+    // like a bot token (an API key in another env var) anywhere.
+    if (!looksLikeBotToken(token)) {
+      throw new Error('[TELEGRAM_BAD_TOKEN] The configured bot token is not shaped like a @BotFather token (<digits>:<secret>). Check telegram.botTokenEnv, or run `qodex telegram setup`.');
+    }
     this.token = token;
     const base = (opts.apiBase || 'https://api.telegram.org').trim().replace(/\/+$/, '');
     if (!/^https?:\/\//i.test(base)) throw new Error(`[TELEGRAM_BAD_CONFIG] telegram.apiBase must be an http(s) URL, got "${redactToken(base, token)}".`);
@@ -278,6 +289,16 @@ export class TelegramApi {
   /** Redact this client's token from any text. */
   redact(text: string): string {
     return redactToken(text, this.token);
+  }
+
+  /**
+   * Telegram's clock (from the last response's `Date` header), advanced by the
+   * local time elapsed since. null before any response carried one. Message
+   * `date`s are server time, so age checks must not use a possibly skewed
+   * local clock.
+   */
+  serverNow(): number | null {
+    return this.serverDateMs === null ? null : this.serverDateMs + (Date.now() - this.serverDateAt);
   }
 
   getMe(signal?: AbortSignal): Promise<TgUser> {
@@ -388,6 +409,10 @@ export class TelegramApi {
         const detail = timedOut ? `timed out after ${Math.round(timeoutMs / 1000)}s` : describeFetchError(err);
         throw new TelegramApiError({ method, status: 0, description: this.redact(detail) });
       }
+      try {
+        const t = Date.parse(res.headers?.get?.('date') ?? '');
+        if (Number.isFinite(t)) { this.serverDateMs = t; this.serverDateAt = Date.now(); }
+      } catch { /* informational only */ }
 
       let text = '';
       try {

@@ -179,6 +179,22 @@ describe('errors and token redaction', () => {
     expect((await api.editMessageText(1, 2, 'same').catch((e) => e)).isNotModified).toBe(true);
   });
 
+  it('tracks Telegram\'s clock from the Date header and flags over-long messages', async () => {
+    const serverMs = Date.parse('2026-01-02T03:04:05Z');
+    const { fetch } = fakeFetch((m) => m === 'getMe'
+      ? new Response(JSON.stringify({ ok: true, result: { id: 1 } }), { status: 200, headers: { Date: new Date(serverMs).toUTCString() } })
+      : new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message is too long' }), { status: 400 }));
+    const api = new TelegramApi({ token: TOKEN, fetch });
+    expect(api.serverNow()).toBeNull();
+    await api.getMe();
+    const now = api.serverNow()!;
+    expect(now).toBeGreaterThanOrEqual(serverMs);
+    expect(now - serverMs).toBeLessThan(5000);
+    const err = await api.sendMessage(1, 'x').catch((e) => e);
+    expect(err.isTooLong).toBe(true);
+    expect(err.isParseError).toBe(false);
+  });
+
   it('redactToken / maskToken / looksLikeBotToken', () => {
     expect(redactToken(`see https://api.telegram.org/bot${TOKEN}/getMe`)).toBe('see https://api.telegram.org/bot<redacted>/getMe');
     expect(redactToken(`token=${TOKEN}`, TOKEN)).toBe('token=<redacted>');

@@ -230,6 +230,22 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
       let code = 0;
       const ac = new AbortController();
       const onTerm = () => ac.abort();
+      // Ctrl+C. Node exits on SIGINT by itself only while NOTHING listens for it, and
+      // the CLI entry imports modules that do (the tool registry's process registry
+      // installs a cleanup listener that never exits) — which would leave "Press Ctrl+C
+      // to stop" doing nothing. So: when a listener already exists, stop the bot
+      // (confirming the update offset) and exit 130 ourselves; a second Ctrl+C exits at
+      // once. When none exists we add none, keeping Node's default.
+      let interrupted = false;
+      let force: NodeJS.Timeout | null = null;
+      const onInt = () => {
+        if (interrupted) { exit(130); return; }
+        interrupted = true;
+        ac.abort();
+        force = setTimeout(() => exit(130), 5000);
+        force.unref?.();
+      };
+      const ownSigint = process.listenerCount('SIGINT') > 0;
       try {
         const { cfg, env, raw } = await loadCtx();
         token = String(env[cfg.botTokenEnv] ?? '').trim();
@@ -246,8 +262,9 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         }
         const { startTelegramBot } = await import('./index.js');
         const stamp = () => new Date().toISOString().slice(11, 19);
-        // SIGTERM → graceful stop. Deliberately NO SIGINT listener: Ctrl+C must keep its default exit.
+        // SIGTERM → graceful stop.
         process.once('SIGTERM', onTerm);
+        if (ownSigint) process.on('SIGINT', onInt);
         const handle = await startTelegramBot({
           config: raw,
           env,
@@ -283,8 +300,10 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         code = 1;
       } finally {
         process.removeListener('SIGTERM', onTerm);
+        if (ownSigint) process.removeListener('SIGINT', onInt);
+        if (force) clearTimeout(force);
       }
-      exit(code);
+      exit(interrupted && code === 0 ? 130 : code);
     });
 
   // ── status ─────────────────────────────────────────────────────────────────

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   escapeHtml, langOf, esc, htmlToPlain, buildCallbackData, parseCallbackData, approvalKeyboard,
   formatApproval, formatOutcome, formatMissionNotice, formatSentinelNotice, formatMissionStatus,
-  formatMissionList, formatStatus, formatScreenCaption, strings, optionLabel, faDigits,
+  formatMissionList, formatStatus, formatScreenCaption, strings, optionLabel, faDigits, redactUrlSecrets,
+  MAX_MESSAGE_CHARS,
 } from '../src/channels/telegram/format.js';
 import { parseCommand, NotificationLimiter } from '../src/channels/telegram/bot.js';
 
@@ -122,6 +123,69 @@ describe('missions + status', () => {
     const fa = strings('fa') as Record<string, unknown>;
     expect(Object.keys(fa).sort()).toEqual(Object.keys(en).sort());
     expect(fa.help).toContain('کنترل از راه دور QodeX');
+  });
+});
+
+describe('review hardening', () => {
+  it('strips access keys and credentials from URLs', () => {
+    expect(redactUrlSecrets('http://127.0.0.1:7420/?k=abc123')).toBe('http://127.0.0.1:7420/');
+    expect(redactUrlSecrets('https://u:p@x.example/a?token=t&q=1#f')).toBe('https://x.example/a?q=1#f');
+    expect(redactUrlSecrets('not a url ?k=zzz')).toBe('not a url ');
+    expect(redactUrlSecrets('')).toBe('');
+    const detail = formatMissionStatus({ id: 'm_1', goal: 'g', status: 'running', liveUrl: 'http://127.0.0.1:7420/?k=SECRET' }, 'en');
+    expect(detail).toContain('Live view: http://127.0.0.1:7420/');
+    expect(detail).not.toContain('SECRET');
+  });
+
+  it('keeps a mission status under Telegram\'s limit by trimming the report', () => {
+    const detail = formatMissionStatus({
+      id: 'm_1', goal: 'g'.repeat(500), status: 'completed',
+      steps: Array.from({ length: 10 }, (_, i) => ({ title: `step ${i} ` + 'x'.repeat(100), status: 'done' })),
+      milestones: ['a', 'b'], report: '<r>'.repeat(3000),
+    }, 'en');
+    expect(htmlToPlain(detail).length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
+    expect(detail).toContain('<b>Report</b>');
+    expect(detail).toContain('&lt;r&gt;');
+  });
+
+  it('masks secrets in text that leaves the machine (approval prompts, mission reports, URLs)', () => {
+    const prompt = [
+      `Run: curl -H 'Authorization: Bearer abcDEF0123456789ghiJKL' https://api.example/pay`,
+      'export OPENAI_API_KEY=sk-proj-AbCdEf0123456789AbCdEf0123',
+      'mysql --password=hunter2hunter2',
+      'card 4111 1111 1111 1111 — قیمت ۲۷ اینچ',
+    ].join('\n');
+    const card = formatApproval({ id: 'ap_1', prompt, options: ['yes', 'no'] }, 'en');
+    for (const secret of ['abcDEF0123456789ghiJKL', 'AbCdEf0123456789AbCdEf0123', 'hunter2hunter2', '4111 1111 1111 1111']) {
+      expect(card).not.toContain(secret);
+    }
+    expect(card).toContain('Run: curl');
+    expect(card).toContain('https://api.example/pay');
+    expect(card).toContain('قیمت ۲۷ اینچ'); // the user's own digits are left alone
+    const done = formatMissionNotice('m_1', 'completed', { report: 'Paid with 4111111111111111, receipt sent' }, 'en')!;
+    expect(done.text).not.toContain('4111111111111111');
+    expect(done.text).toContain('receipt sent');
+    const st = formatStatus({
+      browser: { running: true, mode: 'launch', headless: true, profile: 'default', tabs: [{ title: 'Callback', url: 'https://app.example/cb?access_token=ya29.AbCdEfGhIjKlMnOpQrStUv', active: true }] },
+      activeMissions: [], pendingApprovals: 0,
+    }, 'en');
+    expect(st).not.toContain('ya29.AbCdEfGhIjKlMnOpQrStUv');
+    expect(formatScreenCaption('t', 'https://app.example/cb?access_token=ya29.AbCdEfGhIjKlMnOpQrStUv')).not.toContain('ya29.');
+  });
+
+  it('describes automatic expiries as cancelled, not as a human denial', () => {
+    for (const by of ['worker-exited', 'mission-ended', 'cancelled', 'expired', 'cancel', 'local-error']) {
+      expect(formatOutcome({ answer: 'no', by }, ['yes', 'no'], 'en')).toBe('⚪ Cancelled — denied automatically');
+    }
+    expect(formatOutcome({ answer: 'no', by: 'telegram:@alice' }, ['yes', 'no'], 'en')).toBe('⛔ Denied — "No" via Telegram');
+  });
+
+  it('marks state notices for de-duplication and shows why a mission paused', () => {
+    expect(formatMissionNotice('m_1', 'status', { to: 'completed', status: 'completed' }, 'en')!.dedupeKey).toBe('completed');
+    expect(formatMissionNotice('m_1', 'completed', {}, 'en')!.dedupeKey).toBe('completed');
+    expect(formatMissionNotice('m_1', 'milestone', { title: 't' }, 'en')!.dedupeKey).toBeUndefined();
+    const paused = formatMissionNotice('m_1', 'paused', { status: 'paused', error: 'worker exited' }, 'en')!;
+    expect(paused.text).toContain('worker exited');
   });
 });
 

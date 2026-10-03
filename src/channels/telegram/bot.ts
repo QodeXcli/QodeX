@@ -8,12 +8,18 @@
  *     an AbortSignal or `stop()`.
  *   - Pairing gate: only chats paired via a one-time code (pairing.ts) may use
  *     commands. Unpaired chats can only `/start` (explains pairing) and
- *     `/pair <code>`. Pairing is private-chat only.
+ *     `/pair <code>`. Pairing is private-chat only. Replies to unpaired chats
+ *     are budgeted (per chat and overall) so strangers can't drive the bot into
+ *     Telegram's rate limit and delay the owner's approvals.
  *   - ApprovalChannel 'telegram' on the process-wide ApprovalBroker: deliver →
  *     a card with one inline button per option (`ap:<id>:<index>`) to every
  *     paired chat; retract → the card is edited to show the outcome. The
  *     channel is registered ONLY while at least one chat is paired, so an
  *     unpaired bot never makes unattended runs wait for a human who can't answer.
+ *     An approval id is reserved synchronously on delivery (an instant answer
+ *     never leaves a dangling card; a broker approval mirrored into the mission
+ *     DB under the same id gets one card), cards that could not be sent are
+ *     retried on the tick, and a late/double tap shows the real outcome.
  *   - Mission-DB approvals (detached mission workers in other processes) via
  *     the injected `TelegramMissionAdapter`: polled every 3s, delivered the same
  *     way, resolved through the adapter.
@@ -126,6 +132,8 @@ export interface TelegramBotOptions {
   staleMessageSec?: number;
   /** Notification budget. Default 12 per 60s. */
   notifyRateLimit?: { max: number; windowMs: number };
+  /** /screen gives up after this long (a busy page can stall a screenshot). Default 15s. */
+  screenshotTimeoutMs?: number;
   backoff?: { initialMs?: number; maxMs?: number; conflictMinMs?: number };
   /** Injectable for tests. Must resolve (not reject) early when the signal aborts. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -182,6 +190,25 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 
 const MAX_DELIVERED = 500;
 const MAX_HANDLED = 2000;
+const MAX_OUTCOMES = 200;
+/** Replies to one unpaired chat: at most this many per window (a stranger can't make the bot spam). */
+const UNPAIRED_REPLIES_PER_CHAT = 5;
+const UNPAIRED_WINDOW_MS = 10 * 60_000;
+/** Replies to ALL unpaired chats per minute (a crowd of strangers can't exhaust Telegram's rate limit). */
+const UNPAIRED_REPLIES_PER_MINUTE = 20;
+/** A repeated state notice for the same mission within this window is a duplicate. */
+const NOTICE_DEDUPE_MS = 60_000;
+
+type AnswerOutcome = 'ok' | 'gone' | 'error';
+
+/** Reject with `message` when `p` takes longer than `ms` (p's own outcome is still observed). */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(message)), ms);
+    t.unref?.();
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
 
 export class TelegramBot {
   readonly api: TelegramApi;
@@ -195,6 +222,7 @@ export class TelegramBot {
   private readonly tickMs: number;
   private readonly staleMs: number;
   private readonly limiter: NotificationLimiter;
+  private readonly screenshotTimeoutMs: number;
   private readonly backoffInitialMs: number;
   private readonly backoffMaxMs: number;
   private readonly conflictMinMs: number;
@@ -224,6 +252,14 @@ export class TelegramBot {
   private missionCursor: number | null = null;
   private suppressed = 0;
   private lastHint = new Map<number, number>();
+  /** Recent reply times per unpaired chat + a global budget for all of them. */
+  private unpairedReplies = new Map<number, number[]>();
+  private readonly unpairedLimiter = new NotificationLimiter(UNPAIRED_REPLIES_PER_MINUTE, 60_000);
+  /** How recently resolved approvals ended — a late/double tap shows this instead of "expired". */
+  private outcomes = new Map<string, { card: F.ApprovalCardInput; options: string[]; result: ApprovalResult | null }>();
+  /** `${missionId}:${state}` → when it was announced. */
+  private recentNotices = new Map<string, number>();
+  private lastTickError: { message: string; at: number } | null = null;
   private conflictWarned = false;
   private notifyChain: Promise<void> = Promise.resolve();
 
@@ -241,6 +277,7 @@ export class TelegramBot {
     this.tickMs = opts.tickMs ?? 3000;
     this.staleMs = (opts.staleMessageSec ?? 120) * 1000;
     this.limiter = new NotificationLimiter(opts.notifyRateLimit?.max ?? 12, opts.notifyRateLimit?.windowMs ?? 60_000);
+    this.screenshotTimeoutMs = opts.screenshotTimeoutMs ?? 15_000;
     this.backoffInitialMs = opts.backoff?.initialMs ?? 1000;
     this.backoffMaxMs = opts.backoff?.maxMs ?? 60_000;
     this.conflictMinMs = opts.backoff?.conflictMinMs ?? 5000;
@@ -279,7 +316,9 @@ export class TelegramBot {
       this.controller = null;
       throw err;
     }
-    this.startedAt = this.now();
+    // Message dates are Telegram's clock: measure staleness against it (from the
+    // HTTP Date header), so a local clock running ahead doesn't drop fresh commands.
+    this.startedAt = this.api.serverNow() ?? this.now();
     this.running = true;
     this.busUnsub = this.bus.subscribe((ev) => this.onBusEvent(ev));
     await this.tick();
@@ -470,11 +509,11 @@ export class TelegramBot {
     // `/start 123456` comes from the t.me/<bot>?start=<code> deep link.
     const code = cmd.args;
     if (cmd.cmd === 'start' && !/^\s*[\d۰-۹٠-٩]{6}\s*$/.test(code)) {
-      await this.send(chatId, S.startUnpaired);
+      await this.replyUnpaired(chatId, S.startUnpaired);
       return;
     }
     if (!code) {
-      await this.send(chatId, S.pairUsage);
+      await this.replyUnpaired(chatId, S.pairUsage);
       return;
     }
     const res = await this.pairing.consumeCode(code, {
@@ -490,9 +529,9 @@ export class TelegramBot {
       await this.refreshChannel();
       return;
     }
-    if (res.reason === 'locked') await this.send(chatId, S.pairLocked);
-    else if (res.reason === 'malformed') await this.send(chatId, S.pairUsage);
-    else await this.send(chatId, S.pairInvalid);
+    if (res.reason === 'locked') await this.hint(chatId, S.pairLocked);
+    else if (res.reason === 'malformed') await this.replyUnpaired(chatId, S.pairUsage);
+    else await this.replyUnpaired(chatId, S.pairInvalid);
     this.log('warn', `Telegram: rejected pairing attempt from chat ${chatId} (${res.reason})`);
   }
 
@@ -503,7 +542,27 @@ export class TelegramBot {
     if (last !== undefined && now - last < 10 * 60_000) return;
     this.lastHint.set(chatId, now);
     if (this.lastHint.size > 1000) this.lastHint.delete(this.lastHint.keys().next().value as number);
-    await this.send(chatId, text);
+    await this.replyUnpaired(chatId, text);
+  }
+
+  /**
+   * Reply to a chat that is NOT paired. Anyone can message a bot, so these
+   * replies are budgeted per chat and overall, and never retried: a flood of
+   * /start or /pair from strangers must not push the bot into Telegram's rate
+   * limit (429 back-off stalls the update loop, delaying the owner's approvals).
+   */
+  private async replyUnpaired(chatId: number, text: string): Promise<void> {
+    const now = this.now();
+    const recent = (this.unpairedReplies.get(chatId) ?? []).filter((t) => now - t < UNPAIRED_WINDOW_MS);
+    this.unpairedReplies.delete(chatId);
+    if (recent.length >= UNPAIRED_REPLIES_PER_CHAT || !this.unpairedLimiter.take(now)) {
+      if (recent.length) this.unpairedReplies.set(chatId, recent);
+      return;
+    }
+    recent.push(now);
+    this.unpairedReplies.set(chatId, recent);
+    if (this.unpairedReplies.size > 1000) this.unpairedReplies.delete(this.unpairedReplies.keys().next().value as number);
+    await this.send(chatId, text, { retry: false });
   }
 
   /** Keep username/language fresh; returns the chat's language. */
@@ -534,7 +593,8 @@ export class TelegramBot {
       } catch { browser = null; }
     }
     let active: F.MissionSummaryView[] | null = null;
-    let missionApprovals = 0;
+    // An in-process mission mirrors its broker approval into the DB under the same id: count it once.
+    const pendingIds = new Set(this.broker.pending().map((p) => p.id));
     if (this.missions) {
       try {
         const list = await this.missions.list(50);
@@ -542,13 +602,13 @@ export class TelegramBot {
       } catch (err) {
         this.log('warn', `Telegram /status: missions.list failed: ${errMsg(err)}`);
       }
-      try { missionApprovals = (await this.missions.pendingApprovals()).length; } catch { /* ignore */ }
+      try { for (const a of await this.missions.pendingApprovals()) pendingIds.add(a.id); } catch { /* ignore */ }
     }
     await this.send(chatId, F.formatStatus({
       botUsername: this.me?.username,
       browser,
       activeMissions: active,
-      pendingApprovals: this.broker.pending().length + missionApprovals,
+      pendingApprovals: pendingIds.size,
     }, lang));
   }
 
@@ -614,7 +674,7 @@ export class TelegramBot {
     const id = arg.trim();
     if (!this.missions || !id) return { kind: 'none' };
     const exact = await this.missions.status(id).catch(() => null);
-    if (exact) return { kind: 'ok', id, status: exact };
+    if (exact) return { kind: 'ok', id: exact.id || id, status: exact };
     const list = await this.missions.list(200).catch(() => [] as TelegramMissionSummary[]);
     const matches = list.filter((m) => m.id.startsWith(id));
     if (matches.length === 1) return { kind: 'ok', id: matches[0].id };
@@ -626,7 +686,14 @@ export class TelegramBot {
     const mgr = this.safeBrowser();
     if (!mgr || !mgr.isRunning()) { await this.send(chatId, S.screenNone); return; }
     try {
-      const jpeg = await mgr.screenshotJpeg(70);
+      // A page stuck in a script stalls page.screenshot for Playwright's 30s default,
+      // and updates are handled in order — don't hold approval taps hostage that long.
+      const secs = Math.round(this.screenshotTimeoutMs / 1000);
+      const jpeg = await withTimeout(
+        Promise.resolve().then(() => mgr.screenshotJpeg(70)),
+        this.screenshotTimeoutMs,
+        `[SCREENSHOT_TIMEOUT] The browser did not return a screenshot within ${secs || 1}s (the page may be busy).`,
+      );
       let title = '';
       let url = '';
       try {
@@ -636,7 +703,7 @@ export class TelegramBot {
       } catch { url = ''; }
       await this.withRetry(() => this.api.sendPhoto(chatId, jpeg, { caption: F.formatScreenCaption(title, url), filename: 'qodex-screen.jpg' }));
     } catch (err) {
-      await this.send(chatId, S.screenFailed(this.api.redact(errMsg(err))));
+      await this.send(chatId, S.screenFailed(this.api.redact(firstLine(errMsg(err)))));
     }
   }
 
@@ -650,11 +717,17 @@ export class TelegramBot {
       }
     }
     if (!brokerPending.length && !missionPending.length) { await this.send(chat.chatId, S.noApprovals); return; }
+    // An in-process mission's approval is pending in the broker AND mirrored into
+    // the mission DB under the same id — one card, answered through the broker.
+    const seen = new Set<string>();
     for (const p of brokerPending) {
+      seen.add(p.id);
       const entry = this.delivered.get(p.id) ?? this.createEntry(p.id, 'broker', brokerCard(p), p.options);
       await this.deliverTo(entry, [chat]);
     }
     for (const a of missionPending) {
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
       const entry = this.delivered.get(a.id) ?? this.createEntry(a.id, 'mission', missionCard(a), a.options);
       await this.deliverTo(entry, [chat]);
     }
@@ -704,12 +777,25 @@ export class TelegramBot {
 
   /** ApprovalChannel.deliver — never throws. */
   private async deliverBrokerApproval(p: PendingApproval): Promise<void> {
+    if (this.delivered.has(p.id)) return;
+    // Reserve the id BEFORE the first await: retract() (an instant local answer,
+    // an already-aborted request) and the mission-DB tick (an in-process mission
+    // mirrors this approval under the same id) must both see it.
+    const entry = this.createEntry(p.id, 'broker', brokerCard(p), p.options);
     try {
-      if (this.delivered.has(p.id)) return;
       const chats = await this.pairing.listChats();
-      if (!chats.length) return;
-      const entry = this.createEntry(p.id, 'broker', brokerCard(p), p.options);
+      if (this.delivered.get(p.id) !== entry) return; // retracted meanwhile — nothing to show
+      if (!chats.length || !this.broker.get(p.id)) {
+        this.delivered.delete(p.id);
+        this.dropAlias(p.id);
+        return;
+      }
       await this.deliverTo(entry, chats);
+      if (!entry.messages.length && this.delivered.get(p.id) === entry) {
+        // Nothing went out (Telegram unreachable): forget it so the next tick retries.
+        this.delivered.delete(p.id);
+        this.dropAlias(p.id);
+      }
     } catch (err) {
       this.log('warn', `Telegram: delivering approval ${p.id} failed: ${this.api.redact(errMsg(err))}`);
     }
@@ -720,6 +806,7 @@ export class TelegramBot {
     const entry = this.delivered.get(id);
     if (!entry) return;
     this.delivered.delete(id);
+    this.rememberOutcome(id, entry.card, entry.options, result);
     if (entry.source === 'mission') this.markHandled(id);
     try {
       await entry.ready.catch(() => {});
@@ -751,27 +838,43 @@ export class TelegramBot {
     return null;
   }
 
-  /** Apply an answer from a paired chat. Returns true when it resolved a pending approval. */
-  private async applyAnswer(id: string, found: FoundApproval, option: string, chat: PairedChat): Promise<boolean> {
+  /**
+   * Apply an answer from a paired chat: 'ok' when it resolved a pending
+   * approval, 'gone' when it was no longer pending, 'error' when recording the
+   * answer failed (e.g. the mission DB was busy) — the card stays answerable.
+   */
+  private async applyAnswer(id: string, found: FoundApproval, option: string, chat: PairedChat): Promise<AnswerOutcome> {
     if (found.source === 'broker') {
       // The broker calls our retract() for every channel → cards get the outcome.
-      return this.broker.resolve(id, option, 'telegram');
+      if (!this.broker.resolve(id, option, 'telegram')) return 'gone';
+      this.rememberOutcome(id, found.card, found.options, { answer: option, by: 'telegram' });
+      return 'ok';
     }
-    if (!this.missions) return false;
+    if (!this.missions) return 'gone';
     let ok = false;
     this.answering.add(id);
     try {
       ok = await this.missions.resolveApproval(id, option, `telegram:${chat.username ? '@' + chat.username : chat.chatId}`);
     } catch (err) {
       this.log('warn', `Telegram: resolving mission approval ${id} failed: ${errMsg(err)}`);
+      return 'error';
     } finally {
       this.answering.delete(id);
     }
-    if (ok) {
-      if (this.delivered.has(id)) await this.retractApproval(id, { answer: option, by: 'telegram' });
-      else this.markHandled(id);
+    if (!ok) return 'gone';
+    if (this.delivered.has(id)) {
+      await this.retractApproval(id, { answer: option, by: 'telegram' });
+    } else {
+      this.markHandled(id);
+      this.rememberOutcome(id, found.card, found.options, { answer: option, by: 'telegram' });
     }
-    return ok;
+    return 'ok';
+  }
+
+  private rememberOutcome(id: string, card: F.ApprovalCardInput, options: string[], result: ApprovalResult | null): void {
+    this.outcomes.delete(id);
+    this.outcomes.set(id, { card, options, result });
+    if (this.outcomes.size > MAX_OUTCOMES) this.outcomes.delete(this.outcomes.keys().next().value as string);
   }
 
   private async handleCallback(cq: TgCallbackQuery): Promise<void> {
@@ -795,24 +898,38 @@ export class TelegramBot {
     const option = found?.options[parsed.index];
     if (!found || option === undefined) {
       await this.answerCb(cq.id, S.approvalExpired);
-      await this.markCardExpired(chatId, message, lang);
+      await this.showPastOutcome(chatId, message, id, lang);
       return;
     }
     // A card we don't track (e.g. sent before a bot restart) is not edited by
     // retract(), so update it here once the answer lands.
     const tracked = this.findDeliveredByMessage(chatId, message.message_id) !== null;
-    const ok = await this.applyAnswer(id, found, option, chat);
-    if (ok) {
+    const res = await this.applyAnswer(id, found, option, chat);
+    if (res === 'ok') {
       await this.answerCb(cq.id, S.approvalRecorded(option));
       this.log('info', `Telegram: approval ${id} answered "${option}" by chat ${chatId}`);
       if (!tracked) {
         const outcome = F.formatOutcome({ answer: option, by: 'telegram' }, found.options, lang);
         await this.edit(chatId, message.message_id, F.formatResolvedApproval(found.card, outcome, lang));
       }
+    } else if (res === 'error') {
+      await this.answerCb(cq.id, S.approvalRetry); // buttons stay: the approval is still pending
     } else {
       await this.answerCb(cq.id, S.approvalExpired);
-      await this.markCardExpired(chatId, message, lang);
+      await this.showPastOutcome(chatId, message, id, lang);
     }
+  }
+
+  /**
+   * A tap on a card whose approval is no longer pending. If we know how it ended
+   * (e.g. the second tap of a double tap), show THAT outcome — never overwrite a
+   * real "Approved" with "answered elsewhere". Otherwise just drop the buttons.
+   */
+  private async showPastOutcome(chatId: number, message: TgMessage, id: string, lang: F.Lang): Promise<void> {
+    const past = this.outcomes.get(id);
+    if (!past) { await this.markCardExpired(chatId, message, lang); return; }
+    const outcome = F.formatOutcome(past.result, past.options, lang);
+    await this.edit(chatId, message.message_id, F.formatResolvedApproval(past.card, outcome, lang));
   }
 
   /** A text reply to an approval card ("yes", "بله", "no"...). */
@@ -822,8 +939,9 @@ export class TelegramBot {
     if (!option) { await this.send(chat.chatId, S.approvalAnswerHint(entry.options)); return; }
     const found = await this.findApproval(entry.id);
     if (!found) { await this.send(chat.chatId, S.approvalExpired); return; }
-    const ok = await this.applyAnswer(entry.id, found, option, chat);
-    if (!ok) await this.send(chat.chatId, S.approvalExpired);
+    const res = await this.applyAnswer(entry.id, found, option, chat);
+    if (res === 'error') await this.send(chat.chatId, S.approvalRetry);
+    else if (res === 'gone') await this.send(chat.chatId, S.approvalExpired);
   }
 
   private findDeliveredByMessage(chatId: number, messageId: number): DeliveredApproval | null {
@@ -869,12 +987,31 @@ export class TelegramBot {
     this.ticking = true;
     try {
       await this.refreshChannel();
+      if (this.channelUnregister) {
+        // Broker approvals whose card could not be sent yet (a Sentinel prompt must not
+        // silently wait out its timeout because Telegram was briefly unreachable).
+        for (const p of this.broker.pending()) {
+          if (!this.delivered.has(p.id)) await this.deliverBrokerApproval(p);
+        }
+      }
       if (this.missions) {
         await this.pollMissionApprovals();
         if (this.missions.eventsSince && this.notifyEnabled) await this.pollMissionEvents();
       }
+      if (this.lastTickError) {
+        this.lastTickError = null;
+        this.log('info', 'Telegram: periodic checks are working again');
+      }
     } catch (err) {
-      this.log('warn', `Telegram tick failed: ${this.api.redact(errMsg(err))}`);
+      // Runs every few seconds: report a persistent failure once (and again every
+      // 10 minutes), not on every tick.
+      const message = this.api.redact(errMsg(err));
+      const now = this.now();
+      const last = this.lastTickError;
+      if (!last || last.message !== message || now - last.at >= 10 * 60_000) {
+        this.lastTickError = { message, at: now };
+        this.log('warn', `Telegram tick failed: ${message}`);
+      }
     } finally {
       this.ticking = false;
     }
@@ -901,6 +1038,9 @@ export class TelegramBot {
       const chats = await this.pairing.listChats();
       if (chats.length) {
         for (const a of fresh) {
+          // Re-check after the awaits: the broker may have delivered the same id meanwhile
+          // (an in-process mission mirrors its broker approval into the DB).
+          if (this.delivered.has(a.id) || this.handledMission.has(a.id) || this.answering.has(a.id)) continue;
           const entry = this.createEntry(a.id, 'mission', missionCard(a), a.options);
           await this.deliverTo(entry, chats);
           if (!entry.messages.length) this.delivered.delete(a.id); // retry next tick
@@ -924,16 +1064,34 @@ export class TelegramBot {
     const r = await src.call(this.missions, this.missionCursor);
     if (Number.isFinite(r?.cursor)) this.missionCursor = Math.max(this.missionCursor, r.cursor);
     for (const ev of r?.events ?? []) {
-      await this.broadcast((lang) => F.formatMissionNotice(ev.missionId, ev.type, ev.data, lang));
+      await this.notifyMission(ev.missionId, ev.type, ev.data);
     }
+  }
+
+  /** Mission event → notification; the same mission reaching the same state twice is announced once. */
+  private notifyMission(missionId: string, type: string, data: unknown): Promise<void> {
+    const probe = F.formatMissionNotice(missionId, type, data, 'en');
+    if (!probe) return Promise.resolve();
+    if (probe.dedupeKey) {
+      const key = `${missionId}:${probe.dedupeKey}`;
+      const now = this.now();
+      const last = this.recentNotices.get(key);
+      if (last !== undefined && now - last < NOTICE_DEDUPE_MS) return Promise.resolve();
+      this.recentNotices.set(key, now);
+      if (this.recentNotices.size > 500) this.recentNotices.delete(this.recentNotices.keys().next().value as string);
+    }
+    return this.broadcast((lang) => F.formatMissionNotice(missionId, type, data, lang));
   }
 
   private onBusEvent(ev: BusEvent): void {
     if (!this.notifyEnabled || !this.running) return;
     if (ev.kind === 'mission') {
       if (this.missions?.eventsSince) return; // the DB feed already covers these
-      void this.broadcast((lang) => F.formatMissionNotice(ev.missionId, ev.type, ev.data, lang)).catch(() => {});
+      void this.notifyMission(ev.missionId, ev.type, ev.data).catch(() => {});
     } else if (ev.kind === 'sentinel') {
+      // A denial the user just made by tapping "No" here needs no echo.
+      const by = (ev.data as Record<string, unknown> | undefined)?.answeredBy;
+      if (typeof by === 'string' && by.split(':')[0] === 'telegram') return;
       void this.broadcast((lang) => F.formatSentinelNotice(ev.type, ev.data, lang)).catch(() => {});
     }
   }
@@ -991,14 +1149,21 @@ export class TelegramBot {
     }
   }
 
-  /** sendMessage with HTML → plain-text fallback. Never throws; null on failure. */
-  private async send(chatId: number, html: string, opts: { replyMarkup?: InlineKeyboardMarkup } = {}): Promise<TgMessage | null> {
+  /**
+   * sendMessage with an HTML → plain-text fallback (markup Telegram rejects, or
+   * text over its 4096-character limit, which is counted after entity parsing).
+   * Never throws; null on failure.
+   */
+  private async send(chatId: number, html: string, opts: { replyMarkup?: InlineKeyboardMarkup; retry?: boolean } = {}): Promise<TgMessage | null> {
+    const plain = () => this.api.sendMessage(chatId, F.truncate(F.htmlToPlain(html), 4000), { replyMarkup: opts.replyMarkup, parseMode: null });
+    const attempt = <T>(fn: () => Promise<T>) => (opts.retry === false ? fn() : this.withRetry(fn));
     try {
-      return await this.withRetry(() => this.api.sendMessage(chatId, html, { replyMarkup: opts.replyMarkup }));
+      if (F.htmlToPlain(html).length > F.MAX_MESSAGE_CHARS) return await attempt(plain);
+      return await attempt(() => this.api.sendMessage(chatId, html, { replyMarkup: opts.replyMarkup }));
     } catch (err) {
-      if (err instanceof TelegramApiError && err.isParseError) {
+      if (err instanceof TelegramApiError && (err.isParseError || err.isTooLong)) {
         try {
-          return await this.api.sendMessage(chatId, F.truncate(F.htmlToPlain(html), 4000), { replyMarkup: opts.replyMarkup, parseMode: null });
+          return await plain();
         } catch (err2) {
           this.log('warn', `Telegram send to ${chatId} failed: ${this.api.redact(errMsg(err2))}`);
           return null;
@@ -1011,12 +1176,14 @@ export class TelegramBot {
 
   /** editMessageText (removes the keyboard). Never throws. */
   private async edit(chatId: number, messageId: number, html: string): Promise<void> {
+    const plain = () => this.api.editMessageText(chatId, messageId, F.truncate(F.htmlToPlain(html), 4000), { parseMode: null });
     try {
-      await this.withRetry(() => this.api.editMessageText(chatId, messageId, html));
+      if (F.htmlToPlain(html).length > F.MAX_MESSAGE_CHARS) await this.withRetry(plain);
+      else await this.withRetry(() => this.api.editMessageText(chatId, messageId, html));
     } catch (err) {
       if (err instanceof TelegramApiError && err.isNotModified) return;
-      if (err instanceof TelegramApiError && err.isParseError) {
-        try { await this.api.editMessageText(chatId, messageId, F.truncate(F.htmlToPlain(html), 4000), { parseMode: null }); } catch { /* give up */ }
+      if (err instanceof TelegramApiError && (err.isParseError || err.isTooLong)) {
+        try { await plain(); } catch { /* give up */ }
         return;
       }
       this.log('warn', `Telegram edit ${chatId}/${messageId} failed: ${this.api.redact(errMsg(err))}`);
@@ -1051,4 +1218,13 @@ function describeChat(c: Pick<PairedChat, 'chatId' | 'username'>): string {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** First line of an error message without terminal escapes (Playwright appends an ANSI call log). */
+function firstLine(text: string): string {
+  return String(text ?? '')
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    .split(/\r?\n/)[0]
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim();
 }

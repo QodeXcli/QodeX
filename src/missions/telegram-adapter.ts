@@ -48,6 +48,9 @@ const NOTIFY_STATUSES = new Set(['completed', 'failed', 'cancelled', 'paused']);
 
 export function createTelegramMissionAdapter(opts: { store?: MissionStore; defaultCwd?: string } = {}): TelegramMissionAdapter {
   const store = (): MissionStore => opts.store ?? getMissionStore();
+  // Open the mission DB now: when it can't be opened, the caller reports "missions
+  // unavailable" once at startup instead of every command (and the 3s tick) failing.
+  store();
 
   return {
     async list(limit = 20): Promise<TelegramMissionSummary[]> {
