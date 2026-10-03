@@ -191,6 +191,36 @@ describe('$.command / $.tool / $.ui', () => {
   });
 });
 
+describe('$.model.complete', () => {
+  it('routes fast / default / an id, falls back for an unknown alias, and never rejects on errors', async () => {
+    const seen: Array<{ model: string; maxTokens?: number; system?: string }> = [];
+    const provider = {
+      name: 'fake',
+      async *complete(req: any) {
+        seen.push({ model: req.model, maxTokens: req.maxTokens, system: req.messages[0]?.role === 'system' ? req.messages[0].content : undefined });
+        if (req.messages.at(-1).content === 'fail') { yield { type: 'error', error: 'rate limited' }; return; }
+        yield { type: 'text_delta', delta: `answer from ${req.model}` };
+        yield { type: 'done' };
+      },
+    };
+    const router = {
+      route: (_c: any, _t: number, o: { explicitModel?: string } = {}) => {
+        if (o.explicitModel === 'haiku') throw new Error('Model not available: haiku');
+        return { provider, model: o.explicitModel ?? 'main-model', modelInfo: {} };
+      },
+    };
+    const config = { defaults: { model: 'main-model' }, roles: { offload: { provider: 'ollama', model: 'small-model' } } };
+    const { $ } = await apiOf('asker', { router, config });
+    expect(await $.model.complete({ prompt: 'hi', model: 'fast', system: 'be brief' })).toEqual({ isAnswered: true, text: 'answer from small-model' });
+    expect(seen[0]).toEqual({ model: 'small-model', maxTokens: 1024, system: 'be brief' });
+    expect(await $.model.complete({ prompt: 'hi' })).toEqual({ isAnswered: true, text: 'answer from main-model' });
+    expect(await $.model.complete({ prompt: 'hi', model: 'haiku', maxTokens: 50 })).toEqual({ isAnswered: true, text: 'answer from small-model' });
+    expect(seen.at(-1)?.maxTokens).toBe(50);
+    expect(await $.model.complete({ prompt: 'fail' })).toEqual({ isAnswered: false, reason: 'rate limited' });
+    expect(await $.model.complete({ prompt: '  ' })).toMatchObject({ isAnswered: false });
+  });
+});
+
 describe('$.clock, $.settings, $.session', () => {
   it('timers stop when the mod unloads; later calls are refused', async () => {
     const { $, rt } = await apiOf('ticker');

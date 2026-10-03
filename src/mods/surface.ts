@@ -8,6 +8,17 @@ import { initMods, getModsRuntime, modsActive, type ModsBindings } from './runti
 import { modsPromptSubmit, withModContext } from './integration.js';
 
 let sessionStartedFor: string | null = null;
+let markReady: () => void = () => {};
+let ready: Promise<void> = new Promise<void>(r => { markReady = r; });
+
+/**
+ * Resolves once session.start finished for the TUI session (at most 15 s; at once when
+ * mods are off). The TUI awaits it before sending the first prompt through prompt.submit.
+ */
+export function modsSessionReady(): Promise<void> {
+  if (!getModsRuntime()) return Promise.resolve();
+  return Promise.race([ready, new Promise<void>(r => { const t = setTimeout(r, 15_000); (t as { unref?: () => void }).unref?.(); })]);
+}
 
 export function modsDisabledByEnv(): boolean {
   return process.env.QODEX_NO_MODS === '1';
@@ -29,17 +40,19 @@ export async function modsInteractiveInit(opts: { cwd: string; bindings: ModsBin
  */
 export async function modsSessionActive(sessionId: string, cwd?: string): Promise<void> {
   const rt = getModsRuntime();
-  if (!rt) return;
+  if (!rt) { markReady(); return; }
   try {
     if (sessionStartedFor === null) {
       sessionStartedFor = sessionId;
       await rt.startSession(sessionId, cwd);
+      markReady();
     } else if (sessionStartedFor !== sessionId) {
       sessionStartedFor = sessionId;
       rt.setSession(sessionId, cwd);
     }
   } catch (e: any) {
     logger.warn('Mods session.start failed', { err: e?.message });
+    markReady();
   }
 }
 
@@ -97,4 +110,5 @@ export async function modsHeadlessEnd(): Promise<void> {
 /** Tests: forget which session started. */
 export function resetModsSurfaceForTesting(): void {
   sessionStartedFor = null;
+  ready = new Promise<void>(r => { markReady = r; });
 }

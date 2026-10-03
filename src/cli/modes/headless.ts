@@ -243,7 +243,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 
   // ── Mods: load, session.start, then prompt.submit (may rewrite, add context or drop) ──
   {
-    const { modsHeadlessBegin } = await import('../../mods/surface.js');
+    const { modsHeadlessBegin, modsHeadlessEnd } = await import('../../mods/surface.js');
     const sub = await modsHeadlessBegin({
       cwd: resumeCwd ?? opts.cwd, sessionId, extraDirs: opts.modDirs,
       bindings: { config, router: opts.router, registry: opts.registry },
@@ -251,6 +251,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     if (sub.drop) {
       if (opts.json) process.stdout.write(JSON.stringify({ type: 'prompt_dropped', reason: sub.drop }) + '\n');
       else process.stderr.write(`Prompt dropped by a mod: ${sub.drop}\n`);
+      await modsHeadlessEnd();
       return 0;
     }
     effectivePrompt = sub.text;
