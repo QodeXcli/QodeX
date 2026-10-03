@@ -146,7 +146,10 @@ describe('runMission', () => {
     const types = store.events(m.id).map(e => e.type);
     expect(types).toEqual(expect.arrayContaining(['plan', 'step-start', 'step-done', 'report']));
     expect(store.get(m.id)!.status).toBe('completed');
-    expect(bus.some(e => e.kind === 'mission' && e.type === 'completed')).toBe(true);
+    // One transition, one bus event: {type:'status'} carrying the run's summary (no second 'completed' event).
+    const finals = bus.filter(e => e.kind === 'mission' && ((e.type === 'status' && (e.data as any).to === 'completed') || e.type === 'completed'));
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({ type: 'status', data: { from: 'running', to: 'completed', status: 'completed', stepsDone: 2, report: 'FINAL REPORT for the user' } });
   });
 
   it('retries a failed step with the failure fed back', async () => {

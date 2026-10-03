@@ -135,7 +135,12 @@ export interface BrowserManager {
 
   /** Describe the element behind a snapshot ref (e.g. "e12") on the active tab. */
   describeRef(ref: string): Promise<ElementInfo | null>;
-  /** Describe the element behind a Playwright selector on the active tab. */
+  /**
+   * Describe the element behind a Playwright selector on the active tab: the FIRST
+   * match, `page.locator(selector).first()` (a snapshot ref in the selector field is
+   * described as that ref). A caller that acts on a different match must pass an
+   * nth-qualified selector (`… >> nth=2`, zero-based), or it describes the wrong element.
+   */
   describeSelector(selector: string): Promise<ElementInfo | null>;
 
   /** Subscribe to performed actions (agent + human). Returns unsubscribe. */

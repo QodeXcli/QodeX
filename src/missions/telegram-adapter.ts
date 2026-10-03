@@ -25,6 +25,7 @@ import {
   answerApprovalById,
   type MissionSummary,
 } from './daemon.js';
+import { redactLiveUrl } from './tools.js';
 
 function ms(iso: string | null | undefined): number | undefined {
   if (!iso) return undefined;
@@ -38,7 +39,9 @@ function toSummary(s: MissionSummary): TelegramMissionSummary {
     goal: s.goal,
     status: s.status,
     progress: s.steps.total > 0 ? `${s.steps.done}/${s.steps.total} steps` : undefined,
-    liveUrl: s.liveUrl ?? undefined,
+    // The live link is loopback and carries the control center's access token:
+    // useless on a phone, and the token must not reach Telegram's servers.
+    liveUrl: s.liveUrl ? redactLiveUrl(s.liveUrl) : undefined,
     createdAt: ms(s.createdAt),
     updatedAt: ms(s.updatedAt),
   };

@@ -452,7 +452,8 @@ export class MissionMilestoneTool extends Tool<z.infer<typeof MilestoneArgs>> {
     const progress = typeof args.progress === 'number' && Number.isFinite(args.progress)
       ? Math.max(0, Math.min(100, args.progress)) : undefined;
     const payload = { stepId: stepId ?? undefined, title, detail, progress };
-    store.appendEvent(mission.id, 'milestone', payload);
+    // Published right here: the cross-process event bridge must not mirror it again.
+    store.noteBusPublished(store.appendEvent(mission.id, 'milestone', payload));
     getBus().publish({ kind: 'mission', missionId: mission.id, type: 'milestone', data: payload });
 
     if (resolveMissionsConfig(getActiveConfig()).notify && Date.now() - lastMilestoneNotify > 60_000) {

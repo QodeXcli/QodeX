@@ -106,6 +106,8 @@ describe('pure helpers', () => {
     expect(Rec.resultHash('a')).toBe(Rec.resultHash('a'));
     expect(Rec.resultHash('a')).not.toBe(Rec.resultHash('b'));
     expect(Rec.resultHash('a')).toMatch(/^[0-9a-f]{8}$/);
+    // SHA-256 (not MD5, a CodeQL weak-crypto alert): sha256("a") starts ca978112.
+    expect(Rec.resultHash('a')).toBe('ca978112');
   });
 
   it('detectStuckLoop with result-hashed keys: changing results are progress, identical ones are stuck', () => {

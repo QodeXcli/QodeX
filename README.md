@@ -43,7 +43,7 @@ qodex telegram setup                              # approvals + missions from Te
 - **Sentinel** — purchases, payments, sending and credentials always need a human; domain allow/block lists; web/window text fenced as untrusted data with English + Persian prompt-injection detection; full audit log.
 - **Vault** — encrypted credentials the model never sees, filled only on their own site (anti-phishing), with TOTP 2FA codes.
 - **Control center** — token-protected web page: live browser view, human takeover, one-tap approvals, activity timeline, steering, missions.
-- **Workflows** — learn a task from a demonstration, replay it with self-healing selectors at zero model tokens per step.
+- **Workflows** — learn a task from a demonstration, replay it with self-healing selectors at zero model tokens per step. Record in a logged-in browser profile with `workflow record <name> --browser-profile <p>` (`--profile` is always the config overlay).
 - **Telegram** — approve actions, start and follow missions from your phone.
 
 ---

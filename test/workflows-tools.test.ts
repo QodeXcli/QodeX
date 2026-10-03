@@ -212,6 +212,6 @@ describe('qodex workflow command', () => {
     const run = cmd.commands.find(c => c.name() === 'run')!;
     expect(run.options.map(o => o.long)).toEqual(expect.arrayContaining(['--param', '--dry-run', '--use-examples', '--start-step', '--headed']));
     const record = cmd.commands.find(c => c.name() === 'record')!;
-    expect(record.options.map(o => o.long)).toEqual(expect.arrayContaining(['--url', '--description', '--force', '--profile']));
+    expect(record.options.map(o => o.long)).toEqual(expect.arrayContaining(['--url', '--description', '--force', '--browser-profile']));
   });
 });

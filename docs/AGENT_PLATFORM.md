@@ -191,7 +191,8 @@ with robust selectors (id → data-testid → name → role+name → css), turns
 `{{params}}` and password/CVV/OTP fields into secret params (never stored). Replay heals broken
 selectors (role/name → text → label), asks Sentinel before consequential steps, can fill
 secrets from the vault (`vault:<entry>`), and costs zero model tokens per step. Each workflow
-is also saved as a skill so the agent rediscovers it.
+is also saved as a skill so the agent rediscovers it. `record --browser-profile <name>` records
+in a named browser profile (`--profile` is QodeX's config overlay).
 
 ## 7. Your agent in your pocket — Telegram, Discord, Slack, WhatsApp, Signal
 

@@ -19,6 +19,7 @@ import { render } from 'ink';
 import React from 'react';
 import { loadConfig, ensureQodexHome, setActiveConfig } from './config/loader.js';
 import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './config/profile.js';
+import { handBackRootFlags } from './cli/root-flags.js';
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { PermissionEngine } from './security/permissions.js';
@@ -221,24 +222,18 @@ program
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
   .option('--list-sessions', 'List recent sessions and exit')
-  .hook('preAction', thisCommand => {
-    const name = (thisCommand.optsWithGlobals() as { profile?: string }).profile;
-    if (typeof name === 'string' && name.trim()) setRequestedProfile(name.trim());
-  })
-  // Commander's default parsing lets the ROOT swallow -m/--model, --json, -y/--yes even
-  // when they're written after a subcommand that declares the same flag. Actions that read
-  // cmd.optsWithGlobals() already see them; this hands the value back to subcommands that
-  // read their own opts (mission/vault/workflow/telegram/...), so `qodex mission status
-  // <id> --json` prints JSON. Only flags the subcommand itself declares are copied.
+  // FIRST: commander's default parsing lets the ROOT swallow its flags (-p, --profile,
+  // --json, -m, -y, --scope, ...) even when they're written after a subcommand that
+  // declares the same flag. Hand those back to that subcommand (matched by the flag as
+  // typed — root -p is --print, `workflow run -p` is --param) and drop them from the
+  // root, so `browser open --profile work` is a browser profile, not a config overlay.
+  // Flags written before the subcommand stay the root's; see src/cli/root-flags.ts.
   .hook('preAction', (thisCommand, actionCommand) => {
-    if (actionCommand === thisCommand) return;
-    const rootOpts = thisCommand.opts() as Record<string, unknown>;
-    const rootKeys = new Set(thisCommand.options.map(o => o.attributeName()));
-    for (const opt of actionCommand.options) {
-      const key = opt.attributeName();
-      if (!rootKeys.has(key) || rootOpts[key] === undefined) continue;
-      if (actionCommand.getOptionValue(key) === undefined) actionCommand.setOptionValue(key, rootOpts[key]);
-    }
+    handBackRootFlags(thisCommand, actionCommand, process.argv.slice(2));
+  })
+  .hook('preAction', thisCommand => {
+    const name = (thisCommand.opts() as { profile?: string }).profile;
+    if (typeof name === 'string' && name.trim()) setRequestedProfile(name.trim());
   })
   .action(async (promptArgs: string[], opts: any) => {
     // First-run check: if no config exists and we're interactive, suggest the wizard
