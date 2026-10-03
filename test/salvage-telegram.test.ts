@@ -258,6 +258,8 @@ describe('salvage: format', () => {
     }, 'fa');
     expect(htmlToPlain(out).length).toBeLessThanOrEqual(4096);
     expect(out).toContain('m_big');
+    expect(out).toContain(strings('fa').report); // the report still gets room
+    expect(out).toContain('… +۳'); // steps beyond the cap are counted, not dropped silently
     const small = formatMissionStatus({ id: 'm1', goal: 'g', status: 'running', report: 'done & dusted' }, 'en');
     expect(small).toContain('done &amp; dusted');
   });
@@ -626,6 +628,3 @@ describe('salvage: command + process singleton', () => {
     }
   });
 });
-
-// Used by F-tests that render the Persian catalog.
-void strings;

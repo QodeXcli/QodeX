@@ -512,27 +512,35 @@ export function formatMissionList(list: MissionSummaryView[], lang: Lang): strin
   return [S.missionsHeader, ...list.slice(0, 15).map((m) => formatMissionLine(m, lang))].join('\n');
 }
 
+/**
+ * Full mission status. Every section is capped so that, even with all of them
+ * at their maximum, the message stays under Telegram's 4096-char limit (an
+ * over-long one would only arrive as unformatted plain text); the report gets
+ * whatever room is left.
+ */
 export function formatMissionStatus(m: MissionStatusView, lang: Lang): string {
   const S = strings(lang);
   const lines = [
     `${statusIcon(m.status)} <b>${esc(statusLabel(m.status, lang), 30)}</b> · <code>${esc(m.id, 60)}</code>`,
-    `<i>${esc(maskOutbound(m.goal), 600)}</i>`,
+    `<i>${esc(maskOutbound(m.goal), 400)}</i>`,
   ];
   if (m.steps?.length) {
+    const shown = 12;
     lines.push('', `<b>${S.stepsHeader}</b>`);
-    m.steps.slice(0, 15).forEach((s, i) => {
-      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(maskOutbound(s.title), 120)}`);
+    m.steps.slice(0, shown).forEach((s, i) => {
+      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(maskOutbound(s.title), 80)}`);
     });
+    if (m.steps.length > shown) lines.push(`… +${num(lang, m.steps.length - shown)}`);
   }
   if (m.milestones?.length) {
     lines.push('', `<b>${S.lastMilestones}</b>`);
-    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(maskOutbound(ms), 200)}`);
+    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(maskOutbound(ms), 150)}`);
   }
   if (m.pendingApprovals) lines.push('', S.approvalsPending(m.pendingApprovals));
   if (typeof m.costUsd === 'number' && m.costUsd > 0) lines.push(`${S.cost}: $${m.costUsd.toFixed(m.costUsd < 1 ? 4 : 2)}`);
   // The live-view link carries the control center's access key: never send that to Telegram.
-  if (m.liveUrl) lines.push(`${S.live}: ${esc(redactUrlSecrets(m.liveUrl), 300)}`);
-  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(maskOutbound(m.error), 800)}`);
+  if (m.liveUrl) lines.push(`${S.live}: ${esc(redactUrlSecrets(m.liveUrl), 200)}`);
+  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(maskOutbound(m.error), 600)}`);
   if (m.report) {
     // The report gets whatever room is left under Telegram's 4096-character limit.
     const used = htmlToPlain(lines.join('\n')).length + S.report.length + 8;
