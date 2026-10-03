@@ -162,3 +162,7 @@ export function resetModUiForTesting(): void {
   invalidatePending = null;
   lastInvalidateAt = 0;
 }
+
+/** Short names for the bus (the UI owner's contract): subscribe(listener, opts) / emit(event). */
+export const subscribe = subscribeModUi;
+export const emit = emitModUi;
