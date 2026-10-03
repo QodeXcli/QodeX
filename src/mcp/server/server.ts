@@ -219,7 +219,7 @@ export class QodexMcpServer {
       return { content: [{ type: 'text', text: `[ERROR] Tool "${name}" is not exposed by this server (scope-restricted).` }], isError: true };
     }
     const { makeServerToolContext } = await import('./tool-context.js');
-    const ctx = await makeServerToolContext(this.deps.cwd, this.deps.config);
+    const ctx = await makeServerToolContext(this.deps.cwd, this.deps.config, (n) => this.deps.registry.get(n));
     try {
       const r = await this.deps.registry.execute(name, args, ctx);
       return {

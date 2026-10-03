@@ -58,7 +58,13 @@ import {
  * a number here only with a reason — that is the whole point of writing them down.
  */
 export interface HarnessBudgets {
-  /** All tool definitions, `mode: normal`. Measured ~31.8k over 125 tools. */
+  /**
+   * All tool definitions, `mode: normal` (ungated worst case). Measured ~31.8k over 125
+   * tools before v3.0; the agent platform adds the browser, desktop, mission, workflow
+   * and vault families (~53 tools, ~15k) → measured ~44k over 163 tools. Those families
+   * are relevance-gated (shipped only for web/desktop/mission tasks), which is what
+   * `toolTokensGated` holds to its original budget.
+   */
   toolTokensNormal: number;
   /** Tool definitions after relevance gating on a coding task. Measured ~13.7k / 48 tools. */
   toolTokensGated: number;
@@ -77,7 +83,7 @@ export interface HarnessBudgets {
 }
 
 export const DEFAULT_BUDGETS: HarnessBudgets = {
-  toolTokensNormal: 36_000,
+  toolTokensNormal: 50_000,
   toolTokensGated: 18_000,
   promptTokensCompressed: 6_500,
   promptTokensFull: 9_000,

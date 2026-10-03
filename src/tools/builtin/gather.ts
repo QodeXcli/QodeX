@@ -99,6 +99,9 @@ export class GatherTool extends Tool<z.infer<typeof GatherArgs>> {
     'Scouts cannot modify anything. Returns consolidated findings — the decision is still yours.';
   isReadOnly = true;          // scouts are read-only; gathering never mutates
   isDestructive = false;
+  /** Runs sub-agents: same budget as `task` (not the global 300s tool timeout), so the
+   *  loop also excuses its run time from the parent's wall-clock budget. */
+  timeoutSeconds = 2400;
   argsSchema = GatherArgs;
 
   async execute(args: z.infer<typeof GatherArgs>, ctx: ToolContext): Promise<ToolResult> {

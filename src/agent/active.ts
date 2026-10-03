@@ -15,6 +15,8 @@ export interface ActiveAgent {
   getSnapshotService(): SnapshotService | undefined;
   setAutoSnapshot(enabled: boolean): void;
   setSubagentMode(mode: 'off' | 'sequential' | 'parallel'): void;
+  /** Mid-run steering note (/btw, the control center's Steer box, mission attach). */
+  pushSteer(note: string): void;
 }
 
 let _active: ActiveAgent | null = null;

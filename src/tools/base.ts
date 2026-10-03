@@ -48,6 +48,21 @@ export abstract class Tool<TArgs = unknown> {
   abstract isReadOnly: boolean;
   abstract isDestructive: boolean;
 
+  /**
+   * Per-tool execution timeout in seconds. When set, the agent loop uses
+   * max(budget.toolTimeoutSeconds, timeoutSeconds) so long-running tools
+   * (an autonomous browser sub-agent, a mission wait) aren't killed at the
+   * global 300s default. 0 = no timeout for this tool.
+   */
+  timeoutSeconds?: number;
+
+  /**
+   * The result contains text from an untrusted source (a web page, a desktop
+   * window, an email). Sentinel scans such results for prompt injection and
+   * fences them before the model sees them.
+   */
+  untrustedOutput?: boolean;
+
   /** Return the OpenAI-style schema. */
   schema(): ToolSchema {
     return {

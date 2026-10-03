@@ -40,6 +40,8 @@ export const CORE_TOOLS = new Set<string>([
   'task', 'orchestrate', 'gather',
   'use_skill', 'search_skills',
   'diagnostics',
+  // The agent's clarifying question (answers itself in auto mode) — useful on any task.
+  'ask_user',
 ]);
 
 /** Sent for ANY non-trivial task (language-agnostic — keyed off task-vs-greeting,
@@ -59,7 +61,39 @@ const COMMON_FAMILY_MEMBERS: string[] = [
 
 interface SpecialistFamily {
   members: string[];
+  /** Case-insensitive SUBSTRING keywords (Persian matched after ZWNJ/ی/ک normalization). */
   keywords: string[];
+  /** Boundary-aware patterns for short English words that would otherwise substring-match
+   *  code ("app" in "apply", "order" in "border", "site" in "composite"). Tested against
+   *  the lowercased, normalized signal. */
+  patterns?: RegExp[];
+}
+
+/** Popular sites people name without a TLD (EN + FA). A request naming one is a browser task. */
+const SITE_NAME_KEYWORDS = [
+  'digikala', 'divar.ir', 'snappfood', 'torob', 'aparat', 'amazon.', 'ebay', 'aliexpress',
+  'دیجی کالا', 'دیجیکالا', 'دیوار', 'اسنپ', 'تپسی', 'علی بابا', 'ترب', 'باسلام', 'شیپور', 'آپارات',
+  'فیلیمو', 'کافه بازار', 'جاباما',
+];
+
+// URL / bare-domain / localhost:port detection. Kept local (no runtime imports) so the
+// standalone tsx/strip-types test script can import this module directly.
+const TLDS = 'com|ir|org|net|io|dev|app|co|ai|me|info|xyz|edu|gov|uk|de|shop|store';
+const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/i;
+const DOMAIN_RE = new RegExp(`(?<![@\\w.-])(?:[a-z0-9][a-z0-9-]*\\.)+(?:${TLDS})(?![\\w(-])(?!\\.[a-z0-9])`, 'i');
+const LOCAL_URL_RE = /\b(?:localhost|127\.0\.0\.1):\d{2,5}\b/i;
+
+/** True when the signal names a URL, a bare domain (digikala.com) or localhost:port. PURE. */
+export function hasUrlOrDomain(text: string): boolean {
+  const t = String(text ?? '');
+  return URL_RE.test(t) || DOMAIN_RE.test(t) || LOCAL_URL_RE.test(t);
+}
+
+/** Lowercase + Persian spelling normalization: ZWNJ → space, Arabic ي/ك → ی/ک. Applied to
+ *  both the signal and the keywords, so 'وب‌سایت' / 'وب سایت' and 'ثبت‌نام' / 'ثبت نام' match
+ *  alike without listing every variant. PURE. */
+function normalizeSignal(s: string): string {
+  return String(s ?? '').toLowerCase().replace(/\u200c/g, ' ').replace(/ي/g, 'ی').replace(/ك/g, 'ک');
 }
 
 /** Rare/heavy families — gated strictly. keywords are matched case-insensitively
@@ -70,20 +104,89 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   // Persian-only request still surfaces the specialist tools for QodeX's target audience.
   { members: ['docker_'], keywords: ['docker', 'container', 'compose', 'dockerfile', 'داکر', 'کانتینر', 'کامپوز'] },
   { members: ['db_query', 'db_schema'], keywords: ['database', 'sql', 'postgres', 'mysql', 'sqlite', 'mongo', ' db ', '.sql', 'query', 'دیتابیس', 'پایگاه داده', 'پایگاه‌داده', 'کوئری', 'دادگان'] },
-  // Keyed on INTENT as well as on the tool's own vocabulary. Matching only literal words like
-  // "browser" meant "check how the page looks" — the natural way to ask — dropped every browser
-  // tool on the OPENING turn, exactly when the model decides its approach.
-  { members: ['browser_'], keywords: [
-    'browser', 'screenshot', 'headless', 'puppeteer', 'playwright', 'scrape', 'navigate', 'selector',
-    // Both inflections: 'does the page LOOK right' and 'the page LOOKS broken' are the
-    // same ask, and matching only one of them is the kind of gap that is invisible until
-    // a user phrases it the other way.
-    'how it look', 'how it looks', 'page look', 'page looks', 'look right', 'looks right',
-    'look wrong', 'looks wrong', 'look broken', 'looks broken', 'look off', 'looks off', 'looks like',
-    'check the page', 'see the page', 'view the page', 'render', 'preview', 'open the site', 'open the page',
-    'in the browser',
-    'مرورگر', 'اسکرین', 'اسکرپ', 'کراول', 'چطور به نظر', 'پیش‌نمایش'] },
-  { members: ['computer_use_'], keywords: ['desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard', 'دسکتاپ', 'ماوس', 'کیبورد', 'صفحه‌نمایش'] },
+  // The dedicated QodeX browser (+ the credential vault it fills logins from). Besides the
+  // tooling words, any job ON a site pulls it: site/login/checkout/order/book/cart words,
+  // a URL or bare domain (see selectRelevantToolNames), or a well-known site name.
+  {
+    members: ['browser_', 'vault_'],
+    keywords: [
+      'browser', 'screenshot', 'headless', 'puppeteer', 'playwright', 'scrape', 'navigate', 'selector',
+      // Keyed on INTENT as well as on the tool's own vocabulary: "check how the page looks"
+      // (the natural way to ask) must reach the browser on the OPENING turn. Both
+      // inflections ('does the page LOOK right' / 'the page LOOKS broken').
+      'how it look', 'how it looks', 'page look', 'page looks', 'look right', 'looks right',
+      'look wrong', 'looks wrong', 'look broken', 'looks broken', 'look off', 'looks off', 'looks like',
+      'check the page', 'see the page', 'view the page', 'render', 'preview', 'open the site', 'open the page',
+      'in the browser', 'چطور به نظر', 'پیش‌نمایش',
+      'website', 'web page', 'webpage', 'www.', 'http://', 'https://',
+      'login', 'log in', 'logged in', 'sign in', 'sign up', 'signup', 'checkout', 'check out the cart',
+      'shopping cart', 'add to cart', 'reservation', 'book a ', 'purchase', 'new tab', 'open tab',
+      'مرورگر', 'اسکرین', 'اسکرپ', 'کراول',
+      'سایت', 'وبسایت', 'وب سایت', 'صفحه وب', 'لینک', 'فرم', 'خرید', 'سفارش', 'رزرو', 'ورود به',
+      'لاگین', 'ثبت نام', 'سبد خرید',
+      // CAPTCHA / bot checks are a browser job (handed to the human, never solved).
+      'captcha', 'recaptcha', 'hcaptcha', 'turnstile', 'cloudflare check', 'bot check', "i'm not a robot",
+      'verify you are human', 'کپچا', 'کد امنیتی', 'من ربات نیستم',
+      ...SITE_NAME_KEYWORDS,
+    ],
+    patterns: [
+      /\bsites?\b/, /\burls?\b/, /\btabs?\b(?![._-])/, /\b(buy|buying)\b/, /\bregister (on|at|for|with)\b/,
+      /\bplace (an|the|my) order\b/, /\border (online|from|on|via)\b/, /\bcart\b/, /\bon amazon\b/,
+    ],
+  },
+  // The credential vault and the tools that sign in / store logins with it, for
+  // password-manager / 2FA requests that name no site yet ("log me in with my saved
+  // password", "save my GitHub password", «رمز عبور سایت … رو ذخیره کن»). Keyed on the
+  // user's OWN credentials or a SITE's password, never on a bare "password" (that is
+  // usually code: hashing, reset endpoints); the browser family above already brings
+  // these tools for any login job.
+  {
+    members: ['vault_', 'browser_login', 'browser_fill_secret'],
+    keywords: [
+      'vault', 'password manager', 'saved password', 'stored password', 'saved login', 'my password',
+      'password for my', 'my credentials', 'login credentials', 'log me in', 'sign me in', 'sign me up',
+      'one-time code', '2fa code', 'two-factor code', 'authenticator app', 'authenticator code', 'totp',
+      'گاوصندوق', 'رمزم', 'رمز عبورم', 'پسوردم', 'گذرواژه‌ام', 'رمز ذخیره', 'پسورد ذخیره',
+      'رمز سایت', 'رمز عبور سایت', 'پسورد سایت', 'گذرواژه سایت',
+      'کد دو مرحله', 'تایید دو مرحله', 'تأیید دو مرحله', 'ورود دو مرحله', 'کد یکبار مصرف',
+      'لاگینم کن', 'وارد حسابم', 'وارد اکانتم',
+    ],
+    patterns: [/\b(save|store|remember|keep|add|update|change|rotate)\b[^.\n]{0,40}\bmy\b[^.\n]{0,30}\b(passwords?|logins?|credentials?)\b/],
+  },
+  {
+    members: ['computer_use_'],
+    keywords: [
+      'desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard', 'finder', 'system settings', 'system preferences',
+      'control panel', 'explorer',
+      'دسکتاپ', 'ماوس', 'کیبورد', 'صفحه نمایش', 'اپلیکیشن', 'برنامه', 'پنجره', 'تنظیمات',
+    ],
+    patterns: [/\bapps?\b(?![.\/_-])/, /\bapplications?\b/, /\bsettings app\b/, /(^|\s)اپ(\s|$)/],
+  },
+  // Learn-by-demonstration: record a browser workflow once, replay it on demand.
+  {
+    members: ['workflow_'],
+    keywords: [
+      'workflow', 'replay', 'demonstrate', 'demonstration', 'automate this', 'automate it',
+      'ورک فلو', 'ضبط کن', 'یاد بگیر', 'تکرار کن',
+    ],
+    patterns: [/\brecord (this|that|it|a|the|my|me|how|what)\b/, /\brecording\b/],
+  },
+  // Long-running, detached, resumable missions.
+  {
+    members: ['mission_'],
+    keywords: [
+      'mission', 'long-running', 'long running', 'keep working', 'overnight', 'every day', 'monitor',
+      'ماموریت', 'مأموریت', 'پس زمینه', 'هر روز', 'پیگیری کن', 'تا تموم شدن',
+    ],
+    patterns: [/\b(in|into) the background\b/, /\bbackground (task|job|mission|work|run)s?\b/, /\b(run|keep) (it )?(going|running)\b/],
+  },
+  // Email (src/mail): the mail_* tools only for mail tasks. Not the bare Persian 'میل'
+  // (it matches 'تکمیل') or 'نامه' (it matches 'برنامه').
+  {
+    members: ['mail_'],
+    keywords: ['email', 'e-mail', 'mail', 'inbox', 'mailbox', 'unread', 'attachment', 'ایمیل', 'ای میل', 'جیمیل', 'صندوق ورودی', 'اینباکس', 'پیوست'],
+    patterns: [/\breply to\b/, /\bdrafts?\b/],
+  },
   { members: ['dev_server_'], keywords: ['dev server', 'npm run', 'serve', 'localhost', 'vite', 'next dev', 'hot reload', 'hmr', 'سرور توسعه', 'لوکال‌هاست'] },
   { members: ['background_job_'], keywords: ['background job', 'long-running', 'long running', 'async job', 'queue', 'worker'] },
   { members: ['csv_read', 'csv_write', 'xlsx_read', 'pdf_read', 'media_probe', 'media_transform'],
@@ -135,10 +238,11 @@ function expand(members: string[], allNames: string[]): Set<string> {
  *  (no \b — \b doesn't work for Persian) so Persian task verbs are detected. */
 function isTrivial(signalText: string): boolean {
   const t = signalText.trim();
+  if (hasUrlOrDomain(t)) return false;                          // a URL/domain is always a real job
   if (t.split(/\s+/).filter(Boolean).length > 5) return false; // long → real task
   if (/[a-z][A-Z]/.test(t)) return false;                      // camelCase identifier
   if (/[/._-][a-zA-Z]{1,6}/.test(t)) return false;             // path / .ext / snake_case
-  const lower = t.toLowerCase();
+  const lower = normalizeSignal(t);
   const TASK_WORDS = [
     'fix', 'bug', 'error', 'refactor', 'implement', 'build', 'deploy', 'test', 'debug',
     'create', 'update', 'remove', 'add ', 'edit', 'write', 'change', 'review', 'find',
@@ -149,8 +253,12 @@ function isTrivial(signalText: string): boolean {
     'install', 'run ', 'start', 'stop', 'open', 'check', 'look', 'show', 'list',
     'rename', 'move', 'delete', 'clean', 'format', 'lint', 'upgrade', 'bump',
     'کامیت', 'پوش', 'مرج', 'برنچ', 'نصب', 'اجرا', 'باز کن', 'نشان', 'لیست',
+    // Jobs on a site are work too, even when short ("buy it on digikala").
+    'buy', 'book ', 'order ', 'log in', 'login', 'sign in', 'sign up',
     'باگ', 'خطا', 'اصلاح', 'بساز', 'پیدا', 'پیاده', 'اضاف', 'تست', 'دیباگ', 'ریفکتور',
     'درست', 'حذف', 'تغییر', 'بنویس', 'بررسی', 'پیدا کن', 'عوض',
+    // Persian "do it on a site / on my computer" verbs ("دیجی‌کالا رو باز کن", "بخر", "رزرو کن").
+    'باز کن', 'بخر', 'خرید', 'سفارش', 'رزرو', 'ثبت نام', 'وارد شو', 'برو تو', 'برو به',
   ];
   return !TASK_WORDS.some(w => lower.includes(w));
 }
@@ -163,7 +271,7 @@ export interface RelevanceResult {
 }
 
 export function selectRelevantToolNames(allNames: string[], signalText: string): RelevanceResult {
-  const text = ` ${signalText.toLowerCase()} `;
+  const text = ` ${normalizeSignal(signalText)} `;
   const selected = new Set<string>();
 
   // Tier 1: CORE always.
@@ -176,10 +284,15 @@ export function selectRelevantToolNames(allNames: string[], signalText: string):
     for (const n of expand(COMMON_FAMILY_MEMBERS, allNames)) selected.add(n);
   }
 
-  // Tier 3: SPECIALIST only on explicit signal.
+  // Tier 3: SPECIALIST only on explicit signal. A URL / bare domain is an explicit
+  // signal for the browser family even when no keyword is present ("digikala.com").
+  const urlSignal = hasUrlOrDomain(signalText);
   let matchedFamilies = 0;
   for (const fam of SPECIALIST_FAMILIES) {
-    if (fam.keywords.some(k => text.includes(k))) {
+    const hit = fam.keywords.some(k => text.includes(normalizeSignal(k)))
+      || (fam.patterns?.some(p => p.test(text)) ?? false)
+      || (urlSignal && fam.members.includes('browser_'));
+    if (hit) {
       matchedFamilies++;
       for (const n of expand(fam.members, allNames)) selected.add(n);
     }

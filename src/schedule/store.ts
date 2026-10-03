@@ -8,6 +8,11 @@
  * Each entry has its own next_run_at so the tick loop is O(due) rather than
  * O(all). Wall-clock changes (DST, manual time changes) re-compute next_run_at
  * on the next save.
+ *
+ * Entries have a `kind`: 'prompt' (default) runs `qodex --print <prompt> --yes`;
+ * 'mission' starts a detached, resumable mission with the prompt as its goal
+ * (a routine like "every morning, check X and report"). The column is added to
+ * older DBs by a PRAGMA migration.
  */
 import type Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,11 +21,15 @@ import { QODEX_SESSION_DB } from '../config/defaults.js';
 import { parseCron, nextAfter } from './cron.js';
 import { logger } from '../utils/logger.js';
 
+export type ScheduleKind = 'prompt' | 'mission';
+
 export interface ScheduleEntry {
   id: string;
   name: string;
   cron: string;
   prompt: string;
+  /** 'prompt' = headless one-shot run; 'mission' = start a background mission. */
+  kind: ScheduleKind;
   cwd: string;
   model?: string;
   allowed_tools?: string;     // JSON-encoded array, or null for "all tools"
@@ -34,6 +43,13 @@ export interface ScheduleEntry {
   run_count: number;
   deliver?: string;           // chat target, e.g. "telegram:<chatId>" — null = desktop only
   recipe?: string;            // a recipe kind, e.g. "verified-pr" — null = run prompt as-is
+  /** 1 = each run gets the previous run's answer (monitors report what changed). */
+  continuity?: 1 | 0;
+  /** 'change' = notify/deliver only when the answer differs from the previous run. */
+  notify_on?: string | null;
+  /** Previous run's answer (tail) for continuity, and its fingerprint for change detection. */
+  last_output?: string | null;
+  last_output_hash?: string | null;
 }
 
 const SCHEMA = `
@@ -92,10 +108,24 @@ export class ScheduleStore {
     this.db.exec(SCHEMA);
     // Migrate DBs created before deliver/recipe existed. ADD COLUMN throws on an existing
     // column, so each is guarded — idempotent and safe to run every startup.
-    for (const col of ['deliver TEXT', 'recipe TEXT']) {
+    for (const col of ['deliver TEXT', 'recipe TEXT', 'continuity INTEGER DEFAULT 0', 'notify_on TEXT', 'last_output TEXT', 'last_output_hash TEXT']) {
       try { this.db.exec(`ALTER TABLE schedules ADD COLUMN ${col}`); } catch { /* already present */ }
     }
     try { this.db.exec(`ALTER TABLE schedule_runs ADD COLUMN receipt TEXT`); } catch { /* already present */ }
+    this.migrate();
+  }
+
+  /** Idempotent column migrations for DBs created by older versions. */
+  private migrate(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(schedules)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'kind')) {
+      try {
+        this.db.exec(`ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'`);
+      } catch (e: any) {
+        // A concurrent process migrated first.
+        if (!/duplicate column/i.test(String(e?.message))) throw e;
+      }
+    }
   }
 
   add(input: {
@@ -105,19 +135,31 @@ export class ScheduleStore {
     cwd: string;
     model?: string;
     allowedTools?: string[];
+    /** Default 'prompt'. 'mission' starts a background mission each run. */
+    kind?: ScheduleKind;
     deliver?: string;
     recipe?: string;
+    /** Carry the previous run's answer into the next run. */
+    continuity?: boolean;
+    /** Notify / deliver only when the answer changed. */
+    notifyOnChange?: boolean;
   }): ScheduleEntry {
     const parsed = parseCron(input.cron); // throws on invalid
     const next = nextAfter(parsed, new Date());
     const id = uuidv4();
     const allowed = input.allowedTools && input.allowedTools.length > 0 ? JSON.stringify(input.allowedTools) : null;
+    const kind: ScheduleKind = input.kind === 'mission' ? 'mission' : 'prompt';
     this.db.prepare(`
-      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, deliver, recipe)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind, deliver, recipe, continuity, notify_on)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null,
-           input.deliver ?? null, input.recipe ?? null);
+           kind, input.deliver ?? null, input.recipe ?? null, input.continuity ? 1 : 0, input.notifyOnChange ? 'change' : null);
     return this.get(id)!;
+  }
+
+  /** Remember a finished run's answer for continuity / change detection. */
+  setLastOutput(id: string, output: string, fingerprint: string): void {
+    this.db.prepare(`UPDATE schedules SET last_output = ?, last_output_hash = ? WHERE id = ?`).run(output, fingerprint, id);
   }
 
   remove(idOrName: string): boolean {
@@ -146,7 +188,9 @@ export class ScheduleStore {
     const byName = this.db.prepare(`SELECT * FROM schedules WHERE name = ?`).get(idOrName) as ScheduleEntry | undefined;
     if (byName) return byName;
     if (idOrName.length >= 4) {
-      const matches = this.db.prepare(`SELECT * FROM schedules WHERE id LIKE ?`).all(`${idOrName}%`) as ScheduleEntry[];
+      // Escape LIKE wildcards: `schedule rm %%%%` must not match (and delete) an arbitrary entry.
+      const prefix = idOrName.replace(/[\\%_]/g, m => '\\' + m);
+      const matches = this.db.prepare(`SELECT * FROM schedules WHERE id LIKE ? ESCAPE '\\' LIMIT 2`).all(`${prefix}%`) as ScheduleEntry[];
       if (matches.length === 1) return matches[0];
     }
     return undefined;

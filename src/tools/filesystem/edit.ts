@@ -108,7 +108,7 @@ export class EditTextTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
 
     // Permission check
-    const permReq = { tool: 'edit_text', operation: rel, description: `Edit ${rel} (${occurrences} replacement${occurrences > 1 ? 's' : ''})` };
+    const permReq = { tool: 'edit_text', operation: rel, description: `Edit ${rel} (${occurrences} replacement${occurrences > 1 ? 's' : ''})`, cwd: ctx.cwd };
     const decision = ctx.permissions.evaluate(permReq);
     if (decision === 'deny') {
       return { content: `[PERMISSION_DENIED] Cannot edit ${args.path}`, isError: true };
@@ -119,7 +119,7 @@ export class EditTextTool extends Tool<z.infer<typeof ArgsSchema>> {
         label: `Edit ${rel}?`,
       });
       if (dec.kind === 'reject') {
-        return { content: `[USER_REJECTED] User declined the edit to ${args.path}`, isError: true };
+        return { content: dec.message ?? `[USER_REJECTED] User declined the edit to ${args.path}`, isError: true };
       }
       if (dec.kind === 'revise') return reviseResult(rel);
       updated = dec.content; // may be the user-edited version from [E] Edit

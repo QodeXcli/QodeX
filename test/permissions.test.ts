@@ -70,15 +70,18 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate({ tool: 'shell', operation: 'diskutil eraseDisk' })).toBe('ask');
   });
 
-  it('accept-edits auto still asks for sudo; always yes does not', () => {
+  it('accept-edits still asks for sudo; so does auto (system-level), while ordinary work runs', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
-    setApprovalMode('auto');
+    setApprovalMode('edits');
     expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
+    // The old "always yes" silently ran sudo. Auto (its replacement) asks for system-level
+    // commands — the user's rule — and runs everything else.
     setApprovalMode('always');
-    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    expect(engine.evaluateDetailed({ tool: 'shell', operation: 'sudo something' })).toMatchObject({ decision: 'ask', via: 'auto-policy-ask' });
     expect(engine.evaluate({ tool: 'shell', operation: 'echo hello' })).toBe('allow');
     expect(engine.evaluate({ tool: 'shell', operation: 'npm run build' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'brew install iterm2' })).toBe('allow');
   });
 
   it('still hard-denies catastrophic commands (deny beats always-ask)', () => {
@@ -107,17 +110,18 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(parseApprovalMode('manual')).toBe('manual');
     expect(parseApprovalMode('off')).toBe('manual');
     expect(parseApprovalMode('auto')).toBe('auto');
-    expect(parseApprovalMode('edits')).toBe('auto');
-    expect(parseApprovalMode('always')).toBe('always');
-    expect(parseApprovalMode('on')).toBe('always');
-    expect(parseApprovalMode('yes')).toBe('always');
+    expect(parseApprovalMode('edits')).toBe('edits');
+    expect(parseApprovalMode('accept')).toBe('edits');
+    expect(parseApprovalMode('always')).toBe('auto');
+    expect(parseApprovalMode('on')).toBe('auto');
+    expect(parseApprovalMode('yes')).toBe('auto');
     expect(parseApprovalMode('nope')).toBeNull();
   });
 
-  it('cycles manual → auto → always → manual', () => {
+  it('cycles manual → edits → auto → manual', () => {
     setApprovalMode('manual');
+    expect(cycleApprovalMode()).toBe('edits');
     expect(cycleApprovalMode()).toBe('auto');
-    expect(cycleApprovalMode()).toBe('always');
     expect(cycleApprovalMode()).toBe('manual');
     expect(getApprovalMode()).toBe('manual');
   });
@@ -130,8 +134,8 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
   });
 
-  it('auto accepts file edits but still asks for unknown shell', () => {
-    setApprovalMode('auto');
+  it('edits accepts file edits but still asks for unknown shell', () => {
+    setApprovalMode('edits');
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
     expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('allow');
@@ -141,14 +145,18 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(engine.evaluate({ tool: 'shell', operation: 'npm test' })).toBe('allow');
   });
 
-  it('always yes auto-approves edits, shell, and always-ask; irreversible still asks; hard-deny still denies', () => {
+  it('auto (legacy "always") runs edits and in-project work; outside / remote / system asks; hard-deny still denies', () => {
     setApprovalMode('always');
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
     expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('allow');
-    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    // Was 'allow' under "always yes"; system-level asks in auto.
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
     expect(engine.evaluate({ tool: 'shell', operation: 'git push --force' })).toBe('ask');
-    expect(engine.evaluate({ tool: 'shell', operation: 'rm --recursive --force /tmp/x' })).toBe('ask');
+    // Was 'ask' (irreversible) under "always yes"; /tmp is a workspace root, so a recursive
+    // delete there runs — while the same delete in $HOME still asks.
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm --recursive --force /tmp/x' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm --recursive --force ~/x' })).toBe('ask');
     expect(engine.evaluate({ tool: 'shell', operation: 'rm -rf /' })).toBe('deny');
   });
 
@@ -172,9 +180,9 @@ describe('approval modes (manual / auto / always yes)', () => {
     expect(interpretPermissionAnswer('')).toBe('deny');
   });
 
-  it('setAutoApproveSession(true) still maps to always yes', () => {
+  it('setAutoApproveSession(true) maps to the autonomous auto mode', () => {
     setAutoApproveSession(true);
-    expect(getApprovalMode()).toBe('always');
+    expect(getApprovalMode()).toBe('auto');
     expect(getAutoApproveSession()).toBe(true);
     setAutoApproveSession(false);
     expect(getApprovalMode()).toBe('manual');

@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.7.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 3.0.0** · 150+ tools · its own browser · desktop control · background missions · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -19,6 +19,34 @@ qodex setup && qodex
 [![License](https://img.shields.io/github/license/QodeXcli/QodeX?color=green)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
 [![Docs](https://img.shields.io/badge/docs-live-blue.svg)](https://qodexcli.github.io/QodeX/)
+
+## New in 3.0 — your agent gets its own computer
+
+QodeX is no longer only a coding agent. It now has a **dedicated browser** with persistent
+logins, **controls your desktop** (macOS, Linux, Windows), runs **missions that keep working
+after you close it**, and never buys, pays, sends or types a password **without your
+approval** — even in auto mode (`/auto on`). Full guide: **[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)**.
+
+```bash
+qodex browser open https://mail.example.com      # log in once — the agent stays logged in
+qodex "find me 3 flights Tehran→Istanbul under 15M toman next Friday and compare them"
+qodex mission start "every morning, summarize new issues in my repos and draft replies"
+qodex control --lan                               # watch it live from your phone, take over, approve
+qodex vault add github --origin github.com --username me@example.com --totp
+qodex workflow record invoice --url https://billing.example.com   # teach it once, replay forever
+qodex telegram setup                              # approvals + missions from Telegram
+```
+
+- **Dedicated QodeX Browser** — persistent profiles, multi-tab, accessibility snapshots with element refs, set-of-marks screenshots, downloads/uploads, PDF, CDP attach to your own Chrome, and an autonomous `browser_agent` for long multi-page jobs.
+- **Desktop control everywhere** — screenshots, click/drag/scroll, Unicode (Persian) typing, clipboard, open apps, window focus, and `computer_use_locate` (describe an element, vision finds it).
+- **Missions** — plan → sub-agents → milestones → report, in a detached, resumable worker with its own live view; schedule them as routines.
+- **Sentinel** — purchases, payments, sending and credentials always need a human; domain allow/block lists; web/window text fenced as untrusted data with English + Persian prompt-injection detection; full audit log.
+- **Vault** — encrypted credentials the model never sees, filled only on their own site (anti-phishing), with TOTP 2FA codes.
+- **Control center** — token-protected web page: live browser view, human takeover, one-tap approvals, activity timeline, steering, missions.
+- **Workflows** — learn a task from a demonstration, replay it with self-healing selectors at zero model tokens per step. Record in a logged-in browser profile with `workflow record <name> --browser-profile <p>` (`--profile` is always the config overlay).
+- **Telegram** — approve actions, start and follow missions from your phone.
+
+---
 
 ---
 
@@ -60,7 +88,7 @@ QodeX takes the opposite stance: **protect the model.** A layer of deterministic
 - **Syntax gate** — every edit is parsed before it's written; broken syntax is rejected, not saved.
 - **Completion gate** — the model can't claim "tests pass" or "I fixed it" unless a test actually ran / an edit actually succeeded. Unsupported claims get bounced back for correction.
 - **Auto-verification** — after the model thinks it's done, QodeX detects the project type and runs the real checker (`tsc`, `eslint`, `ruff`, `pyright`, `go vet`, `cargo`, `php -l` …) on touched files and force-feeds any errors back.
-- **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or `/auto on` to skip).
+- **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or Shift+Tab to `edits` / `auto` to skip — see [Approval modes](#approval-modes)).
 - **Git-backed sandbox** — risky work runs on a hidden branch with checkpoints; auto-snapshot (`git stash`) before destructive commands, one command to roll back.
 - **Process sandbox (Docker)** — a second, different isolation: the *shell* runs in a container so a remote-ish turn cannot `rm` your home directory. Pair it with `--profile cloud`. Not a Hub client — Hub is for approvals; this is where commands actually execute.
 - **Skill security scanner** — skills installed from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode payloads *before* they touch disk.
@@ -513,7 +541,17 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /network           Diagnose internet + Ollama + LM Studio connectivity
 /tools [--all]     List registered tools by category
 /plan  /normal     Plan mode (read-only)  /  back to normal
-/auto on|off       Auto-approve permissions
+/auto [manual|edits|auto]   Approval mode (also /mode; Shift+Tab cycles) — see "Approval modes"
+/status            Approval mode, strict mode, session
+/goal <done> [--check "<cmd>"] [--max N]   Keep working until the goal is proven (/goal · /goal clear)
+/stop [all]        Emergency stop: running task, side runs, dev servers (all: missions too)
+/learn [name]      Turn the task you just finished into a reusable skill
+/allow · /mail     Standing reply grants · mail watcher, rules, auto-reply (docs/MAIL.md)
+/mods · /mod new   Mods: hook QodeX itself; have QodeX write one (docs/MODS.md) · /reload-mods
+/context-bar       What fills the context window (built-in mod)
+/instructions first|all   Which project instruction files load (QODEX.md, CLAUDE.md, AGENTS.md, GEMINI.md…)
+/checkup prompt-audit     Audit instruction files, skills, commands → PROMPT_AUDIT.md + patch (nothing applied)
+/model opus|sonnet|haiku|fable   Latest model of each line
 /model <id>        Override model for this conversation
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
@@ -529,6 +567,80 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 From the shell: `qodex sessions list|show <id>|export <id>|search <query>`. Safe shell that should skip the approval hub: `execution.allow` in `config.yaml` (`git status`, `npm test`, …).
+
+## Approval modes
+
+Three modes decide what QodeX asks before it acts. **Shift+Tab** cycles them in the TUI; the
+status bar always shows the current one (`/status` prints it).
+
+| Mode | What runs without asking | What still asks |
+|---|---|---|
+| `manual` (default) | read-only tools, `execution.allow` / `autoApprove` matches | file edits, shell, MCP tools, missions, Sentinel actions |
+| `edits` | + every file edit (with its diff shown) | shell, MCP tools, missions, Sentinel actions |
+| `auto` | everything inside the project: edits, shell, installs, `git commit` / `rebase` / ordinary `push`, deleting project files, MCP and browser/desktop work Sentinel rates non-critical | see below |
+
+**What auto mode still asks a human for** (with nobody at the terminal — `-p` runs, schedules,
+detached missions — the question goes to the control center / Telegram / the mission's approval
+queue when one is connected, and is refused otherwise; it is never answered "yes" for you):
+
+- **Purchases, payments, passwords / credentials, sending messages** and changes to QodeX's own
+  safety settings — Sentinel-critical, a human answers in every mode.
+- **Destructive actions outside the project**: deleting or overwriting paths outside the workspace
+  roots, force-pushes and remote branch deletes, deleting remote data (cloud, Kubernetes,
+  `terraform destroy`, databases on other hosts, package unpublish), publishing (`npm publish`,
+  `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks); on the
+  web, deleting data or changing an account on a non-local site.
+- **Writes to the agent's own instruction files** — `AGENTS.md`, `QODEX.md`, `CLAUDE.md`,
+  `GEMINI.md`, `AI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, the
+  project's `.qodex/` and `.cursor/rules/`, `~/.qodex/skills|rules|hooks|memory`. These ask in
+  **every** mode (edit tools and shell alike) so a prompt-injected page can never rewrite the
+  agent's standing orders; no allow rule or "always yes" covers them.
+
+The agent's **own questions** are not asked in auto mode either: `ask_user` and plan approval
+(`present_plan`) return "decide yourself", so the model picks a sensible default, keeps going and
+lists its assumptions in the final answer. A plan presented in plan mode is approved and carried
+out in the same turn.
+
+**Turning it on:** Shift+Tab, `/auto on` (or `/auto auto`, `/mode auto`), `qodex --auto` /
+`qodex --approval-mode auto` (TUI and `-p`; `-y`/`--yes` means the same for a `-p` run), or
+`approval.defaultMode: auto` in **`~/.qodex/config.yaml`** — only the user config counts; a
+project's `.qodex/config.yaml` can never switch you into auto. Missions follow the session mode
+(`qodex mission start … --auto`). Answering **always yes** to a prompt switches the session to auto
+(a Sentinel "always" stays limited to that category on that site). When the mode changes mid-task
+the running agent is told.
+
+```yaml
+# ~/.qodex/config.yaml
+approval:
+  defaultMode: auto          # manual | edits | auto
+  extraRoots:                # more folders auto mode treats as "the project" (cwd and the temp dir always count)
+    - ~/code/shared-libs
+```
+
+Your `security.denyRules` and the hard-deny patterns still refuse in every mode, and budgets
+(`--budget-usd`, per-task caps) still stop a run — auto mode never raises them.
+
+## Mail, password vault and CAPTCHAs
+
+- **Mail** — connect any mailbox (`qodex mail add`), read, draft and send with your approval; standing
+  reply grants you create yourself; a watcher that wakes up on new mail and runs the tasks you assigned.
+  See [docs/MAIL.md](docs/MAIL.md).
+- **Password vault** — logins the agent can use but never read: OS-keychain key, imports from Chrome /
+  Firefox / Bitwarden / 1Password, one-step `browser_login` with 2FA, strong passwords on sign-up, logins
+  you type into a secure prompt, "save this login?" after you log in yourself. See
+  [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
+- **CAPTCHAs** — QodeX never solves them; it waits out self-clearing checks and hands the rest to you
+  (Telegram card with a one-tap live-view link, solve it from your phone), then continues by itself.
+- **Web Bot Auth** (`browser.botAuth`, off by default) — the honest alternative to stealth: QodeX signs its
+  own requests with an Ed25519 key (RFC 9421) so a site can recognise the agent and let it through, instead
+  of hiding that it is automated. `qodex browser bot-auth --init`; no fingerprint spoofing. See
+  [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
+
+## Mods (Claude Code-compatible)
+
+Small JS/TS modules in `~/.qodex/mods` that hook QodeX itself — rewrite or hold tool calls, draw above the
+prompt, add commands and tools, run timers. `/mod new <what it should do>` has QodeX write one (it asks
+before writing). Project mods load only after `qodex mod trust`. See [docs/MODS.md](docs/MODS.md).
 
 ## End-to-end example
 
@@ -586,7 +698,7 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 | `/new` | fresh conversation (new session) |
 | `/stop` | abort the running task |
 | `/status` | running/queued · model · project · session · auto state |
-| `/auto on \| off` | auto-approve actions (skip the buttons) — handy on mobile, off by default |
+| `/auto on \| off` | auto mode for this chat (skip the buttons) — purchases, payments, passwords, sending messages and destructive actions outside the project still ask; off by default |
 | `/model [id]` | show or switch the model for this conversation |
 | `/sessions` · `/resume <id>` | list past sessions and continue one (same store as the CLI) |
 | `/episodes` | past tasks solved here, from episodic memory |
@@ -620,6 +732,11 @@ qodex schedule add --name nightly-deps \
   --deliver telegram:<your-chat-id>          # result lands on your phone, not just a desktop ping
 qodex schedule list      ·  runs <id>  ·  enable/disable <id>  ·  rm <id>
 ```
+
+**Monitors that remember.** `--continuity` gives each run the previous run's answer so it reports
+only what changed; `--notify-on-change` skips the notification / chat delivery when the answer is
+the same as last time (`qodex schedule add --name price --cron @hourly --prompt "price of X at
+shop.example" --continuity --notify-on-change`).
 
 **Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>` / `slack:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
 

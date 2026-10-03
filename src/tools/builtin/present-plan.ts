@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
+import { isAutonomousContext } from '../../sentinel/auto-mode.js';
 
 const StepSchema = z.object({
   action: z.enum(['read', 'edit', 'create', 'delete', 'shell', 'verify']).describe('Type of action'),
@@ -22,6 +23,16 @@ export function consumeLastPlan(): z.infer<typeof ArgsSchema> | null {
   return p;
 }
 
+/**
+ * Tool-result line for a plan the autonomous 'auto' mode approved. The agent loop sees
+ * `metadata.autoApproved` and lifts plan mode for the rest of the run, so the model
+ * executes the plan in the same turn instead of waiting for a human "go". PURE.
+ */
+export const PLAN_AUTO_APPROVED =
+  '[PLAN_APPROVED] Auto mode approved this plan automatically (the user is not reviewing plans). ' +
+  'Every tool is available now: execute the plan step by step in this turn, note any assumption ' +
+  'you make, and verify the result before you finish.';
+
 export class PresentPlanTool extends Tool<z.infer<typeof ArgsSchema>> {
   name = 'present_plan';
   description = 'Submit a structured plan for the user to review. ONLY available in plan mode. Call this once you have a complete plan — it ends the plan phase.';
@@ -29,7 +40,7 @@ export class PresentPlanTool extends Tool<z.infer<typeof ArgsSchema>> {
   isDestructive = false;
   argsSchema = ArgsSchema;
 
-  async execute(args: z.infer<typeof ArgsSchema>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof ArgsSchema>, ctx: ToolContext): Promise<ToolResult> {
     lastPlan = args;
     const lines: string[] = [`Goal: ${args.goal}`, '', 'Steps:'];
     for (let i = 0; i < args.steps.length; i++) {
@@ -43,6 +54,10 @@ export class PresentPlanTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
     if (args.estimated_changes !== undefined) {
       lines.push('', `Estimated file changes: ${args.estimated_changes}`);
+    }
+    if (isAutonomousContext(ctx)) {
+      lines.push('', PLAN_AUTO_APPROVED);
+      return { content: lines.join('\n'), metadata: { plan: args, autoApproved: true } };
     }
     return {
       content: lines.join('\n'),

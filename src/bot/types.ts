@@ -113,7 +113,7 @@ export interface AgentRunner {
   status?(convKey: string): Promise<RunnerStatus>;
   /** Override the model for this conversation; returns the model now in effect. */
   setModel?(convKey: string, model: string): Promise<string>;
-  /** Toggle per-conversation auto-approve (skip permission prompts). */
+  /** Toggle per-conversation auto mode (the autonomous policy; critical actions still ask). */
   setAuto?(convKey: string, on: boolean): Promise<void>;
   /** Recent resumable sessions for this conversation's working directory. */
   listSessions?(convKey?: string, limit?: number): Promise<{ id: string; title: string; when: string }[]>;

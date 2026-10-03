@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import {
   runSuite, scoreResults, diffRuns, formatRunReport, formatDiffReport,
@@ -199,7 +200,7 @@ describe('runSuite — isolation', () => {
 
     const { stdout } = await promisify(execFile)(
       process.execPath,
-      [path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'), script],
+      [createRequire(import.meta.url).resolve('tsx/cli'), script],
       { cwd: root, timeout: 60_000, encoding: 'utf-8' },
     );
 

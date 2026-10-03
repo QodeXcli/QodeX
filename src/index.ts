@@ -1,5 +1,5 @@
 /*
- * QodeX — Local-first agentic coding CLI
+ * QodeX — Local-first autonomous agent: code, its own browser, your desktop
  * Copyright 2026 7 SEVEN
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,9 +19,11 @@ import { render } from 'ink';
 import React from 'react';
 import { loadConfig, ensureQodexHome, setActiveConfig } from './config/loader.js';
 import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './config/profile.js';
+import { handBackRootFlags } from './cli/root-flags.js';
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
-import { PermissionEngine } from './security/permissions.js';
+import { PermissionEngine, setApprovalMode } from './security/permissions.js';
+import { approvalModeFromFlags, startupApprovalMode } from './cli/approval-flags.js';
 import { appendAudit } from './security/audit-log.js';
 import { App } from './cli/ui.js';
 import { runHeadless } from './cli/modes/headless.js';
@@ -100,7 +102,9 @@ async function bootstrap(): Promise<{
   } catch (e: any) {
     logger.warn('User plugins not loaded', { err: e?.message });
   }
-  const permissions = new PermissionEngine(config);
+  // Resolve read-only status from the live registry (not a hardcoded list), so new
+  // read-only tools are auto-allowed without having to be listed twice.
+  const permissions = new PermissionEngine(config, (n) => registry.get(n));
   permissions.onDecision = (req, decision, via) => {
     if (decision === 'ask') return;
     appendAudit({
@@ -148,6 +152,7 @@ async function bootstrap(): Promise<{
   // Graceful shutdown — also fires SessionEnd hooks
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
+    try { await (await import('./mods/surface.js')).modsShutdown('exit'); } catch { /* mods: session.end, capped */ }
     try {
       if (hooks.hasAny('SessionEnd')) {
         await hooks.dispatch('SessionEnd', { event: 'SessionEnd', sessionId: 'shutdown', cwd: process.cwd() });
@@ -156,6 +161,22 @@ async function bootstrap(): Promise<{
     try {
       const m = getMCPManager();
       if (m) await m.stopAll();
+    } catch {}
+    // Close the dedicated browser (persistent profile data stays on disk) without
+    // letting a hung Chromium block exit.
+    try {
+      const { peekBrowserManager } = await import('./tools/browser/types.js');
+      const mgr = peekBrowserManager();
+      if (mgr) await Promise.race([mgr.close(), new Promise(r => setTimeout(r, 3000))]);
+    } catch {}
+    // Stop the control center and Telegram bot if this process started them.
+    try {
+      const { getControlCenter, stopControlCenter } = await import('./control/server.js');
+      if (getControlCenter()) await stopControlCenter();
+    } catch {}
+    try {
+      const { getTelegramBot, stopTelegramBot } = await import('./channels/telegram/index.js');
+      if (getTelegramBot()) await stopTelegramBot();
     } catch {}
     process.exit(0);
   };
@@ -183,13 +204,15 @@ function readVersion(): string {
 
 program
   .name('qodex')
-  .description('QodeX — Local-first agentic coding CLI')
+  .description('QodeX — local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions')
   .version(readVersion())
   .argument('[prompt...]', 'Initial prompt (omit to launch interactive REPL)')
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
   .option('--profile <name>', 'Named config overlay (~/.qodex/profiles/<name>.yaml or QODEX_PROFILE). Not -p — that is --print.')
   .option('--json', 'When used with --print, emit NDJSON events to stdout')
-  .option('-y, --yes', 'Auto-approve all permission prompts (headless mode only)')
+  .option('-y, --yes', 'Same as --auto (unattended -p runs and schedules pass it): with no human, critical and outside-project destructive actions are refused')
+  .option('--auto', 'Start in auto mode: work without asking; purchases, payments, passwords, sending messages and destructive actions outside the project still need a human')
+  .option('--approval-mode <mode>', 'Approval mode to start in: manual | edits | auto (default: approval.defaultMode in ~/.qodex/config.yaml, else manual)')
   // ── Guardrailed autonomy contract (headless -p only) ──
   .option('--budget-tokens <n>', 'Kill the run after N total (novel) tokens; triggers rollback-on-fail')
   .option('--budget-usd <n>', 'Kill the run after $N spend; triggers rollback-on-fail')
@@ -198,13 +221,34 @@ program
   .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
   .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
   .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
-  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
+  .option('--strict-budget', 'Budget caps stop the run at once: no wrap-up allowance to leave the work consistent (headless -p)')
+  .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-opus-5-5, gpt-4o; aliases: opus, sonnet, haiku, fable)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
   .option('--list-sessions', 'List recent sessions and exit')
+  .option('--mod-dir <dir>', 'Load the mod(s) in <dir> for this session and reload them on save (repeatable; also QODEX_MOD_DIRS)', (v: string, prev: string[] = []) => [...prev, v])
+  // FIRST: commander's default parsing lets the ROOT swallow its flags (-p, --profile,
+  // --json, -m, -y, --scope, ...) even when they're written after a subcommand that
+  // declares the same flag. Hand those back to that subcommand (matched by the flag as
+  // typed — root -p is --print, `workflow run -p` is --param) and drop them from the
+  // root, so `browser open --profile work` is a browser profile, not a config overlay.
+  // Flags written before the subcommand stay the root's; see src/cli/root-flags.ts.
+  .hook('preAction', (thisCommand, actionCommand) => {
+    handBackRootFlags(thisCommand, actionCommand, process.argv.slice(2));
+  })
+  // Approval-mode flags the root kept (--auto / --approval-mode / -y written before a
+  // subcommand, or on the bare `qodex` / `qodex -p` line) set this process's session mode,
+  // which sub-agents, inline missions and `mission start`'s default follow. Flags written
+  // after a subcommand that declares them (mission start --auto) were handed back above.
+  .hook('preAction', (thisCommand, actionCommand) => {
+    const o = thisCommand.opts() as { auto?: boolean; approvalMode?: string; yes?: boolean };
+    // -y keeps meaning "this headless/TUI run" only: `qodex -y <subcommand>` never did more.
+    const mode = approvalModeFromFlags({ auto: o.auto, approvalMode: o.approvalMode, yes: actionCommand === thisCommand ? o.yes : undefined });
+    if (mode) setApprovalMode(mode);
+  })
   .hook('preAction', thisCommand => {
-    const name = (thisCommand.optsWithGlobals() as { profile?: string }).profile;
+    const name = (thisCommand.opts() as { profile?: string }).profile;
     if (typeof name === 'string' && name.trim()) setRequestedProfile(name.trim());
   })
   .action(async (promptArgs: string[], opts: any) => {
@@ -228,6 +272,14 @@ program
     }
 
     const { config, router, registry, permissions } = await bootstrap();
+
+    // Session approval mode: flags (already applied by the preAction hook), else the user
+    // config's approval.defaultMode, else manual. Headless and the TUI both start in it.
+    const startup = startupApprovalMode(
+      { auto: opts.auto, approvalMode: opts.approvalMode, yes: opts.yes },
+      config as { approval?: { defaultMode?: unknown } },
+    );
+    setApprovalMode(startup.mode);
 
     if (opts.listModels) {
       const models = router.listAvailableModels();
@@ -306,6 +358,10 @@ program
       console.error('--receipt needs a contract: add at least one of --verify / --budget-tokens / --budget-usd / --max-wall / --scope.');
       process.exit(1);
     }
+    if (opts.strictBudget && !opts.print) {
+      console.error('--strict-budget requires headless mode (-p/--print).');
+      process.exit(1);
+    }
 
     // Headless mode
     if (opts.print) {
@@ -322,6 +378,8 @@ program
         resumeSessionId,
         contract: contract ?? undefined,
         receiptPath: opts.receipt,
+        strictBudget: !!opts.strictBudget,
+        modDirs: opts.modDir,
       });
       process.exit(code);
     }
@@ -360,6 +418,9 @@ program
     if (config.defaults.warmOnStart !== false) {
       void import('./llm/warmup.js').then(m => m.warmModel(router, config)).catch(() => {});
     }
+    // Mods: load before the first frame (session.start fires once the session id is known).
+    const mods = await import('./mods/surface.js');
+    await mods.modsInteractiveInit({ cwd: process.cwd(), bindings: { config, router, registry }, extraDirs: opts.modDir });
     const { waitUntilExit } = render(
       React.createElement(App, {
         cwd: process.cwd(),
@@ -372,6 +433,7 @@ program
         explicitModel: opts.model,
         onSessionActive: (id: string) => {
           activeSessionId = id;
+          void mods.modsSessionActive(id);
           void import('./session/handoff.js').then(m => {
             const loaded = getSessionStore().loadSession(id);
             return m.writeHandoff(id, loaded?.meta.cwd ?? process.cwd());
@@ -380,6 +442,7 @@ program
       }),
     );
     await waitUntilExit();
+    await mods.modsShutdown('exit'); // mods: session.end (capped at 1.5 s)
     if (activeSessionId) {
       const short = activeSessionId.slice(0, 8);
       console.log(`\nResume this session with:  qodex --resume ${short}   (or: qodex --continue)`);
@@ -1493,6 +1556,25 @@ program
   });
 
 program
+  .command('checkup [check]')
+  .description('Opt-in checks that only report: `prompt-audit` audits instruction files, skills, commands and mods (no check = list)')
+  .option('--no-model', 'Skip the model rewrite pass (deterministic findings only)')
+  .action(async (check: string | undefined, opts: { model?: boolean }) => {
+    const { describeChecks, runPromptAuditCheck } = await import('./checkup/index.js');
+    if (!check) { console.log(describeChecks('qodex checkup')); return; }
+    if (check !== 'prompt-audit') {
+      console.error(`Unknown check: ${check}\n\n${describeChecks('qodex checkup')}`);
+      process.exit(1);
+    }
+    const { summarizeAudit } = await import('./checkup/prompt-audit.js');
+    const { loadConfig } = await import('./config/loader.js');
+    const config = await loadConfig(process.cwd()).catch(() => undefined);
+    // commander turns --no-model into `model: false`.
+    const result = await runPromptAuditCheck(process.cwd(), { noModel: opts.model === false, config });
+    console.log(summarizeAudit(result));
+  });
+
+program
   .command('doctor')
   .description('Check environment health (providers, Ollama, grammars, MCP, DB writability)')
   .action(async () => {
@@ -1730,8 +1812,9 @@ schedule
       const last = e.last_run_at
         ? `${new Date(e.last_run_at).toLocaleString()} (${e.last_status})`
         : 'never';
-      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : ''].filter(Boolean).join('  ');
-      console.log(`${flag} ${e.id.slice(0, 8)}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}${tags ? `  ${tags}` : ''}`);
+      const kind = e.kind === 'mission' ? 'mission' : 'prompt ';
+      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : '', e.continuity ? 'continuity' : '', e.notify_on === 'change' ? 'notify:change' : ''].filter(Boolean).join('  ');
+      console.log(`${flag} ${e.id.slice(0, 8)}  ${kind}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}${tags ? `  ${tags}` : ''}`);
     }
   });
 
@@ -1744,8 +1827,11 @@ schedule
   .option('--cwd <dir>', 'Working directory for the run (default: current cwd)')
   .option('--model <id>', 'Model to use (default: configured default)')
   .option('--allow <tools>', 'Comma-separated tool allowlist (default: all)')
+  .option('--mission', 'Start a background mission each run (the prompt is its goal) instead of a one-shot run')
   .option('--deliver <target>', 'Send the result to chat, e.g. "telegram:<chatId>" or "discord:<channelId>"')
   .option('--recipe <kind>', 'Run a protocol instead of a bare prompt: "verified-pr" (sandbox branch → verify → open PR only if green)')
+  .option('--continuity', 'Give each run the previous run\'s answer so it reports what changed (monitors: prices, pages, issues)')
+  .option('--notify-on-change', 'Notify / deliver only when the answer differs from the previous run')
   .action(async (_opts: unknown, cmd: Command) => {
     // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
     const opts: any = cmd.optsWithGlobals();
@@ -1766,11 +1852,16 @@ schedule
         cwd: opts.cwd ?? process.cwd(),
         model: opts.model,
         allowedTools: opts.allow ? opts.allow.split(',').map((s: string) => s.trim()).filter(Boolean) : undefined,
+        kind: opts.mission ? 'mission' : 'prompt',
         deliver: opts.deliver,
         recipe: opts.recipe,
+        continuity: !!opts.continuity,
+        notifyOnChange: !!opts.notifyOnChange,
       });
       console.log(`✓ Scheduled "${entry.name}" (${entry.id.slice(0, 8)}).`);
       if (entry.recipe) console.log(`  Recipe:   ${entry.recipe}`);
+      if (entry.continuity) console.log('  Continuity: each run sees the previous answer and reports what changed');
+      if (entry.notify_on === 'change') console.log('  Notifies:   only when the answer changes');
       if (entry.deliver) console.log(`  Delivers: ${entry.deliver}`);
       if (entry.next_run_at) console.log(`  Next run: ${new Date(entry.next_run_at).toLocaleString()}`);
       console.log(`  Make sure the tick is installed: \`qodex schedule install\``);
@@ -1892,6 +1983,71 @@ program
 // Built as a separate sub-Command so each subcommand gets clean --help and arg validation.
 import { buildSkillCommand } from './cli/skill-command.js';
 program.addCommand(buildSkillCommand());
+
+// ── Agent platform ──────────────────────────────────────────────────────────
+// Each builder lazy-loads its module; none of them bootstraps the agent stack
+// except `mission` (its worker needs the router/registry), which gets bootstrap.
+import { buildBrowserCommand } from './tools/browser/command.js';
+import { buildControlCommand } from './control/command.js';
+import { buildMissionCommand } from './missions/command.js';
+import { buildWorkflowCommand } from './workflows/command.js';
+import { buildTelegramCommand } from './channels/telegram/command.js';
+import { buildVaultCommand } from './vault/command.js';
+import { buildMailCommand } from './mail/command.js';
+
+program.addCommand(buildBrowserCommand());
+const controlCommand = buildControlCommand({
+  // `qodex control` shows this process's browser; mission actions read the shared DB,
+  // so detached missions (and their approvals) are visible and controllable too.
+  setup: async () => {
+    const { registerMissionControl } = await import('./control/missions-bridge.js');
+    await registerMissionControl({ defaultCwd: process.cwd() });
+  },
+});
+// The control command reads --json via optsWithGlobals(); with positional options it
+// must declare the flag itself.
+controlCommand.option('--json', 'Print the control-center info as JSON');
+program.addCommand(controlCommand);
+program.addCommand(buildMissionCommand(
+  async () => {
+    const b = await bootstrap();
+    return { config: b.config, router: b.router, registry: b.registry, permissions: b.permissions, mcpManager: b.mcpManager };
+  },
+  {
+    // Every mission worker gets its own live control center (ephemeral port, token
+    // protected) so you can watch the mission's browser, take over, and approve.
+    onStart: async () => {
+      if (process.env.QODEX_MISSION_LIVE === '0') return;
+      try {
+        const { startControlCenter, stopControlCenter } = await import('./control/server.js');
+        const info = await startControlCenter({ port: 0 });
+        return { liveUrl: info.url, dispose: async () => { await stopControlCenter(); } };
+      } catch {
+        return;
+      }
+    },
+  },
+));
+program.addCommand(buildWorkflowCommand());
+program.addCommand(buildTelegramCommand({
+  missionAdapter: async () => (await import('./missions/telegram-adapter.js')).createTelegramMissionAdapter({ defaultCwd: process.cwd() }),
+}));
+program.addCommand(buildVaultCommand());
+// `qodex mail add|list|remove|test|default|presets` — IMAP/SMTP accounts, encrypted with the vault key.
+// Mail subcommands from other modules (watch, rule) attach with mailCommand.addCommand(...).
+const mailCommand = buildMailCommand();
+program.addCommand(mailCommand);
+// `qodex mod list|new|validate|test|enable|disable|trust|untrust|path` — mods (hooks into QodeX itself).
+import { buildModCommand } from './mods/command.js';
+program.addCommand(buildModCommand());
+
+// Standing grants (`qodex grant …`) and the mail automation (`qodex mail watch|rule|reply-all`).
+// Keep attachMailAutomationCommands AFTER the core `qodex mail` command is added: it mounts
+// its subcommands under it (or creates `mail` when the core command is absent).
+import { buildGrantCommand } from './grants/command.js';
+import { attachMailAutomationCommands } from './mail/watcher.js';
+program.addCommand(buildGrantCommand());
+attachMailAutomationCommands(program);
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);

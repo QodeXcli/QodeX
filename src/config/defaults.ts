@@ -1,5 +1,8 @@
 import * as os from 'os';
 import * as path from 'path';
+import type {
+  BrowserConfig, DesktopConfig, SentinelConfig, MissionsConfig, ControlConfig, TelegramConfig,
+} from './agent-config.js';
 
 /**
  * Resolve the user's home directory robustly.
@@ -208,6 +211,21 @@ export interface QodexConfig {
     perTaskMaxTokens: number;
     perTaskMaxWallSeconds: number;
     toolTimeoutSeconds: number;
+    /**
+     * Wrap-up allowance: when a token / USD / iteration / (stall-aware) wall-clock cap is hit
+     * mid-task, the run gets ONE extra allowance to leave the work consistent and report,
+     * instead of stopping mid-change. Tokens / USD = max(percent of the cap, minimum), wall
+     * clock = max(percent, 60 s), plus at most `maxIterations` more model calls. Then the hard
+     * stop. Never for /stop, Esc, Sentinel blocks or `--strict-budget`. Defaults below.
+     */
+    wrapUp?: {
+      enabled?: boolean;
+      percent?: number;
+      minTokens?: number;
+      /** USD floor of the allowance (percent of a tiny cap can be fractions of a cent). */
+      minUsd?: number;
+      maxIterations?: number;
+    };
   };
   security: {
     autoApprove: string[];
@@ -417,6 +435,11 @@ export interface QodexConfig {
      *  Default false. Explicit values above/in `compaction` always override the profile.
      *  Trade-off: the model may occasionally re-read an aged-out file. */
     efficient?: boolean;
+    /** Project instruction files (QODEX.md, CLAUDE.md, AGENTS.md, GEMINI.md, .cursorrules,
+     *  .windsurfrules, AI.md): 'first' (default) loads the first one found walking up from the
+     *  cwd; 'all' loads every one in the nearest directory that has any (headers per file,
+     *  identical contents once). `/instructions all|first` overrides it for the session. */
+    projectInstructions?: 'first' | 'all';
   };
   /**
    * LLM Critic gate — semantic peer review after the mechanical verify gate. A
@@ -485,17 +508,6 @@ export interface QodexConfig {
       /** If true, ALL tool calls are auto-approved. Dangerous — only on a fully trusted machine. */
       all?: boolean;
     };
-  };
-  /**
-   * Browser tooling. By default the `browser_*` tools launch a fresh headless Chromium.
-   * Set `cdpUrl` to ATTACH to an already-running browser over the Chrome DevTools Protocol
-   * instead — drive your OWN logged-in Chrome / Brave / Arc / Edge (started with
-   * `--remote-debugging-port=9222`), or any Chromium-based browser, with your real cookies
-   * and sessions. The `QODEX_BROWSER_CDP_URL` env var overrides this.
-   */
-  browser?: {
-    /** CDP/DevTools endpoint to attach to, e.g. "http://127.0.0.1:9222". */
-    cdpUrl?: string;
   };
   /**
    * Local data flywheel — record successful sandbox trajectories (prompt +
@@ -674,6 +686,46 @@ export interface QodexConfig {
       name?: string;
     }>;
   };
+  /**
+   * Agent platform sections — all optional; defaults are resolved in code by
+   * src/config/agent-config.ts (resolveBrowserConfig, resolveSentinelConfig, ...)
+   * so `qx setup` never freezes them into the user's YAML.
+   */
+  /**
+   * Dedicated QodeX Browser (persistent profile, headed/headless). Set `cdpUrl` to ATTACH
+   * to an already-running browser over the Chrome DevTools Protocol instead — drive your
+   * OWN logged-in Chrome / Brave / Arc / Edge (started with `--remote-debugging-port=9222`)
+   * with your real cookies and sessions. `QODEX_BROWSER_CDP_URL` overrides it.
+   */
+  browser?: Partial<Omit<BrowserConfig, 'viewport'>> & { viewport?: Partial<BrowserConfig['viewport']> };
+  /** Cross-platform desktop control (computer_use_* tools). */
+  desktop?: Partial<DesktopConfig>;
+  /** Sentinel guard for purchases, payments, sending, credentials, blocked domains. */
+  sentinel?: Partial<SentinelConfig>;
+  /** Long-running background missions. */
+  missions?: Partial<MissionsConfig>;
+  /** Web control center (live browser view, takeover, approvals). */
+  control?: Partial<ControlConfig>;
+  /** Telegram channel (approvals + missions from your phone). */
+  telegram?: Partial<TelegramConfig>;
+  /**
+   * Approval mode defaults. Read ONLY from the user config (~/.qodex/config.yaml): a
+   * project's .qodex/config.yaml must not switch a user into autonomous mode.
+   */
+  approval?: {
+    /** Mode at startup: 'manual' (default), 'edits' or 'auto' (autonomous). */
+    defaultMode?: 'manual' | 'edits' | 'auto';
+    /** Extra directories auto mode treats as part of the project (besides cwd and the temp dir). */
+    extraRoots?: string[];
+    /**
+     * Auto mode's remaining asks (destructive outside the project, edits outside it, Sentinel's
+     * auto-mode asks) shown in the TUI are denied after this many seconds without an answer, with
+     * a hint to rewrite the action inside the project — an unattended run keeps going instead of
+     * waiting forever. Default 120; 0 = wait forever. Never applies to Sentinel-critical prompts
+     * (purchase, payment, credential, send, integrity) or to manual mode.
+     */
+    unattendedTimeoutSec?: number;
+  };
 }
 
 export const DEFAULT_CONFIG: QodexConfig = {
@@ -713,6 +765,7 @@ export const DEFAULT_CONFIG: QodexConfig = {
     // model legitimately spends that on a handful of long generations.
     perTaskMaxWallSeconds: 3600,
     toolTimeoutSeconds: 300,
+    wrapUp: { enabled: true, percent: 10, minTokens: 4000, minUsd: 0.05, maxIterations: 3 },
   },
   learning: {
     // Skill CAPTURE stays off: it writes candidate files and spends a judge call, so it is a
@@ -742,15 +795,16 @@ export const DEFAULT_CONFIG: QodexConfig = {
       '^cargo (check|test|build)',
     ],
     autoReject: [
-      'rm -rf /',
-      'rm -rf /\\*',
+      // A recursive/forced rm of the filesystem root itself — `/` or `/*`, any flag order —
+      // not every absolute path (an unanchored 'rm -rf /' also denied `rm -rf /tmp/x`).
+      '\\brm\\s+(?:-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*(?:--\\s+)?/\\*?(?:\\s|;|&|\\||$)',
       'mkfs',
       'dd if=',
       ':\\(\\)\\{',
       'curl .* \\| (bash|sh)',
       'wget .* \\| (bash|sh)',
       '> /dev/sda',
-      'chmod -R 777 /',
+      '\\bchmod\\s+-R\\s+777\\s+/(?:\\s|;|&|\\||$)',
     ],
     alwaysAsk: [
       // macOS global preference / system settings mutation

@@ -35,6 +35,9 @@ export interface DistillPolicy {
   minSteps: number;
   /** Cap on outlined steps; longer sequences get truncated with an explicit marker. */
   maxSteps: number;
+  /** Allow a session that changed no files (web / desktop tasks). Only a human-requested
+   *  /learn sets this — an automatic capture still needs file evidence. */
+  filesOptional?: boolean;
 }
 
 export const DEFAULT_DISTILL_POLICY: DistillPolicy = { minSteps: 3, maxSteps: 12 };
@@ -113,7 +116,7 @@ export function distillDraft(
   // a one-or-two-move session has no step outline worth reviewing, and a session that
   // changed no files has no evidence to anchor the draft.
   if (allSteps.length < policy.minSteps) return null;
-  if (digest.filesChanged.length === 0) return null;
+  if (digest.filesChanged.length === 0 && !policy.filesOptional) return null;
 
   const truncated = allSteps.length > policy.maxSteps;
   const steps = truncated ? allSteps.slice(0, policy.maxSteps) : allSteps;
@@ -157,7 +160,7 @@ ${digest.finalSummary.trim() || '(summary unavailable)'}
 ## Evidence
 
 Files changed:
-${evidence.files.map(f => `- ${f}`).join('\n')}
+${evidence.files.length ? evidence.files.map(f => `- ${f}`).join('\n') : '- (none — not a file-editing task)'}
 
 Tools used:
 ${evidence.tools.map(t => `- \`${t}\``).join('\n')}

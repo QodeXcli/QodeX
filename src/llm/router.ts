@@ -23,6 +23,7 @@ import { validateCustomProviders } from './providers/custom-config.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { logger } from '../utils/logger.js';
 import { ProviderError } from '../utils/errors.js';
+import { resolveModelAlias } from './model-catalog.js';
 
 export type TaskClass = 'planning' | 'tool-decision' | 'code-generation' | 'reflection' | 'general';
 
@@ -219,6 +220,15 @@ export class ModelRouter {
           return { provider: val.provider, modelInfo: val.info, resolvedId: modelId };
         }
       }
+    }
+
+    // Alias (`opus` / `sonnet` / `haiku` / `fable` → the latest id of that line). Checked after
+    // the exact match, so a local model literally named `sonnet` still wins; when the target is
+    // not served here, fall through to the partial match below exactly as before.
+    const aliased = resolveModelAlias(modelId);
+    if (aliased) {
+      const viaAlias = this.resolveModel(aliased);
+      if (viaAlias) return viaAlias;
     }
 
     // Partial match (case-insensitive): lets `--model qwen2.5` select

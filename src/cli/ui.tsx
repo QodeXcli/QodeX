@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { emergencyStop, formatStopReport, registerStopHandler } from '../control/emergency-stop.js';
+import { checkGoalAsync, getStandingGoal, nextGoalStep, setStandingGoal } from '../goals/goal.js';
 import { Box, Text, Static, useApp, useInput, useStdout } from 'ink';
 import Spinner from 'ink-spinner';
 import { ChatInput } from './components/chat-input.js';
@@ -39,6 +41,7 @@ import { isAlwaysYesAnswer } from '../security/permissions.js';
 import { isRedundantAssistantText, dedupeSelfRepeatedText } from './modes/final-dedupe.js';
 import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
+import { SecretPromptHost } from './prompts/secret-input.js';
 import { ThinkingPanel } from './prompts/thinking-panel.js';
 import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
@@ -50,10 +53,21 @@ import { Welcome } from './prompts/welcome.js';
 import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
+import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
+import { handoffForPrompt, handoffTerminalHint } from '../control/handoff.js';
+import {
+  buildSendNowPrompt, detachForegroundShells, foregroundShellCount, sendNowKey, sendNowLine, SEND_NOW_HINT, SEND_NOW_TIP,
+} from '../tools/shell/send-now.js';
+import type { AskMeta } from '../agent/ask-meta.js';
+import { isSentinelPrompt } from '../sentinel/guard.js';
+import { autoAnswerForMode, autoAnsweredLine, autoModeBannerOnce, modeBadge } from './approval-ui.js';
+import { forwardAgentEvent } from '../control/forward.js';
 import { getOperatorHub } from '../operator/hub.js';
 import { pickWorkingCwd } from '../session/handoff.js';
 import { getActiveProfile } from '../config/profile.js';
 import { SideRunDock } from './prompts/side-run-dock.js';
+import { useModsUiController, ModsBand, ModsPanes, ModsStatusLines, ModsToasts, ModsSpinnerWord, ModHistoryLineView } from '../mods/ui/components.js';
+import type { ModsUiSnapshot } from '../mods/ui/controller.js';
 import {
   appendLaneLine,
   applyRunToLanes,
@@ -67,7 +81,9 @@ type HistoryItem =
   | { type: 'tool'; name: string; result: string; isError?: boolean; id: string }
   | { type: 'diff'; path: string; before: string | null; after: string; id: string }
   | { type: 'system'; text: string; id: string }
-  | { type: 'error'; text: string; id: string };
+  | { type: 'error'; text: string; id: string }
+  /** $.ui.log / $.ui.notice from a mod: display only, never part of the model's messages. */
+  | { type: 'mod'; kind: 'log' | 'notice' | 'error'; plugin: string; text: string; id: string };
 
 const EDIT_DIFF_TOOLS = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
 
@@ -77,6 +93,11 @@ interface PendingPrompt {
   resolve: (answer: string) => void;
   diff?: { path: string; before: string | null; after: string };
   hubId?: string;
+  /** What the prompt is about (tool + operation for a permission) — lets a switch into
+   *  auto re-check it against the policy instead of guessing from the text. */
+  meta?: AskMeta;
+  lane?: string;
+  origin?: string;
 }
 
 export interface AppProps {
@@ -146,6 +167,12 @@ export function App(props: AppProps): React.ReactElement {
   const dockOpenRef = useRef(false);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
+  // The masked login prompt (vault_request_login) owns the keyboard while it is open:
+  // the chat input is hidden and the shortcuts below stand aside (Esc cancels the
+  // request, not the run), so no keystroke of a password reaches the chat or its history.
+  const [secretActive, setSecretActive] = useState(false);
+  const secretActiveRef = useRef(false);
+  secretActiveRef.current = secretActive;
   const [sessionId, setSessionId] = useState<string>(() => {
     const store = getSessionStore();
     if (props.resumeSessionId) {
@@ -213,6 +240,18 @@ export function App(props: AppProps): React.ReactElement {
   // output isn't a TTY (piped) or the user opted out via QODEX_NO_MOTION=1.
   const motion = !!stdout?.isTTY && process.env.QODEX_NO_MOTION !== '1';
   const abortRef = useRef<AbortController | null>(null);
+  // Send now (Ctrl+Enter, or the Ctrl+X Ctrl+S chord): the chord's armed state; the pending
+  // hand-off to the running turn's event loop (it ends the turn once the moved shell's result
+  // is recorded); and the prompts send-now queued → what to show for them in history.
+  const sendNowArmedRef = useRef(false);
+  const sendNowRef = useRef<{ ac: AbortController; stop: () => void } | null>(null);
+  const sendNowDisplayRef = useRef(new Map<string, string>());
+  // /stop (here, the control center or Telegram) aborts the running turn through this handler.
+  useEffect(() => registerStopHandler('current run', () => {
+    const ac = abortRef.current;
+    if (ac && !ac.signal.aborted) { ac.abort(); return 'the running task'; }
+    return null;
+  }), []);
   // Exit guard: a stray Ctrl+C while idle shouldn't quit. The first press "arms" an
   // exit prompt; a second Ctrl+C within the window actually exits. Any other key (or
   // the timeout) disarms it. This mirrors what people expect from Claude Code et al.
@@ -238,6 +277,23 @@ export function App(props: AppProps): React.ReactElement {
     idCounterRef.current++;
     return String(idCounterRef.current);
   }, []);
+
+  // Mods: the band above the prompt, panes, status lines, toasts, the spinner suffix and
+  // log/notice history lines. Draws nothing until the mods runtime registers a host.
+  const mods = useModsUiController({
+    busy, columns: cols, rows, promptEmpty: input === '', mode,
+    // One state update per burst of lines (each update repaints the whole App).
+    onHistoryLines: lines => setHistory(h => [...h, ...lines.map(line => ({ type: 'mod' as const, ...line, id: nextId() }))]),
+    // $.prompt.submit: queued like a typed prompt, so it runs when the agent is free.
+    // Never as a slash command — a mod does not get to type /auto or /mode for the user.
+    onPrompt: p => {
+      if (p.text.startsWith('/')) {
+        setHistory(h => [...h, { type: 'mod', kind: 'error', plugin: p.plugin, text: 'prompt.submit refused: a mod cannot run slash commands', id: nextId() }]);
+        return;
+      }
+      setQueued(q => [...q, p.text]);
+    },
+  });
 
   // Throttle the live streaming region: setting state on every text_delta (one per
   // token) repaints the multi-line region dozens of times a second, which the user
@@ -284,9 +340,17 @@ export function App(props: AppProps): React.ReactElement {
     void import('../tools/builtin/task.js').then(m => {
       m.setSubAgentRunner((prompt, opts) => agent.runSubagent(prompt, opts));
     });
+    // mission_start {detach:false}: run a mission in this terminal, streaming its
+    // milestones (detached missions are the default and need nothing here).
+    void Promise.all([import('../missions/tools.js'), import('../missions/command.js')]).then(([mt, mc]) => {
+      mt.setMissionInlineRunner(mc.createInlineMissionRunner({
+        config: props.config, router: props.router, registry: props.registry, permissions: props.permissions,
+      }));
+    }).catch(() => { /* missions unavailable */ });
     return () => {
       void import('../agent/loop.js').then(m => m.setActiveAgent(null));
       void import('../tools/builtin/task.js').then(m => m.setSubAgentRunner(null));
+      void import('../missions/tools.js').then(m => m.setMissionInlineRunner(null)).catch(() => {});
     };
   }, [props.router, props.registry, props.permissions, props.config, props.cwd]);
 
@@ -327,14 +391,65 @@ export function App(props: AppProps): React.ReactElement {
     }
   }, [props.initialPrompt, booted]);
 
+  // Send now: end the running turn at once and send what is queued (queued prompts, or the
+  // steering note typed mid-task) as the next turn. A foreground shell command that is running
+  // keeps running as a background job (src/tools/shell/send-now.ts). Nothing queued → a hint.
+  const sendNow = (): void => {
+    const ac = abortRef.current;
+    if (!busy || !ac || ac.signal.aborted || sendNowRef.current) return;
+    const hasSteer = agentRef.current?.hasPendingSteer() ?? false;
+    if (queued.length === 0 && !hasSteer) {
+      setHistory(h => [...h, { type: 'system', text: SEND_NOW_HINT, id: nextId() }]);
+      return;
+    }
+    const moved = detachForegroundShells({ sessionId });
+    const plain = queued.filter(q => !q.startsWith('/'));
+    if (plain.length > 0 || hasSteer) {
+      // Plain queued prompts go in as ONE turn (slash commands stay queued after it); a pending
+      // steering note is injected by the loop at that turn's first step.
+      const prompt = buildSendNowPrompt(plain, moved);
+      sendNowDisplayRef.current.set(prompt, plain.length > 0 ? plain.join('\n\n') : '⏩ (send now — continue with the note above)');
+      setQueued(q => [prompt, ...q.filter(x => x.startsWith('/'))]);
+    }
+    setHistory(h => [...h, { type: 'system', text: sendNowLine(moved), id: nextId() }]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (): void => {
+      if (timer) clearTimeout(timer);
+      if (sendNowRef.current?.stop === stop) sendNowRef.current = null;
+      if (abortRef.current !== ac || ac.signal.aborted) return; // that turn already ended
+      ac.abort();
+      const broker = getApprovalBroker();
+      for (const p of broker.pending()) {
+        if (p.source === 'terminal') broker.cancel(p.id, 'user-stop');
+      }
+    };
+    if (moved.length === 0) { stop(); return; }
+    // The moved command's call returns [MOVED_TO_BACKGROUND] at once: end the turn when that
+    // tool round is recorded (iteration_done), or after 1.5 s if another tool is still running.
+    sendNowRef.current = { ac, stop };
+    timer = setTimeout(stop, 1500);
+  };
+
   // Ctrl+C handler
   useInput((_input, key) => {
+    if (secretActiveRef.current) return; // the secure login prompt has the keyboard
     // Any keypress other than a confirming Ctrl+C disarms the exit prompt — so if you
     // armed it then went back to work, you won't quit on the next stray press.
     if (exitArmed && !(key.ctrl && _input === 'c')) {
       setExitArmed(false);
       if (exitTimer.current) { clearTimeout(exitTimer.current); exitTimer.current = null; }
     }
+
+    // Send now: Ctrl+Enter, or Ctrl+X then Ctrl+S (terminals that send Ctrl+Enter as Enter).
+    const sendKey = sendNowKey(_input, key, sendNowArmedRef.current);
+    sendNowArmedRef.current = sendKey === 'arm';
+    if (sendKey === 'send' && busy) {
+      sendNow();
+      return;
+    }
+    // Mods: Ctrl+X Tab focuses a mod pane (or the band); while one has the keyboard its
+    // Buttons take Tab/arrows/Enter/hotkeys and Esc gives the keyboard back (not a stop).
+    if (!pendingPromptRef.current && mods.ctl.handleInput(_input, key)) return;
 
     // Ctrl+B toggles the side-run dock (background live stays out of the transcript).
     if (key.ctrl && _input === 'b') {
@@ -350,25 +465,28 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
-    // Shift+Tab cycles approval: manual → auto → always yes → manual.
-    // If a prompt is already on screen, auto-answer it when the new mode would
-    // have skipped the ask (always yes; or auto + a file-edit diff).
+    // Shift+Tab cycles approval: manual → edits → auto → manual.
+    // A prompt already on screen is re-checked under the new mode: a permission prompt
+    // the new mode's policy allows (the engine is asked again for the same tool +
+    // operation) is answered "yes" once. Sentinel prompts (purchases, payments,
+    // passwords, sending — and Sentinel's own auto-mode asks), the auto policy's "ask"
+    // (destructive outside the project), questions and unknown prompts stay for you.
     if ((key.tab && key.shift) || _input === '\u001b[Z') {
       const next = cycleApprovalMode();
       setApprovalMode(next);
       const meta = APPROVAL_MODE_META[next];
       setHistory(h => [...h, {
         type: 'system',
-        text: `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
+        text: `Approval: ${modeBadge(next).label} — ${meta.hint}  (Shift+Tab to cycle)`,
         id: nextId(),
       }]);
       const pending = pendingPromptRef.current as PendingPrompt | null;
       if (pending) {
-        const shouldAccept = next === 'always' || (next === 'auto' && !!pending.diff);
-        const answer = shouldAccept ? pickAutoAnswer(pending.options) : null;
+        const answer = autoAnswerForMode(pending, next, req => props.permissions.evaluate(req));
         if (answer) {
           setPendingPrompt(null);
           pending.resolve(answer);
+          setHistory(h => [...h, { type: 'system', text: autoAnsweredLine(pending, answer, next), id: nextId() }]);
         }
       }
       return;
@@ -379,6 +497,12 @@ export function App(props: AppProps): React.ReactElement {
     if ((key.ctrl && _input === 'c') || key.escape) {
       if (busy && abortRef.current) {
         abortRef.current.abort();
+        // A tool may be blocked on a terminal approval; answer it "no" so the
+        // queue doesn't stay stuck behind a prompt for a run that was stopped.
+        const broker = getApprovalBroker();
+        for (const p of broker.pending()) {
+          if (p.source === 'terminal') broker.cancel(p.id, 'user-stop');
+        }
         setHistory(h => [...h, { type: 'system', text: 'Stopped by user. You can type a new instruction now.', id: nextId() }]);
         return;
       }
@@ -437,6 +561,16 @@ export function App(props: AppProps): React.ReactElement {
       if (ev.kind === 'approval') {
         const diff = pendingDiffRef.current ?? undefined;
         pendingDiffRef.current = null;
+        // Asked under the old mode and still queued when the mode changed (e.g. a side
+        // run's prompt behind the one Shift+Tab just answered): same re-check as Shift+Tab.
+        const view = { prompt: ev.prompt, options: ev.options, meta: ev.meta, lane: ev.lane, origin: ev.origin };
+        const now = getApprovalMode();
+        const preAnswer = autoAnswerForMode(view, now, req => props.permissions.evaluate(req));
+        if (preAnswer) {
+          queueMicrotask(() => { hub.answer(ev.id, preAnswer); });
+          setHistory(h => [...h, { type: 'system', text: autoAnsweredLine(view, preAnswer, now), id: nextId() }]);
+          return;
+        }
         const tag = ev.origin && ev.origin !== 'tui' ? ev.origin : ev.source;
         const label = tag === 'main' ? ev.prompt : `[${tag}] ${ev.prompt}`;
         setPendingPrompt(p => {
@@ -447,6 +581,9 @@ export function App(props: AppProps): React.ReactElement {
             options: ev.options,
             hubId: ev.id,
             diff,
+            meta: ev.meta,
+            lane: ev.lane,
+            origin: ev.origin,
             resolve: (a) => { hub.answer(ev.id, a); },
           };
         });
@@ -485,8 +622,37 @@ export function App(props: AppProps): React.ReactElement {
     return () => { unsubSide(); unsubHub(); };
   }, [nextId]);
 
-  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    return getOperatorHub().requestApproval('main', prompt, options);
+  // The first time auto mode is on (startup flag/config, Shift+Tab, /auto, "always yes"),
+  // say once what it still asks.
+  useEffect(() => {
+    if (approvalMode !== 'auto') return;
+    const banner = autoModeBannerOnce();
+    if (banner) setHistory(h => [...h, { type: 'system', text: banner, id: nextId() }]);
+  }, [approvalMode, nextId]);
+
+  // A human is at this terminal: Sentinel-critical actions may be approved here.
+  useEffect(() => {
+    setInteractiveHuman(true);
+    return () => setInteractiveHuman(false);
+  }, []);
+
+  // Save-login capture (src/vault/capture.ts): a login the human types during a
+  // control-center takeover is offered for the vault here too ("Save the login for
+  // <host> (user <masked>)?" — never the secret).
+  useEffect(() => {
+    void import('../vault/capture.js')
+      .then(m => m.installLoginCapture({ localAsk: (p, o, signal) => getOperatorHub().requestApproval('main', p, o, { signal }) }))
+      .catch(() => {});
+  }, []);
+
+  // Terminal approvals are shown by the operator hub (FIFO per lane). They also go
+  // through the ApprovalBroker, so the control center or Telegram can answer the same
+  // question — the first answer wins and the terminal prompt is withdrawn.
+  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no'], meta?: AskMeta): Promise<string> => {
+    return getApprovalBroker()
+      .request({ prompt, options, source: 'terminal' }, (p, o, signal) =>
+        getOperatorHub().requestApproval('main', p, o, { signal, ...(meta ? { meta } : {}) }))
+      .then(r => r.answer);
   }, []);
 
   const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string; skipUserHistory?: boolean }) => {
@@ -639,6 +805,8 @@ export function App(props: AppProps): React.ReactElement {
         askUser,
         maxIterationsOverride: maxIterOverrideRef.current,
         reasoningEffort: effortOverrideRef.current,
+        // A reached budget cap gets one wrap-up allowance (config budget.wrapUp).
+        wrapUpAllowance: true,
         onToolUI: (uiEvent) => {
           if (uiEvent.type === 'diff') {
             pendingDiffRef.current = uiEvent;
@@ -652,6 +820,12 @@ export function App(props: AppProps): React.ReactElement {
         },
       })) {
         if (ac.signal.aborted) break;
+        forwardAgentEvent(sessionId, event);
+        // Send now with a moved shell: its tool round is recorded — end the turn right here.
+        if (event.type === 'iteration_done' && sendNowRef.current?.ac === ac) {
+          sendNowRef.current.stop();
+          break;
+        }
         switch (event.type) {
           case 'thinking_start':
             setThinkingChars(0);
@@ -729,6 +903,8 @@ export function App(props: AppProps): React.ReactElement {
           case 'tool_result': {
             liveShellRef.current = [];
             setLiveShell([]);
+            // A tool may have switched the session mode ("always yes" → auto): follow it.
+            setApprovalMode(getApprovalMode());
             setActiveTools(prev => prev.filter(t => t.id !== event.data.id));
             const diff = EDIT_DIFF_TOOLS.has(event.data.name) ? pendingDiffRef.current : null;
             if (diff) pendingDiffRef.current = null;
@@ -771,6 +947,15 @@ export function App(props: AppProps): React.ReactElement {
           case 'notice':
             setHistory(h => [...h, { type: 'system', text: event.data.message, id: nextId() }]);
             break;
+          case 'plan_ready':
+            // Auto mode approved the plan and the run carried on in normal mode: so does
+            // the session. Otherwise say how to go ahead.
+            if (event.data?.modeLifted) {
+              setMode('normal');
+            } else if (!event.data?.autoApproved) {
+              setHistory(h => [...h, { type: 'system', text: 'Plan ready. Review it, then /normal and tell me to go ahead (or Shift+Tab to auto mode to approve plans automatically).', id: nextId() }]);
+            }
+            break;
           case 'steer_injected': {
             const note = String(event.data?.note ?? '');
             const preview = note.length > 56 ? note.slice(0, 56) + '…' : note;
@@ -794,6 +979,33 @@ export function App(props: AppProps): React.ReactElement {
       setThinkingChars(0);
       setActiveTools([]);
       abortRef.current = null;
+      // Standing goal (/goal): prove it with evidence, or queue the next round.
+      const goal = getStandingGoal();
+      if (goal && goal.status === 'active') {
+        if (ac.signal.aborted) {
+          setHistory(h => [...h, { type: 'system', text: '🎯 Goal paused — the run was stopped. Send a message to continue, or /goal clear to drop it.', id: nextId() }]);
+        } else {
+          const lastAnswer = [...(loaded?.messages ?? [])].reverse().find(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim())?.content ?? '';
+          setHistory(h => [...h, { type: 'system', text: `🎯 Checking the goal${goal.check ? `: ${goal.check}` : ''}…`, id: nextId() }]);
+          void checkGoalAsync(goal, String(lastAnswer), activeCwd).then((verdict) => {
+            if (getStandingGoal() !== goal) return; // cleared or replaced meanwhile
+            const next = nextGoalStep(goal, verdict);
+            const ev = verdict.evidence.length > 400 ? verdict.evidence.slice(0, 400) + '…' : verdict.evidence;
+            if (next.action === 'done') {
+              setStandingGoal(null);
+              setHistory(h => [...h, { type: 'system', text: `✓ Goal met: ${goal.objective}\n${ev}`, id: nextId() }]);
+            } else if (next.action === 'give-up') {
+              setStandingGoal(null);
+              setHistory(h => [...h, { type: 'error', text: `✗ Goal not met after ${goal.maxRounds} extra rounds: ${goal.objective}\n${ev}`, id: nextId() }]);
+            } else {
+              setStandingGoal(next.goal);
+              setHistory(h => [...h, { type: 'system', text: `↻ Goal not met yet — round ${next.goal.rounds}/${next.goal.maxRounds}`, id: nextId() }]);
+              // Through the queue, so it never races a prompt the user typed meanwhile.
+              setQueued(q => [next.prompt, ...q]);
+            }
+          });
+        }
+      }
     }
   }, [sessionId, mode, explicitModel, messages, props.cwd, activeCwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
 
@@ -804,6 +1016,17 @@ export function App(props: AppProps): React.ReactElement {
     // Record for arrow-key recall (skip consecutive duplicates).
     const ph = promptHistoryRef.current;
     if (ph[ph.length - 1] !== v) ph.push(v);
+    // /stop and /stop all act at once — never queued behind the task they are meant to stop.
+    const stopCmd = /^\/stop(?:\s+(all))?\s*$/i.exec(v);
+    if (stopCmd) {
+      const all = !!stopCmd[1];
+      setQueued([]);
+      setStandingGoal(null);
+      void emergencyStop({ missions: all, by: 'TUI' }).then((report) => {
+        setHistory(h => [...h, { type: 'system', text: formatStopReport(report, all), id: nextId() }]);
+      });
+      return;
+    }
     // Mid-task steering: `/btw <note>` typed WHILE a turn is in flight is injected
     // into the running task (the model weighs it on its next step) instead of being
     // queued for after. When idle, it falls through to normal handling below.
@@ -824,6 +1047,8 @@ export function App(props: AppProps): React.ReactElement {
       agentRef.current.pushSteer(v);
       const preview = v.length > 56 ? v.slice(0, 56) + '…' : v;
       setHistory(h => [...h, { type: 'system', text: `↪ Redirected the running task: ${preview}`, id: nextId() }]);
+      // The note waits for the next step — behind a long command, say how to send it now.
+      if (foregroundShellCount({ sessionId }) > 0) setHistory(h => [...h, { type: 'system', text: SEND_NOW_TIP, id: nextId() }]);
       return;
     }
     // If a turn is in flight (or a permission prompt is open), QUEUE it instead of
@@ -847,7 +1072,10 @@ export function App(props: AppProps): React.ReactElement {
     dispatchingRef.current = true;
     const [next, ...rest] = queued;
     setQueued(rest);
-    void submitPrompt(next).finally(() => {
+    // A send-now prompt shows what the user typed, not its framing.
+    const shownAs = sendNowDisplayRef.current.get(next);
+    if (shownAs !== undefined) sendNowDisplayRef.current.delete(next);
+    void submitPrompt(next, shownAs !== undefined ? { displayAs: shownAs } : undefined).finally(() => {
       dispatchingRef.current = false;
       setDrainTick(t => t + 1);
     });
@@ -921,6 +1149,8 @@ export function App(props: AppProps): React.ReactElement {
 
       <SideRunDock lanes={lanes} expanded={dockOpen} width={cols} />
 
+      <SecretPromptHost blocked={!!pendingPrompt} onActiveChange={setSecretActive} />
+
       {pendingPrompt && (
         <Box flexDirection="column">
           {pendingPrompt.diff && (
@@ -933,10 +1163,16 @@ export function App(props: AppProps): React.ReactElement {
           <Confirmation
             prompt={pendingPrompt.prompt}
             options={pendingPrompt.options}
+            hint={terminalHandoffHint(pendingPrompt.prompt, pendingPrompt.options)}
             onAnswer={(a) => {
-              if (isAlwaysYesAnswer(a)) {
-                setApprovalModeGlobal('always');
-                setApprovalMode('always');
+              // "always yes" switches this session to auto mode (its policy: critical and
+              // outside-project destructive actions still ask). A Sentinel "always" keeps
+              // the scope its prompt states — that category on that site — not the session.
+              const sentinel = isSentinelPrompt(pendingPrompt.prompt) || pendingPrompt.meta?.kind === 'sentinel';
+              const otherLane = (pendingPrompt.lane && pendingPrompt.lane !== 'tui') || (pendingPrompt.origin && pendingPrompt.origin !== 'tui');
+              if (isAlwaysYesAnswer(a) && !sentinel && !otherLane) {
+                setApprovalModeGlobal('auto');
+                setApprovalMode('auto');
               }
               const p = pendingPrompt;
               setPendingPrompt(null);
@@ -944,15 +1180,19 @@ export function App(props: AppProps): React.ReactElement {
             }}
           />
           <Box paddingX={1}>
-            <Text dimColor>Shift+Tab cycles approval · now {APPROVAL_MODE_META[approvalMode].label}</Text>
+            <Text dimColor>Shift+Tab cycles approval · now </Text>
+            <Text color={modeBadge(approvalMode).color} bold={modeBadge(approvalMode).bold}>{modeBadge(approvalMode).label}</Text>
           </Box>
         </Box>
       )}
 
-      {!pendingPrompt && (
+      {!pendingPrompt && !secretActive && (
         <Box flexDirection="column" marginTop={1}>
+          <ModsToasts snap={mods.snap} width={cols} />
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}
-          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} />
+          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} modsSpinner={mods.snap.spinner} />
+          <ModsPanes snap={mods.snap} width={cols} maxRows={p => mods.ctl.paneMaxRows(p)} />
+          <ModsBand snap={mods.snap} width={cols} maxRows={mods.ctl.bandMaxRows()} />
           {/* Input lives in its own bordered box, visually detached from the transcript above. */}
           <Box
             width={cols}
@@ -968,7 +1208,7 @@ export function App(props: AppProps): React.ReactElement {
               placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}
-              active={!pendingPrompt}
+              active={!mods.snap.focus && !mods.snap.chord}
               busy={busy}
               historyRef={promptHistoryRef}
               extraSlashNames={[...slashAliasMap().keys()]}
@@ -977,6 +1217,7 @@ export function App(props: AppProps): React.ReactElement {
                 : <Text color={mode === 'plan' ? 'yellow' : 'cyan'}>{mode === 'plan' ? '📋' : '❯'}</Text>}
             />
           </Box>
+          <ModsStatusLines snap={mods.snap} width={cols} />
           {queued.length > 0 && (
             <Box paddingX={1}>
               <Text dimColor>
@@ -984,6 +1225,7 @@ export function App(props: AppProps): React.ReactElement {
                   ? `⏎ queued: ${queued[0].length > 60 ? queued[0].slice(0, 60) + '…' : queued[0]}`
                   : `⏎ ${queued.length} prompts queued`}
               </Text>
+              {busy && <Text dimColor>  ·  Ctrl+Enter (or Ctrl+X Ctrl+S): send now</Text>}
             </Box>
           )}
           {exitArmed && (
@@ -1043,9 +1285,10 @@ function LiveHeader(props: {
   busy: boolean;
   thinkingChars?: number;
   motion: boolean;
+  /** A mod's spinner suffix or drawing (ui.render Spinner); null keeps QodeX's own. */
+  modsSpinner?: ModsUiSnapshot['spinner'];
 }): React.ReactElement {
   const phase = useShimmer(props.motion);
-  const approval = APPROVAL_MODE_META[props.approvalMode];
   const thinkTok = props.thinkingChars && props.thinkingChars > 0
     ? Math.max(1, Math.round(props.thinkingChars / 4))
     : 0;
@@ -1055,13 +1298,21 @@ function LiveHeader(props: {
       {props.busy
         ? thinkTok > 0
           ? <Text color="yellow">  ·  thinking… {thinkTok} tok  ·  Esc to stop</Text>
-          : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
+          : props.modsSpinner
+            ? (
+              <>
+                <Text dimColor>  ·  </Text>
+                <ModsSpinnerWord spinner={props.modsSpinner} word="crafting" width={Math.max(10, props.width - 30)} />
+                <Text dimColor>  ·  Esc to stop</Text>
+              </>
+            )
+            : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
         : props.mode === 'plan'
           ? <Text color="yellow">  ·  plan mode</Text>
           : <Text dimColor>  ·  ready</Text>}
       {props.mode !== 'plan' && (
-        <Text color={approvalColor(props.approvalMode)} dimColor={props.approvalMode === 'manual'}>
-          {'  ·  '}{approval.label}
+        <Text color={modeBadge(props.approvalMode).color} bold={modeBadge(props.approvalMode).bold} dimColor={props.approvalMode === 'manual'}>
+          {'  ·  '}{modeBadge(props.approvalMode).label}
         </Text>
       )}
     </Box>
@@ -1073,21 +1324,6 @@ function LiveHeader(props: {
  * key hints on the right. "credit" reads "local · free" for on-device models (cost $0) and
  * the running dollar amount once a paid API is in play. Updates live as budget events land.
  */
-function pickAutoAnswer(options: string[]): string | null {
-  const lower = options.map(o => o.toLowerCase());
-  for (const want of ['accept', 'yes', 'y', 'always yes', 'always']) {
-    const i = lower.indexOf(want);
-    if (i !== -1) return options[i]!;
-  }
-  return null;
-}
-
-function approvalColor(mode: ApprovalMode): 'green' | 'cyan' | 'yellow' {
-  if (mode === 'always') return 'yellow';
-  if (mode === 'auto') return 'cyan';
-  return 'green';
-}
-
 function StatusBar(props: {
   width: number;
   model: string;
@@ -1140,7 +1376,7 @@ function StatusBar(props: {
         <Text dimColor>  ·  </Text>
         <Text color={mode === 'plan' ? 'yellow' : 'green'}>{mode}</Text>
         <Text dimColor>  ·  </Text>
-        <Text color={approvalColor(approvalMode)}>{APPROVAL_MODE_META[approvalMode].label}</Text>
+        <Text color={modeBadge(approvalMode).color} bold={modeBadge(approvalMode).bold}>{modeBadge(approvalMode).label}</Text>
         {ctxMeter !== '' && (
           <>
             <Text dimColor>  ·  </Text>
@@ -1205,6 +1441,8 @@ function HistoryItemView({ item }: { item: HistoryItem }): React.ReactElement {
       return <Text color="yellow" dimColor>※ {item.text}</Text>;
     case 'error':
       return <Text color="red">⚠ {item.text}</Text>;
+    case 'mod':
+      return <ModHistoryLineView line={item} />;
   }
 }
 
@@ -1265,4 +1503,19 @@ function stripLeakedToolJson(text: string): string {
     }
   }
   return result.replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * A hand-off prompt (a CAPTCHA / bot check waiting for the human) gets its own hint:
+ * where to solve it, the local control-center URL, and that QodeX continues by
+ * itself (Esc stops the task; the hand-off listens to the run's signal).
+ */
+function terminalHandoffHint(prompt: string, options: string[]): string[] | undefined {
+  try {
+    const found = handoffForPrompt(prompt, options);
+    if (!found) return undefined;
+    return handoffTerminalHint(found.handoff, /^fa/i.test(process.env.LANG ?? '') ? 'fa' : 'en');
+  } catch {
+    return undefined;
+  }
 }

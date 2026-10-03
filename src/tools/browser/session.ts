@@ -1,190 +1,2220 @@
 /**
- * Browser session manager.
+ * The dedicated QodeX Browser — one persistent Chromium the agent owns.
  *
- * Owns a single Playwright Browser + Page across all browser_* tool calls in a
- * QodeX session. The lifecycle is intentionally simple:
+ * `QodexBrowserManager` implements the BrowserManager contract (types.ts):
  *
- *   - First browser_* call lazily imports playwright + launches Chromium.
- *   - All subsequent calls reuse the same Page.
- *   - `closeBrowser()` is called on session end (or `/browser close`).
+ *   - Persistent profile: `launchPersistentContext(~/.qodex/browser/profiles/<name>)`
+ *     so logins, cookies and localStorage survive restarts (`qodex browser open`
+ *     lets the user log in once by hand). A profile locked by another Chromium
+ *     falls back to `<name>-<pid>` with a notice instead of failing.
+ *   - Or attach to the user's own Chrome over CDP (`browser.cdpUrl`); `close()`
+ *     then only disconnects — it never kills the user's browser.
+ *   - Executable discovery (launcher.ts) so a Playwright/Chromium revision
+ *     mismatch, a system Chrome, or PLAYWRIGHT_BROWSERS_PATH all just work.
+ *   - Multi-tab: every page of the context is tracked with its own console /
+ *     error / network buffers; a popup opened from the active tab becomes the
+ *     active tab and is announced on the next tool result.
+ *   - Dialogs per `browser.dialogPolicy`, downloads saved to
+ *     ~/.qodex/browser/downloads, live screencast (CDP) for the control center,
+ *     human takeover (agent actions wait), human input dispatch, element
+ *     introspection for Sentinel and an action feed for the workflow recorder.
  *
- * Why a singleton: launching Chromium is ~1-3 seconds. Re-launching on every
- * tool call would be unusable. Within one session, the user's intent is
- * usually "drive a flow" (navigate, click, screenshot, evaluate) so reusing
- * one page mirrors what they'd do manually in a browser tab.
+ * Playwright is an OPTIONAL dependency: it is imported dynamically on first
+ * launch and all its objects are typed `any`.
  *
- * Playwright is an OPTIONAL dependency. If the user hasn't run
- * `npx playwright install chromium`, the import throws at runtime. We catch
- * that and return a clear "playwright not installed" tool result so the agent
- * can tell the user instead of crashing.
- *
- * Concurrency note: tools that touch the page are serialized at the session
- * level — multiple parallel browser_click calls would race the page. We assume
- * the agent issues them sequentially (which the loop does for read-write tools).
- *
- * No headed-mode option here intentionally — agentic coding is unattended.
- * Users who want to SEE the browser can set QODEX_BROWSER_HEADED=1.
+ * Signals: this module installs NO process signal listeners. Playwright's own
+ * launcher kills the Chromium it spawned when the process exits (and closes it
+ * gracefully on SIGINT/SIGTERM/SIGHUP, as it always did for QodeX).
  */
 
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import { EventEmitter } from 'events';
 import { logger } from '../../utils/logger.js';
+import { getActiveConfig } from '../../config/loader.js';
+import { resolveBrowserConfig, type BrowserConfig } from '../../config/agent-config.js';
+import {
+  QODEX_BROWSER_PROFILES_DIR,
+  QODEX_BROWSER_DOWNLOADS_DIR,
+  QODEX_VAULT_FILE,
+  QODEX_VAULT_KEY_FILE,
+  browserProfileDir,
+  sanitizeName,
+} from '../../config/paths.js';
+import { QODEX_HOME } from '../../config/defaults.js';
+import { VAULT_KEY_ARTIFACTS } from '../../vault/paths.js';
+import { getBus } from '../../control/bus.js';
+import { isInteractiveHuman } from '../../control/approvals.js';
+import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
+import { LeanBlocker, leanEnabled, LEAN_BLOCK_ERROR, LEAN_FAILURE_TEXT, type LeanStatus } from './lean.js';
+import { BotAuthSigner, type BotAuthStatus } from './bot-auth.js';
+import {
+  detectChallenge,
+  pickChallengeHeaders,
+  sameChallenge,
+  stripQuery,
+  challengeLabel,
+  waitForChallengeChange,
+  type ChallengeInfo,
+  type WaitForChallengeResult,
+} from './challenge.js';
+import {
+  takeSnapshotDetailed,
+  snapshotWithBoxes,
+  maskPageSecrets,
+  DESCRIBE_ELEMENT_FN,
+  DESCRIBE_AT_POINT_FN,
+  FOCUS_PROBE_FN,
+  FRAME_CONTENT_ORIGIN_FN,
+  REF_RE,
+  type SnapshotOptions,
+  type SnapshotResult,
+  type MarkBox,
+} from './snapshot.js';
+import {
+  registerBrowserManagerFactory,
+  getBrowserManager,
+  peekBrowserManager,
+  type BrowserManager,
+  type BrowserStatus,
+  type TabInfo,
+  type ScreencastFrame,
+  type ElementInfo,
+  type BrowserActionRecord,
+  type HumanInputEvent,
+  type LaunchOverrides,
+  type ScreenshotClip,
+  HUMAN_HOLD_MAX_MS,
+} from './types.js';
 
-// We can't `import` playwright statically because it's optional. Instead we
-// keep typed handles loose and dynamic-import on first use.
-type Browser = any;
-type BrowserContext = any;
 type Page = any;
-type ConsoleMessage = any;
+type BrowserContext = any;
 
-interface BrowserSession {
-  browser: Browser;
-  context: BrowserContext;
-  page: Page;
-  /** True when we ATTACHED to an already-running browser over CDP (vs launched our
-   *  own). When attached we must never kill the user's browser on cleanup. */
-  attached: boolean;
-  /** Console messages captured since session start (cleared on navigate). */
-  consoleBuffer: Array<{ type: string; text: string; location?: string }>;
-  /** Network requests captured (URL + status). Cleared on navigate. */
-  requestBuffer: Array<{ url: string; method: string; status?: number; ok?: boolean }>;
-  /** Page errors caught via the 'pageerror' event. Cleared on navigate. */
-  errorBuffer: Array<{ message: string; stack?: string }>;
+// ── buffers / records ───────────────────────────────────────────────────────
+
+export interface ConsoleEntry { type: string; text: string; location?: string; ts: number }
+export interface PageErrorEntry { message: string; stack?: string; ts: number }
+export interface RequestEntry { url: string; method: string; resourceType?: string; status?: number; ok?: boolean; failure?: string; ts: number }
+
+export interface DownloadEntry {
+  id: string;
+  url: string;
+  suggestedFilename: string;
+  /** Final path on disk ('' until a name is reserved). */
+  path: string;
+  state: 'in_progress' | 'completed' | 'failed';
+  error?: string;
+  bytes?: number;
+  startedAt: number;
+  finishedAt?: number;
+  tabId?: string;
+  /** Already returned by waitForDownload (so the next wait looks for a newer one). */
+  claimed?: boolean;
 }
 
-let session: BrowserSession | null = null;
-let initInFlight: Promise<BrowserSession> | null = null;
+export interface DialogEntry {
+  id: string;
+  type: string;
+  message: string;
+  defaultValue?: string;
+  url: string;
+  tabId: string;
+  action: 'pending' | 'accepted' | 'dismissed' | 'auto-dismissed';
+  ts: number;
+}
 
-/** CDP endpoint to ATTACH to instead of launching a fresh Chromium. Set from config
- *  (`browser.cdpUrl`) by bootstrap; `QODEX_BROWSER_CDP_URL` env overrides it. */
+interface TabState {
+  id: string;
+  page: Page;
+  title: string;
+  console: ConsoleEntry[];
+  errors: PageErrorEntry[];
+  requests: RequestEntry[];
+  /** Ref flavour of the latest snapshot on this tab (aria-ref vs data-qx-ref). */
+  refMode: 'aria' | 'dom' | null;
+  pendingDialog: { entry: DialogEntry; dialog: any; timer: NodeJS.Timeout } | null;
+  /** Serializes guardProtectedPage runs (navigation event + tool call racing). */
+  guardChain?: Promise<void>;
+  /** CAPTCHA / bot check currently on this tab (challenge.ts), or null. */
+  challenge: ChallengeInfo | null;
+  /** Main-document response of the latest navigation: status + detection headers only (no query, no cookies). */
+  doc?: { url: string; status?: number; headers: Record<string, string> };
+  /** Debounced re-detection after frame / load events. */
+  challengeTimer?: NodeJS.Timeout | null;
+  /** 1.5 s heartbeat while a challenge is on the tab. */
+  challengeBeat?: NodeJS.Timeout | null;
+  /** In-flight detection (coalesced). */
+  challengeRun?: Promise<ChallengeInfo | null | 'unknown'> | null;
+  /**
+   * Values filled from the vault into this tab: masked in snapshots / page text even if
+   * the site reveals them. In memory only, with a TTL — never logged, published or stored.
+   */
+  masked?: Array<{ value: string; until: number }>;
+}
+
+/** Bus / listener payload when a tab's challenge appears, changes or clears. */
+export interface ChallengeChange {
+  tab: string;
+  index: number;
+  challenge: ChallengeInfo | null;
+  previous: ChallengeInfo | null;
+}
+
+interface CastSub {
+  onFrame: (f: ScreencastFrame) => void;
+  quality: number;
+  minIntervalMs: number;
+  last: number;
+  session: any | null;
+  page: Page | null;
+  stopped: boolean;
+  chain: Promise<void>;
+}
+
+export const CONSOLE_CAP = 500;
+export const ERROR_CAP = 100;
+export const REQUEST_CAP = 500;
+const DOWNLOAD_CAP = 200;
+const DIALOG_HISTORY_CAP = 50;
+
+/** Append and drop the oldest entries beyond `max`. */
+export function pushCapped<T>(arr: T[], item: T, max: number): void {
+  arr.push(item);
+  if (arr.length > max) arr.splice(0, arr.length - max);
+}
+
+function firstLine(e: unknown): string {
+  const msg = (e as any)?.message ?? String(e);
+  return String(msg).split('\n')[0].slice(0, 400);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => { const t = setTimeout(r, ms); (t as any).unref?.(); });
+}
+
+/** `p`'s value, or `fallback` after `ms` / on rejection. Never rejects. */
+function withTimeoutValue<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    (t as any).unref?.();
+    p.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
+
+// ── small pure helpers shared with the tools ────────────────────────────────
+
+/**
+ * Make a model-typed address loadable: `digikala.com` → `https://digikala.com`,
+ * `localhost:3000` → `http://localhost:3000`. Anything with a scheme is
+ * returned unchanged. PURE.
+ */
+export function normalizeUrl(raw: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return s;
+  if (/^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[[0-9a-f:]+\])(:\d+)?([/?#]|$)/i.test(s)) return 'http://' + s;
+  if (/^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#]|$)/.test(s)) return 'http://' + s;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return s;
+  if (/^(about|data|javascript|file|chrome|blob|mailto|tel|view-source|edge|brave):/i.test(s)) return s;
+  if (s.startsWith('//')) return 'https:' + s;
+  if (/^[^\s/?#:@]+\.[^\s/?#:@.]{2,}(:\d+)?([/?#]|$)/u.test(s)) return 'https://' + s;
+  return s;
+}
+
+/**
+ * A snapshot ref written into a `selector` field ("e12", "ref=e12", "[ref=e12]",
+ * "f1e3") → the bare ref; anything else → null. The tools act on such a selector
+ * as that ref, so every introspection path (Sentinel's describeSelector) must
+ * resolve it the same way. PURE.
+ */
+export function refFromSelector(selector: string | undefined | null): string | null {
+  const bare = String(selector ?? '').trim().replace(/^\[?ref=/, '').replace(/\]$/, '');
+  return REF_RE.test(bare) ? bare : null;
+}
+
+const KEY_ALIASES: Record<string, string> = {
+  enter: 'Enter', return: 'Enter', esc: 'Escape', escape: 'Escape', tab: 'Tab',
+  space: 'Space', spacebar: 'Space', backspace: 'Backspace', delete: 'Delete', del: 'Delete',
+  insert: 'Insert', home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown',
+  pgup: 'PageUp', pgdn: 'PageDown', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft',
+  right: 'ArrowRight', arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft',
+  arrowright: 'ArrowRight', ctrl: 'Control', control: 'Control', cmd: 'Meta', command: 'Meta',
+  meta: 'Meta', win: 'Meta', super: 'Meta', alt: 'Alt', option: 'Alt', opt: 'Alt', shift: 'Shift',
+  controlormeta: 'ControlOrMeta',
+};
+
+/** `ctrl+a` → `Control+a`, `esc` → `Escape`, `f5` → `F5`. Playwright key syntax. PURE. */
+export function normalizeKey(raw: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s || s === '+') return s;
+  // "Control++" means Control and the "+" key.
+  const plusKey = s.endsWith('++');
+  const body = plusKey ? s.slice(0, -2) : s;
+  const parts = body
+    .split('+')
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => {
+      const lower = p.toLowerCase();
+      if (KEY_ALIASES[lower]) return KEY_ALIASES[lower];
+      if (/^f([1-9]|1[0-9]|2[0-4])$/.test(lower)) return lower.toUpperCase();
+      return p.length === 1 ? p : p[0].toUpperCase() + p.slice(1);
+    });
+  if (plusKey) parts.push('+');
+  return parts.join('+');
+}
+
+/** Width/height from a base64 JPEG's SOF segment (null if not parseable). PURE. */
+export function jpegSize(base64: string): { width: number; height: number } | null {
+  let buf: Buffer;
+  try { buf = Buffer.from(base64, 'base64'); } catch { return null; }
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < buf.length) {
+    if (buf[i] !== 0xff) return null;
+    const marker = buf[i + 1];
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+    const len = buf.readUInt16BE(i + 2);
+    const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof) return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+    i += 2 + len;
+  }
+  return null;
+}
+
+/** File name safe on every OS, deduplicated against `taken`. PURE. */
+export function dedupFilename(suggested: string, taken: (name: string) => boolean): string {
+  let base = String(suggested ?? '')
+    .replace(/[/\\?%*:|"<>\x00-\x1f]/g, '_')
+    .replace(/^[.\s]+/, '')
+    .trim()
+    .slice(0, 180);
+  if (!base) base = 'download';
+  if (!taken(base)) return base;
+  const ext = path.extname(base);
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  for (let n = 1; n < 10_000; n++) {
+    const cand = `${stem} (${n})${ext}`;
+    if (!taken(cand)) return cand;
+  }
+  return `${stem}-${Date.now()}${ext}`;
+}
+
+// ── QodeX's own secret files (vault, browser profiles, .env) ────────────────
+
+/** Files that hold QodeX secrets / browser sessions, plus extra protected dirs (e.g. a manager's own profiles dir). */
+function protectedLocations(extraDirs: string[] = []): { files: string[]; dirs: string[] } {
+  return {
+    files: [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env'), ...VAULT_KEY_ARTIFACTS],
+    dirs: [QODEX_BROWSER_PROFILES_DIR, ...extraDirs],
+  };
+}
+
+/** Case-insensitive file systems (macOS, Windows) make `.QODEX` the same as `.qodex`. */
+function normForCompare(p: string): string {
+  const abs = path.resolve(p);
+  return process.platform === 'darwin' || process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+/** Is `p` (lexically, no symlink resolution) one of QodeX's secret files or inside a profiles dir? PURE. */
+export function isProtectedQodexPath(p: string, extraDirs: string[] = []): boolean {
+  const abs = normForCompare(p);
+  const loc = protectedLocations(extraDirs);
+  if (loc.files.some(f => abs === normForCompare(f))) return true;
+  return loc.dirs.some(d => {
+    const dir = normForCompare(d);
+    return abs === dir || abs.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  });
+}
+
+/**
+ * Real location of `p`: symlinks resolved, including a DANGLING final link (a
+ * link to a vault file that does not exist yet would otherwise be created
+ * through) and missing trailing components (resolved via their parent).
+ */
+export async function realPathLoose(p: string, depth = 0): Promise<string> {
+  const abs = path.resolve(p);
+  if (depth > 32) return abs;
+  try { return await fs.realpath(abs); } catch { /* missing or dangling */ }
+  try {
+    const st = await fs.lstat(abs);
+    if (st.isSymbolicLink()) return realPathLoose(path.resolve(path.dirname(abs), await fs.readlink(abs)), depth + 1);
+  } catch { /* does not exist */ }
+  const parent = path.dirname(abs);
+  if (parent === abs) return abs;
+  return path.join(await realPathLoose(parent, depth + 1), path.basename(abs));
+}
+
+/** isProtectedQodexPath on the path itself AND on its real location (symlinks followed), against real protected locations too. */
+export async function isProtectedQodexPathReal(p: string, extraDirs: string[] = []): Promise<boolean> {
+  if (isProtectedQodexPath(p, extraDirs)) return true;
+  const real = await realPathLoose(p);
+  if (isProtectedQodexPath(real, extraDirs)) return true;
+  // ~/.qodex itself may live behind a symlink (e.g. /var → /private/var on macOS).
+  const loc = protectedLocations(extraDirs);
+  const realFiles = await Promise.all(loc.files.map(f => realPathLoose(f)));
+  const realDirs = await Promise.all(loc.dirs.map(d => realPathLoose(d)));
+  const r = normForCompare(real);
+  return realFiles.some(f => normForCompare(f) === r) || realDirs.some(d => {
+    const dir = normForCompare(d);
+    return r === dir || r.startsWith(dir + path.sep);
+  });
+}
+
+/** Local path of a `file:` URL (also behind `view-source:`), or null. PURE. */
+export function fileUrlPath(rawUrl: string): string | null {
+  const url = String(rawUrl ?? '').trim().replace(/^view-source:/i, '');
+  if (!/^file:/i.test(url)) return null;
+  try {
+    const u = new URL(url);
+    let p = decodeURIComponent(u.pathname);
+    if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** `file:` URLs (also behind `view-source:`) that point into QodeX's own profile / vault files. PURE. */
+export function isProtectedFileUrl(rawUrl: string, extraDirs: string[] = []): boolean {
+  if (!/^\s*(view-source:)?file:/i.test(String(rawUrl ?? ''))) return false;
+  const p = fileUrlPath(rawUrl);
+  if (p === null) return /\.qodex/i.test(rawUrl);
+  return isProtectedQodexPath(p, extraDirs);
+}
+
+/** isProtectedFileUrl with symlinks followed. */
+export async function isProtectedFileUrlReal(rawUrl: string, extraDirs: string[] = []): Promise<boolean> {
+  if (!/^\s*(view-source:)?file:/i.test(String(rawUrl ?? ''))) return false;
+  const p = fileUrlPath(rawUrl);
+  if (p === null) return /\.qodex/i.test(rawUrl);
+  return isProtectedQodexPathReal(p, extraDirs);
+}
+
+/** A CDP endpoint with its password and query values hidden (browserless-style `?token=`). PURE. */
+export function redactCdpUrl(raw: string | undefined): string | undefined {
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    if (u.password) u.password = '***';
+    for (const k of [...u.searchParams.keys()]) u.searchParams.set(k, '***');
+    return u.toString().replace(/%2A%2A%2A/g, '***');
+  } catch {
+    return String(raw).replace(/([?&][^=&#]+=)[^&#]*/g, '$1***').replace(/\/\/([^/@:]*):[^/@]*@/, '//$1:***@');
+  }
+}
+
+/** `text` with the secret parts of `url` (password, query values) removed. PURE. */
+function maskUrlSecrets(text: string, url: string | undefined): string {
+  if (!url) return text;
+  let out = text.split(url).join(redactCdpUrl(url) ?? '');
+  try {
+    const u = new URL(url);
+    const parts = [u.password, ...[...u.searchParams.values()]].filter(v => v && v.length >= 4);
+    for (const v of parts) out = out.split(v).join('***');
+  } catch { /* not a URL */ }
+  return out;
+}
+
+/** Fields whose typed content must never be recorded / broadcast in clear: passwords, one-time codes, card numbers. PURE. */
+export function isSecretElement(el: ElementInfo | null | undefined): boolean {
+  if (!el) return false;
+  return el.isPassword === true || /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i.test(el.autocomplete ?? '');
+}
+
+/**
+ * Typed content in action-record args → "***" when it went into a secret field
+ * (`unknownTarget`: focus was somewhere we could not inspect — redact to be safe).
+ * Covers text/value and a single printable `key` ("q", "Alt+q", "Shift+!"). PURE.
+ */
+export function redactTypedArgs(args: Record<string, unknown>, el: ElementInfo | null | undefined, unknownTarget = false): Record<string, unknown> {
+  if (!unknownTarget && !isSecretElement(el)) return args;
+  const out = { ...args };
+  for (const k of ['text', 'value']) if (k in out) out[k] = '***';
+  if (typeof out.key === 'string') {
+    const parts = out.key.split('+');
+    const last = out.key.endsWith('++') ? '+' : parts[parts.length - 1];
+    if ([...last].length === 1) out.key = '***';
+  }
+  return out;
+}
+
+/**
+ * Delete a directory and make sure it stays deleted: Chromium's helper processes can
+ * still write into a profile for a moment after the browser exits, recreating it.
+ * Best effort — stale throwaways are also pruned at the next launch.
+ */
+async function removeUntilGone(dir: string, attempts = 10): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
+    try { await fs.access(dir); } catch { return; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+/** File inside a `<profile>-<pid>` throwaway profile (written by QodeX). */
+const FALLBACK_MARKER = '.qodex-fallback-profile';
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
+}
+
+/**
+ * Delete `<profile>-<pid>` fallback profiles left by QodeX processes that are gone
+ * (a crash skips the delete-on-close). Live pids are never touched.
+ */
+export async function pruneStaleFallbackProfiles(profilesDir: string, profile: string): Promise<string[]> {
+  const removed: string[] = [];
+  let names: string[] = [];
+  try { names = await fs.readdir(profilesDir); } catch { return removed; }
+  const re = new RegExp(`^${profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d+)$`);
+  for (const name of names) {
+    const m = re.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (!pid || pid === process.pid || pidAlive(pid)) continue;
+    try {
+      await fs.access(path.join(profilesDir, name, FALLBACK_MARKER));
+    } catch { continue; } // not created as a fallback: a real profile
+    try {
+      await fs.rm(path.join(profilesDir, name), { recursive: true, force: true });
+      removed.push(name);
+    } catch { /* in use / permissions: leave it */ }
+  }
+  return removed;
+}
+
+/** Profile lock by another Chromium (Linux/macOS/Windows wording). */
+export function isProfileLockedError(e: unknown): boolean {
+  return /SingletonLock|ProcessSingleton|user data directory is already in use|profile appears to be in use|profile directory is already in use/i.test((e as any)?.message ?? String(e));
+}
+
+function isMissingDisplayError(e: unknown): boolean {
+  return /Missing X server|\$DISPLAY|cannot open display|no display|headed browser without having a XServer/i.test((e as any)?.message ?? String(e));
+}
+
+/** Turn a raw Playwright launch error into a `[BROWSER_LAUNCH_FAILED]` with a fix. */
+export function explainLaunchError(e: unknown, exe: ResolvedExecutable | null): Error {
+  const msg = (e as any)?.message ?? String(e);
+  const where = exe?.executablePath ? ` (executable: ${exe.executablePath}, found via ${exe.source})` : exe?.channel ? ` (channel: ${exe.channel})` : '';
+  if (/Executable doesn't exist|ENOENT|no such file or directory|browserType\.launch.*not found|Chromium distribution .* is not found/i.test(msg)) {
+    return new Error(`[BROWSER_LAUNCH_FAILED] No usable Chromium/Chrome was found${where}. ${missingBrowserHint()}`);
+  }
+  if (isMissingDisplayError(e)) {
+    return new Error(
+      `[BROWSER_LAUNCH_FAILED] A visible (headed) browser needs a display, but none is available. ` +
+      `Run headless (browser.headless: true, unset QODEX_BROWSER_HEADED), use xvfb-run, or run QodeX in a desktop session.`,
+    );
+  }
+  if (/missing dependencies|error while loading shared libraries/i.test(msg)) {
+    return new Error(`[BROWSER_LAUNCH_FAILED] Chromium is missing system libraries${where}. Fix (Linux): npx playwright install-deps chromium — or install Google Chrome.`);
+  }
+  return new Error(`[BROWSER_LAUNCH_FAILED] ${firstLine(e)}${where}. If this keeps happening: ${missingBrowserHint()}`);
+}
+
+export const PLAYWRIGHT_MISSING_MESSAGE =
+  '[PLAYWRIGHT_MISSING] The QodeX browser needs the optional `playwright` package. Install it in the QodeX ' +
+  'installation: `npm install playwright` (then `npx playwright install chromium`, or point ' +
+  'QODEX_BROWSER_EXECUTABLE at an installed Chrome/Chromium).';
+
+async function importPlaywright(): Promise<any> {
+  const name = 'playwright';
+  try {
+    const mod: any = await import(name);
+    return mod?.chromium ? mod : mod?.default ?? mod;
+  } catch {
+    throw new Error(PLAYWRIGHT_MISSING_MESSAGE);
+  }
+}
+
+/**
+ * Fingerprint patches — applied ONLY when the user explicitly sets browser.stealth: true
+ * (off by default: QodeX does not disguise that it is automated). Never breaks a page
+ * (every patch is try/catch'd).
+ */
+function stealthScript(languages: string[]): string {
+  return `(() => {
+  try {
+    const proto = Object.getPrototypeOf(navigator);
+    Object.defineProperty(proto, 'webdriver', { get: () => undefined, configurable: true });
+  } catch (e) {}
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      const langs = ${JSON.stringify(languages)};
+      Object.defineProperty(Object.getPrototypeOf(navigator), 'languages', { get: () => langs.slice(), configurable: true });
+    }
+  } catch (e) {}
+  try {
+    if (navigator.plugins && navigator.plugins.length === 0) {
+      const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer'];
+      const fake = names.map((n) => ({ name: n, filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1 }));
+      fake.item = (i) => fake[i] || null;
+      fake.namedItem = (n) => fake.find((p) => p.name === n) || null;
+      fake.refresh = () => {};
+      Object.defineProperty(Object.getPrototypeOf(navigator), 'plugins', { get: () => fake, configurable: true });
+    }
+  } catch (e) {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, 'chrome', { value: { runtime: {} }, configurable: true, writable: true });
+  } catch (e) {}
+})();`;
+}
+
+function languagesFor(locale: string): string[] {
+  const l = locale.trim();
+  if (!l) return ['en-US', 'en'];
+  const base = l.split('-')[0];
+  const out = [l];
+  if (base && base !== l) out.push(base);
+  if (base !== 'en') out.push('en-US', 'en');
+  return Array.from(new Set(out));
+}
+
+// ── manager ─────────────────────────────────────────────────────────────────
+
+// ── human-input observers (V2 save-login capture; additive) ────────────────
+
+/**
+ * Sees the HUMAN's input while they hold takeover (control-center live view) — never
+ * the agent's own actions, which do not go through dispatchInput. Used by the vault's
+ * save-login capture (src/vault/capture.ts) to read a submitted login host-side.
+ */
+export interface HumanInputObserver {
+  /** Before a human click (viewport point) or Enter is dispatched. Bounded wait. */
+  beforeInput?(ctx: { page: Page; tabId: string; kind: 'click' | 'enter'; point?: { x: number; y: number } }): void | Promise<void>;
+  /** A tab's main frame navigated (human or not). */
+  navigated?(tabId: string, page: Page): void;
+  /** Takeover switched on / off. */
+  takeover?(on: boolean): void;
+}
+
+const humanInputObservers = new Set<HumanInputObserver>();
+
+export function addHumanInputObserver(o: HumanInputObserver): () => void {
+  humanInputObservers.add(o);
+  return () => { humanInputObservers.delete(o); };
+}
+
+function notifyObservers(fn: (o: HumanInputObserver) => void): void {
+  for (const o of [...humanInputObservers]) {
+    try { fn(o); } catch (e) { logger.debug('human input observer failed', { err: firstLine(e) }); }
+  }
+}
+
+export interface QodexBrowserManagerOptions {
+  /** Base dir of persistent profiles (tests pass a tmp dir). Default ~/.qodex/browser/profiles. */
+  profilesDir?: string;
+  /** Where downloads are saved. Default ~/.qodex/browser/downloads. */
+  downloadsDir?: string;
+  /** Overrides applied on top of `resolveBrowserConfig(getActiveConfig())`. */
+  config?: Partial<BrowserConfig>;
+  /** Inject the playwright module (tests). */
+  loadPlaywright?: () => Promise<any>;
+  /** Inject executable-discovery deps (tests). */
+  launcherDeps?: LauncherDeps;
+  /** 'ask' dialog policy: auto-dismiss after this many ms. Default 30000. */
+  dialogAutoDismissMs?: number;
+  /** Pages lean mode never touches (tests). Default: loopback / LAN hosts and non-http(s) pages. */
+  leanExempt?: (pageUrl: string) => boolean;
+}
+
+/** Extended status: the contract fields plus diagnostics for `browser_status`. */
+export interface QodexBrowserStatus extends BrowserStatus {
+  executableSource?: string;
+  cdpUrl?: string;
+  /** e.g. "profile 'default' was locked; using 'default-1234'". */
+  notice?: string;
+  downloads: number;
+  pendingDialog?: { type: string; message: string };
+  /** A CAPTCHA / bot check on a tab (the active one first): host only, no URL. */
+  challenge?: { tab: number; vendor: string; state: string; host: string };
+  /** Lean mode (browser.lean), when this launch started lean. */
+  lean?: LeanStatus;
+  /** Web Bot Auth (browser.botAuth), when this launch signs its requests. */
+  botAuth?: BotAuthStatus;
+}
+
+export class QodexBrowserManager implements BrowserManager {
+  readonly profilesDir: string;
+  readonly downloadsDir: string;
+  private readonly opts: QodexBrowserManagerOptions;
+
+  private pw: any = null;
+  private ctx: BrowserContext | null = null;
+  private cdpBrowser: any = null;
+  private mode: 'launch' | 'cdp' | 'none' = 'none';
+  private launching: Promise<void> | null = null;
+  private closing: Promise<void> | null = null;
+  private launchedCfg: BrowserConfig | null = null;
+  private lean = new LeanBlocker(false, () => true);
+  private botAuth: BotAuthSigner | null = null;
+  private botAuthOn = false;
+  private profileInUse = '';
+  private exe: ResolvedExecutable | null = null;
+  private browserVersion: string | undefined;
+  private profileNotice: string | undefined;
+  /** Throwaway `<profile>-<pid>` dir used because the real profile was locked; deleted on close. */
+  private fallbackProfileDir: string | null = null;
+  private fallbackCleanup: Promise<void> | null = null;
+
+  private tabList: TabState[] = [];
+  private activeTab: TabState | null = null;
+  private tabSeq = 0;
+  private pendingAttach = new Set<Promise<void>>();
+  private notices: Array<string | (() => string)> = [];
+  private static readonly NOTICE_CAP = 20;
+
+  private takeoverOn = false;
+  private takeoverWho: string | undefined;
+  private takeoverWaiters = new Set<() => void>();
+  /** Last agent navigation / action per public host (pacing). */
+  private hostLast = new Map<string, number>();
+  /** Consecutive agent loads of a URL (origin + path) that ended on a challenge. */
+  private challengeLoads = new Map<string, number>();
+  /** Longest a relayed human press-and-hold lasts before the manager forces the 'up'. */
+  static HOLD_CAP_MS = HUMAN_HOLD_MAX_MS;
+
+  private actionListeners = new Set<(rec: BrowserActionRecord) => void>();
+  private events = new EventEmitter();
+  private casts = new Set<CastSub>();
+
+  private downloadList: DownloadEntry[] = [];
+  private downloadDone = new Map<string, Promise<DownloadEntry>>();
+  private reservedNames = new Set<string>();
+  private downloadSeq = 0;
+  private dialogHistory: DialogEntry[] = [];
+  private dialogSeq = 0;
+
+  constructor(opts: QodexBrowserManagerOptions = {}) {
+    this.opts = opts;
+    this.profilesDir = opts.profilesDir ?? QODEX_BROWSER_PROFILES_DIR;
+    this.downloadsDir = opts.downloadsDir ?? QODEX_BROWSER_DOWNLOADS_DIR;
+    this.events.setMaxListeners(0);
+  }
+
+  /** Effective config right now (active QodeX config + constructor overrides). */
+  currentConfig(): BrowserConfig {
+    // `headless: auto` = a window when a human sits at the TUI and a display exists.
+    const base = resolveBrowserConfig(getActiveConfig(), process.env, { interactive: isInteractiveHuman() });
+    const o = this.opts.config;
+    if (!o) return base;
+    return { ...base, ...o, viewport: { ...base.viewport, ...(o.viewport ?? {}) } };
+  }
+
+  // ── lifecycle ─────────────────────────────────────────────────────────────
+
+  async ensure(overrides?: LaunchOverrides): Promise<void> {
+    if (this.ctx) return;
+    if (this.closing) await this.closing.catch(() => {});
+    if (this.ctx) return;
+    if (!this.launching) {
+      this.launching = this.launch(overrides).finally(() => { this.launching = null; });
+    }
+    return this.launching;
+  }
+
+  isRunning(): boolean {
+    return this.ctx !== null;
+  }
+
+  private async loadPlaywright(): Promise<any> {
+    if (this.pw) return this.pw;
+    let mod: any;
+    try {
+      mod = this.opts.loadPlaywright ? await this.opts.loadPlaywright() : await importPlaywright();
+    } catch (e) {
+      throw new Error(String((e as any)?.message ?? '').startsWith('[PLAYWRIGHT_MISSING]') ? (e as any).message : PLAYWRIGHT_MISSING_MESSAGE);
+    }
+    if (!mod?.chromium) throw new Error(PLAYWRIGHT_MISSING_MESSAGE);
+    this.pw = mod;
+    return mod;
+  }
+
+  private async launch(over?: LaunchOverrides): Promise<void> {
+    const base = this.currentConfig();
+    const cfg: BrowserConfig = {
+      ...base,
+      headless: over?.headless ?? base.headless,
+      profile: over?.profile ?? base.profile,
+      cdpUrl: over?.cdpUrl ?? (base.cdpUrl || configuredCdpUrl || ''),
+    };
+    const pw = await this.loadPlaywright();
+    this.profileNotice = undefined;
+    if (cfg.cdpUrl) await this.attachCdp(pw, cfg);
+    else await this.launchPersistent(pw, cfg, over?.headless === undefined);
+    this.launchedCfg = cfg;
+    this.lean = new LeanBlocker(leanEnabled(cfg, this.mode), this.opts.leanExempt ?? leanExemptPage);
+
+    const ctx = this.ctx;
+    await this.setupBotAuth(ctx, cfg);
+    ctx.on('page', (p: Page) => { this.attachPage(p); });
+    ctx.on('close', () => this.onContextClosed(ctx));
+    for (const p of ctx.pages()) this.attachPage(p, { initial: true });
+
+    if (this.mode === 'cdp') {
+      // Never hijack the user's current tab: the agent works in its own tab.
+      const p = await ctx.newPage();
+      this.activate(this.attachPage(p, { initial: true }));
+    } else if (!this.activeTab) {
+      const first = this.tabList[0] ?? this.attachPage(await ctx.newPage(), { initial: true });
+      this.activate(first);
+    }
+    await this.lean.settled();
+
+    getBus().publish({
+      kind: 'browser',
+      type: 'launched',
+      data: { mode: this.mode, headless: this.mode === 'cdp' ? false : cfg.headless, profile: this.profileInUse, executable: this.exe?.executablePath, version: this.browserVersion },
+    });
+    logger.info('QodeX browser ready', { mode: this.mode, profile: this.profileInUse, executable: this.exe?.executablePath, source: this.exe?.source });
+    this.followCasts();
+  }
+
+  /**
+   * Web Bot Auth: when enabled, sign the agent's own requests so a site can recognise
+   * QodeX (honest identity, not evasion). A context.route adds the signature headers to
+   * same-authority document / XHR / fetch requests on public hosts; everything else is
+   * passed through untouched. Loopback / LAN / file pages are never signed. Never throws
+   * out of launch: if the key can't be loaded, bot-auth just stays off.
+   */
+  private async setupBotAuth(ctx: any, cfg: BrowserConfig): Promise<void> {
+    this.botAuth = null;
+    this.botAuthOn = false;
+    if (!cfg.botAuth?.enabled) return;
+    if (this.mode !== 'launch') {
+      // On the user's own Chrome (CDP) the context is shared with their tabs; never add
+      // headers to requests that are not the agent's.
+      this.notice('Web Bot Auth is only applied to QodeX\'s own browser, not your Chrome (cdpUrl).');
+      return;
+    }
+    try {
+      const signer = await BotAuthSigner.load(cfg.botAuth);
+      const exempt = this.opts.leanExempt ?? leanExemptPage;
+      await ctx.route('**/*', (route: any) => {
+        let handled = false;
+        try {
+          const req = route.request();
+          const url = String(req.url());
+          const type = String(req.resourceType?.() ?? '');
+          if (/^https?:/i.test(url) && !exempt(url) && (type === 'document' || type === 'xhr' || type === 'fetch')) {
+            const signed = signer.headersForUrl(url);
+            if (signed) { handled = true; void route.continue({ headers: { ...req.headers(), ...signed } }).catch(() => {}); }
+          }
+        } catch { /* fall through to pass-through */ }
+        if (!handled) { void route.fallback().catch(() => { void route.continue().catch(() => {}); }); }
+      });
+      this.botAuth = signer;
+      this.botAuthOn = true;
+      logger.info('Web Bot Auth on', { keyid: signer.keyid, directory: signer.directoryUrl || '(keyid only)' });
+      this.notice(`Web Bot Auth is on — requests are signed as this agent (key ${signer.keyid.slice(0, 12)}…).`);
+    } catch (e) {
+      logger.warn('Web Bot Auth disabled: ' + firstLine(e));
+      this.notice('Web Bot Auth could not start (key error) — continuing without it. See `qodex browser bot-auth`.');
+    }
+  }
+
+  private async attachCdp(pw: any, cfg: BrowserConfig): Promise<void> {
+    let browser: any;
+    try {
+      browser = await pw.chromium.connectOverCDP(cfg.cdpUrl);
+    } catch (e) {
+      throw new Error(
+        `[BROWSER_LAUNCH_FAILED] Could not attach to Chrome at ${redactCdpUrl(cfg.cdpUrl)}: ${maskUrlSecrets(firstLine(e), cfg.cdpUrl)}. ` +
+        'Start Chrome with --remote-debugging-port=9222 (and a separate --user-data-dir), or clear browser.cdpUrl / QODEX_BROWSER_CDP_URL to let QodeX launch its own browser.',
+      );
+    }
+    const ctx = browser.contexts()[0] ?? await browser.newContext({ viewport: cfg.viewport, acceptDownloads: true });
+    browser.on('disconnected', () => this.onContextClosed(ctx));
+    this.cdpBrowser = browser;
+    this.ctx = ctx;
+    this.mode = 'cdp';
+    this.profileInUse = '(user Chrome via CDP)';
+    this.exe = { source: 'cdp' };
+    try { this.browserVersion = browser.version(); } catch { this.browserVersion = undefined; }
+  }
+
+  private async launchPersistent(pw: any, cfg: BrowserConfig, allowHeadlessFallback: boolean): Promise<void> {
+    let pwExe = '';
+    try { pwExe = String(pw.chromium.executablePath?.() ?? ''); } catch { pwExe = ''; }
+    const exe = resolveBrowserExecutable(
+      { executablePath: cfg.executablePath, channel: cfg.channel, playwrightExecutablePath: pwExe, headless: cfg.headless },
+      this.opts.launcherDeps,
+    );
+    this.exe = exe;
+    for (const w of exe.warnings ?? []) { logger.warn(w); this.notice(w); }
+
+    // A visible browser uses its real window (no emulated viewport that differs from the
+    // window); headless keeps the configured viewport.
+    const options: Record<string, unknown> = {
+      headless: cfg.headless,
+      viewport: cfg.headless ? { ...cfg.viewport } : null,
+      acceptDownloads: true,
+      args: ['--no-first-run', '--no-default-browser-check', ...(cfg.headless ? [] : [`--window-size=${cfg.viewport.width},${cfg.viewport.height}`])],
+    };
+    if (cfg.stealth) {
+      (options.args as string[]).unshift('--disable-blink-features=AutomationControlled');
+      options.ignoreDefaultArgs = ['--enable-automation'];
+    }
+    if (exe.executablePath) options.executablePath = exe.executablePath;
+    else if (exe.channel) options.channel = exe.channel;
+    if (cfg.userAgent) options.userAgent = cfg.userAgent;
+    if (cfg.locale) options.locale = cfg.locale;
+    if (cfg.timezone) options.timezoneId = cfg.timezone;
+
+    const open = async (profile: string, opts: Record<string, unknown>) => {
+      const dir = browserProfileDir(profile, this.profilesDir);
+      await fs.mkdir(dir, { recursive: true });
+      return pw.chromium.launchPersistentContext(dir, opts);
+    };
+
+    let profile = sanitizeName(cfg.profile) || 'default';
+    let ctx: any;
+    try {
+      ctx = await open(profile, options);
+    } catch (e) {
+      if (isProfileLockedError(e)) {
+        const alt = `${profile}-${process.pid}`;
+        // Throwaway copies of earlier (now dead) QodeX processes would pile up — one
+        // full Chromium profile per locked launch (e.g. every mission worker).
+        await pruneStaleFallbackProfiles(this.profilesDir, profile);
+        try {
+          ctx = await open(alt, options);
+        } catch (e2) {
+          throw explainLaunchError(e2, exe);
+        }
+        this.fallbackProfileDir = browserProfileDir(alt, this.profilesDir);
+        // Marks it as a QodeX throwaway, so pruning never touches a user profile
+        // that merely LOOKS like "<name>-<digits>" (e.g. "work-2024").
+        await fs.writeFile(path.join(this.fallbackProfileDir, FALLBACK_MARKER), String(process.pid)).catch(() => {});
+        this.profileNotice = `Browser profile "${profile}" is in use by another browser; this session uses "${alt}" (logins saved in "${profile}" are not available until that browser closes).`;
+        this.notice(this.profileNotice);
+        logger.warn(this.profileNotice);
+        profile = alt;
+      } else if (!cfg.headless && allowHeadlessFallback && isMissingDisplayError(e)) {
+        try {
+          ctx = await open(profile, { ...options, headless: true, viewport: { ...cfg.viewport } });
+        } catch (e2) {
+          throw explainLaunchError(e2, exe);
+        }
+        cfg.headless = true;
+        this.notice('No display is available for a visible browser — running headless instead.');
+      } else {
+        throw explainLaunchError(e, exe);
+      }
+    }
+
+    this.ctx = ctx;
+    this.cdpBrowser = null;
+    this.mode = 'launch';
+    this.profileInUse = profile;
+    try { this.browserVersion = ctx.browser?.()?.version?.(); } catch { this.browserVersion = undefined; }
+    if (cfg.stealth) {
+      try { await ctx.addInitScript(stealthScript(languagesFor(cfg.locale))); } catch (e) { logger.debug('stealth init script failed', { err: firstLine(e) }); }
+    }
+  }
+
+  /** Reset to "not running" after the context/browser went away (idempotent). */
+  private onContextClosed(ctx: BrowserContext | null): void {
+    if (ctx && this.ctx !== ctx) return;
+    const wasRunning = this.ctx !== null;
+    for (const st of this.tabList) {
+      if (st.pendingDialog) clearTimeout(st.pendingDialog.timer);
+      this.stopChallengeTimers(st);
+    }
+    for (const sub of this.casts) { sub.session = null; sub.page = null; }
+    if (this.humanHold) { clearTimeout(this.humanHold.timer); this.humanHold = null; }
+    this.ctx = null;
+    this.cdpBrowser = null;
+    this.mode = 'none';
+    this.tabList = [];
+    this.activeTab = null;
+    this.launchedCfg = null;
+    this.lean = new LeanBlocker(false, () => true);
+    this.botAuth = null;
+    this.botAuthOn = false;
+    if (this.fallbackProfileDir) {
+      // The browser has exited: drop the throwaway profile (its logins were never the
+      // user's). Chromium may still flush a file or two while exiting, hence retries.
+      const dir = this.fallbackProfileDir;
+      this.fallbackProfileDir = null;
+      this.fallbackCleanup = removeUntilGone(dir).finally(() => { this.fallbackCleanup = null; });
+    }
+    if (wasRunning) getBus().publish({ kind: 'browser', type: 'closed', data: { profile: this.profileInUse } });
+  }
+
+  async close(): Promise<void> {
+    if (this.launching) { try { await this.launching; } catch { /* launch failed: nothing to close */ } }
+    if (this.closing) return this.closing;
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const browser = this.cdpBrowser;
+    const mode = this.mode;
+    this.closing = (async () => {
+      await Promise.all([...this.casts].map(sub => this.detachCast(sub)));
+      try {
+        // CDP: Browser.close() on a connectOverCDP browser only drops the
+        // connection — the user's Chrome keeps running.
+        if (mode === 'cdp') await browser?.close();
+        else await ctx.close();
+      } catch (e) {
+        logger.debug('browser close failed', { err: firstLine(e) });
+      }
+      this.onContextClosed(ctx);
+      if (this.fallbackCleanup) await this.fallbackCleanup;
+    })().finally(() => { this.closing = null; });
+    return this.closing;
+  }
+
+  async restart(overrides?: LaunchOverrides): Promise<void> {
+    await this.close();
+    await this.ensure(overrides);
+  }
+
+  // ── tabs ──────────────────────────────────────────────────────────────────
+
+  private attachPage(page: Page, opts: { initial?: boolean } = {}): TabState {
+    const existing = this.tabList.find(t => t.page === page);
+    if (existing) return existing;
+    const st: TabState = { id: `t${++this.tabSeq}`, page, title: '', console: [], errors: [], requests: [], refMode: null, pendingDialog: null, challenge: null };
+    this.tabList.push(st);
+    if (this.ctx) void this.lean.attach(this.ctx as any, page);
+
+    page.on('console', (msg: any) => {
+      let location: string | undefined;
+      try { location = msg.location()?.url || undefined; } catch { /* ignore */ }
+      const text = String(msg.text());
+      // "Failed to load resource" for every image lean mode skipped is noise, not a page bug.
+      if (this.lean.enabled && text.includes(LEAN_BLOCK_ERROR)) return;
+      pushCapped(st.console, { type: String(msg.type()), text, location, ts: Date.now() }, CONSOLE_CAP);
+    });
+    page.on('pageerror', (err: any) => {
+      pushCapped(st.errors, { message: String(err?.message ?? err), stack: err?.stack, ts: Date.now() }, ERROR_CAP);
+    });
+    page.on('requestfinished', (req: any) => {
+      const base = { url: String(req.url()), method: String(req.method()), resourceType: safe(() => req.resourceType()), ts: Date.now() };
+      // The main document's response headers carry the most reliable bot-check signals
+      // (cf-mitigated, x-amzn-waf-action, x-datadome …) — also for click-triggered navigations.
+      const mainDoc = base.resourceType === 'document' && safe(() => req.frame() === page.mainFrame()) === true;
+      Promise.resolve()
+        .then(() => req.response())
+        .then((resp: any) => {
+          pushCapped(st.requests, { ...base, status: resp?.status(), ok: resp?.ok() }, REQUEST_CAP);
+          if (mainDoc && resp) this.noteDocument(page, resp);
+        })
+        .catch(() => pushCapped(st.requests, base, REQUEST_CAP));
+    });
+    page.on('requestfailed', (req: any) => {
+      const failure = safe(() => req.failure()?.errorText) ?? 'failed';
+      pushCapped(st.requests, {
+        url: String(req.url()), method: String(req.method()), resourceType: safe(() => req.resourceType()),
+        ok: false, failure: this.lean.enabled && failure === LEAN_BLOCK_ERROR ? LEAN_FAILURE_TEXT : failure, ts: Date.now(),
+      }, REQUEST_CAP);
+    });
+    page.on('dialog', (d: any) => this.onDialog(st, d));
+    page.on('download', (d: any) => this.onDownload(st, d));
+    page.on('close', () => this.onPageClosed(st));
+    page.on('framenavigated', (frame: any) => {
+      // Leave QodeX's secret files at once (also for the live view / a human).
+      if (/^(view-source:)?file:/i.test(safe(() => String(frame.url())) ?? '')) {
+        void this.guardProtectedPage(st).catch(() => {});
+      }
+      this.scheduleChallengeCheck(st);
+      try {
+        if (frame !== page.mainFrame()) return;
+      } catch { return; }
+      st.refMode = null;
+      this.lean.navigated(page);
+      this.events.emit('tab-navigated', st.id);
+      getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
+      notifyObservers(o => o.navigated?.(st.id, page));
+    });
+    page.on('frameattached', () => { this.scheduleChallengeCheck(st); });
+    page.on('framedetached', () => { this.scheduleChallengeCheck(st); });
+    page.on('domcontentloaded', () => { void this.refreshTitle(st); });
+    page.on('load', () => { void this.refreshTitle(st); this.scheduleChallengeCheck(st, 100); });
+
+    if (!opts.initial) {
+      // Popup / target=_blank from the active tab → becomes the active tab.
+      const p: Promise<void> = (async () => {
+        let opener: Page | null = null;
+        try { opener = await page.opener(); } catch { opener = null; }
+        if (opener && this.activeTab && opener === this.activeTab.page && this.tabList.includes(st)) {
+          this.activate(st);
+          this.notice(() => `New tab opened: ${safeUrl(page) || 'about:blank'}${st.title ? ` — "${st.title}"` : ''} (tab ${this.tabList.indexOf(st)}, now active; browser_tabs to list/switch back)`);
+        }
+        getBus().publish({ kind: 'browser', type: 'tab', data: { action: 'open', tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
+      })().finally(() => { this.pendingAttach.delete(p); });
+      this.pendingAttach.add(p);
+    }
+    return st;
+  }
+
+  private onPageClosed(st: TabState): void {
+    const idx = this.tabList.indexOf(st);
+    if (idx < 0) return;
+    this.lean.forget(st.page);
+    if (st.pendingDialog) { clearTimeout(st.pendingDialog.timer); st.pendingDialog = null; }
+    this.stopChallengeTimers(st);
+    if (st.challenge) {
+      const previous = st.challenge;
+      st.challenge = null;
+      getBus().publish({ kind: 'browser', type: 'challenge-cleared', data: { tab: st.id, index: idx, host: previous.host, vendor: previous.vendor, reason: 'tab-closed' } });
+      this.events.emit('challenge', { tab: st.id, index: idx, challenge: null, previous } satisfies ChallengeChange);
+    }
+    this.tabList.splice(idx, 1);
+    if (this.activeTab === st) {
+      this.activeTab = null;
+      const prev = this.tabList[Math.max(0, idx - 1)];
+      if (prev) this.activate(prev);
+    }
+    getBus().publish({ kind: 'browser', type: 'tab', data: { action: 'close', tab: st.id, index: idx } });
+  }
+
+  private activate(st: TabState): void {
+    if (this.activeTab === st) return;
+    this.activeTab = st;
+    try { void Promise.resolve(st.page.bringToFront()).catch(() => {}); } catch { /* ignore */ }
+    getBus().publish({ kind: 'browser', type: 'tab', data: { action: 'switch', tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(st.page) } });
+    this.followCasts();
+  }
+
+  private async refreshTitle(st: TabState): Promise<void> {
+    try { st.title = String(await st.page.title()); } catch { /* page busy/closed */ }
+  }
+
+  /** Re-read every tab's title (titles are cached for the sync `tabs()`). */
+  async refreshTitles(): Promise<void> {
+    await Promise.all(this.tabList.map(st => this.refreshTitle(st)));
+  }
+
+  context(): any | null {
+    return this.ctx;
+  }
+
+  async activePage(): Promise<Page> {
+    await this.ensure();
+    let st = this.activeTab;
+    if (st && safe(() => st!.page.isClosed())) { this.onPageClosed(st); st = this.activeTab; }
+    if (!st) {
+      if (!this.ctx) throw new Error('[BROWSER_ERROR] The browser closed while starting — try again.');
+      const p = await this.ctx.newPage();
+      st = this.attachPage(p, { initial: true });
+      this.activate(st);
+    }
+    await this.guardProtectedPage(st);
+    return st.page;
+  }
+
+  /** Dirs protected for THIS manager on top of the defaults (its own profiles dir). */
+  protectedDirs(): string[] {
+    return [this.profilesDir];
+  }
+
+  /**
+   * A tab (or one of its frames) that ended up on QodeX's own secret files — a
+   * file:// directory listing → click, a redirect, a human in the live view — is
+   * sent to about:blank before anything can read it. browser_navigate refuses such
+   * URLs up front; this closes the other ways in. Throws when it cannot leave.
+   */
+  private guardProtectedPage(st: TabState): Promise<void> {
+    const run = (st.guardChain ?? Promise.resolve()).then(() => this.guardProtectedPageOnce(st));
+    st.guardChain = run.catch(() => {});
+    return run;
+  }
+
+  private async guardProtectedPageOnce(st: TabState): Promise<void> {
+    let urls: string[] = [];
+    try { urls = st.page.frames().map((f: any) => String(f.url())); } catch { urls = [safeUrl(st.page)]; }
+    const fileUrls = urls.filter(u => /^(view-source:)?file:/i.test(u));
+    if (!fileUrls.length) return;
+    let hit = false;
+    for (const u of fileUrls) {
+      if (await isProtectedFileUrlReal(u, this.protectedDirs())) { hit = true; break; }
+    }
+    if (!hit) return;
+    try { await st.page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 }); } catch (e) { logger.debug('leaving a protected page failed', { err: firstLine(e) }); }
+    const still = safeUrl(st.page);
+    this.notice('Closed a page showing QodeX\'s own secret files (credential vault / browser profile) — they are never readable through the browser.');
+    if (/^(view-source:)?file:/i.test(still) && await isProtectedFileUrlReal(still, this.protectedDirs())) {
+      throw new Error('[BROWSER_ERROR] The active tab shows QodeX\'s own secret files and could not be closed — call browser_tabs action=close.');
+    }
+  }
+
+  private tabInfo(st: TabState, index: number): TabInfo {
+    return { index, id: st.id, url: safeUrl(st.page), title: st.title, active: st === this.activeTab };
+  }
+
+  tabs(): TabInfo[] {
+    return this.tabList.map((st, i) => this.tabInfo(st, i));
+  }
+
+  async newTab(url?: string): Promise<TabInfo> {
+    await this.ensure();
+    const p = await this.ctx.newPage();
+    const st = this.attachPage(p, { initial: true });
+    this.activate(st);
+    if (url) {
+      try {
+        await p.goto(normalizeUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      } catch (e) {
+        if (!/timeout/i.test(firstLine(e))) throw e;
+      }
+      await this.refreshTitle(st);
+    }
+    return this.tabInfo(st, this.tabList.indexOf(st));
+  }
+
+  async switchTab(index: number): Promise<TabInfo> {
+    await this.ensure();
+    const st = this.tabList[index];
+    if (!st) throw new Error(`[BROWSER_ERROR] No tab at index ${index} (open tabs: ${this.tabList.length ? `0..${this.tabList.length - 1}` : 'none'}).`);
+    this.activate(st);
+    await this.refreshTitle(st);
+    return this.tabInfo(st, index);
+  }
+
+  async closeTab(index?: number): Promise<void> {
+    if (!this.ctx) return;
+    const st = index === undefined ? this.activeTab : this.tabList[index];
+    if (!st) throw new Error(`[BROWSER_ERROR] No tab at index ${index} (open tabs: ${this.tabList.length ? `0..${this.tabList.length - 1}` : 'none'}).`);
+    try { await st.page.close({ runBeforeUnload: false }); } catch (e) { logger.debug('tab close failed', { err: firstLine(e) }); }
+    this.onPageClosed(st);
+  }
+
+  // ── status / notices ──────────────────────────────────────────────────────
+
+  status(): QodexBrowserStatus {
+    const cfg = this.launchedCfg ?? this.currentConfig();
+    const pending = this.activeTab?.pendingDialog?.entry;
+    const chTab = this.activeTab?.challenge ? this.activeTab : this.tabList.find(t => t.challenge);
+    const ch = chTab?.challenge;
+    return {
+      running: this.ctx !== null,
+      mode: this.mode,
+      headless: this.mode === 'cdp' ? false : cfg.headless,
+      profile: this.profileInUse || sanitizeName(cfg.profile) || 'default',
+      executable: this.exe?.executablePath ?? this.exe?.channel,
+      version: this.browserVersion,
+      tabs: this.tabs(),
+      takeover: this.takeoverOn,
+      takeoverBy: this.takeoverWho,
+      downloadsDir: this.downloadsDir,
+      executableSource: this.exe?.source,
+      // A remote CDP endpoint may carry a token (`?token=`, user:pass@): never show it.
+      cdpUrl: redactCdpUrl(cfg.cdpUrl || undefined),
+      notice: this.profileNotice,
+      downloads: this.downloadList.length,
+      pendingDialog: pending ? { type: pending.type, message: pending.message } : undefined,
+      challenge: ch && chTab ? { tab: this.tabList.indexOf(chTab), vendor: ch.vendor, state: ch.state, host: ch.host } : undefined,
+      lean: this.ctx && this.lean.enabled ? this.lean.status() : undefined,
+      botAuth: this.ctx && this.botAuthOn && this.botAuth ? this.botAuth.status(true) : undefined,
+    };
+  }
+
+  /** The Web Bot Auth signer in force (for `qodex browser bot-auth`), or null. */
+  botAuthSigner(): BotAuthSigner | null {
+    return this.botAuthOn ? this.botAuth : null;
+  }
+
+  /**
+   * Pixels matter from now on (a screenshot, the live view, a takeover, a bot check):
+   * lean mode stops skipping images / fonts / media for the rest of this session.
+   * Returns whether it was on and how many requests it skipped on the active tab since
+   * that tab's last navigation (those stay missing until the page is reloaded).
+   */
+  async suspendLean(reason: string): Promise<{ wasOn: boolean; blockedOnPage: number }> {
+    const page = this.activeTab?.page;
+    const blockedOnPage = page && this.lean.active ? this.lean.blockedOn(page) : 0;
+    const wasOn = await this.lean.suspend(reason);
+    return { wasOn, blockedOnPage };
+  }
+
+  private notice(n: string | (() => string)): void {
+    pushCapped(this.notices, n, QodexBrowserManager.NOTICE_CAP);
+  }
+
+  /** Notes for the next tool result (new tabs, dialogs, downloads, launch notices). Clears them. */
+  drainNotices(): string[] {
+    const out = this.notices.map(n => (typeof n === 'function' ? n() : n));
+    this.notices = [];
+    return out;
+  }
+
+  /** Let popups / navigations triggered by an action start and the active tab settle. */
+  async settle(opts: { timeoutMs?: number } = {}): Promise<void> {
+    await sleep(150);
+    if (this.pendingAttach.size) await Promise.race([Promise.allSettled([...this.pendingAttach]), sleep(1500)]);
+    const st = this.activeTab;
+    if (!st || st.pendingDialog) return;
+    try { await st.page.waitForLoadState('domcontentloaded', { timeout: opts.timeoutMs ?? 5000 }); } catch { /* slow page: report what we have */ }
+    await this.refreshTitle(st);
+  }
+
+  /** Console / error / network buffers of the active tab (null when not running). */
+  activeBuffers(): { console: ConsoleEntry[]; errors: PageErrorEntry[]; requests: RequestEntry[]; tabId: string } | null {
+    const st = this.activeTab;
+    return st ? { console: st.console, errors: st.errors, requests: st.requests, tabId: st.id } : null;
+  }
+
+  /** Clear the active tab's buffers (browser_navigate does this for the new page). */
+  clearActiveBuffers(): void {
+    const st = this.activeTab;
+    if (!st) return;
+    st.console.length = 0;
+    st.errors.length = 0;
+    st.requests.length = 0;
+  }
+
+  activeUrl(): string {
+    return this.activeTab ? safeUrl(this.activeTab.page) : '';
+  }
+
+  /** The active tab's title (cached). */
+  activeTitle(): string {
+    return this.activeTab?.title ?? '';
+  }
+
+  // ── CAPTCHA / bot-check state (challenge.ts) ─────────────────────────────
+
+  private tabOf(page?: Page | string): TabState | null {
+    if (page === undefined || page === null) return this.activeTab;
+    if (typeof page === 'string') return this.tabList.find(t => t.id === page) ?? null;
+    return this.tabList.find(t => t.page === page) ?? null;
+  }
+
+  /** Remember the main document's response (status + detection headers only). */
+  noteDocument(page: Page, resp: any): void {
+    const st = this.tabOf(page);
+    if (!st || !resp) return;
+    let headers: Record<string, string> = {};
+    try { headers = pickChallengeHeaders(resp.headers?.() ?? {}); } catch { headers = {}; }
+    st.doc = { url: stripQuery(safe(() => String(resp.url())) ?? ''), status: safe(() => resp.status()), headers };
+  }
+
+  /** Status + detection headers of the tab's latest main-document response. */
+  documentInfo(page?: Page | string): { status?: number; headers: Record<string, string> } {
+    const st = this.tabOf(page);
+    return st?.doc ? { status: st.doc.status, headers: { ...st.doc.headers } } : { headers: {} };
+  }
+
+  private stopChallengeTimers(st: TabState): void {
+    if (st.challengeTimer) { clearTimeout(st.challengeTimer); st.challengeTimer = null; }
+    if (st.challengeBeat) { clearInterval(st.challengeBeat); st.challengeBeat = null; }
+  }
+
+  private currentConfigSafe(): BrowserConfig | null {
+    try { return this.launchedCfg ?? this.currentConfig(); } catch { return null; }
+  }
+
+  /** Debounced passive re-detection (frame attach / detach / navigation / load). */
+  private scheduleChallengeCheck(st: TabState, delayMs = 350): void {
+    if (!this.tabList.includes(st)) return;
+    if (this.currentConfigSafe()?.challengeHandoff === 'off') return;
+    if (st.challengeTimer) clearTimeout(st.challengeTimer);
+    st.challengeTimer = setTimeout(() => {
+      st.challengeTimer = null;
+      void this.runChallengeCheck(st).catch(() => {});
+    }, delayMs);
+    (st.challengeTimer as any).unref?.();
+  }
+
+  /** One detection on a tab (coalesced; never while a JS dialog blocks the page). */
+  private runChallengeCheck(st: TabState): Promise<ChallengeInfo | null | 'unknown'> {
+    if (st.challengeRun) return st.challengeRun;
+    if (!this.tabList.includes(st) || st.pendingDialog || safe(() => st.page.isClosed()) === true) return Promise.resolve('unknown');
+    const run = (async () => {
+      const doc = st.doc;
+      const r = await detectChallenge(st.page, { status: doc?.status, headers: doc?.headers });
+      if (r !== 'unknown' && this.tabList.includes(st)) this.setChallenge(st, r);
+      // A URL that loaded without a challenge may be reloaded freely again.
+      if (r === null) this.challengeLoads.delete(stripQuery(safeUrl(st.page)));
+      return r;
+    })().finally(() => { st.challengeRun = null; });
+    st.challengeRun = run;
+    return run;
+  }
+
+  private setChallenge(st: TabState, next: ChallengeInfo | null): void {
+    const previous = st.challenge;
+    st.challenge = next;
+    // The person who solves it must see it whole (a cross-site CAPTCHA frame is never
+    // touched by lean mode, but the page around it may be).
+    if (next) void this.lean.suspend('bot check');
+    if (next && !st.challengeBeat) {
+      st.challengeBeat = setInterval(() => { void this.runChallengeCheck(st).catch(() => {}); }, 1500);
+      (st.challengeBeat as any).unref?.();
+    } else if (!next && st.challengeBeat) {
+      clearInterval(st.challengeBeat);
+      st.challengeBeat = null;
+    }
+    if (sameChallenge(previous, next)) return;
+    const index = this.tabList.indexOf(st);
+    // Host, vendor and state only: never a URL, query string or token.
+    if (next) {
+      getBus().publish({ kind: 'browser', type: 'challenge', data: { tab: st.id, index, host: next.host, vendor: next.vendor, state: next.state } });
+      if (st !== this.activeTab && !previous) this.notice(`A ${challengeLabel(next.vendor)} appeared on tab ${index}${next.host ? ` (${next.host})` : ''}.`);
+    } else if (previous) {
+      getBus().publish({ kind: 'browser', type: 'challenge-cleared', data: { tab: st.id, index, host: previous.host, vendor: previous.vendor } });
+    }
+    this.events.emit('challenge', { tab: st.id, index, challenge: next, previous } satisfies ChallengeChange);
+  }
+
+  /** The challenge last seen on a tab (default: the active tab). Cached; no page round-trip. */
+  challengeOf(page?: Page | string): ChallengeInfo | null {
+    return this.tabOf(page)?.challenge ?? null;
+  }
+
+  /** Detect now on a tab (default: active) and update its state. 'unknown' keeps the previous verdict. */
+  async detectChallengeNow(page?: Page | string): Promise<ChallengeInfo | null> {
+    if (this.currentConfigSafe()?.challengeHandoff === 'off') return null;
+    const st = this.tabOf(page);
+    if (!st) return null;
+    const r = await this.runChallengeCheck(st);
+    return r === 'unknown' ? st.challenge : r;
+  }
+
+  /** Tabs that currently show a challenge (index order). */
+  challengeTabs(): Array<{ index: number; tab: string; challenge: ChallengeInfo }> {
+    return this.tabList
+      .map((t, index) => ({ index, tab: t.id, challenge: t.challenge }))
+      .filter((x): x is { index: number; tab: string; challenge: ChallengeInfo } => x.challenge !== null);
+  }
+
+  /** Subscribe to challenge appear / change / clear events. Returns unsubscribe. */
+  onChallengeChange(listener: (c: ChallengeChange) => void): () => void {
+    this.events.on('challenge', listener);
+    return () => { this.events.off('challenge', listener); };
+  }
+
+  /**
+   * Re-detect on a tab (default: active) about every `intervalMs` — and at once on a
+   * navigation or a passive challenge change — until `until` holds on `confirmations`
+   * consecutive checks (default: the challenge is gone), the timeout, or the signal
+   * (rejects `[ABORTED]`). Read-only: it only looks.
+   */
+  async waitForChallenge(
+    page: Page | string | undefined,
+    opts: { timeoutMs: number; signal?: AbortSignal; until?: (c: ChallengeInfo | null) => boolean; confirmations?: number; intervalMs?: number; onCheck?: (c: ChallengeInfo | null | 'unknown') => void },
+  ): Promise<WaitForChallengeResult> {
+    const st = this.tabOf(page);
+    if (!st) return { challenge: null, timedOut: false, waitedMs: 0 };
+    return waitForChallengeChange(st.page, {
+      ...opts,
+      detect: () => (this.tabList.includes(st) ? this.runChallengeCheck(st) : Promise.resolve(null)),
+      wake: cb => {
+        const onChange = (c: ChallengeChange) => { if (c.tab === st.id) cb(); };
+        const onNav = (id: string) => { if (id === st.id) { const t = setTimeout(cb, 300); (t as any).unref?.(); } };
+        this.events.on('challenge', onChange);
+        this.events.on('tab-navigated', onNav);
+        return () => { this.events.off('challenge', onChange); this.events.off('tab-navigated', onNav); };
+      },
+    });
+  }
+
+  /**
+   * Pace agent navigations / actions per public host (browser.hostPacingMs, ≤1 s): a
+   * burst of back-to-back requests is what bot scoring punishes. Loopback / LAN hosts
+   * (dev servers) are never paced. Returns the ms waited.
+   */
+  async paceHost(url: string): Promise<number> {
+    const ms = this.currentConfigSafe()?.hostPacingMs ?? 0;
+    let host = '';
+    try { host = new URL(url).hostname.toLowerCase(); } catch { host = ''; }
+    if (ms <= 0 || !host || isLocalHost(host)) return 0;
+    const now = Date.now();
+    const wait = Math.max(0, (this.hostLast.get(host) ?? 0) + ms - now);
+    this.hostLast.set(host, now + wait);
+    if (this.hostLast.size > 500) {
+      for (const [h, t] of this.hostLast) if (t < now - 60_000) this.hostLast.delete(h);
+    }
+    if (wait > 0) await sleep(wait);
+    return wait;
+  }
+
+  /** How many consecutive agent loads of `url` (origin + path) ended on a challenge. */
+  challengeLoadCount(url: string): number {
+    return this.challengeLoads.get(stripQuery(url)) ?? 0;
+  }
+
+  /** Count an agent load of `url` that ended on a challenge (or reset it). */
+  noteChallengeLoad(url: string, challenged: boolean): void {
+    const key = stripQuery(url);
+    if (!key) return;
+    if (!challenged) { this.challengeLoads.delete(key); return; }
+    this.challengeLoads.set(key, (this.challengeLoads.get(key) ?? 0) + 1);
+    if (this.challengeLoads.size > 200) this.challengeLoads.delete(this.challengeLoads.keys().next().value as string);
+  }
+
+  // ── vault-filled values (masked everywhere page text leaves the browser) ─────
+
+  /**
+   * Remember values the vault filled into a tab (`page` / tab id; default: active tab)
+   * so snapshots and page text hide them even when the site reveals them (a "show
+   * password" toggle, an echo). In memory only, expiring after `ttlMs` (default 15 min)
+   * or when the tab closes — never logged, published, stored or returned.
+   */
+  maskExtra(tab: Page | string | undefined, values: string[], ttlMs = 15 * 60_000): void {
+    const st = this.tabOf(tab);
+    if (!st) return;
+    const until = Date.now() + Math.max(1000, ttlMs);
+    const now = Date.now();
+    const keep = (st.masked ?? []).filter(m => m.until > now);
+    for (const v of values) {
+      if (typeof v !== 'string' || !v) continue;
+      const hit = keep.find(m => m.value === v);
+      if (hit) hit.until = Math.max(hit.until, until);
+      else keep.push({ value: v, until });
+    }
+    st.masked = keep.slice(-50);
+  }
+
+  /** The unexpired vault-filled values of a tab (for maskPageSecrets / snapshots). Never output these. */
+  extraSecretsFor(tab?: Page | string): string[] {
+    const st = this.tabOf(tab);
+    if (!st?.masked?.length) return [];
+    const now = Date.now();
+    st.masked = st.masked.filter(m => m.until > now);
+    return st.masked.map(m => m.value);
+  }
+
+  /** `text` with this tab's secret field values and vault fills hidden. */
+  async maskText(tab: Page | string | undefined, text: string): Promise<string> {
+    const st = this.tabOf(tab);
+    if (!st) return text;
+    return maskPageSecrets(st.page, text, this.extraSecretsFor(st.page));
+  }
+
+  /** The Playwright page of a tab index (null when out of range). */
+  pageAt(index: number): Page | null {
+    return this.tabList[index]?.page ?? null;
+  }
+
+  /** Index of the tab showing `page` (-1 when unknown). */
+  indexOfPage(page: Page): number {
+    return this.tabList.findIndex(t => t.page === page);
+  }
+
+  // ── snapshots / refs ──────────────────────────────────────────────────────
+
+  /** Snapshot the active tab and remember which ref flavour it produced. */
+  async snapshot(opts: Omit<SnapshotOptions, 'tabs'> = {}): Promise<SnapshotResult> {
+    const page = await this.activePage();
+    const st = this.tabList.find(t => t.page === page);
+    const r = await takeSnapshotDetailed(page, {
+      ...opts,
+      extraSecrets: [...(opts.extraSecrets ?? []), ...this.extraSecretsFor(page)],
+      tabs: { count: this.tabList.length, active: st ? this.tabList.indexOf(st) : 0 },
+    });
+    if (st) { st.refMode = r.mode; st.title = r.title || st.title; }
+    return r;
+  }
+
+  /** Snapshot with element boxes (set-of-marks); refreshes the tab's refs like snapshot(). */
+  async boxes(): Promise<{ text: string; marks: MarkBox[]; mode: 'aria' | 'dom' }> {
+    const page = await this.activePage();
+    const r = await snapshotWithBoxes(page, { extraSecrets: this.extraSecretsFor(page) });
+    const st = this.tabList.find(t => t.page === page);
+    if (st) st.refMode = r.mode;
+    return r;
+  }
+
+  async locator(target: { ref?: string; selector?: string }): Promise<any> {
+    const page = await this.activePage();
+    // A snapshot ref written into `selector` ("e12" — never a valid CSS tag, custom
+    // elements need a hyphen) means that ref, for every caller (tools, vault, replay).
+    const hasRef = target.ref !== undefined && target.ref !== null && String(target.ref).trim() !== '';
+    if (!hasRef && refFromSelector(target.selector)) target = { ref: refFromSelector(target.selector)! };
+    if (target.ref !== undefined && target.ref !== null && String(target.ref).trim() !== '') {
+      const ref = String(target.ref).trim().replace(/^\[?ref=/, '').replace(/\]$/, '');
+      if (!REF_RE.test(ref)) {
+        throw new Error(`[STALE_REF] "${target.ref}" is not a snapshot ref (expected e.g. e12) — call browser_snapshot and use a ref from it, or pass a selector.`);
+      }
+      const st = this.tabList.find(t => t.page === page);
+      const aria = `aria-ref=${ref}`;
+      const dom = `[data-qx-ref="${ref}"]`;
+      const order = st?.refMode === 'dom' ? [dom, aria] : [aria, dom];
+      for (const sel of order) {
+        try {
+          const loc = page.locator(sel);
+          if ((await loc.count()) > 0) return loc.first();
+        } catch { /* unknown engine / detached frame: try the next flavour */ }
+      }
+      throw new Error(`[STALE_REF] ref ${ref} not found — call browser_snapshot again (refs change when the page changes).`);
+    }
+    if (target.selector && target.selector.trim()) return page.locator(target.selector).first();
+    throw new Error('[BROWSER_ERROR] Pass `ref` (from browser_snapshot) or `selector`.');
+  }
+
+  /** ElementInfo for a resolved locator (best-effort, never throws). */
+  async describeLocator(loc: any, timeoutMs = 1500): Promise<ElementInfo | null> {
+    try {
+      const info = await loc.evaluate(DESCRIBE_ELEMENT_FN, undefined, { timeout: timeoutMs });
+      return info && typeof info === 'object' ? (info as ElementInfo) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async describeRef(ref: string): Promise<ElementInfo | null> {
+    if (!this.ctx) return null; // never launch for introspection
+    try {
+      const loc = await this.locator({ ref });
+      const info = await this.describeLocator(loc);
+      return info ? { ...info, ref: String(ref).trim() } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async describeSelector(selector: string): Promise<ElementInfo | null> {
+    if (!this.ctx) return null;
+    // The tools accept a snapshot ref in the `selector` field ("e12", "ref=e12",
+    // "[ref=e12]") and act on that ref — describe the SAME element, or Sentinel
+    // would classify a CSS tag selector that matches nothing (approval bypass).
+    const asRef = refFromSelector(selector);
+    if (asRef) return this.describeRef(asRef);
+    try {
+      const page = await this.activePage();
+      const loc = page.locator(selector).first();
+      if ((await page.locator(selector).count()) === 0) return null;
+      return await this.describeLocator(loc);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The element with keyboard focus on `page` (default: the active tab),
+   * descending into frames — cross-origin ones too, which page JS cannot see into
+   * but Playwright can evaluate in. null = nothing focused; 'unknown' = focus is
+   * inside a frame that could not be inspected (callers then redact typing).
+   */
+  async focusedElement(page?: Page): Promise<ElementInfo | null | 'unknown'> {
+    const p = page ?? this.activeTab?.page;
+    if (!p) return null;
+    let main: any;
+    try { main = p.mainFrame(); } catch { return 'unknown'; }
+    const probe = (f: any): Promise<any> => withTimeoutValue(Promise.resolve().then(() => f.evaluate(FOCUS_PROBE_FN)), 1500, null);
+    const top = await probe(main);
+    if (!top) return 'unknown';
+    if (top.state === 'none') return null;
+    if (top.state === 'el') return top.info ?? 'unknown';
+    let frames: any[] = [];
+    try { frames = p.frames().filter((f: any) => f !== main).slice(0, 50); } catch { frames = []; }
+    const found = (await Promise.all(frames.map(probe))).find(r => r?.state === 'el' && r.focus);
+    return found?.info ?? 'unknown';
+  }
+
+  /** ElementInfo at viewport point (x, y), descending into (cross-origin) frames. */
+  async describeAtPoint(page: Page, x: number, y: number): Promise<ElementInfo | null> {
+    let frame: any;
+    try { frame = page.mainFrame(); } catch { return null; }
+    let px = x;
+    let py = y;
+    for (let depth = 0; depth < 5; depth++) {
+      const info: ElementInfo | null = await withTimeoutValue(
+        Promise.resolve().then(() => frame.evaluate(DESCRIBE_AT_POINT_FN, { x: px, y: py })), 1500, null,
+      );
+      if (!info || (info.tag !== 'iframe' && info.tag !== 'frame')) return info;
+      let next: any = null;
+      let children: any[] = [];
+      try { children = frame.childFrames(); } catch { children = []; }
+      for (const child of children) {
+        try {
+          const fe = await child.frameElement();
+          const o = await fe.evaluate(FRAME_CONTENT_ORIGIN_FN);
+          void Promise.resolve(fe.dispose?.()).catch(() => {});
+          if (o && px >= o.left && px <= o.left + o.w && py >= o.top && py <= o.top + o.h) {
+            next = child;
+            px -= o.x;
+            py -= o.y;
+            break;
+          }
+        } catch { /* detached frame */ }
+      }
+      if (!next) return info;
+      frame = next;
+    }
+    return null;
+  }
+
+  // ── dialogs ───────────────────────────────────────────────────────────────
+
+  private onDialog(st: TabState, dialog: any): void {
+    const type = String(safe(() => dialog.type()) ?? 'alert');
+    const entry: DialogEntry = {
+      id: `d${++this.dialogSeq}`,
+      type,
+      message: String(safe(() => dialog.message()) ?? ''),
+      defaultValue: safe(() => dialog.defaultValue()) || undefined,
+      url: safeUrl(st.page),
+      tabId: st.id,
+      action: 'pending',
+      ts: Date.now(),
+    };
+    pushCapped(this.dialogHistory, entry, DIALOG_HISTORY_CAP);
+    const policy = this.currentConfig().dialogPolicy;
+    const msg = entry.message.length > 200 ? entry.message.slice(0, 200) + '…' : entry.message;
+    if (policy === 'ask' && type !== 'beforeunload') {
+      if (st.pendingDialog) {
+        // A second dialog while one is pending cannot happen in one page; be safe.
+        void Promise.resolve(dialog.dismiss()).catch(() => {});
+        entry.action = 'dismissed';
+        return;
+      }
+      const ms = this.opts.dialogAutoDismissMs ?? 30_000;
+      const timer = setTimeout(() => { void this.resolveDialog('dismiss', undefined, st, true).catch(() => {}); }, ms);
+      (timer as any).unref?.();
+      st.pendingDialog = { entry, dialog, timer };
+      this.notice(`Dialog waiting (${type}): "${msg}" — answer with browser_dialog action=accept|dismiss (auto-dismissed in ${Math.round(ms / 1000)}s).`);
+      this.events.emit('dialog-pending', entry);
+    } else {
+      // beforeunload is always accepted: dismissing it would block navigation.
+      const accept = policy !== 'dismiss' || type === 'beforeunload';
+      void Promise.resolve(accept ? dialog.accept(entry.defaultValue) : dialog.dismiss()).catch(() => {});
+      entry.action = accept ? 'accepted' : 'dismissed';
+      this.notice(`Dialog (${type}) "${msg}" → ${entry.action}`);
+    }
+    getBus().publish({ kind: 'browser', type: 'dialog', data: { tab: st.id, type, message: msg, action: entry.action } });
+  }
+
+  /** Subscribe to dialogs that wait for an answer ('ask' policy). Returns unsubscribe. */
+  onPendingDialog(listener: (d: DialogEntry) => void): () => void {
+    this.events.on('dialog-pending', listener);
+    return () => { this.events.off('dialog-pending', listener); };
+  }
+
+  /** The pending dialog of a page (or of the active tab). */
+  pendingDialog(page?: Page): DialogEntry | null {
+    const st = page ? this.tabList.find(t => t.page === page) : this.activeTab;
+    return st?.pendingDialog?.entry ?? null;
+  }
+
+  /** Answer a pending dialog (active tab first, else any tab). Returns null if none is pending. */
+  async resolveDialog(action: 'accept' | 'dismiss', text?: string, tab?: TabState, auto = false): Promise<DialogEntry | null> {
+    const st = tab ?? (this.activeTab?.pendingDialog ? this.activeTab : this.tabList.find(t => t.pendingDialog));
+    const pd = st?.pendingDialog;
+    if (!st || !pd) return null;
+    clearTimeout(pd.timer);
+    st.pendingDialog = null;
+    try {
+      if (action === 'accept') await pd.dialog.accept(text ?? pd.entry.defaultValue);
+      else await pd.dialog.dismiss();
+    } catch (e) {
+      logger.debug('dialog answer failed', { err: firstLine(e) });
+    }
+    pd.entry.action = auto ? 'auto-dismissed' : action === 'accept' ? 'accepted' : 'dismissed';
+    if (auto) this.notice(`Dialog (${pd.entry.type}) "${pd.entry.message.slice(0, 120)}" was auto-dismissed after waiting.`);
+    getBus().publish({ kind: 'browser', type: 'dialog', data: { tab: st.id, type: pd.entry.type, action: pd.entry.action } });
+    return pd.entry;
+  }
+
+  /** Recent dialogs, oldest first. */
+  dialogs(): DialogEntry[] {
+    return [...this.dialogHistory];
+  }
+
+  // ── downloads ─────────────────────────────────────────────────────────────
+
+  private onDownload(st: TabState, download: any): void {
+    const entry: DownloadEntry = {
+      id: `dl${++this.downloadSeq}`,
+      url: String(safe(() => download.url()) ?? ''),
+      suggestedFilename: String(safe(() => download.suggestedFilename()) ?? 'download'),
+      path: '',
+      state: 'in_progress',
+      startedAt: Date.now(),
+      tabId: st.id,
+    };
+    pushCapped(this.downloadList, entry, DOWNLOAD_CAP);
+    if (this.downloadDone.size > DOWNLOAD_CAP) {
+      const live = new Set(this.downloadList.map(d => d.id));
+      for (const id of [...this.downloadDone.keys()]) if (!live.has(id)) this.downloadDone.delete(id);
+    }
+    this.notice(() => entry.state === 'in_progress'
+      ? `Download started: ${entry.suggestedFilename} → ${entry.path || this.downloadsDir} (browser_downloads action=wait to wait for it)`
+      : `Download ${entry.state}: ${entry.path || entry.suggestedFilename}${entry.bytes !== undefined ? ` (${formatBytes(entry.bytes)})` : ''}${entry.error ? ` — ${entry.error}` : ''}`);
+    getBus().publish({ kind: 'browser', type: 'download', data: { id: entry.id, state: 'started', filename: entry.suggestedFilename, url: entry.url } });
+    this.events.emit('download-start', entry);
+
+    const done = (async (): Promise<DownloadEntry> => {
+      let target = '';
+      try {
+        await fs.mkdir(this.downloadsDir, { recursive: true });
+        const existing = new Set(await fs.readdir(this.downloadsDir).catch(() => [] as string[]));
+        const name = dedupFilename(entry.suggestedFilename, n => existing.has(n) || this.reservedNames.has(n));
+        this.reservedNames.add(name);
+        target = path.join(this.downloadsDir, name);
+        entry.path = target;
+        await download.saveAs(target);
+        const stat = await fs.stat(target);
+        entry.bytes = stat.size;
+        entry.state = 'completed';
+      } catch (e) {
+        entry.state = 'failed';
+        entry.error = firstLine(e);
+      } finally {
+        if (target) this.reservedNames.delete(path.basename(target));
+        entry.finishedAt = Date.now();
+      }
+      getBus().publish({ kind: 'browser', type: 'download', data: { id: entry.id, state: entry.state, path: entry.path, bytes: entry.bytes, error: entry.error } });
+      this.events.emit('download-done', entry);
+      return entry;
+    })();
+    this.downloadDone.set(entry.id, done);
+  }
+
+  /** Downloads of this session, oldest first. */
+  downloads(): DownloadEntry[] {
+    return [...this.downloadList];
+  }
+
+  /**
+   * Wait for a download to finish and return it: the newest download not yet
+   * returned by a previous wait (it may already be complete — fast downloads
+   * often finish during the click), else the next one that starts. Resolves
+   * null on timeout.
+   */
+  async waitForDownload(timeoutMs: number, signal?: AbortSignal): Promise<DownloadEntry | null> {
+    return new Promise<DownloadEntry | null>((resolve, reject) => {
+      let finished = false;
+      // The one download this wait follows. Only a download actually RETURNED is
+      // claimed: one that finishes after this wait timed out, or a second one that
+      // started meanwhile, stays available for the next wait.
+      let following: DownloadEntry | null = null;
+      const finish = (v: DownloadEntry | null, err?: Error) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.events.off('download-start', onStart);
+        signal?.removeEventListener('abort', onAbort);
+        if (v) v.claimed = true;
+        if (err) reject(err); else resolve(v);
+      };
+      const follow = (d: DownloadEntry) => {
+        if (following) return;
+        following = d;
+        this.events.off('download-start', onStart);
+        void (this.downloadDone.get(d.id) ?? Promise.resolve(d)).then(r => finish(r), () => finish(d));
+      };
+      const onStart = (d: DownloadEntry) => { if (!d.claimed) follow(d); };
+      const onAbort = () => finish(null, new Error('[ABORTED] Stopped waiting for the download.'));
+      const timer = setTimeout(() => finish(null), Math.max(0, timeoutMs));
+      (timer as any).unref?.();
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      const unclaimed = [...this.downloadList].reverse().find(d => !d.claimed);
+      if (unclaimed) follow(unclaimed);
+      else this.events.on('download-start', onStart);
+    });
+  }
+
+  // ── screencast ────────────────────────────────────────────────────────────
+
+  async startScreencast(onFrame: (f: ScreencastFrame) => void, opts: { quality?: number; maxFps?: number } = {}): Promise<() => Promise<void>> {
+    const fps = Math.min(30, Math.max(1, opts.maxFps ?? 8));
+    // Someone is watching: they get the real page, images included.
+    await this.lean.suspend('live view');
+    const sub: CastSub = {
+      onFrame,
+      quality: Math.min(100, Math.max(1, Math.round(opts.quality ?? 60))),
+      minIntervalMs: Math.floor(1000 / fps),
+      last: 0,
+      session: null,
+      page: null,
+      stopped: false,
+      chain: Promise.resolve(),
+    };
+    this.casts.add(sub);
+    this.queueCast(sub);
+    await sub.chain;
+    return async () => {
+      sub.stopped = true;
+      this.casts.delete(sub);
+      await sub.chain.catch(() => {});
+      await this.detachCast(sub);
+    };
+  }
+
+  private queueCast(sub: CastSub): void {
+    sub.chain = sub.chain.then(() => this.attachCast(sub)).catch(e => logger.debug('screencast attach failed', { err: firstLine(e) }));
+  }
+
+  private followCasts(): void {
+    for (const sub of this.casts) this.queueCast(sub);
+  }
+
+  private async attachCast(sub: CastSub): Promise<void> {
+    if (sub.stopped || !this.ctx || !this.activeTab) return;
+    const page = this.activeTab.page;
+    if (sub.page === page && sub.session) return;
+    await this.detachCast(sub);
+    const ctx = this.ctx;
+    const session = await ctx.newCDPSession(page);
+    if (sub.stopped || this.ctx !== ctx || this.activeTab?.page !== page) {
+      await Promise.resolve(session.detach()).catch(() => {});
+      if (!sub.stopped && this.ctx && this.activeTab && this.activeTab.page !== page) this.queueCast(sub);
+      return;
+    }
+    sub.session = session;
+    sub.page = page;
+    session.on('Page.screencastFrame', (ev: any) => {
+      void Promise.resolve(session.send('Page.screencastFrameAck', { sessionId: ev.sessionId })).catch(() => {});
+      if (sub.stopped) return;
+      const now = Date.now();
+      if (now - sub.last < sub.minIntervalMs) return;
+      sub.last = now;
+      const dims = jpegSize(ev.data) ?? { width: Math.round(ev.metadata?.deviceWidth ?? 0), height: Math.round(ev.metadata?.deviceHeight ?? 0) };
+      try { sub.onFrame({ data: ev.data, width: dims.width, height: dims.height, ts: now }); } catch { /* viewer error must not kill the cast */ }
+    });
+    const vp = await this.viewportOf(page);
+    await session.send('Page.startScreencast', { format: 'jpeg', quality: sub.quality, maxWidth: vp.width, maxHeight: vp.height, everyNthFrame: 1 });
+  }
+
+  private async detachCast(sub: CastSub): Promise<void> {
+    const session = sub.session;
+    sub.session = null;
+    sub.page = null;
+    if (!session) return;
+    try { await session.send('Page.stopScreencast'); } catch { /* page gone */ }
+    try { await session.detach(); } catch { /* already detached */ }
+  }
+
+  private async viewportOf(page: Page): Promise<{ width: number; height: number }> {
+    const vp = safe(() => page.viewportSize());
+    if (vp && vp.width && vp.height) return vp;
+    try {
+      const r = await page.evaluate('({ width: window.innerWidth, height: window.innerHeight })');
+      if (r?.width && r?.height) return r;
+    } catch { /* fall through */ }
+    return { ...(this.launchedCfg ?? this.currentConfig()).viewport };
+  }
+
+  async screenshotJpeg(quality = 70, opts: { clip?: ScreenshotClip } = {}): Promise<Buffer> {
+    if (!this.ctx || !this.activeTab) throw new Error('[BROWSER_ERROR] The QodeX browser is not running.');
+    const page = this.activeTab.page;
+    await this.lean.suspend('screenshot');
+    const q = Math.min(100, Math.max(1, Math.round(Number.isFinite(quality) ? quality : 70)));
+    const clip = opts.clip ? clampClip(opts.clip, await this.viewportOf(page)) : null;
+    return page.screenshot(clip ? { type: 'jpeg', quality: q, clip } : { type: 'jpeg', quality: q });
+  }
+
+  /** The mouse button a human is holding through the live view (press-and-hold / drag). */
+  private humanHold: { page: Page; button: 'left' | 'right' | 'middle'; timer: NodeJS.Timeout } | null = null;
+
+  /** Release the button the human holds (lost 'up', takeover ended, hold cap). Never throws. */
+  async releaseHumanMouse(): Promise<void> {
+    const hold = this.humanHold;
+    if (!hold) return;
+    this.humanHold = null;
+    clearTimeout(hold.timer);
+    try { await hold.page.mouse.up({ button: hold.button }); } catch { /* page gone */ }
+  }
+
+  // ── takeover / human input ────────────────────────────────────────────────
+
+  /**
+   * Turn human takeover on / off. Turning it ON never silently steals it: while someone
+   * else holds it (a human in the control center, a hand-off) the owner stays and this
+   * returns false. Turning it OFF is an explicit hand-back and always releases (an
+   * automatic release must use releaseTakeover(owner)). Returns whether `by` now has the
+   * state it asked for.
+   */
+  setTakeover(on: boolean, by = 'human'): boolean {
+    if (on && this.takeoverOn && this.takeoverWho !== undefined && this.takeoverWho !== by) return false;
+    const changed = this.takeoverOn !== on;
+    this.takeoverOn = on;
+    this.takeoverWho = on ? by : undefined;
+    if (on) void this.lean.suspend('takeover');
+    if (changed) getBus().publish({ kind: 'browser', type: 'takeover', data: { on, by } });
+    if (changed) notifyObservers(o => o.takeover?.(on));
+    if (!on) {
+      const waiters = [...this.takeoverWaiters];
+      this.takeoverWaiters.clear();
+      for (const w of waiters) w();
+    }
+    return true;
+  }
+
+  /** Compare-and-release: end the takeover only if `by` still owns it. */
+  releaseTakeover(by: string): boolean {
+    if (!this.takeoverOn || this.takeoverWho !== by) return false;
+    this.setTakeover(false, by);
+    return true;
+  }
+
+  isTakeover(): boolean {
+    return this.takeoverOn;
+  }
+
+  /**
+   * Resolve when the takeover ends (true) — or after `timeoutMs` (false). Rejects
+   * `[ABORTED]` on `signal`. Resolves true at once when no takeover is on.
+   */
+  waitForTakeoverEnd(signal?: AbortSignal, timeoutMs?: number): Promise<boolean> {
+    if (!this.takeoverOn) return Promise.resolve(true);
+    return new Promise<boolean>((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error('[ABORTED] Stopped waiting for the human to hand back the browser.')); return; }
+      let timer: NodeJS.Timeout | null = null;
+      const cleanup = () => {
+        this.takeoverWaiters.delete(done);
+        signal?.removeEventListener('abort', onAbort);
+        if (timer) clearTimeout(timer);
+      };
+      const done = () => { cleanup(); resolve(true); };
+      const onAbort = () => {
+        cleanup();
+        reject(new Error('[ABORTED] Stopped waiting for the human to hand back the browser.'));
+      };
+      this.takeoverWaiters.add(done);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (timeoutMs !== undefined && timeoutMs >= 0) {
+        timer = setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
+        (timer as any).unref?.();
+      }
+    });
+  }
+
+  async dispatchInput(ev: HumanInputEvent): Promise<void> {
+    if (ev.type === 'navigate') {
+      const page = await this.activePage();
+      const url = normalizeUrl(ev.url);
+      try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }); } catch (e) { if (!/timeout/i.test(firstLine(e))) throw e; }
+      this.recordAction({ tool: 'browser_navigate', args: { url }, url: safeUrl(page), title: await safeTitle(page), actor: 'human' });
+      return;
+    }
+    if (!this.ctx || !this.activeTab) throw new Error('[BROWSER_ERROR] The QodeX browser is not running.');
+    const page = this.activeTab.page;
+    const toViewport = async (x: number, y: number, fw?: number, fh?: number) => {
+      if (!fw || !fh) return { x, y };
+      const vp = await this.viewportOf(page);
+      return { x: (x * vp.width) / fw, y: (y * vp.height) / fh };
+    };
+    // Focus may sit in a (cross-origin) login iframe; when it cannot be inspected,
+    // the typed text is redacted rather than recorded / broadcast in clear.
+    const focused = async (): Promise<{ el: ElementInfo | null; unknown: boolean }> => {
+      const f = await this.focusedElement(page);
+      return f === 'unknown' ? { el: null, unknown: true } : { el: f, unknown: false };
+    };
+    switch (ev.type) {
+      case 'click': {
+        const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+        const element = await this.describeAtPoint(page, p.x, p.y);
+        await this.beforeHumanInput(page, 'click', p);
+        await page.mouse.click(p.x, p.y, { button: ev.button ?? 'left', clickCount: ev.clickCount ?? 1 });
+        this.recordAction({ tool: 'browser_click', args: { x: Math.round(p.x), y: Math.round(p.y), button: ev.button ?? 'left', click_count: ev.clickCount ?? 1 }, url: safeUrl(page), title: await safeTitle(page), element: element ?? undefined, actor: 'human' });
+        return;
+      }
+      case 'move': {
+        const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+        await page.mouse.move(p.x, p.y);
+        return;
+      }
+      // The human's own press-and-hold / drag, relayed one event at a time. Not
+      // recorded as workflow steps (a hold on a bot check is never a replayable step).
+      case 'down': {
+        await this.releaseHumanMouse(); // a lost 'up' must not leave a button stuck
+        const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+        const button = ev.button ?? 'left';
+        await page.mouse.move(p.x, p.y);
+        await page.mouse.down({ button });
+        const timer = setTimeout(() => { void this.releaseHumanMouse(); }, QodexBrowserManager.HOLD_CAP_MS);
+        timer.unref?.();
+        this.humanHold = { page, button, timer };
+        return;
+      }
+      case 'up': {
+        const hold = this.humanHold;
+        this.humanHold = null;
+        if (hold) clearTimeout(hold.timer);
+        const target = hold?.page ?? page;
+        if (ev.x !== undefined && ev.y !== undefined) {
+          const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+          try { await target.mouse.move(p.x, p.y); } catch { /* still release below */ }
+        }
+        await target.mouse.up({ button: ev.button ?? hold?.button ?? 'left' });
+        return;
+      }
+      case 'type': {
+        const { el, unknown } = await focused();
+        await page.keyboard.type(ev.text);
+        this.recordAction({ tool: 'browser_type', args: redactTypedArgs({ text: ev.text }, el, unknown), url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
+        return;
+      }
+      case 'key': {
+        const { el, unknown } = await focused();
+        const key = normalizeKey(ev.key);
+        if (key === 'Enter') await this.beforeHumanInput(page, 'enter');
+        await page.keyboard.press(key);
+        this.recordAction({ tool: 'browser_press', args: redactTypedArgs({ key }, el, unknown), url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
+        return;
+      }
+      case 'scroll': {
+        if (ev.x !== undefined && ev.y !== undefined) {
+          const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
+          await page.mouse.move(p.x, p.y);
+        }
+        await page.mouse.wheel(ev.dx || 0, ev.dy || 0);
+        this.recordAction({ tool: 'browser_scroll', args: { dx: ev.dx || 0, dy: ev.dy || 0 }, url: safeUrl(page), actor: 'human' });
+        return;
+      }
+      case 'back':
+      case 'forward':
+      case 'reload': {
+        const opts = { waitUntil: 'domcontentloaded', timeout: 15_000 };
+        try {
+          if (ev.type === 'back') await page.goBack(opts);
+          else if (ev.type === 'forward') await page.goForward(opts);
+          else await page.reload(opts);
+        } catch (e) {
+          if (!/timeout/i.test(firstLine(e))) throw e;
+        }
+        this.recordAction({ tool: 'browser_history', args: { action: ev.type }, url: safeUrl(page), title: await safeTitle(page), actor: 'human' });
+        return;
+      }
+    }
+  }
+
+  /** Let observers (save-login capture) look at the page before a human submit-like input. */
+  private async beforeHumanInput(page: Page, kind: 'click' | 'enter', point?: { x: number; y: number }): Promise<void> {
+    if (!this.takeoverOn || !this.activeTab || !humanInputObservers.size) return;
+    const tabId = this.activeTab.id;
+    const runs = [...humanInputObservers].map(o => Promise.resolve().then(() => o.beforeInput?.({ page, tabId, kind, ...(point ? { point } : {}) })).catch(() => {}));
+    await withTimeoutValue(Promise.all(runs).then(() => undefined), 1500, undefined);
+  }
+
+  // ── action feed ───────────────────────────────────────────────────────────
+
+  onAction(listener: (rec: BrowserActionRecord) => void): () => void {
+    this.actionListeners.add(listener);
+    return () => { this.actionListeners.delete(listener); };
+  }
+
+  recordAction(rec: Omit<BrowserActionRecord, 'ts'> & { ts?: number }): void {
+    const full: BrowserActionRecord = { ...rec, ts: rec.ts ?? Date.now() };
+    for (const l of [...this.actionListeners]) {
+      try { l(full); } catch (e) { logger.debug('browser action listener failed', { err: firstLine(e) }); }
+    }
+    // Defense in depth for the broadcast copy (callers already redact their records).
+    const args = redactTypedArgs({ ...full.args }, full.element);
+    getBus().publish({
+      kind: 'browser',
+      type: 'action',
+      data: {
+        tool: full.tool,
+        actor: full.actor,
+        url: full.url,
+        title: full.title,
+        args,
+        element: full.element ? { role: full.element.role, name: full.element.name, selector: full.element.selector } : undefined,
+      },
+    });
+  }
+}
+
+function safe<T>(fn: () => T): T | undefined {
+  try { return fn(); } catch { return undefined; }
+}
+
+/** Loopback / private-network / .local hosts (dev servers): never paced. PURE. */
+/**
+ * Pages lean mode never touches: non-http(s) pages and loopback / LAN hosts (a dev
+ * server's images and fonts are part of what you are building). PURE.
+ */
+export function leanExemptPage(pageUrl: string): boolean {
+  let u: URL;
+  try { u = new URL(pageUrl); } catch { return true; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return true;
+  return isLocalHost(u.hostname);
+}
+
+export function isLocalHost(host: string): boolean {
+  const h = String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '::1' || h === '0.0.0.0') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (!m) return /^(fc|fd|fe80)/.test(h) && h.includes(':');
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+
+function safeUrl(page: Page): string {
+  try { return String(page.url()); } catch { return ''; }
+}
+
+async function safeTitle(page: Page): Promise<string> {
+  try { return String(await page.title()); } catch { return ''; }
+}
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+registerBrowserManagerFactory(() => new QodexBrowserManager());
+
+// ── back-compat API (pre-manager callers) ───────────────────────────────────
+
+export interface BrowserSession {
+  browser: any;
+  context: any;
+  page: any;
+  consoleBuffer: ConsoleEntry[];
+  requestBuffer: RequestEntry[];
+  errorBuffer: PageErrorEntry[];
+}
+
+/** The ACTIVE tab as the old single-page session shape (launches if needed). */
+/**
+ * CDP endpoint set programmatically (bootstrap passes `browser.cdpUrl`). Config and
+ * `QODEX_BROWSER_CDP_URL` are read by resolveBrowserConfig at launch; this is only a
+ * fallback kept for callers of the older API.
+ */
 let configuredCdpUrl: string | undefined;
 export function setBrowserCdpUrl(url: string | undefined): void {
   configuredCdpUrl = (url ?? '').trim() || undefined;
 }
-/**
- * Where to attach, if anywhere. Accepts a full CDP/DevTools URL
- * (http://127.0.0.1:9222) — drive your OWN logged-in Chrome / Brave / Arc / Edge (or any
- * Chromium browser, e.g. an upcoming AI browser) started with `--remote-debugging-port`,
- * with your real cookies + sessions. Empty → launch a fresh headless Chromium (default).
- */
+/** Where the browser will attach, if anywhere (env wins over config). */
 export function resolveBrowserCdpUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return (env.QODEX_BROWSER_CDP_URL ?? '').trim() || configuredCdpUrl;
 }
 
-/**
- * Lazily import playwright. Throws a clear error if not installed.
- */
-async function importPlaywright(): Promise<typeof import('playwright')> {
-  try {
-    // @ts-ignore — optional dep, may not be installed
-    return await import('playwright');
-  } catch (e: any) {
-    throw new Error(
-      'playwright is not installed. Run:\n' +
-      '  npm install playwright\n' +
-      '  npx playwright install chromium\n' +
-      '(playwright is an optional dependency to keep base install small)',
-    );
-  }
-}
-
-/**
- * Get the active session, launching the browser if needed.
- * Calls are coalesced — concurrent first-time calls share one launch.
- */
 export async function getSession(): Promise<BrowserSession> {
-  if (session) return session;
-  if (initInFlight) return initInFlight;
-
-  initInFlight = (async () => {
-    const playwright = await importPlaywright();
-    const cdpUrl = resolveBrowserCdpUrl();
-
-    let browser: Browser, context: BrowserContext, page: Page, attached = false;
-    if (cdpUrl) {
-      // ATTACH to an already-running browser (the user's own, with real logins). Reuse
-      // its existing default context + an open tab so cookies/sessions are intact; only
-      // open a fresh tab if none exist. We never create our own isolated context here —
-      // that would defeat the point (a blank, logged-OUT session).
-      browser = await playwright.chromium.connectOverCDP(cdpUrl);
-      context = browser.contexts()[0] ?? (await browser.newContext());
-      const open = (context.pages() as Page[]).find((p: Page) => !p.isClosed?.());
-      page = open ?? (await context.newPage());
-      attached = true;
-      logger.info('Browser session ATTACHED over CDP', { cdpUrl });
-    } else {
-      const headed = process.env.QODEX_BROWSER_HEADED === '1';
-      browser = await playwright.chromium.launch({
-        headless: !headed,
-        // --disable-blink-features prevents the "Chrome is being controlled by
-        // automated test software" infobar from interfering with element positions.
-        args: ['--disable-blink-features=AutomationControlled'],
-      });
-      context = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 QodeX/0.7',
-      });
-      page = await context.newPage();
-      logger.info('Browser session launched', { headed });
-    }
-
-    const s: BrowserSession = { browser, context, page, attached, consoleBuffer: [], requestBuffer: [], errorBuffer: [] };
-    wireSessionListeners(s, page);
-    session = s;
-    return s;
-  })();
-
-  try {
-    return await initInFlight;
-  } finally {
-    initInFlight = null;
+  const mgr = await getBrowserManager();
+  if (!(mgr instanceof QodexBrowserManager)) {
+    const page = await mgr.activePage();
+    return { browser: null, context: mgr.context(), page, consoleBuffer: [], requestBuffer: [], errorBuffer: [] };
   }
+  const page = await mgr.activePage();
+  const bufs = mgr.activeBuffers();
+  const ctx = mgr.context();
+  let browser: any = null;
+  try { browser = ctx?.browser?.() ?? null; } catch { browser = null; }
+  return {
+    browser,
+    context: ctx,
+    page,
+    consoleBuffer: bufs?.console ?? [],
+    requestBuffer: bufs?.requests ?? [],
+    errorBuffer: bufs?.errors ?? [],
+  };
 }
 
-/** Install the console/pageerror/network listeners that fill the read buffers. Tools
- *  read from these rather than installing per-call listeners (avoids missing events). */
-function wireSessionListeners(s: BrowserSession, page: Page): void {
-  page.on('console', (msg: ConsoleMessage) => {
-    s.consoleBuffer.push({ type: msg.type(), text: msg.text(), location: msg.location()?.url });
-    if (s.consoleBuffer.length > 500) s.consoleBuffer.splice(0, 100);
-  });
-  page.on('pageerror', (err: Error) => {
-    s.errorBuffer.push({ message: err.message, stack: err.stack });
-    if (s.errorBuffer.length > 100) s.errorBuffer.splice(0, 20);
-  });
-  page.on('requestfinished', async (req: any) => {
-    const resp = await req.response();
-    s.requestBuffer.push({ url: req.url(), method: req.method(), status: resp?.status(), ok: resp?.ok() });
-    if (s.requestBuffer.length > 500) s.requestBuffer.splice(0, 100);
-  });
-  page.on('requestfailed', (req: any) => {
-    s.requestBuffer.push({ url: req.url(), method: req.method(), ok: false });
-  });
-}
-
-/** Clear the per-page buffers. Called automatically on browser_navigate. */
+/** Clear a session's buffers (the active tab's when called with getSession()'s result). */
 export function clearBuffers(s: BrowserSession): void {
   s.consoleBuffer.length = 0;
   s.requestBuffer.length = 0;
   s.errorBuffer.length = 0;
 }
 
-/** Close the browser. Idempotent. When ATTACHED to the user's own browser we drop the
- *  connection WITHOUT closing it — killing someone's logged-in Chrome would be hostile. */
+/** Close the browser if one was started. Idempotent. */
 export async function closeBrowser(): Promise<void> {
-  if (!session) return;
-  if (session.attached) {
-    logger.debug('Browser was attached over CDP — disconnecting, not closing');
-    session = null; // let the CDP socket GC; the user's browser keeps running
-    return;
-  }
-  try {
-    await session.browser.close();
-  } catch (e: any) {
-    logger.debug('Browser close failed', { err: e?.message });
-  }
-  session = null;
+  const mgr = peekBrowserManager();
+  if (mgr) await mgr.close();
 }
 
-/** Whether playwright is available on this machine. Used by `/network` etc. */
+/** Whether the optional playwright package can be imported. */
 export async function isPlaywrightAvailable(): Promise<boolean> {
   try {
     await importPlaywright();
@@ -194,16 +2224,13 @@ export async function isPlaywrightAvailable(): Promise<boolean> {
   }
 }
 
-// Register process exit hook so we don't leak a chromium process if the user
-// Ctrl+C's QodeX without cleanup. Best-effort: if it doesn't fire (SIGKILL etc),
-// Playwright's own subprocess management catches it.
-process.on('exit', () => {
-  if (session && !session.attached) {
-    try { session.browser.close(); } catch { /* ignore */ }
-  }
-});
-process.on('SIGINT', () => {
-  if (session && !session.attached) {
-    try { session.browser.close(); } catch { /* ignore */ }
-  }
-});
+/** A screenshot clip inside the viewport (≥ 1px, whole pixels), or null when it misses it. PURE. */
+export function clampClip(clip: ScreenshotClip, vp: { width: number; height: number }): ScreenshotClip | null {
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+  const x0 = Math.max(0, Math.floor(n(clip?.x)));
+  const y0 = Math.max(0, Math.floor(n(clip?.y)));
+  const x1 = Math.min(vp.width, Math.ceil(n(clip?.x) + n(clip?.width)));
+  const y1 = Math.min(vp.height, Math.ceil(n(clip?.y) + n(clip?.height)));
+  if (![x0, y0, x1, y1].every(Number.isFinite) || x1 - x0 < 1 || y1 - y0 < 1) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}

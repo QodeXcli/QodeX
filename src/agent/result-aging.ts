@@ -37,15 +37,23 @@ const AGEABLE = new Set([
   'ls',
   'diagnostics',
   'dev_server_start',
-  'dev_server_logs',
-  'browser_open',
-  'browser_snapshot',
-  'browser_evaluate',
-  'browser_console',
+  'dev_server_log',
+  'background_job_log',
+  'computer_use_locate',
   'http_request',
   'openapi_digest',
   'backend_routemap',
 ]);
+
+/** Whole families whose old outputs are page/screen state that goes stale anyway: every
+ *  browser tool can return a snapshot (navigate/click/type… append one when
+ *  snapshotAfterAction is on), extract/get_text return page text. */
+const AGEABLE_PREFIXES = ['browser_'];
+
+/** True when an old, large result of `name` may be aged. PURE. */
+export function isAgeableTool(name: string): boolean {
+  return AGEABLE.has(name) || AGEABLE_PREFIXES.some(p => name.startsWith(p));
+}
 
 export interface AgingOptions {
   /** Results older than this many assistant turns are eligible. */
@@ -84,7 +92,7 @@ export function ageToolResults(messages: Message[], opts: AgingOptions = {}): Ag
   const out = messages.map((m, i) => {
     if (m.role !== 'tool') return m;
     const name = (m as any).name as string | undefined;
-    if (!name || !AGEABLE.has(name)) return m;
+    if (!name || !isAgeableTool(name)) return m;
     const content = typeof m.content === 'string' ? m.content : '';
     if (content.length <= maxChars) return m;
     if (content.startsWith(AGING_MARK)) return m; // idempotent

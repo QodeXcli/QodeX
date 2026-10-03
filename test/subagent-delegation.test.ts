@@ -115,6 +115,14 @@ function makeAgent(provider: any, config?: any): any {
     { role: 'system', content: 'sub-agent system prompt' },
     { role: 'user', content: prompt },
   ];
+  // runSubagent runs each child on a FRESH AgentLoop (spawnChild); give that child the
+  // same light preamble so the real child run() is still what's under test.
+  const spawn = agent.spawnChild.bind(agent);
+  agent.spawnChild = () => {
+    const child = spawn();
+    child.buildInitialMessages = agent.buildInitialMessages;
+    return child;
+  };
   return agent;
 }
 

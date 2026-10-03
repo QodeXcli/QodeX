@@ -72,7 +72,8 @@ export const COMMANDS: BotCommand[] = [
       if (q) lines.push(`⏳ ${q} message${q === 1 ? '' : 's'} queued`);
       if (agent.status) {
         const s = await agent.status(key);
-        lines.push(`🧠 model: \`${s.model}\``, `📁 project: \`${s.cwd}\``, `🔓 auto-approve: ${s.auto ? 'on' : 'off'}`);
+        lines.push(`🧠 model: \`${s.model}\``, `📁 project: \`${s.cwd}\``,
+          s.auto ? '🔓 approval: auto (still asks for purchases, payments, passwords, sending, remote deletes and destructive actions outside the project)' : '🔒 approval: manual');
         if (s.sessionId) lines.push(`🧵 session: \`${s.sessionId.slice(0, 8)}\``);
       }
       await reply(lines.join('\n'));
@@ -102,13 +103,24 @@ export const COMMANDS: BotCommand[] = [
   },
   {
     name: 'auto',
-    description: 'Auto-approve actions: /auto on | off',
+    description: 'Auto mode: /auto on | off',
     run: async ({ agent, args, key, reply }) => {
-      if (!agent.setAuto) return reply(NA('Auto-approve'));
-      const v = args.toLowerCase();
-      if (v !== 'on' && v !== 'off') return reply('Usage: `/auto on` or `/auto off`.\nWhen ON, I run shell/edits without asking — convenient on your phone, riskier. OFF by default.');
-      await agent.setAuto(key, v === 'on');
-      await reply(v === 'on' ? '🔓 Auto-approve ON — I won’t ask before running things this conversation.' : '🔒 Auto-approve OFF — I’ll ask before risky actions.');
+      if (!agent.setAuto) return reply(NA('Auto mode'));
+      const v = args.trim().toLowerCase();
+      const on = v === 'on' || v === 'auto';
+      const off = v === 'off' || v === 'manual';
+      if (!on && !off) {
+        return reply('Usage: `/auto on` or `/auto off`.\nWhen ON (auto mode), I work on the project without asking — edits, shell, installs, commits. ' +
+          'I still ask you before purchases, payments, passwords, sending messages, deleting data on a server and destructive actions outside the project. OFF by default.');
+      }
+      await agent.setAuto(key, on);
+      if (on) {
+        return reply('🔓 Auto mode ON for this conversation — I work without asking, except purchases, payments, passwords, sending messages, deleting data on a server and destructive actions outside the project: those still come to you as buttons.');
+      }
+      const still = agent.status ? (await agent.status(key)).auto : false;
+      await reply(still
+        ? '🔓 This bot process itself runs in auto mode (approval.defaultMode or an "always yes" answer), so this conversation stays in auto mode.'
+        : '🔒 Auto mode OFF — I’ll ask before edits, shell commands and risky actions.');
     },
   },
   {
@@ -187,6 +199,57 @@ export const COMMANDS: BotCommand[] = [
       await reply(ok ? `🧵 Resumed session \`${args.slice(0, 8)}\` — I have its history now.` : `❓ No session matches \`${args}\`. Try \`/sessions\`.`);
     },
   },
+  // ── Agent platform: background missions + approvals from your phone ─────────────
+  {
+    name: 'mission',
+    description: 'Start a background mission: /mission <goal>',
+    run: async ({ agent, args, key, reply }) => {
+      if (!args) return reply('Usage: `/mission <goal>` — it keeps working in the background; follow it with `/missions`.');
+      try {
+        const { startMission } = await import('../missions/daemon.js');
+        // A mission started from an auto-mode conversation runs in auto mode too (the
+        // worker applies the same policy); otherwise it inherits the process's mode.
+        const auto = agent.status ? (await agent.status(key)).auto : false;
+        const r = startMission({ goal: args, source: 'bot', ...(auto ? { approvalMode: 'auto' as const } : {}) });
+        const mode = r.mission.approval_mode === 'auto'
+          ? ' It runs in auto mode: purchases, payments, passwords, sending and destructive actions outside the project still wait for you (`/missions` lists them; answer with `/approve` or `/deny`).'
+          : '';
+        await reply(`🚀 Mission \`${r.mission.id}\` started in the background. I'll keep working even if you close the chat — \`/missions\` to follow it.${mode}`);
+      } catch (e: any) {
+        await reply(`❌ Could not start the mission: ${truncate(String(e?.message ?? e), 200)}`);
+      }
+    },
+  },
+  {
+    name: 'missions',
+    description: 'Background missions and their progress',
+    run: async ({ reply }) => {
+      try {
+        const { listMissionSummaries } = await import('../missions/daemon.js');
+        const list = listMissionSummaries({ limit: 8 });
+        if (!list.length) return reply('No missions yet. Start one with `/mission <goal>`.');
+        const lines = list.map(m => {
+          const prog = m.steps.total ? ` ${m.steps.done}/${m.steps.total}` : '';
+          const ask = m.pendingApprovals.length ? ` · ⚠️ ${m.pendingApprovals.length} approval(s)` : '';
+          return `\`${m.id}\` *${m.status}*${prog}${ask}\n${truncate(m.goal, 90)}`;
+        });
+        const pending = list.flatMap(m => m.pendingApprovals.map(a => `\`${a.id}\` (${m.id}): ${truncate(a.prompt, 120)}`));
+        await reply([...lines, ...(pending.length ? ['', '*Waiting for you:*', ...pending, 'Answer with `/approve <id>` or `/deny <id>`.'] : [])].join('\n'));
+      } catch (e: any) {
+        await reply(`❌ ${truncate(String(e?.message ?? e), 200)}`);
+      }
+    },
+  },
+  {
+    name: 'approve',
+    description: 'Approve a mission action: /approve <id>',
+    run: async ({ args, reply }) => reply(await answerMissionAsk(args, 'yes')),
+  },
+  {
+    name: 'deny',
+    description: 'Deny a mission action: /deny <id>',
+    run: async ({ args, reply }) => reply(await answerMissionAsk(args, 'no')),
+  },
 ];
 
 /** Look up a command by the leading `/word` (case-insensitive). `/start` aliases `/help`. */
@@ -203,6 +266,19 @@ export function findCommand(text: string): { cmd: BotCommand; args: string } | n
 /** The list an adapter registers as the native `/` menu. */
 export function menuDescriptors(): { command: string; description: string }[] {
   return COMMANDS.map(c => ({ command: c.name, description: c.description }));
+}
+
+/** Answer a pending mission approval (written to the missions DB, so detached workers see it). */
+async function answerMissionAsk(id: string, answer: 'yes' | 'no'): Promise<string> {
+  const target = id.trim().split(/\s+/)[0] ?? '';
+  if (!target) return `Usage: \`/${answer === 'yes' ? 'approve' : 'deny'} <id>\` — ids are listed by \`/missions\`.`;
+  try {
+    const { answerApprovalById } = await import('../missions/daemon.js');
+    const r = answerApprovalById(target, answer, { by: 'bot' });
+    return r.ok ? `${answer === 'yes' ? '✅ Approved' : '🛑 Denied'} \`${target}\`.` : `❓ ${truncate(r.message ?? 'No pending approval matches.', 200)}`;
+  } catch (e: any) {
+    return `❌ ${truncate(String(e?.message ?? e), 200)}`;
+  }
 }
 
 function helpText(): string {

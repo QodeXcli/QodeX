@@ -21,7 +21,7 @@ export interface SlashResult {
     | { type: 'clear' }
     | { type: 'set_model'; model: string }
     | { type: 'set_mode'; mode: 'plan' | 'normal' }
-    | { type: 'set_approval_mode'; mode: 'manual' | 'auto' | 'always' }
+    | { type: 'set_approval_mode'; mode: 'manual' | 'edits' | 'auto' }
     | { type: 'set_max_iterations'; value: number }
     | { type: 'set_effort'; value: 'low' | 'medium' | 'high' | 'off' }
     | { type: 'switch_session'; sessionId: string }
@@ -61,7 +61,83 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     return { handled: false };
   }
 
+  // Mods: command.run — a mod's own commands, and mods answering a command in QodeX's place.
+  {
+    const { modsCommandRun } = await import('../mods/integration.js');
+    const byMod = await modsCommandRun(cmd!, arg);
+    if (byMod.handled) return { handled: true, ...(byMod.text ? { message: byMod.text } : {}) };
+  }
+
   switch (cmd) {
+    case 'goal': {
+      // /goal <what done looks like> [--check "<cmd>"] [--max N] · /goal · /goal clear
+      const { parseGoalCommand, newGoal, setStandingGoal, getStandingGoal, describeGoal, goalKickoffPrompt } = await import('../goals/goal.js');
+      const parsed = parseGoalCommand(trimmed.slice(1 + cmd!.length));
+      if (parsed.kind === 'status') return { handled: true, message: describeGoal(getStandingGoal()) };
+      if (parsed.kind === 'clear') {
+        const had = getStandingGoal();
+        setStandingGoal(null);
+        return { handled: true, message: had ? `Goal cleared: ${had.objective}` : 'No standing goal.' };
+      }
+      if (parsed.kind === 'error') return { handled: true, message: parsed.message };
+      const goal = newGoal(parsed.objective, parsed.check, parsed.maxRounds);
+      setStandingGoal(goal);
+      return {
+        handled: true,
+        message: `🎯 ${describeGoal(goal)}\n   QodeX keeps working until ${goal.check ? `\`${goal.check}\` passes` : 'it can cite evidence'} (max ${goal.maxRounds} extra rounds). /goal clear or /stop to end it.`,
+        action: { type: 'submit_prompt', prompt: `${goal.objective}\n\n${goalKickoffPrompt(goal)}`, commandName: 'goal', rawInput: trimmed },
+      };
+    }
+    case 'mod': {
+      // /mod new <description> — QodeX writes a mod for you with the bundled mod-writing
+      // playbook (the modsmith skill). The write into ~/.qodex/mods asks you in every
+      // approval mode (agent instruction files): that answer is your consent to install it.
+      const sub = (args[0] ?? '').toLowerCase();
+      const description = args.slice(1).join(' ').trim();
+      if (sub !== 'new' || !description) {
+        return {
+          handled: true,
+          message:
+            'Usage: /mod new <what the mod should do>\n' +
+            '  QodeX writes the mod to ~/.qodex/mods/<name>/ (you approve the write), validates it and reloads mods.\n' +
+            '  e.g. /mod new show the time and how full the context is under the prompt\n' +
+            'See docs/MODS.md for what a mod can do.',
+        };
+      }
+      const playbook = await modsmithPlaybook();
+      if (!playbook) {
+        return { handled: true, message: 'The modsmith skill (the mod-writing playbook) is missing. Reinstall QodeX, or /skill reload if you removed it.' };
+      }
+      return {
+        handled: true,
+        action: {
+          type: 'submit_prompt',
+          prompt: buildSkillRunPrompt('modsmith', playbook.body, `Write a QodeX mod that does this: ${description}`),
+          commandName: '/mod new',
+          rawInput: trimmed,
+          ...(playbook.allowedTools?.length ? { allowedTools: playbook.allowedTools } : {}),
+          ...(playbook.model ? { model: playbook.model } : {}),
+        },
+      };
+    }
+    case 'learn': {
+      // /learn [name] — turn the task you just finished into a reusable skill.
+      const { getSessionStore } = await import('../session/store.js');
+      const { learnFromSession } = await import('../skills/learning/learn-now.js');
+      const loaded = getSessionStore().loadSession(sessionId);
+      const r = await learnFromSession(loaded?.messages ?? [], cwd, { name: args.join('-') || undefined });
+      return { handled: true, message: r.ok ? `🧠 ${r.message}` : r.message };
+    }
+    case 'stop': {
+      // /stop · /stop all — emergency stop. The TUI intercepts it even mid-task; this path
+      // serves idle use and other hosts.
+      const { emergencyStop, formatStopReport } = await import('../control/emergency-stop.js');
+      const { setStandingGoal } = await import('../goals/goal.js');
+      setStandingGoal(null);
+      const all = (args[0] ?? '').toLowerCase() === 'all';
+      const report = await emergencyStop({ missions: all, by: 'slash command' });
+      return { handled: true, message: formatStopReport(report, all) };
+    }
     case 'btw': {
       // When a task is running, `/btw` is intercepted in the UI and injected live.
       // Reaching here means it was typed while IDLE — there's nothing to steer.
@@ -279,11 +355,13 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
   Mode & model
     /plan              Switch to plan mode (read-only)
     /normal            Switch back to normal mode
-    /model <id>        Override model for this conversation (bare /model lists models)
+    /model <id|alias>  Override model for this conversation (opus/sonnet/haiku/fable; bare /model lists)
     /effort <level>    Reasoning effort: low|medium|high|off (for models that support it)
     /trellis [init]    Show Trellis harness status, or scaffold .trellis/ (spec+tasks+journals)
-    /auto [manual|auto|always]  Approval mode (or Shift+Tab). on=always, off=manual
+    /auto [manual|edits|auto]  Approval mode (or Shift+Tab; also /mode). on=auto, off=manual
+    /status            Approval mode, strict mode, session and model at a glance
     /network           Diagnose internet + local backend connectivity
+    /checkup [prompt-audit [--no-model]]  Audit instructions/skills/commands → PROMPT_AUDIT.md + patch (also /doctor)
     /tools [--all]     List all registered tools by category
     /memory            Show / manage persisted project facts
     /strict on|off     Production-safety mode (plan + analyze before changes)
@@ -291,6 +369,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /unlimited         Remove the iteration cap for this session
     /iterations <n>    Set iteration cap for this session (0 = no limit)
     /btw <note>        Steer a RUNNING task mid-flight — inject a guidance note without stopping it
+    /instructions [all|first]  Load the first project instruction file or all of them (CLAUDE.md, AGENTS.md…)
 
   Sub-agents & safety
     /subagents [off|sequential|parallel]   Configure sub-agent dispatcher
@@ -311,14 +390,32 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /skills                        List installed skills (taste, ui-ux-pro-max, ghost, OODA, L99, god-mode, artifacts)
     /skill <name> [args]           Run a skill explicitly (also: /skill enable|disable|reload)
     /hooks                         List configured lifecycle hooks
+    /mods [enable|disable|trust|untrust <name>]   List mods (hooks into QodeX itself), or switch / trust one
+    /reload-mods                   Reload mods from disk
+    /mod new <description>         Have QodeX write a mod (asks before writing ~/.qodex/mods)
     /mcp                           Show status of MCP servers
     /mcp-restart <id>              Restart an MCP server
     /release-notes [<a>..<b>] [--write] [--bump=patch|minor|major] [--all]
                                    Generate release notes from a git range
     /schedule                      List scheduled tasks (add/rm/install via shell: \`qodex schedule …\`)
     /mcp-build <name> [desc]       Guided 4-stage scaffold of a new MCP server
+    /mod new <description>         Have QodeX write a mod (status line, pane, guard…) — docs/MODS.md
 
-  Tab completes a command name. Mid-task, a plain message redirects the running agent.`,
+  Agent platform — your own browser, desktop, missions
+    /browser [status|open [url]|headed|headless|close|profile <name>]
+                                   The dedicated QodeX Browser (persistent logins)
+    /control [stop|--lan|--tunnel] Web control center: live browser view, take over, approve
+    /takeover [on|off]             Pause the agent's browser and drive it yourself
+    /approvals                     List pending approvals (answer: /approve <id> | /deny <id>)
+    /missions                      Background missions (start: /mission <goal>)
+    /mission <goal>                Start a long-running mission that keeps working in the background
+    /workflows                     Recorded workflows (learn by demonstration, replay)
+    /sentinel [reset]              Sentinel guard status + recent decisions
+    /telegram start|stop|status|pair   Approve actions & control missions from your phone
+    /vault                         Saved logins the agent can fill (it never sees the secret)
+    /desktop                       Desktop-control backend status (macOS / Linux / Windows)
+
+  Tab completes a command name. Mid-task, a plain message redirects the running agent.` + (await import('../mods/command.js')).modCommandsHelp(),
       };
     }
 
@@ -436,6 +533,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     }
 
     case 'clear': {
+      await (await import('../mods/surface.js')).modsSessionEnded('clear'); // mods: session.end
       clearTodos(sessionId);
       getSessionStore().clearMessages(sessionId);
       try {
@@ -522,11 +620,23 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       const all = store.listRecentSessions(100);
       const match = all.find(s => s.id.startsWith(arg));
       if (!match) return { handled: true, message: `No session found matching "${arg}".` };
+      await (await import('../mods/surface.js')).modsSessionEnded('resume'); // mods: session.end
       return {
         handled: true,
         action: { type: 'switch_session', sessionId: match.id },
         message: `Resumed session ${match.id.slice(0, 8)} (${match.turn_count} turns).`,
       };
+    }
+
+    case 'mods': {
+      // /mods · /mods enable|disable|trust|untrust <name>
+      const { handleModsSlash } = await import('../mods/command.js');
+      return { handled: true, message: await handleModsSlash(args, cwd) };
+    }
+
+    case 'reload-mods': {
+      const { reloadModsSlash } = await import('../mods/command.js');
+      return { handled: true, message: await reloadModsSlash() };
     }
 
     case 'plan': {
@@ -566,6 +676,27 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         handled: true,
         message: `Strict mode: ${isStrictMode() ? 'ON 🛡' : 'OFF'}\n\nUsage: /strict on   |   /strict off\n\nWhen ON, the agent must:\n  - Run analyze_impact / project_overview before multi-file changes\n  - present_plan for any change spanning >2 files\n  - Verify with auto_fix after every batch of edits\n  - Dry-run destructive commands first\n  - Explain blast radius before risky changes\nUse for production codebases (Seven Gum, ChinPost, sg-commerce-pro).`,
       };
+    }
+
+    case 'instructions': {
+      // /instructions [all|first] — which project instruction files (QODEX.md, CLAUDE.md,
+      // AGENTS.md, GEMINI.md, AI.md, .cursorrules, .windsurfrules) the system prompt loads.
+      const { getProjectInstructionsMode, setProjectInstructionsMode, loadProjectRules } = await import('../context/claude-md.js');
+      const v = arg.trim().toLowerCase();
+      if (v !== '' && v !== 'all' && v !== 'first') {
+        return { handled: true, message: 'Usage: /instructions [all|first]' };
+      }
+      if (v === 'all' || v === 'first') setProjectInstructionsMode(v);
+      const mode = getProjectInstructionsMode();
+      const rules = await loadProjectRules(cwd, { mode }).catch(() => null);
+      const files = rules?.sources?.length ? rules.sources : rules ? [rules.sourcePath] : [];
+      const lines = [
+        `Project instructions: ${mode} — ${mode === 'all' ? 'every instruction file in the nearest folder that has one' : 'the first file found walking up from here'}`,
+        files.length ? `  loads: ${files.join(', ')}` : '  loads: (no instruction file found)',
+      ];
+      if (v) lines.push('  Applies from the next conversation (/clear) — this one already has its system prompt.');
+      lines.push('  Usage: /instructions all|first · permanent: context.projectInstructions in ~/.qodex/config.yaml');
+      return { handled: true, message: lines.join('\n') };
     }
 
     case 'context': {
@@ -648,7 +779,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         'Dev server': [],
         'Background jobs': [],
         'Vision': [],
-        'Computer use (macOS)': [],
+        'Computer use (desktop)': [],
+        'Workflows': [],
+        'Missions': [],
+        'Vault': [],
         'Database': [],
         'WordPress': [],
         'Memory': [],
@@ -661,7 +795,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         if (n.startsWith('browser_')) categories['Browser']!.push(t);
         else if (n.startsWith('dev_server_')) categories['Dev server']!.push(t);
         else if (n.startsWith('background_job_')) categories['Background jobs']!.push(t);
-        else if (n.startsWith('computer_use_')) categories['Computer use (macOS)']!.push(t);
+        else if (n.startsWith('computer_use_')) categories['Computer use (desktop)']!.push(t);
+        else if (n.startsWith('workflow_')) categories['Workflows']!.push(t);
+        else if (n.startsWith('mission_')) categories['Missions']!.push(t);
+        else if (n.startsWith('vault_')) categories['Vault']!.push(t);
         else if (n.startsWith('git_') || n === 'smart_diff') categories['Git']!.push(t);
         else if (n.startsWith('code_graph_') || n === 'semantic_search') categories['Code graph']!.push(t);
         else if (['project_overview', 'analyze_impact', 'find_dead_code', 'safe_rename', 'safe_delete_file', 'review_my_changes', 'explain_codebase', 'suggest_improvements'].includes(n)) categories['Analysis & Safety']!.push(t);
@@ -699,6 +836,26 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       return { handled: true, message: lines.join('\n') };
     }
 
+    case 'checkup':
+    case 'doctor': {
+      // /checkup lists the checks; /checkup prompt-audit [--no-model] (also /doctor prompt-audit)
+      // reads the prompt surface and writes PROMPT_AUDIT.md + prompt-audit.patch — applies nothing.
+      const { describeChecks, runPromptAuditCheck } = await import('../checkup/index.js');
+      const [check, ...rest] = args;
+      if (!check) {
+        return {
+          handled: true,
+          message: describeChecks(`/${cmd}`) + (cmd === 'doctor' ? '\n\n(`qodex doctor` in a shell diagnoses the install itself.)' : ''),
+        };
+      }
+      if (check !== 'prompt-audit') {
+        return { handled: true, message: `Unknown check: ${check}\n\n${describeChecks(`/${cmd}`)}` };
+      }
+      const { summarizeAudit } = await import('../checkup/prompt-audit.js');
+      const result = await runPromptAuditCheck(cwd, { noModel: rest.includes('--no-model'), config });
+      return { handled: true, message: summarizeAudit(result) };
+    }
+
     case 'model': {
       if (!arg) {
         const def = config?.defaults?.model ?? '(unknown)';
@@ -721,13 +878,20 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           lines.push('Configured models:');
           for (const m of list) lines.push(`  ${m === def ? '●' : '○'} ${m}`);
         }
-        lines.push('', 'Switch with: /model <model-id>  (applies from the next turn).');
+        const { MODEL_ALIASES } = await import('../llm/model-catalog.js');
+        lines.push('', 'Aliases (latest of each line):');
+        for (const [alias, id] of Object.entries(MODEL_ALIASES)) lines.push(`  ${alias.padEnd(7)} → ${id}`);
+        lines.push('', 'Switch with: /model <model-id|alias>  (applies from the next turn).');
         return { handled: true, message: lines.join('\n') };
       }
+      // The router expands the alias at resolve time (an exact model id still wins), so the
+      // action carries what the user typed; the message just says what it means.
+      const { resolveModelAlias } = await import('../llm/model-catalog.js');
+      const expanded = resolveModelAlias(arg);
       return {
         handled: true,
         action: { type: 'set_model', model: arg },
-        message: `Model set to ${arg} for next turn.`,
+        message: `Model set to ${arg}${expanded ? ` (→ ${expanded})` : ''} for next turn.`,
       };
     }
 
@@ -1241,9 +1405,56 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       };
     }
 
+    // Agent platform: browser, control center, takeover, approvals, missions,
+    // workflows, Sentinel, Telegram, vault, desktop (see platform-slash.ts).
+    case 'browser':
+    case 'control':
+    case 'takeover':
+    case 'approvals':
+    case 'approve':
+    case 'deny':
+    case 'missions':
+    case 'mission':
+    case 'workflows':
+    case 'workflow':
+    case 'sentinel':
+    case 'telegram':
+    case 'vault':
+    case 'desktop': {
+      const { handlePlatformSlash } = await import('./platform-slash.js');
+      return handlePlatformSlash(cmd, args, cwd);
+    }
+
+    // Standing grants (/allow) and mail automation (/mail): typed by the human at the
+    // TUI. A headless run (a schedule's prompt) may list / revoke, never create.
+    case 'allow':
+    case 'mail': {
+      const { mailAutomationSlash } = await import('./platform-slash.js');
+      return mailAutomationSlash(cmd, args, cwd, sessionId);
+    }
+
+    case 'status': {
+      const { getApprovalMode, APPROVAL_MODE_META } = await import('../security/permissions.js');
+      const { isStrictMode } = await import('../safety/strict-mode.js');
+      const mode = getApprovalMode();
+      const meta = APPROVAL_MODE_META[mode];
+      const model = (config as { defaults?: { model?: string } } | undefined)?.defaults?.model;
+      return {
+        handled: true,
+        message: [
+          `Approval: ${meta.label} — ${meta.hint}`,
+          '  change: Shift+Tab · /auto manual|edits|auto · qodex --auto / --approval-mode <mode>',
+          `Strict mode: ${isStrictMode() ? 'ON' : 'OFF'}`,
+          `Session: ${sessionId.slice(0, 8)}  ·  cwd: ${cwd}`,
+          ...(model ? [`Default model: ${model}  (the status bar shows the live one; /model to switch)`] : []),
+        ].join('\n'),
+      };
+    }
+
+    case 'mode':
     case 'auto': {
-      // /auto [manual|auto|always] — session approval mode. on=always, off=manual.
-      // Shift+Tab in the TUI cycles the same three modes.
+      // /auto [manual|edits|auto] — session approval mode. on=auto, off=manual.
+      // /mode is an alias. Shift+Tab in the TUI cycles the same three modes.
       const { parseApprovalMode, setApprovalMode, getApprovalMode, APPROVAL_MODE_META } =
         await import('../security/permissions.js');
       const sub = args[0]?.toLowerCase();
@@ -1254,20 +1465,24 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           handled: true,
           message:
             `Approval: ${meta.label} — ${meta.hint}\n` +
-            'Usage: /auto manual | auto | always\n' +
+            'Usage: /auto manual | edits | auto   (also /mode)\n' +
             '  manual  — ask before edits and shell (default)\n' +
-            '  auto    — file edits run without asking; shell still asks\n' +
-            '  always  — always yes: tools run without asking (hard-deny / irreversible still stop)\n' +
+            '  edits   — file edits run without asking; shell still asks\n' +
+            '  auto    — autonomous: nothing asks except purchases, payments, passwords,\n' +
+            '            sending messages and destructive actions outside the project;\n' +
+            '            the agent decides its own questions and lists its assumptions\n' +
+            'Start in a mode: qodex --auto | --approval-mode <mode>, or approval.defaultMode\n' +
+            '  in ~/.qodex/config.yaml (approval.extraRoots: folders auto treats as the project).\n' +
             'Safe shell can skip the hub without /auto: execution.allow in config.yaml\n' +
-            '  (e.g. `git status`, `npm test`). Deny / always-ask / irreversible still win.\n' +
-            'Aliases: /auto off = manual, /auto on = always. Shift+Tab cycles the three.',
+            '  (e.g. `git status`, `npm test`). Deny rules always win.\n' +
+            'Aliases: /auto off = manual, /auto on = auto. Shift+Tab cycles the three.',
         };
       }
       const mode = parseApprovalMode(sub);
       if (!mode) {
         return {
           handled: true,
-          message: 'Usage: /auto manual | auto | always   (aliases: off, on)',
+          message: 'Usage: /auto manual | edits | auto   (aliases: off, on)',
         };
       }
       setApprovalMode(mode);
@@ -1276,8 +1491,8 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         handled: true,
         action: { type: 'set_approval_mode', mode },
         message:
-          mode === 'always'
-            ? `⚠ Approval: ${meta.label} — ${meta.hint}\n  Hard-deny patterns still apply. Shift+Tab or /auto manual to go back.`
+          mode === 'auto'
+            ? `⚠ Approval: ${meta.label} — ${meta.hint}\n  Deny rules still apply. Shift+Tab or /auto manual to go back.`
             : `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
       };
     }
@@ -1518,6 +1733,30 @@ Never invent commits. If the range is empty, say so and stop.`;
         },
       };
     }
+  }
+}
+
+/**
+ * The mod-writing playbook for /mod new: the user's installed modsmith skill (they may
+ * have edited their copy), else the copy bundled with QodeX (examples/skills/modsmith).
+ * A `modsmith` from the project (`<cwd>/.qodex/skills`) or a Claude Code plugin is never
+ * used: that is repository content, and this playbook writes code that runs with the
+ * user's permissions in every later session, outside the project's trust gate.
+ */
+async function modsmithPlaybook(): Promise<{ body: string; allowedTools?: string[]; model?: string } | null> {
+  const installed = getSkill('modsmith');
+  if (installed?.body && (installed.origin === 'user' || installed.origin === 'builtin')) return installed;
+  try {
+    const { promises: fsp } = await import('fs');
+    const path = await import('path');
+    const { fileURLToPath } = await import('url');
+    const { parseSkill } = await import('../skills/loader.js');
+    // <root>/src/cli or <root>/dist/cli → <root>/examples/skills/modsmith
+    const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'examples', 'skills', 'modsmith');
+    const spec = parseSkill(await fsp.readFile(path.join(dir, 'SKILL.md'), 'utf8'), 'modsmith', dir, 'builtin');
+    return spec?.body ? spec : null;
+  } catch {
+    return null;
   }
 }
 

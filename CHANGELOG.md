@@ -1,5 +1,188 @@
 # Changelog
 
+## Unreleased — mail, a real password vault, CAPTCHA hand-off, Claude Code parity
+
+1. **Mail.** `qodex mail add` connects any IMAP/SMTP mailbox (presets for Gmail, Outlook, Yahoo,
+   iCloud, Yandex, Zoho, Fastmail, AOL, GMX, Proton Bridge; app passwords explained). Tools
+   `mail_list`, `mail_read` (fenced as untrusted data), `mail_draft`, `mail_send` (always asks),
+   `mail_mark`, `mail_move`, `mail_download_attachment`. **Standing reply grants** that only you
+   can create (`/allow mail-replies`, Telegram `/allow`, or "always allow replies like this") let
+   same-thread replies to the original sender go out without a prompt — audited, capped per day,
+   revocable. **Watcher** (IMAP IDLE): new mail is announced; **rules** start a task on matching
+   mail with the email as data. Guide: [docs/MAIL.md](docs/MAIL.md).
+2. **Password vault (Muse-style).** The vault key can live in the macOS Keychain / Secret Service /
+   Windows DPAPI (`qodex vault key migrate`); `qodex vault edit|rotate|import` (Chrome, Firefox,
+   Bitwarden, 1Password exports); `browser_login` signs in in one step (username-first forms, 2FA);
+   `vault_generate_and_fill` makes and saves a strong password on sign-up; `vault_request_login`
+   has *you* type a login into a masked prompt or the control center's secure form (sealed over
+   tunnels) — the agent never sees it; logins you type during a takeover are offered for saving;
+   a vault panel in the control center. Guide: [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
+3. **CAPTCHAs: a smart hand-off, never solving.** Bot checks are detected; self-clearing ones are
+   waited out; the rest are handed to you (Telegram card with a cropped screenshot and a one-tap,
+   short-lived live-view link; phone hand-off mode that relays your own press-and-hold / drag;
+   TUI hint) and QodeX continues by itself when the check is gone. The agent can never click,
+   type into, drag or analyze a challenge (`[CHALLENGE_HUMAN_ONLY]`). **`browser.stealth` is now
+   off by default** — no fingerprint spoofing. Visible browser in the TUI by default
+   (`browser.headless: auto`), per-site pacing.
+4. **Claude Code parity.** **Mods** — JS/TS modules that hook QodeX itself (tool calls, prompts,
+   permission checks within the safety rules, commands, tools, UI above/under the prompt, timers),
+   compatible with Claude Code mods; `/mod new` has QodeX write one; built-ins `context-bar`
+   (`/context-bar`) and `you-should-know` ([docs/MODS.md](docs/MODS.md)). **Wrap-up allowance**
+   when a budget runs out mid-task (`--strict-budget` to disable). **Send now** (Ctrl+Enter /
+   Ctrl+X Ctrl+S) keeps a running shell command as a background job. **Auto-mode asks time out**
+   after `approval.unattendedTimeoutSec` (default 120 s) with a rewrite hint — never the critical
+   ones. **Project instructions** `first|all` (`/instructions`, GEMINI.md). **Models:**
+   `claude-opus-5-5` (new default), `claude-sonnet-5-5`, `claude-fable-5-1`; `/model opus|sonnet|
+   haiku|fable`. **`/checkup prompt-audit`** writes `PROMPT_AUDIT.md` + `prompt-audit.patch`
+   (nothing applied). Built-in skills **build-eval** and **hillclimb**.
+5. **Lean browser mode** (`browser.lean`, default `auto` = headless only): images, fonts and
+   audio/video are skipped while nobody needs the pixels; DOM, scripts, forms, cookies and the
+   HTTP cache are untouched (per-tab CDP interception of those resource types only, not
+   `context.route`, which turns the cache off). Never on your own Chrome or localhost / LAN
+   pages; off for the rest of the session on a screenshot, takeover, live view or bot check.
+   12-photo page: ~0 MB vs 5 MB downloaded, ~270 ms vs ~720 ms, ~100–180 MB less memory.
+6. **Web Bot Auth — an honest agent identity** (`browser.botAuth`, off by default). QodeX
+   can sign its own requests with an Ed25519 key (HTTP Message Signatures / RFC 9421, tag
+   `web-bot-auth`) so a site recognises the agent and may let it through — the opposite of
+   detection evasion. `qodex browser bot-auth --init|--directory`; the private key lives in
+   `~/.qodex/browser/bot-auth/` (0600) and Sentinel keeps the agent out of it. Signs only
+   same-site document/xhr/fetch on public hosts; never loopback/LAN or the user's own
+   Chrome. No fingerprint spoofing, no hiding `navigator.webdriver`, no synthetic input.
+7. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
+   (echo matching); the mail watcher missed mail that arrived between a check and the IDLE wait,
+   and `stop()` could wait out the IDLE timeout; Telegram `/unpair` confirmed before dropping the
+   approval channel; challenge detection stringified the page-title promise; the terminal's
+   secure login prompt could put keys typed right after Enter into the previous field (a false
+   "passwords do not match"), and now also takes a pasted password ending in Enter; the Wayland
+   backend measured the screen through a predictable file in the shared temp dir; `/mod new`
+   had a second, unreachable implementation.
+
+## Unreleased — standing goals, emergency stop, /learn, monitors
+
+1. **`/goal` — keep working until it is proven done.** `/goal <what done looks like>
+   [--check "<cmd>"] [--max N]` starts the task and, after each run, checks the goal: the check
+   command must exit 0, or (without one) the answer must cite evidence on a `GOAL_MET:` line.
+   Not met → another round with the check's output, up to `--max` (default 8, cap 50), then it
+   stops and says what is missing. `/goal` shows it, `/goal clear` drops it.
+2. **Emergency stop.** `/stop` halts the running task, side runs, background jobs and dev
+   servers and clears the goal — mid-task too; `/stop all` also cancels every active mission.
+   Also in the control center (⏹ Stop) and Telegram (`/stop`, `/stop all`).
+3. **`/learn [name]`.** Turns the task you just finished into an active skill with the
+   deterministic distiller (no model call); never overwrites a skill you wrote.
+4. **Monitors.** `qodex schedule add --continuity` gives each run the previous answer so it
+   reports what changed; `--notify-on-change` skips the notification / delivery when nothing did.
+   `qodex schedule list` shows both.
+5. **Protected instruction files.** Writes to `AGENTS.md`, `QODEX.md`, `CLAUDE.md`, `GEMINI.md`,
+   `AI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, the project's
+   `.qodex/` and `.cursor/rules/`, and `~/.qodex/skills|rules|hooks|memory` ask in every mode,
+   auto included — by edit tool or any shell command that writes, moves, deletes or chmods them.
+   No allow rule, tool-wide allow or "always yes" covers them.
+
+## Unreleased — a real auto mode
+
+**Auto mode now means "work without asking me" — except for money, passwords, messages and
+damage outside the project.** The approval modes are `manual` (default), `edits` (the old
+"auto": file edits run, shell asks) and `auto` (replaces "always yes"). Shift+Tab cycles them.
+
+1. **What auto mode asks.** Purchases, payments, passwords / credentials, sending messages and
+   QodeX's own safety settings (Sentinel-critical — a human answers in every mode), and
+   destructive actions outside the project: deleting or overwriting paths outside the workspace
+   roots, force-push and remote branch deletes, deleting remote data (cloud, Kubernetes,
+   `terraform destroy`, databases on other hosts, package unpublish), publishing (`npm publish`,
+   `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks), and on
+   the web deleting data or changing an account on a non-local site. With nobody at the
+   terminal these go to the control center / Telegram / the mission queue, or are refused —
+   never auto-answered.
+2. **What it doesn't.** Everything inside the project: edits, shell, installs, commits, rebases,
+   ordinary pushes, deleting project files, browser and desktop work Sentinel rates
+   non-critical. The agent's own questions are not asked either: the new `ask_user` tool and
+   plan approval (`present_plan`) answer "decide yourself" in auto mode, so the model picks a
+   sensible default, keeps going and lists its assumptions at the end; a plan presented in plan
+   mode is approved and carried out in the same turn. The system prompt gets a short
+   "Autonomous mode" section, and when the mode changes mid-task the running agent is told.
+   Sub-agents, side runs and missions started from an auto session follow the same policy.
+3. **Turning it on.** Shift+Tab; `/auto on` (`/auto manual|edits|auto`, alias `/mode`);
+   `qodex --auto` or `qodex --approval-mode <manual|edits|auto>` for the TUI and `-p` runs
+   (`-y`/`--yes` on a `-p` run now means auto mode); `qodex mission start … --auto`; or
+   `approval.defaultMode: auto` in `~/.qodex/config.yaml` — only the user config counts, a
+   project's `.qodex/config.yaml` cannot switch you into auto. `approval.extraRoots` lists more
+   folders auto mode treats as the project (cwd and the temp dir always count).
+4. **TUI.** The status bar shows the mode as a badge (`manual` · `✎ accept edits` ·
+   `⏵⏵ auto`); `/status` prints it. The first time auto is on, a one-line banner says what
+   still asks. Switching into auto with a prompt on screen answers it only when it is an
+   ordinary permission the auto policy allows — never a Sentinel prompt, never one the policy
+   still asks about, never with a standing "always". A Sentinel "always" answer keeps its
+   category-on-this-site scope instead of switching the whole session.
+5. **Still in force.** `security.denyRules`, the hard-deny patterns and every budget
+   (`--budget-usd`, per-task caps) apply in auto mode exactly as before.
+
+## v3.0.0 — 2026-10-03
+
+**QodeX gets its own computer: a dedicated browser, desktop control on every OS, background
+missions, and a Sentinel that never lets it buy, pay, send or type a password without you.**
+
+QodeX is now a general autonomous agent in the spirit of Meta Muse and xAI Grok Bot — but it
+runs on your machine, with your model, and also controls your desktop. Guide:
+[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md).
+
+1. **Dedicated QodeX Browser.** Persistent Chromium profiles (logins survive restarts), multi-tab
+   with popup tracking, accessibility snapshots with element refs, actions by ref that return a
+   fresh compact snapshot, set-of-marks screenshots, markdown/table extraction, downloads,
+   uploads, dialogs, PDF, network log, CDP attach to your own Chrome, stealth, and
+   `browser_agent` (an autonomous browser sub-agent). 28 `browser_*` tools; `qodex browser
+   open|status|profiles|reset-profile|close`. Chromium is discovered automatically even when
+   the installed Playwright expects another revision. `browser_evaluate` now returns values
+   (it always returned `undefined`).
+2. **Desktop control on macOS, Linux (X11 + Wayland) and Windows.** Screenshot (HiDPI-aware,
+   downscaled with coordinate mapping), click/drag/move/scroll, Unicode typing (Persian via
+   paste), key combos, clipboard, open apps/files/URLs, list/focus windows,
+   `computer_use_locate` (vision grounding) and `computer_use_agent`. 15 `computer_use_*` tools.
+3. **Missions.** `qodex mission start "<goal>"` / `mission_start` plans the goal into steps, runs
+   each on a fresh agent in a detached, resumable worker (keeps going after you close QodeX),
+   reports milestones, retries failures, writes a final report, and starts its own private
+   live view. `attach`, `status`, `approve|deny`, `steer`, `cancel`, `resume`; routines via
+   `qodex schedule add --mission`. Approvals work across processes.
+4. **Sentinel.** One guard at the tool-execution choke point (main agent, sub-agents, missions,
+   MCP server). Purchases, payments, sending and credentials always need an explicit human
+   answer — `/auto on` and `--yes` cannot approve them; with nobody reachable they are refused.
+   English + Persian action classification, payment-gateway and secret detection (Luhn, Sheba,
+   IBAN, API keys), domain allow/block lists, protected QodeX files, JSONL audit log. Web and
+   window text is fenced as untrusted data and scanned for prompt injection (EN + FA, hidden
+   Unicode).
+5. **Credential vault.** `qodex vault add` — AES-256-GCM, separate 0600 key, TOTP (RFC 6238).
+   `browser_fill_secret` fills only on the entry's own https origin, re-checks right before
+   typing, and never returns the value to the model.
+6. **Control center.** `qodex control [--lan|--tunnel]` or `/control`: a token-protected web page
+   with the live browser view, human takeover, one-tap approvals, an activity timeline,
+   steering and missions (English + Persian).
+7. **Workflows.** Record the agent's or your own demonstration (`qodex workflow record`,
+   `workflow_record`), replay with self-healing selectors, Sentinel checks and vault secrets at
+   zero model tokens per step; each workflow is also saved as a skill.
+8. **Telegram channel.** `qodex telegram setup|pair|start`: approve actions with inline buttons,
+   start and follow missions, get screenshots and notifications — paired private chats only.
+9. **Approvals everywhere.** A new ApprovalBroker routes every human decision to the terminal,
+   the control center and Telegram; the first answer wins. Terminal prompts are queued (no more
+   concurrent prompts clobbering each other) and Esc cancels a stuck one.
+10. **Agent core.** Sub-agents work again (they failed on a database foreign key), run on fresh
+    agent instances, honor their iteration cap and inherit approvals; new `browser` and
+    `computer` operator roles; per-tool timeouts; loop guards that understand changing page
+    state; the completion gate accepts real-world actions as evidence; `web` and `desktop` task
+    profiles; tool relevance understands URLs and Persian site commands; headless no longer
+    auto-accepts edits without `--yes`.
+11. **CLI.** Options after a subcommand now belong to it (`qodex schedule tick --json` and every
+    new `--json` flag silently printed text before).
+
+```
+src/tools/browser/*        (dedicated browser: manager, launcher, snapshot, 28 tools, CLI)
+src/tools/computer/*       (desktop backends: macOS, X11, Wayland, Windows; 15 tools)
+src/missions/*             (store, planner, runner, daemon, tools, CLI, Telegram adapter)
+src/sentinel/*, src/vault/* (guard, policy, injection fencing, audit; encrypted vault, TOTP)
+src/control/*              (event bus, approval broker, control center server + dashboard)
+src/workflows/*            (recorder, replay, store, skill generation, tools, CLI)
+src/channels/telegram/*    (bot, Bot API client, pairing, formatting, CLI)
+src/config/agent-config.ts, src/config/paths.ts (new optional config sections + paths)
+```
+
 ## v2.7.0 — 2026-08-14
 
 **Raw telemetry from 2.6 becomes something you can act on — without a slower CLI start.**

@@ -59,6 +59,9 @@ export class FanoutTool extends Tool<FanoutArgs> {
     'Differs from `orchestrate` (which builds one feature via a dependency DAG). Requires sub-agents enabled.';
   isReadOnly = false;
   isDestructive = true; // sub-agents may run destructive tools
+  /** Runs sub-agents: same budget as `task` (not the global 300s tool timeout), so the
+   *  loop also excuses its run time from the parent's wall-clock budget. */
+  timeoutSeconds = 2400;
   argsSchema = Args;
 
   async execute(args: FanoutArgs, ctx: ToolContext): Promise<ToolResult> {

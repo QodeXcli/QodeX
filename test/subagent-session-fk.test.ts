@@ -92,6 +92,9 @@ describe('AgentLoop.runSubagent — creates the child session row before the fir
       getSessionStore().recordTurn(sessionId, [assistantMsg], { input: 3, output: 2, costUsd: 0 });
       yield { type: 'final', data: { content: 'done' } };
     };
+    // runSubagent runs each child on a FRESH AgentLoop (so parallel sub-agents never share
+    // per-run state); route that child back to this mocked instance.
+    agent.spawnChild = () => agent;
 
     const subSessionId = 'parent-session/sub-1751700000001';
     const result = await agent.runSubagent('do a focused thing', {

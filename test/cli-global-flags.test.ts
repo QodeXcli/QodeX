@@ -25,11 +25,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const execFileAsync = promisify(execFile);
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TSX = path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+// Resolved like an import, so it also works from a git worktree without its own node_modules.
+const TSX = createRequire(import.meta.url).resolve('tsx/cli');
 const ENTRY = path.join(ROOT, 'src', 'index.ts');
 
 const tempHomes: string[] = [];

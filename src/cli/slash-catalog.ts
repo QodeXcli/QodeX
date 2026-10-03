@@ -2,6 +2,7 @@
  * Single catalog of built-in slash commands — help text, Tab autocomplete,
  * and unknown-command suggestions all read from here so they cannot drift.
  */
+import { listModCommands } from '../mods/command-registry.js';
 
 export interface SlashCatalogEntry {
   name: string;
@@ -26,9 +27,15 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'resume', args: '<id>', description: 'Continue a previous session' },
   { name: 'plan', description: 'Read-only plan mode' },
   { name: 'normal', description: 'Back to normal (mutating) mode' },
-  { name: 'model', args: '[id]', description: 'Show or switch the model' },
-  { name: 'auto', args: '[manual|auto|always]', description: 'Approval mode (or Shift+Tab)' },
+  { name: 'model', args: '[id|opus|sonnet|haiku|fable]', description: 'Show or switch the model' },
+  { name: 'auto', args: '[manual|edits|auto]', description: 'Approval mode (or Shift+Tab)' },
+  { name: 'mode', args: '[manual|edits|auto]', description: 'Same as /auto' },
+  { name: 'status', description: 'Approval mode, strict mode, session' },
   { name: 'btw', args: '<note>', description: 'Steer a running task without stopping it' },
+  { name: 'instructions', args: '[all|first]', description: 'Load the first project instruction file or all of them' },
+  { name: 'goal', args: '<done looks like> [--check "<cmd>"] [--max N]', description: 'Keep working until a check proves the goal is met' },
+  { name: 'stop', args: '[all]', description: 'Emergency stop: the running task, side runs, processes (all = missions too)' },
+  { name: 'learn', args: '[name]', description: 'Turn the task you just finished into a reusable skill' },
   { name: 'effort', args: '<low|medium|high|off>', description: 'Reasoning effort' },
   { name: 'memory', description: 'Show / manage learned facts' },
   { name: 'cost', description: 'Token and cost usage' },
@@ -45,8 +52,33 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'unlimited', description: 'Remove the iteration cap this session' },
   { name: 'iterations', args: '<n>', description: 'Set iteration cap (0 = none)' },
   { name: 'network', description: 'Diagnose connectivity' },
+  { name: 'checkup', args: '[prompt-audit [--no-model]]', description: 'Audit instruction files, skills, commands (writes a report + patch)' },
+  { name: 'doctor', args: '[prompt-audit [--no-model]]', description: 'Same as /checkup' },
   { name: 'commands', description: 'List custom slash commands' },
+  { name: 'allow', args: 'mail-replies [--account a] [--from @domain] | list | revoke <id>', description: 'Standing grants: replies QodeX may send without asking' },
+  { name: 'mail', args: 'status | watch [start|stop] | rule … | reply-all', description: 'Mail watcher, rules for incoming mail, auto-reply' },
+  { name: 'mods', args: '[enable|disable|trust|untrust <name>]', description: 'List mods, or switch / trust one' },
+  { name: 'reload-mods', description: 'Reload every mod from disk' },
+  { name: 'mod', args: 'new <description>', description: 'Have QodeX write a mod for you' },
   { name: 'exit', description: 'Quit QodeX' },
+];
+
+/**
+ * Every name handleSlashCommand answers itself (aliases included). A mod cannot register
+ * a command under one of these (src/mods/runtime.ts); test/cc-mods-integration.test.ts
+ * checks this list against the switch in slash-commands.ts.
+ */
+export const RESERVED_SLASH_NAMES: readonly string[] = [
+  'approvals', 'approve', 'auto', 'background', 'bg', 'browser', 'btw', 'caching', 'clear', 'commands',
+  'compact', 'context', 'control', 'cost', 'deny', 'desktop', 'effort', 'exit', 'facts', 'flywheel', 'goal',
+  'h', 'help', 'history', 'hooks', 'identity', 'index', 'insights', 'iterations', 'learn', 'mcp', 'mcp-build',
+  'mcp-restart', 'mcpbuild', 'mcprestart', 'memory', 'mission', 'missions', 'mod', 'mode', 'model', 'mods', 'net',
+  'network', 'normal', 'phone', 'plan', 'plugins', 'project', 'q', 'quit', 'reasoning', 'release-notes',
+  'releasenotes', 'reload-mods', 'restore', 'resume', 'retry', 'roles', 'rollback', 'schedule', 'schedules',
+  'search', 'sentinel', 'sessions', 'skill', 'skills', 'snapshot', 'snapshots', 'stats', 'status', 'stop',
+  'strict', 'sub-model', 'subagent', 'subagent-model', 'subagents', 'takeover', 'telegram', 'telemetry', 'todo',
+  'todos', 'tokens', 'tools', 'trellis', 'undo', 'undo-session', 'unlimited', 'usage', 'vault', 'workflow',
+  'workflows',
 ];
 
 export interface SlashSuggestion {
@@ -69,7 +101,11 @@ export function suggestSlashCommands(value: string, extraNames: string[] = []): 
   const extras: SlashCatalogEntry[] = extraNames
     .filter(n => n && !SLASH_CATALOG.some(c => c.name === n))
     .map(name => ({ name, description: 'custom / skill' }));
-  const pool = [...SLASH_CATALOG, ...extras];
+  // Commands mods added ($.command.register), with their own description.
+  const modEntries: SlashCatalogEntry[] = listModCommands()
+    .filter(c => !SLASH_CATALOG.some(e => e.name === c.name) && !extraNames.includes(c.name))
+    .map(c => ({ name: c.name, ...(c.argumentHint ? { args: c.argumentHint } : {}), description: `${c.description || 'mod command'} (${c.plugin})` }));
+  const pool = [...SLASH_CATALOG, ...extras, ...modEntries];
   return pool
     .filter(c => c.name.startsWith(prefix) || (prefix.length === 0 && true))
     .slice(0, 8)

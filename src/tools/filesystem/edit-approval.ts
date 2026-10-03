@@ -5,6 +5,8 @@ import { join, extname } from 'node:path';
 import type { ToolContext } from '../base.js';
 import { logger } from '../../utils/logger.js';
 import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
+import { askHumanForAutoMode, explainRequest, unansweredMessage, whyLine } from '../../security/human-approval.js';
+import { isInteractiveHuman } from '../../control/approvals.js';
 import { prepareDiffPreview } from '../../utils/ui-limits.js';
 
 /**
@@ -25,7 +27,7 @@ import { prepareDiffPreview } from '../../utils/ui-limits.js';
 
 export type EditDecision =
   | { kind: 'accept'; content: string }   // write this content (original or user-edited)
-  | { kind: 'reject' }                     // hard stop
+  | { kind: 'reject'; message?: string }   // hard stop (message: why, when no human answered)
   | { kind: 'revise' };                    // soft: model should try a different edit
 
 export const APPROVE_OPTIONS = ['accept', 'always yes', 'edit', 'continue', 'reject'];
@@ -80,10 +82,33 @@ export async function confirmEdit(
 ): Promise<EditDecision> {
   emitEditDiff(ctx, opts.rel, opts.before, opts.after);
 
-  const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
+  // WHY it asks, and whether "always yes" (= switch to auto mode) would help at all: an
+  // edit outside the project asks in auto mode too, so offering it there is a lie.
+  const permReq = { ...(opts.permReq ?? {}), cwd: opts.permReq?.cwd ?? ctx.cwd };
+  const ex = explainRequest(ctx.permissions as any, permReq);
+  const remoteHuman = ex.autoPolicy && !isInteractiveHuman();
+  const options = remoteHuman
+    ? ['accept', 'reject'] // `edit` would open $EDITOR on this machine, not the approver's
+    : ex.canAlways ? APPROVE_OPTIONS : APPROVE_OPTIONS.filter(o => o !== 'always yes');
+  const label = `${opts.label}${whyLine(ex)}`;
+
+  let answer: string;
+  if (ex.autoPolicy) {
+    // Auto mode does not decide this alone: a real human answers (never an unattended
+    // auto-answerer such as headless --yes or a mission in 'auto').
+    const r = await askHumanForAutoMode(ctx, label, options, { source: String(permReq.tool ?? 'edit'), reason: ex.reason });
+    if (!r || r.by === 'timeout' || r.by === 'fallback') {
+      const message = unansweredMessage(`write ${opts.rel}`, ex.reason, r?.by ?? null);
+      ctx.emit({ type: 'progress', message });
+      return { kind: 'reject', message };
+    }
+    answer = r.answer;
+  } else {
+    answer = await ctx.askUser(label, options);
+  }
   // Mode only — a tool-wide session grant survived Shift+Tab back to manual and
   // kept auto-writing every file after the user thought they had left always-yes.
-  if (isAlwaysYesAnswer(answer)) setApprovalMode('always');
+  if (isAlwaysYesAnswer(answer)) setApprovalMode('auto');
   const branch = interpretApprovalAnswer(answer);
 
   if (branch === 'reject') return { kind: 'reject' };

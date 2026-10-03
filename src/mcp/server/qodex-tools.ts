@@ -156,7 +156,7 @@ function sandboxRunTool(deps: Deps): SpecialTool {
       const command = String(args?.command ?? '').trim();
       if (!command) return textResult('[ERROR] command is required', true);
       const { makeServerToolContext } = await import('./tool-context.js');
-      const ctx = await makeServerToolContext(deps.cwd, deps.config);
+      const ctx = await makeServerToolContext(deps.cwd, deps.config, (n) => deps.registry.get(n));
       try {
         // Reuse the registered code_run / shell tool through the registry so the
         // same sandboxing applies. Prefer code_run if present, else shell.

@@ -19,6 +19,7 @@ import { EditSymbolTool } from './ast/edit-symbol.js';
 import { TodoWriteTool, TodoReadTool } from './builtin/todo.js';
 import { ProjectLogTool, ProjectRecallTool } from './project/project-tools.js';
 import { PresentPlanTool } from './builtin/present-plan.js';
+import { AskUserTool } from './builtin/ask-user.js';
 import { UseSkillTool } from './builtin/use-skill.js';
 import { SearchSkillsTool } from './builtin/search-skills.js';
 import { DataFlowTool } from './codegraph/data-flow-tool.js';
@@ -63,25 +64,15 @@ import { WebFetchTool } from './web/web-fetch.js';
 import { NetworkCheckTool } from './web/network-check.js';
 import { SeoAuditTool } from './web/seo-audit.js';
 import { VisionAnalyzeTool } from './vision/vision-analyze.js';
-import {
-  ComputerUseScreenshotTool,
-  ComputerUseClickTool,
-  ComputerUseTypeTool,
-  ComputerUseKeyTool,
-  ComputerUseActiveWindowTool,
-  ComputerUseListWindowsTool,
-} from './computer/use.js';
-import {
-  BrowserNavigateTool,
-  BrowserClickTool,
-  BrowserFillTool,
-  BrowserScreenshotTool,
-  BrowserConsoleTool,
-  BrowserEvaluateTool,
-  BrowserGetTextTool,
-  BrowserWaitForTool,
-  BrowserCloseTool,
-} from './browser/tools.js';
+// Agent platform — the dedicated browser, cross-platform desktop control, the
+// credential vault, missions and recorded workflows each export their tool classes.
+import { COMPUTER_TOOL_CLASSES } from './computer/index.js';
+import { BROWSER_TOOL_CLASSES } from './browser/index.js';
+import { VAULT_TOOL_CLASSES } from '../vault/index.js';
+import { MISSION_TOOL_CLASSES } from '../missions/tools.js';
+import { WORKFLOW_TOOL_CLASSES } from '../workflows/tools.js';
+import { MAIL_TOOL_CLASSES } from '../mail/tools.js';
+import { getSentinel, redactForAudit } from '../sentinel/index.js';
 import {
   DevServerStartTool,
   DevServerLogTool,
@@ -219,6 +210,7 @@ export class ToolRegistry {
       new TodoWriteTool(),
       new TodoReadTool(),
       new PresentPlanTool(),
+      new AskUserTool(),
       new UseSkillTool(),
       new SearchSkillsTool(),
       new DataFlowTool(),
@@ -273,21 +265,12 @@ export class ToolRegistry {
       new NetworkCheckTool(),
       new SeoAuditTool(),
       new VisionAnalyzeTool(),
-      new ComputerUseScreenshotTool(),
-      new ComputerUseClickTool(),
-      new ComputerUseTypeTool(),
-      new ComputerUseKeyTool(),
-      new ComputerUseActiveWindowTool(),
-      new ComputerUseListWindowsTool(),
-      new BrowserNavigateTool(),
-      new BrowserClickTool(),
-      new BrowserFillTool(),
-      new BrowserScreenshotTool(),
-      new BrowserConsoleTool(),
-      new BrowserEvaluateTool(),
-      new BrowserGetTextTool(),
-      new BrowserWaitForTool(),
-      new BrowserCloseTool(),
+      ...COMPUTER_TOOL_CLASSES.map(T => new T()),
+      ...BROWSER_TOOL_CLASSES.map(T => new T()),
+      ...VAULT_TOOL_CLASSES.map(T => new T()),
+      ...MISSION_TOOL_CLASSES.map(T => new T()),
+      ...WORKFLOW_TOOL_CLASSES.map(T => new T()),
+      ...MAIL_TOOL_CLASSES.map(T => new T()),
       new DevServerStartTool(),
       new DevServerLogTool(),
       new DevServerStopTool(),
@@ -405,7 +388,12 @@ export class ToolRegistry {
       tools = tools.filter(t => t.isReadOnly || t.name === 'present_plan' || t.name === 'todo_write' || t.name === 'todo_read');
     } else if (mode.mode === 'subagent') {
       // Exclude every sub-agent-spawning tool (no recursion) + present_plan.
-      const noRecursion = new Set(['task', 'gather', 'orchestrate', 'fanout', 'present_plan']);
+      // Sub-agents can't spawn further agents (nested browser/desktop operators) or
+      // start detached missions — only the top-level agent may.
+      const noRecursion = new Set([
+        'task', 'gather', 'orchestrate', 'fanout', 'present_plan',
+        'browser_agent', 'computer_use_agent', 'mission_start',
+      ]);
       tools = tools.filter(t => !noRecursion.has(t.name));
     } else {
       // Normal mode: exclude present_plan (only used in plan mode)
@@ -420,6 +408,23 @@ export class ToolRegistry {
     }
 
     return tools;
+  }
+
+  /**
+   * Resolve a tool and validate its args exactly as execute() would, without running
+   * it. Lets the agent loop run Sentinel's preflight review on the same PARSED args
+   * (tools normalize e.g. bare domains in coerceArgs) before arming the tool timeout.
+   */
+  prepare(name: string, args: unknown): { ok: true; tool: Tool<any>; args: Record<string, unknown> } | { ok: false } {
+    const tool = this.tools.get(this.resolveName(name));
+    if (!tool) return { ok: false };
+    try {
+      const jsonSchema = tool.schema().function.parameters as JsonSchemaNode;
+      const parsed = tool.argsSchema.parse(coerceArgsToSchema(tool.coerceArgs(args), jsonSchema));
+      return { ok: true, tool, args: (parsed ?? {}) as Record<string, unknown> };
+    } catch {
+      return { ok: false };
+    }
   }
 
   async execute(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -446,17 +451,35 @@ export class ToolRegistry {
       const errMsg = e.errors
         ? e.errors.map((err: any) => `${err.path.join('.')}: ${err.message}`).join('; ')
         : e.message;
+      // Echo the args' shape, never typed text / password values (they land in the
+      // session transcript): text/value/body/... become "[hidden N chars]".
       return {
-        content: `[ARGUMENT_VALIDATION_ERROR] ${errMsg}\nProvided args: ${JSON.stringify(args)}\nFix your tool arguments and try again.`,
+        content: `[ARGUMENT_VALIDATION_ERROR] ${errMsg}\nProvided args: ${JSON.stringify(redactForAudit(args, { hideTyped: true }))}\nFix your tool arguments and try again.`,
         isError: true,
       };
     }
 
-    logger.debug('Executing tool', { name, args: parsed });
+    // Same redaction for qodex.log (debug mode): typed passwords must not reach the disk.
+    logger.debug('Executing tool', { name, args: redactForAudit(parsed, { hideTyped: true }) });
+
+    // Sentinel sits at this single choke point, so the main loop, sub-agents,
+    // missions and the MCP server are all guarded the same way. It reviews the
+    // PARSED args under the canonical tool name (aliases resolved), may ask a
+    // human (purchases, payments, sending, credentials — never auto-approved by
+    // /auto or --yes), and fences untrusted page/window text afterwards.
+    const sentinel = getSentinel();
+    const meta = { untrustedOutput: tool.untrustedOutput === true, isReadOnly: tool.isReadOnly };
+    try {
+      const veto = await sentinel.beforeTool(tool.name, parsed, ctx, meta);
+      if (veto) return veto;
+    } catch (e: any) {
+      // Fail closed: a guard that can't decide must not wave the call through.
+      return { content: `[SENTINEL_ERROR] ${tool.name} was not run: ${e?.message ?? e}`, isError: true };
+    }
 
     try {
       const result = await tool.execute(parsed, ctx);
-      return result;
+      return sentinel.afterTool(tool.name, parsed, result, meta);
     } catch (e: any) {
       // Apply-guard CAS refusals are already a complete observation for the model.
       if (typeof e?.message === 'string' && e.message.startsWith('[FILE_CHANGED]')) {

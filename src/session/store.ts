@@ -218,16 +218,30 @@ export class SessionStore {
   }
 
   /**
-   * Create a session row with a caller-chosen id if it doesn't exist yet (idempotent).
-   * Used for sub-agent sessions, whose ids are derived from the parent's
-   * (`<parent>/sub-<ts>`, `<parent>/fanout-<n>`, …): messages.session_id has a FK to
-   * sessions.id, so the row MUST exist before the sub-agent's first recordTurn —
-   * otherwise every child write dies with "FOREIGN KEY constraint failed".
+   * Make sure a `sessions` row exists for a caller-chosen id (INSERT OR IGNORE).
+   *
+   * Sub-agents, fanout workers, scouts, background jobs and orchestrator workers run
+   * under derived ids (`<parent>/sub-<ts>`, `bg-<job>`, …) that were never inserted
+   * into `sessions`. Because `messages.session_id` REFERENCES sessions(id) and the DB
+   * runs with foreign_keys=ON, their first recordTurn threw "FOREIGN KEY constraint
+   * failed" and every sub-agent run came back ok:false. Calling this before the run
+   * fixes that without changing the id scheme. Idempotent; an existing row (and its
+   * model/cwd/title) is left untouched.
    */
   ensureSession(id: string, cwd: string, model: string): void {
-    this.db.prepare(
-      `INSERT OR IGNORE INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, ?)`,
-    ).run(id, cwd, model, null);
+    if (typeof id !== 'string' || !id) throw new Error('[SESSION_ERROR] ensureSession needs a non-empty session id');
+    // ON CONFLICT(id) DO NOTHING — not INSERT OR IGNORE: OR IGNORE also swallows a NOT NULL
+    // violation (cwd), silently creating no row, and the caller's first recordTurn then
+    // failed with the very FK error this method exists to prevent.
+    const safeCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+    const safeModel = typeof model === 'string' ? model : null;
+    this.db.prepare(`INSERT INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, NULL) ON CONFLICT(id) DO NOTHING`)
+      .run(id, safeCwd, safeModel);
+  }
+
+  /** True when a `sessions` row exists for `id`. */
+  hasSession(id: string): boolean {
+    return !!this.db.prepare(`SELECT 1 AS ok FROM sessions WHERE id = ?`).get(id);
   }
 
   recordTurn(
@@ -659,4 +673,13 @@ let _store: SessionStore | null = null;
 export function getSessionStore(): SessionStore {
   if (!_store) _store = new SessionStore();
   return _store;
+}
+
+/**
+ * Test hook: point the process-wide store at a temp-DB instance (or `null` to drop
+ * it so the next getSessionStore() reopens the default ~/.qodex/sessions.db). Lets
+ * agent-loop tests run end-to-end without writing to the developer's real DB.
+ */
+export function setSessionStoreForTests(store: SessionStore | null): void {
+  _store = store;
 }

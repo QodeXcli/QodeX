@@ -36,6 +36,9 @@ const C = {
   plan: '#94a3b8',        // slate
   memory: '#c084fc',      // purple
   understand: '#38bdf8',  // sky
+  workflow: '#a3e635',    // lime
+  mission: '#facc15',     // yellow
+  vault: '#f472b6',       // rose
 } as const;
 
 function act(verb: string, icon: string, color: string, category: string): ToolActivity {
@@ -67,7 +70,8 @@ const EXACT: Record<string, ToolActivity> = {
   safe_rename: act('Renaming', '✎', C.edit, 'edit'),
   safe_delete_file: act('Removing', '✕', C.edit, 'edit'),
 
-  // Shell / execution
+  // Shell / execution (`shell` is the canonical name; `bash` an alias models still emit)
+  shell: act('Running', '⚡', C.shell, 'shell'),
   bash: act('Running', '⚡', C.shell, 'shell'),
   code_run: act('Executing', '⚡', C.shell, 'shell'),
   auto_fix: act('Verifying', '⚡', C.shell, 'shell'),
@@ -120,7 +124,8 @@ const EXACT: Record<string, ToolActivity> = {
 };
 
 // Prefix rules — checked in order when no exact match. Covers families like
-// code_graph_*, git_*, browser_*, dev_server_*, background_job_*, computer_*.
+// code_graph_*, git_*, browser_*, dev_server_*, background_job_*, computer_*,
+// workflow_*, mission_*, vault_*.
 const PREFIX: Array<[string, ToolActivity]> = [
   ['code_graph', act('Navigating', '⌕', C.search, 'search')],
   ['git_', act('Git', '⎇', C.git, 'git')],
@@ -128,6 +133,9 @@ const PREFIX: Array<[string, ToolActivity]> = [
   ['dev_server', act('Dev server', '▣', C.browser, 'browser')],
   ['background_job', act('Background job', '☰', C.plan, 'background')],
   ['computer_', act('Controlling', '▣', C.browser, 'computer')],
+  ['workflow_', act('Automating', '↻', C.workflow, 'workflow')],
+  ['mission_', act('Mission', '⚑', C.mission, 'mission')],
+  ['vault_', act('Vault', '⚷', C.vault, 'vault')],
 ];
 
 const DEFAULT: ToolActivity = act('Working', '◆', C.read, 'general');

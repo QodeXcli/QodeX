@@ -13,6 +13,7 @@
  */
 
 import { appendAudit } from '../security/audit-log.js';
+import type { AskMeta } from '../agent/ask-meta.js';
 
 export const TUI_LANE = 'tui';
 export const TUI_ORIGIN = 'tui';
@@ -28,6 +29,8 @@ export interface ApprovalRequest {
   options: string[];
   lane: string;
   origin: string;
+  /** What the prompt is about (permission tool + operation, Sentinel, question), when known. */
+  meta?: AskMeta;
 }
 
 export interface ApprovalOpts {
@@ -35,6 +38,14 @@ export interface ApprovalOpts {
   lane?: string;
   /** Who should present this ask. Default `tui`. */
   origin?: string;
+  /**
+   * Withdraw the ask when this aborts (it resolves with 'no'). The ApprovalBroker uses
+   * it to dismiss the terminal prompt once another channel (control center, Telegram)
+   * answered the same question first.
+   */
+  signal?: AbortSignal;
+  /** What the prompt is about (src/agent/ask-meta.ts) — lets the surface re-check it on a mode switch. */
+  meta?: AskMeta;
 }
 
 export type LiveStream = 'out' | 'err' | 'progress';
@@ -52,8 +63,8 @@ interface LaneState {
 }
 
 function snapshot(w: ApprovalWaiter): ApprovalRequest {
-  const { id, source, prompt, options, lane, origin } = w;
-  return { id, source, prompt, options, lane, origin };
+  const { id, source, prompt, options, lane, origin, meta } = w;
+  return meta ? { id, source, prompt, options, lane, origin, meta } : { id, source, prompt, options, lane, origin };
 }
 
 export class OperatorHub {
@@ -96,13 +107,19 @@ export class OperatorHub {
     const origin = opts.origin ?? TUI_ORIGIN;
     return new Promise(resolve => {
       this.seq += 1;
+      const id = `ap${this.seq}`;
+      if (opts.signal) {
+        if (opts.signal.aborted) { resolve('no'); return; }
+        opts.signal.addEventListener('abort', () => { this.cancel(id, 'no'); }, { once: true });
+      }
       this.laneState(lane).queue.push({
-        id: `ap${this.seq}`,
+        id,
         source,
         prompt,
         options: options.length ? options : ['yes', 'no'],
         lane,
         origin,
+        ...(opts.meta ? { meta: opts.meta } : {}),
         resolve,
       });
       this.pump(lane);

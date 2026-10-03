@@ -62,7 +62,7 @@ export class MultiEditTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
 
     // Permission check
-    const permReq = { tool: 'multi_edit', operation: rel, description: `Multi-edit ${rel} (${args.edits.length} changes)` };
+    const permReq = { tool: 'multi_edit', operation: rel, description: `Multi-edit ${rel} (${args.edits.length} changes)`, cwd: ctx.cwd };
     const decision = ctx.permissions.evaluate(permReq);
     if (decision === 'deny') return { content: `[PERMISSION_DENIED]`, isError: true };
     if (decision === 'ask') {
@@ -70,7 +70,7 @@ export class MultiEditTool extends Tool<z.infer<typeof ArgsSchema>> {
         rel, before: original, after: content, absPath: abs, permReq,
         label: `Apply ${args.edits.length} edits to ${rel}?`,
       });
-      if (dec.kind === 'reject') return { content: `[USER_REJECTED]`, isError: true };
+      if (dec.kind === 'reject') return { content: dec.message ?? `[USER_REJECTED]`, isError: true };
       if (dec.kind === 'revise') return reviseResult(rel);
       content = dec.content; // may be the user-edited version from [E] Edit
     } else {

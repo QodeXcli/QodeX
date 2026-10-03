@@ -95,23 +95,25 @@ describe('slash-command routing vs file paths', () => {
     expect(r.message).toMatch(/Unknown command/);
   });
 
-  it('/auto always sets always-yes approval', async () => {
+  it('/auto auto (and the legacy /auto always) sets the autonomous auto mode', async () => {
     const { setApprovalMode } = await import('../src/security/permissions.js');
     setApprovalMode('manual');
-    const r = await handleSlashCommand('/auto always', 'test', process.cwd());
-    expect(r.handled).toBe(true);
-    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'always' });
-    expect(r.message).toMatch(/always yes/i);
-  });
-
-  it('/auto on stays an alias for always', async () => {
-    const r = await handleSlashCommand('/auto on', 'test', process.cwd());
-    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'always' });
-  });
-
-  it('/auto auto sets accept-edits mode', async () => {
     const r = await handleSlashCommand('/auto auto', 'test', process.cwd());
+    expect(r.handled).toBe(true);
     expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'auto' });
+    expect(r.message).toMatch(/autonomous/i);
+    const legacy = await handleSlashCommand('/auto always', 'test', process.cwd());
+    expect(legacy.action).toEqual({ type: 'set_approval_mode', mode: 'auto' });
+  });
+
+  it('/auto on is an alias for auto', async () => {
+    const r = await handleSlashCommand('/auto on', 'test', process.cwd());
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'auto' });
+  });
+
+  it('/auto edits sets accept-edits mode', async () => {
+    const r = await handleSlashCommand('/auto edits', 'test', process.cwd());
+    expect(r.action).toEqual({ type: 'set_approval_mode', mode: 'edits' });
     expect(r.message).toMatch(/file edits/i);
   });
 
