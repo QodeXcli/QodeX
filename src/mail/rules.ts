@@ -32,7 +32,7 @@ import {
   bareAddress, domainOf, getGrantStore, normalizeAccount, normalizeSenderFilter, describeGrant,
   type GrantOrigin, type GrantStore,
 } from '../grants/store.js';
-import { publishMailEvent, cleanLine } from '../grants/mail-events.js';
+import { publishMailEvent, publishMailEvent as publishMailEventDefault, cleanLine, type MailEventData, type MailEventType } from '../grants/mail-events.js';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -152,6 +152,20 @@ export function parseRuleMatch(when: string): MailRuleMatch {
   return match;
 }
 
+/** Validate / normalize a structured match (from a file or a caller). Throws [MAIL_RULE_BAD_INPUT] / [GRANT_BAD_INPUT]. PURE. */
+export function normalizeMatch(m: MailRuleMatch): MailRuleMatch {
+  const out: MailRuleMatch = {};
+  const addrs = (v: unknown) => [...new Set((Array.isArray(v) ? v : []).map(x => normalizeSenderFilter(String(x))))];
+  const terms = (v: unknown) => (Array.isArray(v) ? v : []).map(x => normalizeText(String(x)).slice(0, 200)).filter(Boolean);
+  if (m?.from?.length) out.from = addrs(m.from);
+  if (m?.to?.length) out.to = addrs(m.to);
+  if (m?.subject?.length) { const t = terms(m.subject); if (t.length) out.subject = t; }
+  if (m?.body?.length) { const t = terms(m.body); if (t.length) out.body = t; }
+  if (typeof m?.hasAttachment === 'boolean') out.hasAttachment = m.hasAttachment;
+  if (m?.account) { const a = normalizeAccount(m.account); if (a !== '*') out.account = a; }
+  return out;
+}
+
 /** Human-readable form of a match (round-trips through parseRuleMatch). PURE. */
 export function describeMatch(m: MailRuleMatch): string {
   const q = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
@@ -248,16 +262,16 @@ function sanitizeRules(raw: unknown): MailRule[] {
     if (typeof x.task !== 'string' || !x.task.trim()) continue;
     if (typeof x.cwd !== 'string' || !path.isAbsolute(x.cwd)) continue;
     try {
-      // Re-parse the stored match through the same validator (never trust the file to widen a rule).
+      // Re-validate the stored match (a condition we can't read precisely drops the rule, never widens it).
       const m = (x.match && typeof x.match === 'object' ? x.match : {}) as Record<string, unknown>;
-      const match = parseRuleMatch(describeMatch({
+      const match = normalizeMatch({
         from: Array.isArray(m.from) ? m.from.map(String) : undefined,
         to: Array.isArray(m.to) ? m.to.map(String) : undefined,
         subject: Array.isArray(m.subject) ? m.subject.map(String) : undefined,
         body: Array.isArray(m.body) ? m.body.map(String) : undefined,
         hasAttachment: typeof m.hasAttachment === 'boolean' ? m.hasAttachment : undefined,
         account: typeof m.account === 'string' ? m.account : undefined,
-      }));
+      });
       out.push({
         id: x.id,
         match,
@@ -320,7 +334,7 @@ export class MailRuleStore {
     let st;
     try { st = await fs.stat(cwd); } catch { throw new Error(`[MAIL_RULE_BAD_INPUT] Working directory does not exist: ${cwd}`); }
     if (!st.isDirectory()) throw new Error(`[MAIL_RULE_BAD_INPUT] Not a directory: ${cwd}`);
-    const match = parseRuleMatch(describeMatch(input.match));
+    const match = normalizeMatch(input.match);
     const d = String(detail ?? '').replace(/[^\p{L}\p{N}@._:-]+/gu, '').slice(0, 64);
     return this.mutate((rules) => {
       let id = '';
@@ -424,7 +438,16 @@ export interface RuleRunResult {
  * watcher's scan or a fresh one) makes each run DRAFT ONLY and notifies the user.
  * Never throws.
  */
-export async function runMatchingRules(mail: IncomingMail, opts: { rules?: MailRule[]; store?: MailRuleStore; start?: RuleRunStarter } = {}): Promise<RuleRunResult[]> {
+export async function runMatchingRules(
+  mail: IncomingMail,
+  opts: { rules?: MailRule[]; store?: MailRuleStore; start?: RuleRunStarter; publish?: (type: MailEventType, data: MailEventData) => unknown } = {},
+): Promise<RuleRunResult[]> {
+  const publishMailEvent = (type: MailEventType, data: MailEventData): void => {
+    try {
+      if (opts.publish) void Promise.resolve(opts.publish(type, data)).catch(() => {});
+      else void publishMailEventDefault(type, data);
+    } catch { /* never break the watcher */ }
+  };
   const store = opts.store ?? getMailRuleStore();
   const rules = (opts.rules ?? await store.list()).filter(r => r.enabled && matchesRule(r.match, mail));
   if (!rules.length) return [];

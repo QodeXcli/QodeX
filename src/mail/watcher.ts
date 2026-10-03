@@ -554,7 +554,7 @@ export class MailWatcher {
       subject: m.subject ?? '', text: m.text ?? '', date: m.date, attachments: m.attachments ?? [],
       flagged, findings: findings.map(f => f.id),
     };
-    const rules = await runMatchingRules(incoming, { store: this.opts.rules ?? getMailRuleStore(), start: this.opts.startRun });
+    const rules = await runMatchingRules(incoming, { store: this.opts.rules ?? getMailRuleStore(), start: this.opts.startRun, publish: this.opts.publish });
     for (const r of rules) {
       this.log(r.error ? `  ✗ rule ${r.ruleId}: ${r.error}` : `  ▶ rule ${r.ruleId} → ${r.missionId}${r.draftOnly ? ' (draft only)' : ''}`);
     }
