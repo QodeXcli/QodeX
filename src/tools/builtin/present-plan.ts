@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { isAutonomousMode } from '../../security/permissions.js';
+import { isAutonomousContext } from '../../sentinel/auto-mode.js';
 
 const StepSchema = z.object({
   action: z.enum(['read', 'edit', 'create', 'delete', 'shell', 'verify']).describe('Type of action'),
@@ -40,7 +40,7 @@ export class PresentPlanTool extends Tool<z.infer<typeof ArgsSchema>> {
   isDestructive = false;
   argsSchema = ArgsSchema;
 
-  async execute(args: z.infer<typeof ArgsSchema>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof ArgsSchema>, ctx: ToolContext): Promise<ToolResult> {
     lastPlan = args;
     const lines: string[] = [`Goal: ${args.goal}`, '', 'Steps:'];
     for (let i = 0; i < args.steps.length; i++) {
@@ -55,7 +55,7 @@ export class PresentPlanTool extends Tool<z.infer<typeof ArgsSchema>> {
     if (args.estimated_changes !== undefined) {
       lines.push('', `Estimated file changes: ${args.estimated_changes}`);
     }
-    if (isAutonomousMode()) {
+    if (isAutonomousContext(ctx)) {
       lines.push('', PLAN_AUTO_APPROVED);
       return { content: lines.join('\n'), metadata: { plan: args, autoApproved: true } };
     }

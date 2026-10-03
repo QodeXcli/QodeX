@@ -80,3 +80,16 @@ export function explainRequest(
   } catch { /* fall through to the old prompt */ }
   return { canAlways: true, autoPolicy: false };
 }
+
+/** Same text as src/sentinel/auto-mode.ts AUTO_MODE_ASKS (channels match on it). */
+const AUTO_MODE_ASKS_LABEL = 'Auto mode still asks';
+
+/**
+ * The prompt line explaining why it asks. An auto-policy ask carries the
+ * "Auto mode still asks" marker so the bot, Telegram, the control center and mission
+ * queues can say why (isAutoModeAskPrompt). PURE.
+ */
+export function whyLine(ex: { reason?: string; autoPolicy: boolean }): string {
+  if (!ex.reason) return '';
+  return ex.autoPolicy ? `\n  ${AUTO_MODE_ASKS_LABEL}: ${ex.reason}` : `\n  Why: ${ex.reason}`;
+}

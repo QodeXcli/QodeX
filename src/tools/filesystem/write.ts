@@ -48,7 +48,7 @@ export class WriteFileTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
 
     // Permission check
-    const permReq = { tool: 'write_file', operation: rel, description: before ? `Overwrite ${rel}` : `Create ${rel}` };
+    const permReq = { tool: 'write_file', operation: rel, description: before ? `Overwrite ${rel}` : `Create ${rel}`, cwd: ctx.cwd };
     const decision = ctx.permissions.evaluate(permReq);
     if (decision === 'deny') {
       return { content: `[PERMISSION_DENIED] Cannot write to ${args.path} (blocked by policy)`, isError: true };
@@ -63,7 +63,7 @@ export class WriteFileTool extends Tool<z.infer<typeof ArgsSchema>> {
         label: (before ? `Overwrite ${rel}?` : `Create ${rel}?`) + sizeNote,
       });
       if (dec.kind === 'reject') {
-        return { content: `[USER_REJECTED] User declined to write ${args.path}`, isError: true };
+        return { content: dec.message ?? `[USER_REJECTED] User declined to write ${args.path}`, isError: true };
       }
       if (dec.kind === 'revise') return reviseResult(rel);
       contentToWrite = dec.content; // may be the user-edited version from [E] Edit

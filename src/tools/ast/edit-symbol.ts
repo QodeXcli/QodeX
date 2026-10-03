@@ -7,7 +7,7 @@ import { emitEditDiff } from '../filesystem/edit-approval.js';
 import { detectLanguage, getParser, findSyntaxErrors, type FoundSymbol } from './parser.js';
 import { logger } from '../../utils/logger.js';
 import { interpretPermissionAnswer, setApprovalMode } from '../../security/permissions.js';
-import { askHumanForAutoMode, explainRequest, unansweredMessage } from '../../security/human-approval.js';
+import { askHumanForAutoMode, explainRequest, unansweredMessage, whyLine } from '../../security/human-approval.js';
 
 const ArgsSchema = z.object({
   path: z.string().describe('Path to source file'),
@@ -281,7 +281,7 @@ export class EditSymbolTool extends Tool<z.infer<typeof ArgsSchema>> {
       ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
       // Say WHY, and offer "always yes" (= auto mode) only when auto mode would not ask too.
       const ex = explainRequest(ctx.permissions as any, permReq);
-      const prompt = `Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?${ex.reason ? `\n  Why: ${ex.reason}` : ''}`;
+      const prompt = `Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?${whyLine(ex)}`;
       const options = ex.canAlways ? ['yes', 'no', 'always yes'] : ['yes', 'no'];
       let answer: string;
       if (ex.autoPolicy) {

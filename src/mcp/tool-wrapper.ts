@@ -60,6 +60,7 @@ export class MCPToolWrapper extends Tool<Record<string, unknown>> {
       tool: this.name,
       operation: this.name,
       description: this.description,
+      cwd: ctx.cwd,
     };
     // Sentinel reviews every mcp:* call before this runs (ToolRegistry.execute). When a
     // human just approved THIS call in Sentinel's prompt, asking "Run MCP tool …?" again

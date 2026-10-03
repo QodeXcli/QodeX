@@ -5,7 +5,7 @@ import { join, extname } from 'node:path';
 import type { ToolContext } from '../base.js';
 import { logger } from '../../utils/logger.js';
 import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
-import { askHumanForAutoMode, explainRequest, unansweredMessage } from '../../security/human-approval.js';
+import { askHumanForAutoMode, explainRequest, unansweredMessage, whyLine } from '../../security/human-approval.js';
 import { isInteractiveHuman } from '../../control/approvals.js';
 import { prepareDiffPreview } from '../../utils/ui-limits.js';
 
@@ -90,7 +90,7 @@ export async function confirmEdit(
   const options = remoteHuman
     ? ['accept', 'reject'] // `edit` would open $EDITOR on this machine, not the approver's
     : ex.canAlways ? APPROVE_OPTIONS : APPROVE_OPTIONS.filter(o => o !== 'always yes');
-  const label = ex.reason ? `${opts.label}\n  Why: ${ex.reason}` : opts.label;
+  const label = `${opts.label}${whyLine(ex)}`;
 
   let answer: string;
   if (ex.autoPolicy) {

@@ -19,6 +19,7 @@ import { EditSymbolTool } from './ast/edit-symbol.js';
 import { TodoWriteTool, TodoReadTool } from './builtin/todo.js';
 import { ProjectLogTool, ProjectRecallTool } from './project/project-tools.js';
 import { PresentPlanTool } from './builtin/present-plan.js';
+import { AskUserTool } from './builtin/ask-user.js';
 import { UseSkillTool } from './builtin/use-skill.js';
 import { SearchSkillsTool } from './builtin/search-skills.js';
 import { DataFlowTool } from './codegraph/data-flow-tool.js';
@@ -208,6 +209,7 @@ export class ToolRegistry {
       new TodoWriteTool(),
       new TodoReadTool(),
       new PresentPlanTool(),
+      new AskUserTool(),
       new UseSkillTool(),
       new SearchSkillsTool(),
       new DataFlowTool(),

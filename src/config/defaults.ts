@@ -766,15 +766,16 @@ export const DEFAULT_CONFIG: QodexConfig = {
       '^cargo (check|test|build)',
     ],
     autoReject: [
-      'rm -rf /',
-      'rm -rf /\\*',
+      // A recursive/forced rm of the filesystem root itself — `/` or `/*`, any flag order —
+      // not every absolute path (an unanchored 'rm -rf /' also denied `rm -rf /tmp/x`).
+      '\\brm\\s+(?:-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*(?:--\\s+)?/\\*?(?:\\s|;|&|\\||$)',
       'mkfs',
       'dd if=',
       ':\\(\\)\\{',
       'curl .* \\| (bash|sh)',
       'wget .* \\| (bash|sh)',
       '> /dev/sda',
-      'chmod -R 777 /',
+      '\\bchmod\\s+-R\\s+777\\s+/(?:\\s|;|&|\\||$)',
     ],
     alwaysAsk: [
       // macOS global preference / system settings mutation

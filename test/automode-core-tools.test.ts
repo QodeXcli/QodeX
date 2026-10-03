@@ -116,7 +116,7 @@ describe('shell prompts', () => {
     await new BashTool().execute({ command: `rm -rf ${target}` }, ctx);
     expect(asked).toHaveLength(1);
     expect(asked[0]!.options).toEqual(['yes', 'no']);
-    expect(asked[0]!.prompt).toMatch(/Why: deletes ~\/\.qx-auto-tools-.* \(outside the project\)/);
+    expect(asked[0]!.prompt).toMatch(/Auto mode still asks: deletes ~\/\.qx-auto-tools-.* \(outside the project\)/);
     expect(ran).toEqual([`rm -rf ${target}`]);
   });
 
@@ -143,7 +143,7 @@ describe('shell prompts', () => {
     expect(asked).toHaveLength(0);
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ category: 'auto-mode', source: 'shell', options: ['yes', 'no'] });
-    expect(seen[0].prompt).toMatch(/Why: npm publish publishes/);
+    expect(seen[0].prompt).toMatch(/Auto mode still asks: npm publish publishes/);
     expect(ran).toEqual(['npm publish']);
   });
 
@@ -232,7 +232,7 @@ describe('multi_file_edit goes through edit approval', () => {
       const r = await new MultiFileEditTool().execute({ files: [{ path: outside, edits: [{ old_string: 'gamma', new_string: 'G' }] }] }, two.ctx);
       expect(two.asked).toHaveLength(1);
       expect(two.asked[0]!.options).not.toContain('always yes');
-      expect(two.asked[0]!.prompt).toMatch(/Why: writes ~\/\.qx-auto-tools-.* \(outside the project\)/);
+      expect(two.asked[0]!.prompt).toMatch(/Auto mode still asks: writes ~\/\.qx-auto-tools-.* \(outside the project\)/);
       expect(r.content).toMatch(/^\[USER_REJECTED\]/);
       expect(fs.readFileSync(outside, 'utf8')).toBe('gamma\n');
     } finally {

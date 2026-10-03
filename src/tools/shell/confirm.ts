@@ -9,7 +9,7 @@
  */
 import type { ToolContext, ToolResult } from '../base.js';
 import { interpretPermissionAnswer, setApprovalMode } from '../../security/permissions.js';
-import { askHumanForAutoMode, explainRequest, unansweredMessage } from '../../security/human-approval.js';
+import { askHumanForAutoMode, explainRequest, unansweredMessage, whyLine } from '../../security/human-approval.js';
 
 export const AUTO_MODE_ON_NOTE =
   'note: auto mode is on for this session (Shift+Tab or /auto to change). It still asks before destructive ' +
@@ -33,7 +33,7 @@ export async function confirmShellCommand(
   }
 
   ctx.emit({ type: 'permission-request', tool: req.tool, operation: cmd, description: req.description });
-  const prompt = `Run: ${cmd}${req.description ? `\n  (${req.description})` : ''}${ex.reason ? `\n  Why: ${ex.reason}` : ''}`;
+  const prompt = `Run: ${cmd}${req.description ? `\n  (${req.description})` : ''}${whyLine(ex)}`;
   const options = ex.canAlways ? ['yes', 'no', 'always yes'] : ['yes', 'no'];
 
   let answer: string;

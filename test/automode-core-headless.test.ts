@@ -106,7 +106,7 @@ describe('headless --yes = auto mode', () => {
     try {
       const { results } = await run([`rm -r ~/${outsideName}`], { yes: true });
       expect(seen).toHaveLength(1);
-      expect(seen[0]).toMatch(/Why: deletes ~\/keep-me/);
+      expect(seen[0]).toMatch(/Auto mode still asks: deletes ~\/keep-me/);
       expect(results[0]).toMatch(/^\[USER_REJECTED\]/);
       expect(fs.existsSync(path.join(os.homedir(), outsideName))).toBe(true);
     } finally { unregister(); }

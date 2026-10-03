@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { isAutonomousMode } from '../../security/permissions.js';
+import { isAutonomousContext } from '../../sentinel/auto-mode.js';
 import { autonomousQuestionReply } from '../../security/autonomy.js';
 import type { AskUserFn } from '../../agent/ask-meta.js';
 
@@ -56,7 +56,8 @@ export class AskUserTool extends Tool<Args> {
     if (!question) return { content: '[ERROR] ask_user needs a question.', isError: true };
     const options = cleanOptions(Array.isArray(args.options) ? args.options : []);
 
-    if (isAutonomousMode()) {
+    // The session is in auto mode, or this conversation is (a bot chat with /auto on).
+    if (isAutonomousContext(ctx)) {
       return { content: autonomousQuestionReply(question, options), metadata: { autonomous: true } };
     }
     if (options.length < 2) {
