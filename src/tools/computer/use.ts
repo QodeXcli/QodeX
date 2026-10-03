@@ -25,30 +25,44 @@
  *     capture the screen BEFORE the click.
  *   - computer_use_clipboard can SET the clipboard, so it is not read-only.
  *   - Tools whose output contains text from other apps (window titles,
- *     clipboard) set untrustedOutput so Sentinel fences it as data.
+ *     clipboard) set untrustedOutput so Sentinel fences it as data. Output that
+ *     is NOT fenced (screenshot, coordinate errors, screen_info, window-not-found
+ *     lists) only ever shows sanitized titles (safeTitle: truncated, invisible
+ *     characters stripped, instruction-like titles withheld).
  *
  * Safety: consequential actions are reviewed by Sentinel at the registry
- * choke point (desktop category; secret-looking typing is critical). Typed
- * text is never echoed back or logged. `desktop.enabled: false` disables all
- * of these tools ([COMPUTER_USE_DISABLED]).
+ * choke point (desktop category; secret-looking typing is critical). Clicks
+ * carry `element` (auto-filled from the last computer_use_locate) so the
+ * review can say WHAT is clicked. Typed text is never echoed back or logged;
+ * on X11 / Wayland / Windows it reaches the input tool over stdin, not the
+ * command line (macOS keystroke/cliclick still take it as an argument); and a
+ * paste through the clipboard always restores the clipboard — even when
+ * cancelled. QodeX's own
+ * secret files (vault, ~/.qodex/.env, browser profiles) are never opened.
+ * `desktop.enabled: false` disables all of these tools ([COMPUTER_USE_DISABLED]).
  */
 
 import { z } from 'zod';
-import { promises as fs, existsSync } from 'fs';
+import { promises as fs, existsSync, realpathSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { getActiveConfig } from '../../config/loader.js';
+import { QODEX_HOME } from '../../config/defaults.js';
+import { QODEX_BROWSER_PROFILES_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE } from '../../config/paths.js';
 import { resolveDesktopConfig, type DesktopConfig } from '../../config/agent-config.js';
 import { getBus } from '../../control/bus.js';
 import {
   captureScreenshot,
   checkInScreenshot,
   defaultScreenshotPath,
+  describeDesktopPoint,
   getDesktopBackend,
   getLastCapture,
+  safeTitle,
   toScreenPoint,
   toScreenshotPoint,
+  windowLabel,
   type BackendAvailability,
   type DesktopBackend,
   type MappedPoint,
@@ -133,6 +147,30 @@ export function resolveUserPath(p: string, cwd: string): string {
   return path.resolve(cwd, expanded);
 }
 
+function normPath(p: string): string {
+  const r = path.resolve(p);
+  return process.platform === 'win32' || process.platform === 'darwin' ? r.toLowerCase() : r;
+}
+
+function insideDir(p: string, dir: string): boolean {
+  const a = normPath(p);
+  const d = normPath(dir);
+  return a === d || a.startsWith(d.endsWith(path.sep) ? d : d + path.sep);
+}
+
+/**
+ * QodeX's own secrets: the vault + its key, ~/.qodex/.env (API keys, bot
+ * tokens) and the dedicated browser's profiles (logged-in sessions). Opening
+ * one in a desktop app puts it on screen — one screenshot away from a vision
+ * model — so desktop tools refuse them (symlinks are resolved).
+ */
+export function isProtectedQodexTarget(absPath: string): boolean {
+  const candidates = [path.resolve(absPath)];
+  try { candidates.push(realpathSync(absPath)); } catch { /* doesn't exist (yet) */ }
+  const files = [QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE, path.join(QODEX_HOME, '.env')].map(normPath);
+  return candidates.some(p => files.includes(normPath(p)) || insideDir(p, QODEX_BROWSER_PROFILES_DIR));
+}
+
 /** Map + validate model coordinates; returns an error result or the screen point. */
 function mapPoint(x: number, y: number): MappedPoint | ToolResult {
   const err = checkInScreenshot(x, y);
@@ -152,11 +190,17 @@ function fmtRect(b: WindowInfo['bounds']): string {
   return b ? `${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}×${Math.round(b.height)}` : 'unknown';
 }
 
-/** One-line window description; `maxTitle` truncates the (untrusted) title. PURE. */
-export function formatWindow(w: WindowInfo, maxTitle = 300): string {
-  const title = (w.title || '(untitled)').replace(/\s+/g, ' ');
-  const parts = [`"${title.length > maxTitle ? `${title.slice(0, maxTitle)}…` : title}"`];
-  if (w.app) parts.push(`app: ${w.app}`);
+/**
+ * One-line window description; `maxTitle` truncates the (untrusted) title.
+ * `safe` sanitizes title + app name with safeTitle() for output that Sentinel
+ * does NOT fence (instruction-like titles are withheld). PURE.
+ */
+export function formatWindow(w: WindowInfo, maxTitle = 300, safe = false): string {
+  const raw = (w.title || '').replace(/\s+/g, ' ');
+  const title = (safe ? safeTitle(w.title, maxTitle) : raw.length > maxTitle ? `${raw.slice(0, maxTitle)}…` : raw) || '(untitled)';
+  const app = safe ? safeTitle(w.app, 40) : w.app;
+  const parts = [`"${title}"`];
+  if (app) parts.push(`app: ${app}`);
   if (w.pid) parts.push(`pid ${w.pid}`);
   if (w.bounds) parts.push(`screen ${fmtRect(w.bounds)}`);
   return `${w.focused ? '[focused] ' : ''}${parts.join(' · ')}`;
@@ -189,6 +233,9 @@ export class ComputerUseScreenshotTool extends Tool<z.infer<typeof ScreenshotArg
     if (args.path && !/\.(png|jpe?g)$/i.test(args.path.trim())) {
       return { content: `[COMPUTER_USE_ERROR] computer_use_screenshot path must end with .png, .jpg or .jpeg (got "${args.path}"). Omit it to use ~/.qodex/screenshots.`, isError: true };
     }
+    if (args.path && isProtectedQodexTarget(resolveUserPath(args.path.trim(), ctx.cwd))) {
+      return { content: '[COMPUTER_USE_BLOCKED] computer_use_screenshot: refusing to write into QodeX\'s browser-profile / vault files. Omit path to use ~/.qodex/screenshots.', isError: true };
+    }
     return runDesktopTool(this.name, ctx, async ({ backend, cfg }) => {
       const dest = args.path ? resolveUserPath(args.path.trim(), ctx.cwd) : defaultScreenshotPath('desktop');
       const { shot, mapping } = await captureScreenshot(backend, { dest, window: args.window, maxWidth: cfg.screenshotMaxWidth });
@@ -197,14 +244,15 @@ export class ComputerUseScreenshotTool extends Tool<z.infer<typeof ScreenshotArg
       const lines = [
         `Screenshot saved: ${shot.path}`,
         `  Size: ${shot.width}×${shot.height} px (${(sizeBytes / 1024).toFixed(1)} KB)`,
-        // Short title only: this result is not fenced as untrusted, and titles come from other apps.
-        shot.window ? `  Window: ${formatWindow(shot.window, 60)}` : '  Capture: full screen',
+        // Sanitized short title only: this result is not fenced as untrusted, and titles come from
+        // other apps (a browser window's title is the web page's <title>).
+        shot.window ? `  Window: ${formatWindow(shot.window, 60, true)}` : '  Capture: full screen',
         `  Coordinates: pass x,y ${COORD_HELP} to computer_use_click / move / drag / scroll${Math.abs(mapping.scale - 1) > 0.001 ? ` (scale ${mapping.scale.toFixed(3)} is applied automatically)` : ''}.`,
         ...shot.notes.map(n => `  Note: ${n}`),
         '',
         `Next: computer_use_locate {"description": "<the element>"} to get its coordinates, or vision_analyze {"image_path": "${shot.path}", "prompt": "..."} to read the screen.`,
       ];
-      publishDesktopAction(this.name, `screenshot${shot.window ? ` of "${shot.window.title || shot.window.app}"` : ''}`, { path: shot.path });
+      publishDesktopAction(this.name, `screenshot${shot.window ? ` of "${windowLabel(shot.window)}"` : ''}`, { path: shot.path });
       return {
         content: lines.join('\n'),
         metadata: { path: shot.path, width: shot.width, height: shot.height, scale: mapping.scale, origin: mapping.origin, backend: backend.name, window: shot.window?.title, sizeBytes },
@@ -221,6 +269,7 @@ const ClickArgs = z.object({
   y: z.number().describe(`Y ${COORD_HELP}.`),
   button: z.enum(['left', 'right', 'middle']).describe('Mouse button. Default left.').optional(),
   count: z.number().int().min(1).max(3).describe('1 = single, 2 = double, 3 = triple click. Default 1.').optional(),
+  element: z.string().describe('What you are clicking, e.g. "Send button" (shown for approval). Auto-filled from computer_use_locate.').optional(),
 });
 
 export class ComputerUseClickTool extends Tool<z.infer<typeof ClickArgs>> {
@@ -232,6 +281,28 @@ export class ComputerUseClickTool extends Tool<z.infer<typeof ClickArgs>> {
   isDestructive = true;
   argsSchema = ClickArgs;
 
+  /**
+   * Name the click target BEFORE validation (Sentinel reviews the parsed args):
+   * a point inside the element the last computer_use_locate found gets that
+   * element's description, so the approval prompt says WHAT is clicked
+   * ("Place order button"), not just coordinates.
+   */
+  coerceArgs(raw: unknown): unknown {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+    let r = raw as Record<string, unknown>;
+    if (typeof r.element === 'string' && r.element.trim()) return raw;
+    if ('element' in r && (r.element === null || r.element === '')) {
+      // Models often send null / "" for optional fields: drop it rather than fail validation.
+      const { element: _drop, ...rest } = r;
+      r = rest;
+    }
+    const x = Number(r.x);
+    const y = Number(r.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return r;
+    const element = describeDesktopPoint(x, y);
+    return element ? { ...r, element } : r;
+  }
+
   async execute(args: z.infer<typeof ClickArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runDesktopTool(this.name, ctx, async ({ backend }) => {
       const p = mapPoint(args.x, args.y);
@@ -240,10 +311,11 @@ export class ComputerUseClickTool extends Tool<z.infer<typeof ClickArgs>> {
       const count = args.count ?? 1;
       await backend.click(p.x, p.y, { button, count });
       const what = `${count === 2 ? 'Double-clicked' : count === 3 ? 'Triple-clicked' : 'Clicked'}${button !== 'left' ? ` (${button} button)` : ''}`;
-      publishDesktopAction(this.name, `${what} at ${Math.round(args.x)},${Math.round(args.y)}`);
+      const target = args.element?.trim() ? ` "${args.element.replace(/\s+/g, ' ').trim().slice(0, 120)}"` : '';
+      publishDesktopAction(this.name, `${what}${target} at ${Math.round(args.x)},${Math.round(args.y)}`);
       return {
-        content: `✓ ${what} at (${Math.round(args.x)}, ${Math.round(args.y)}) → screen (${p.x}, ${p.y})${mappingNote(p)}. Take computer_use_screenshot to verify.`,
-        metadata: { x: args.x, y: args.y, screenX: p.x, screenY: p.y, button, count },
+        content: `✓ ${what}${target} at (${Math.round(args.x)}, ${Math.round(args.y)}) → screen (${p.x}, ${p.y})${mappingNote(p)}. Take computer_use_screenshot to verify.`,
+        metadata: { x: args.x, y: args.y, screenX: p.x, screenY: p.y, button, count, ...(target ? { element: args.element } : {}) },
       };
     });
   }
@@ -269,9 +341,11 @@ export class ComputerUseTypeTool extends Tool<z.infer<typeof TypeArgs>> {
 
   async execute(args: z.infer<typeof TypeArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runDesktopTool(this.name, ctx, async ({ backend }) => {
-      const res = await backend.type(args.text, { method: args.method ?? 'auto' });
+      // CRLF / lone CR → one Enter each (xdotool/ydotool would press Return twice for "\r\n").
+      const text = args.text.replace(/\r\n?/g, '\n');
+      const res = await backend.type(text, { method: args.method ?? 'auto' });
       if (args.submit) await backend.key('enter');
-      const n = [...args.text].length;
+      const n = [...text].length;
       publishDesktopAction(this.name, `typed ${n} character(s)${args.submit ? ' + Enter' : ''}`, { method: res.method });
       return {
         content: `✓ Typed ${n} character(s)${res.method === 'paste' ? ' (pasted via the clipboard)' : ''}${args.submit ? ' and pressed Enter' : ''}. Take computer_use_screenshot to verify.`,
@@ -441,6 +515,10 @@ export class ComputerUseScrollTool extends Tool<z.infer<typeof ScrollArgs>> {
   argsSchema = ScrollArgs;
 
   async execute(args: z.infer<typeof ScrollArgs>, ctx: ToolContext): Promise<ToolResult> {
+    if ((args.x === undefined) !== (args.y === undefined)) {
+      // Silently scrolling under the pointer instead would scroll some other pane.
+      return { content: '[COMPUTER_USE_ERROR] computer_use_scroll: give both x and y (the point to scroll over), or neither to scroll under the pointer.', isError: true };
+    }
     return runDesktopTool(this.name, ctx, async ({ backend }) => {
       const n = args.amount ?? 5;
       const dx = args.direction === 'right' ? n : args.direction === 'left' ? -n : 0;
@@ -501,6 +579,24 @@ export class ComputerUseClipboardTool extends Tool<z.infer<typeof ClipboardArgs>
 // ─────────────────────────────────────────────────────────────────────────────
 // computer_use_open
 
+/** `host:port[/path]` — a URL without its scheme ("localhost:3000", "evil.example:8443/x"). */
+const HOST_PORT_RE = /^(localhost|\d{1,3}(\.\d{1,3}){3}|[a-z0-9-]+(\.[a-z0-9-]+)+):\d+([/?#]\S*)?$/i;
+
+/** Does an (already cwd-resolved) open target point at a protected QodeX file? */
+function protectedOpenTarget(target: string): boolean {
+  if (/^file:/i.test(target)) {
+    try {
+      let p = decodeURIComponent(new URL(target).pathname);
+      if (process.platform === 'win32' && /^\/[a-z]:/i.test(p)) p = p.slice(1);
+      return isProtectedQodexTarget(p);
+    } catch {
+      return /\.qodex/i.test(target);
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(target) && !/^[a-z]:[\\/]/i.test(target)) return false; // any other URL
+  return path.isAbsolute(target) && isProtectedQodexTarget(target);
+}
+
 const OpenArgs = z.object({
   target: z.string().min(1).describe('An app name ("Calculator", "Visual Studio Code", "firefox", "notepad"), a file/folder path (relative to the working dir or absolute), or a URL (opens in the default app/browser).'),
 });
@@ -514,6 +610,20 @@ export class ComputerUseOpenTool extends Tool<z.infer<typeof OpenArgs>> {
   isDestructive = true;
   argsSchema = OpenArgs;
 
+  /**
+   * Every backend opens "localhost:3000" / "host.example:8443/x" as an http://
+   * URL. Spell that out BEFORE validation so Sentinel — which reviews the parsed
+   * args — applies its URL policy (blocked/allowed domains, private network)
+   * instead of treating the target as a local app name.
+   */
+  coerceArgs(raw: unknown): unknown {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.target !== 'string') return raw;
+    const t = r.target.trim();
+    return HOST_PORT_RE.test(t) ? { ...r, target: `http://${t}` } : raw;
+  }
+
   async execute(args: z.infer<typeof OpenArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runDesktopTool(this.name, ctx, async ({ backend }) => {
       let target = args.target.trim();
@@ -521,6 +631,12 @@ export class ComputerUseOpenTool extends Tool<z.infer<typeof OpenArgs>> {
       if (!/^[a-z][a-z0-9+.-]*:/i.test(target) || /^[a-z]:[\\/]/i.test(target)) {
         const candidate = resolveUserPath(target, ctx.cwd);
         if (/^(~|\.{1,2})?[\\/]/.test(target) || existsSync(candidate)) target = candidate;
+      }
+      if (protectedOpenTarget(target)) {
+        return {
+          content: `[COMPUTER_USE_BLOCKED] Refusing to open ${args.target.trim()}: it is one of QodeX's own secret stores (vault, API keys, browser sessions), which must never be displayed or read.`,
+          isError: true,
+        };
       }
       const did = await backend.openApp(target);
       publishDesktopAction(this.name, did);
@@ -593,7 +709,7 @@ export class ComputerUseFocusWindowTool extends Tool<z.infer<typeof FocusArgs>> 
   async execute(args: z.infer<typeof FocusArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runDesktopTool(this.name, ctx, async ({ backend }) => {
       const w = await backend.focusWindow(args.query);
-      publishDesktopAction(this.name, `focused ${w.app || w.title}`);
+      publishDesktopAction(this.name, `focused ${windowLabel(w)}`);
       return { content: `✓ Focused ${formatWindow(w)}. Take computer_use_screenshot before clicking (window positions may have changed).`, metadata: { app: w.app, title: w.title } };
     });
   }

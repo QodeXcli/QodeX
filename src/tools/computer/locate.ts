@@ -11,14 +11,16 @@
  * Vision models are sloppy JSON writers, so the parser accepts: code fences,
  * prose around the object, single quotes, Python booleans, trailing commas,
  * unquoted keys, `bbox: [x1,y1,x2,y2]`, Gemini-style `box_2d: [ymin,xmin,ymax,
- * xmax]` normalized to 0-1000, `center: [x,y]`, and 0-1 fractions. Answers
- * that land outside the screenshot are rejected rather than clicked.
+ * xmax]` normalized to 0-1000, Qwen2.5-VL `bbox_2d` / `point_2d` (absolute
+ * pixels, usually inside a JSON array), Qwen2-VL `<|box_start|>(x1,y1),(x2,y2)`
+ * tokens (0-1000), `center: [x,y]`, and 0-1 fractions. Answers that land
+ * outside the screenshot are rejected rather than clicked.
  */
 
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
-import { captureScreenshot, defaultScreenshotPath } from './backends/index.js';
+import { captureScreenshot, defaultScreenshotPath, rememberLocated } from './backends/index.js';
 import { publishDesktopAction, runDesktopTool } from './use.js';
 
 export interface LocateBox {
@@ -96,7 +98,7 @@ function tryParse(s: string): Record<string, unknown> | null {
   return null;
 }
 
-const COORD_KEYS = ['found', 'x', 'y', 'bbox', 'box', 'box_2d', 'center', 'cx', 'cy', 'x1', 'left'];
+const COORD_KEYS = ['found', 'x', 'y', 'bbox', 'box', 'box_2d', 'bbox_2d', 'point_2d', 'point', 'center', 'cx', 'cy', 'x1', 'left'];
 
 function num(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -139,6 +141,11 @@ export function parseLocateResponse(raw: string, width: number, height: number):
   }
 
   if (!obj) {
+    // Qwen2-VL grounding tokens: <|box_start|>(x1,y1),(x2,y2)<|box_end|>, normalized to 0..1000.
+    const qb = text.match(/<\|?box(?:_start\|)?>\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)\s*,\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)/i);
+    if (qb) obj = { box_2d: [Number(qb[2]), Number(qb[1]), Number(qb[4]), Number(qb[3])] };
+  }
+  if (!obj) {
     // Last resort: "x: 120, y: 340" style prose, or an explicit "not found".
     const mx = text.match(/\bx\s*[:=]\s*(-?\d+(?:\.\d+)?)/i);
     const my = text.match(/\by\s*[:=]\s*(-?\d+(?:\.\d+)?)/i);
@@ -163,8 +170,9 @@ export function parseLocateResponse(raw: string, width: number, height: number):
   let cy: number | undefined;
 
   const box2d = numArray(obj.box_2d, 4);
-  const bbox = numArray(obj.bbox ?? obj.box ?? obj.bounding_box, 4);
-  const center = numArray(obj.center, 2);
+  // Qwen2.5-VL grounding: {"bbox_2d": [x1, y1, x2, y2]} / {"point_2d": [x, y]} in absolute image pixels.
+  const bbox = numArray(obj.bbox ?? obj.box ?? obj.bounding_box ?? obj.bbox_2d, 4);
+  const center = numArray(obj.center ?? obj.point_2d ?? obj.point, 2);
   if (box2d) {
     // Gemini: [ymin, xmin, ymax, xmax] normalized to 0..1000.
     const [y1, x1, y2, x2] = box2d as [number, number, number, number];
@@ -243,6 +251,20 @@ export function setLocateAnalyzer(fn: LocateAnalyzer | null): void {
   analyzer = fn ?? defaultAnalyzer;
 }
 
+/** `p`, or an `[ABORTED]` rejection as soon as `signal` fires (the abort listener is always removed). */
+function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new Error('[ABORTED] computer_use_locate was cancelled.'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('[ABORTED] computer_use_locate was cancelled.'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      v => { signal.removeEventListener('abort', onAbort); resolve(v); },
+      e => { signal.removeEventListener('abort', onAbort); reject(e); },
+    );
+  });
+}
+
 // ── tool ─────────────────────────────────────────────────────────────────────
 
 const LocateArgs = z.object({
@@ -266,7 +288,9 @@ export class ComputerUseLocateTool extends Tool<z.infer<typeof LocateArgs>> {
     return runDesktopTool(this.name, ctx, async ({ backend, cfg }) => {
       const { shot } = await captureScreenshot(backend, { dest: defaultScreenshotPath('locate'), window: args.window, maxWidth: cfg.screenshotMaxWidth });
       ctx.emit({ type: 'progress', message: `Locating "${args.description}" on screen…` });
-      const answer = await analyzer(shot.path, buildLocatePrompt(args.description, shot.width, shot.height), ctx);
+      // vision_analyze doesn't take a signal and a local VL model can take minutes:
+      // stop waiting as soon as the call is cancelled.
+      const answer = await untilAborted(analyzer(shot.path, buildLocatePrompt(args.description, shot.width, shot.height), ctx), ctx.signal);
       if (answer.isError) {
         const t = answer.text.trim();
         return {
@@ -291,6 +315,7 @@ export class ComputerUseLocateTool extends Tool<z.infer<typeof LocateArgs>> {
           metadata: { found: false, path: shot.path },
         };
       }
+      rememberLocated({ description: args.description, x: res.x!, y: res.y!, box: res.box });
       publishDesktopAction(this.name, `located "${args.description.slice(0, 80)}" at ${res.x},${res.y}`);
       const conf = res.confidence !== undefined ? `, confidence ${res.confidence.toFixed(2)}` : '';
       const lowConf = res.confidence !== undefined && res.confidence < 0.4

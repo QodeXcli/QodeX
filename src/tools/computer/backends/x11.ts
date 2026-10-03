@@ -9,8 +9,13 @@
  *   open        xdg-open (URLs/files), gtk-launch / .desktop entries / PATH (apps)
  *
  * X11 screenshots and xdotool share one pixel space, so scale is 1 unless the
- * image was downscaled. `xdotool type` handles UTF-8 (Persian etc.) only under
- * a UTF-8 locale, so we force one; if typing still fails we paste instead.
+ * image was downscaled. Text: `xdotool type` needs a UTF-8 locale (forced), and
+ * even then characters missing from the keyboard layout (Persian on a US
+ * layout) are typed by remapping a spare keycode per character, which races
+ * with the app reading the keymap — verified under Xvfb + Chromium: wrong
+ * letters ("سلسم سنیا" for "سلام دنیا") with exit code 0, at any --delay. So
+ * method 'auto' pastes non-ASCII text through the clipboard (like the other
+ * backends) and types only ASCII; method 'type' still forces key events.
  *
  * Also exports the Linux helpers (app launching, .desktop lookup, process
  * names) that the Wayland backend reuses.
@@ -40,6 +45,7 @@ import {
   parseKeyCombo,
   pickWindow,
   readImageSize,
+  windowLabel,
   windowMatches,
   windowNotFound,
   type PackageNames,
@@ -324,12 +330,12 @@ export class X11Backend extends CommandBackend implements DesktopBackend {
           await this.check(scaler, [dest, '-crop', `${int(b.width)}x${int(b.height)}+${int(b.x)}+${int(b.y)}`, '+repage', dest], { timeoutMs: 20_000 });
         } else {
           origin = { x: 0, y: 0 };
-          notes.push(`Captured the full screen: cropping to "${win.title}" needs ImageMagick (${installHint(this.deps, ['imagemagick'])}).`);
+          notes.push(`Captured the full screen: cropping to "${windowLabel(win)}" needs ImageMagick (${installHint(this.deps, ['imagemagick'])}).`);
         }
         captured = true;
       } else {
         origin = { x: 0, y: 0 };
-        notes.push(`Window "${win.title}" has no known geometry; captured the full screen.`);
+        notes.push(`Window "${windowLabel(win)}" has no known geometry; captured the full screen.`);
       }
     }
     if (!captured) await this.captureFull(dest);
@@ -409,21 +415,22 @@ export class X11Backend extends CommandBackend implements DesktopBackend {
 
   async type(text: string, opts: TypeOptions = {}): Promise<{ method: 'type' | 'paste' }> {
     const method = opts.method ?? 'auto';
-    if (method === 'paste') {
+    // Non-ASCII via xdotool silently types wrong letters (see header): paste it when we can.
+    if (method === 'paste' || (method === 'auto' && hasNonAscii(text) && (await firstAvailable(X11_CLIPBOARD_TOOLS)))) {
       await this.pasteText(text, () => this.key('ctrl+v'));
       return { method: 'paste' };
     }
     const delay = Math.max(1, Math.min(this.inputDelay, 25));
-    const r = await this.run('xdotool', ['type', '--delay', String(delay), '--clearmodifiers', '--', text], {
-      env: utf8Env(this.deps.env),
-      timeoutMs: 15_000 + text.length * (delay + 15),
-    });
-    if (r.code === 0) return { method: 'type' };
-    if (method === 'auto' && hasNonAscii(text) && (await firstAvailable(X11_CLIPBOARD_TOOLS))) {
-      await this.pasteText(text, () => this.key('ctrl+v'));
-      return { method: 'paste' };
+    const runOpts = { env: utf8Env(this.deps.env), timeoutMs: 15_000 + text.length * (delay + 15) };
+    // The text goes on stdin (`--file -`), never argv: a typed password must not show up
+    // in `ps` / /proc/<pid>/cmdline, which other local users can read.
+    let r = await this.run('xdotool', ['type', '--delay', String(delay), '--clearmodifiers', '--file', '-'], { ...runOpts, stdin: text });
+    if (r.code !== 0 && r.code !== 130 && !r.timedOut && /unrecognized option|invalid option|unknown option|usage:/i.test(`${r.stderr}\n${r.stdout}`)) {
+      // xdotool too old for --file: fall back to the argument form.
+      r = await this.run('xdotool', ['type', '--delay', String(delay), '--clearmodifiers', '--', text], runOpts);
     }
-    if (r.code === 130) throw desktopError('ABORTED', 'x11: typing aborted.');
+    if (r.code === 0) return { method: 'type' };
+    if (r.code === 130 || this.deps.signal?.aborted) throw desktopError('ABORTED', 'x11: typing aborted.');
     throw desktopError('COMPUTER_USE_ERROR', `x11: xdotool type exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
   }
 
@@ -497,7 +504,7 @@ export class X11Backend extends CommandBackend implements DesktopBackend {
     const r = await this.run('xdotool', ['windowactivate', w.id!], { timeoutMs: 5000 });
     if (r.code !== 0) {
       if (await which('wmctrl')) await this.check('wmctrl', ['-i', '-a', `0x${Number(w.id).toString(16)}`], { timeoutMs: 5000 });
-      else throw desktopError('COMPUTER_USE_ERROR', `x11: couldn't activate "${w.title}": ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+      else throw desktopError('COMPUTER_USE_ERROR', `x11: couldn't activate "${windowLabel(w)}": ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
     }
     return { ...w, focused: true };
   }

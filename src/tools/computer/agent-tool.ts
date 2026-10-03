@@ -61,6 +61,7 @@ export class ComputerUseAgentTool extends Tool<z.infer<typeof AgentArgs>> {
   argsSchema = AgentArgs;
 
   async execute(args: z.infer<typeof AgentArgs>, ctx: ToolContext): Promise<ToolResult> {
+    if (ctx.signal?.aborted) return { content: `[ABORTED] ${this.name} was cancelled.`, isError: true };
     const desktop = await openDesktop(ctx);
     if ('content' in desktop) return desktop;
 
@@ -83,7 +84,15 @@ export class ComputerUseAgentTool extends Tool<z.infer<typeof AgentArgs>> {
     const start = Date.now();
     let result: Awaited<ReturnType<typeof runner>>;
     try {
-      result = await runner(prompt, { maxIterations, signal: ctx.signal, sessionId, role: 'computer' });
+      result = await runner(prompt, {
+        maxIterations,
+        signal: ctx.signal,
+        sessionId,
+        role: 'computer',
+        // The sub-agent's Sentinel / permission prompts must reach the human (or remote
+        // channel) that is answering THIS call — not whatever run last used the runner's agent.
+        askUser: typeof ctx.askUser === 'function' ? ctx.askUser : undefined,
+      });
     } catch (e: any) {
       return { content: `[COMPUTER_AGENT_FAILED] The desktop sub-agent crashed: ${e?.message ?? e}`, isError: true, metadata: { sessionId } };
     }

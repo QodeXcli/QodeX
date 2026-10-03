@@ -19,6 +19,7 @@
 
 import { promises as fs } from 'fs';
 import { runCommand, describeFailure, type ExecOptions, type ExecResult } from '../exec.js';
+import { scanInjection } from '../../../sentinel/injection.js';
 
 export type DesktopBackendName = 'macos' | 'x11' | 'wayland' | 'windows';
 export type MouseButton = 'left' | 'right' | 'middle';
@@ -289,9 +290,35 @@ export function pickWindow(windows: WindowInfo[], query: string): WindowInfo | u
   return undefined;
 }
 
-/** "[WINDOW_NOT_FOUND] ..." with a short list of what IS open. */
+/** Control chars, bidi overrides/isolates, zero-width space, BOM and Unicode tag characters. (ZWNJ/ZWJ/LRM/RLM stay: Persian and emoji need them.) */
+const UNSAFE_TITLE_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u200b\u202a-\u202e\u2066-\u2069\ufeff]|[\u{E0000}-\u{E007F}]/gu;
+
+/**
+ * A window title / app name that is safe to echo in tool output Sentinel does
+ * NOT fence (screenshot results, coordinate errors, screen_info, window-not-
+ * found lists). Titles are attacker-controlled — a browser window's title is
+ * the web page's <title> — so: invisible/bidi characters are stripped, the
+ * text is truncated to `max`, and a title that reads like instructions is
+ * withheld entirely. PURE.
+ */
+export function safeTitle(title: string | undefined, max = 60): string {
+  const t = String(title ?? '').replace(UNSAFE_TITLE_CHARS_RE, '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  if (scanInjection(String(title ?? '')).length || scanInjection(t).length) return '[title withheld: it reads like instructions]';
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/** Short "app: title" label for a window, built from safeTitle(). PURE. */
+export function windowLabel(w: Pick<WindowInfo, 'app' | 'title'>, maxTitle = 50): string {
+  const app = safeTitle(w.app, 40);
+  const title = safeTitle(w.title, maxTitle);
+  if (app && title) return `${app}: ${title}`;
+  return app || title || '(untitled)';
+}
+
+/** "[WINDOW_NOT_FOUND] ..." with a short list of what IS open (titles sanitized: this error is not always fenced). */
 export function windowNotFound(query: string, windows: WindowInfo[]): Error {
-  const list = windows.slice(0, 15).map(w => `${w.app ? `${w.app}: ` : ''}${w.title || '(untitled)'}`).join(' · ');
+  const list = windows.slice(0, 15).map(w => windowLabel(w, 60)).join(' · ');
   return desktopError('WINDOW_NOT_FOUND', `No window matches "${query}".${list ? ` Open windows: ${list}` : ' No windows were reported.'}`);
 }
 
@@ -412,13 +439,27 @@ export function linuxInstallHint(pkgs: PackageNames[], osRelease: string | undef
  */
 export abstract class CommandBackend {
   abstract readonly name: DesktopBackendName;
+  /** True while running cleanup that must happen even after the call was aborted (clipboard restore). */
+  private ignoreAbort = false;
   constructor(protected readonly deps: BackendDeps) {}
 
   abstract clipboardGet(): Promise<string>;
   abstract clipboardSet(text: string): Promise<void>;
 
   protected run(cmd: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
-    return runCommand(cmd, args, { signal: this.deps.signal, ...opts });
+    return runCommand(cmd, args, { signal: this.ignoreAbort ? undefined : this.deps.signal, ...opts });
+  }
+
+  /** Throw `[ABORTED]` when the tool call was cancelled. */
+  protected throwIfAborted(): void {
+    if (this.deps.signal?.aborted) throw desktopError('ABORTED', `${this.name}: desktop action aborted.`);
+  }
+
+  /** Run `fn` with commands detached from the (possibly aborted) call signal — for must-run cleanup. */
+  protected async evenIfAborted<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.ignoreAbort;
+    this.ignoreAbort = true;
+    try { return await fn(); } finally { this.ignoreAbort = prev; }
   }
 
   /** Run and throw a `[CODE]` error on failure; returns stdout. */
@@ -448,18 +489,29 @@ export abstract class CommandBackend {
    * Type via the clipboard: remember the current clipboard, put `text` on it,
    * press the platform's paste shortcut, give the app time to read it, then
    * restore the previous contents (best-effort).
+   *
+   * The restore runs in a `finally`, detached from the call's AbortSignal: the
+   * typed text may be a password, and a cancelled or failed paste must not
+   * leave it on the clipboard (where every app and clipboard manager can read
+   * it). When the old contents couldn't be read, the clipboard is cleared.
    */
   protected async pasteText(text: string, pressPaste: () => Promise<void>): Promise<void> {
+    this.throwIfAborted();
     let previous: string | null = null;
     try { previous = await this.clipboardGet(); } catch { previous = null; }
-    await this.clipboardSet(text);
-    await this.wait(60);
-    await pressPaste();
-    // Apps read the clipboard asynchronously after the paste key; restoring too
-    // early would paste the OLD contents.
-    await this.wait(350);
-    if (previous !== null && previous !== text) {
-      try { await this.clipboardSet(previous); } catch { /* best-effort */ }
+    // Cancelled while reading: nothing has been changed yet, so there is nothing to restore.
+    this.throwIfAborted();
+    try {
+      await this.clipboardSet(text);
+      await this.wait(60);
+      await pressPaste();
+      // Apps read the clipboard asynchronously after the paste key; restoring too
+      // early would paste the OLD contents.
+      await this.wait(350);
+    } finally {
+      if (previous !== text) {
+        await this.evenIfAborted(() => this.clipboardSet(previous ?? '')).catch(() => { /* best-effort */ });
+      }
     }
   }
 }
