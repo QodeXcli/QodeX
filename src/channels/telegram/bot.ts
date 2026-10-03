@@ -747,7 +747,7 @@ export class TelegramBot {
     for (const a of missionPending) {
       if (seen.has(a.id)) continue;
       seen.add(a.id);
-      const entry = this.delivered.get(a.id) ?? this.createEntry(a.id, 'mission', missionCard(a), a.options);
+      const entry = this.delivered.get(a.id) ?? this.createEntry(a.id, 'mission', missionCard(a), missionOptions(a));
       await this.deliverTo(entry, [chat]);
     }
   }
@@ -851,7 +851,7 @@ export class TelegramBot {
     if (this.missions && !this.handledMission.has(id)) {
       try {
         const a = (await this.missions.pendingApprovals()).find((x) => x.id === id);
-        if (a) return { source: 'mission', options: a.options, card: missionCard(a) };
+        if (a) return { source: 'mission', options: missionOptions(a), card: missionCard(a) };
       } catch { /* treat as unknown */ }
     }
     return null;
@@ -1064,7 +1064,7 @@ export class TelegramBot {
           // Re-check after the awaits: the broker may have delivered the same id meanwhile
           // (an in-process mission mirrors its broker approval into the DB).
           if (this.delivered.has(a.id) || this.handledMission.has(a.id) || this.answering.has(a.id)) continue;
-          const entry = this.createEntry(a.id, 'mission', missionCard(a), a.options);
+          const entry = this.createEntry(a.id, 'mission', missionCard(a), missionOptions(a));
           await this.deliverTo(entry, chats);
           if (!entry.messages.length) this.delivered.delete(a.id); // retry next tick
         }
@@ -1231,8 +1231,14 @@ function brokerCard(p: PendingApproval): F.ApprovalCardInput {
   return { id: p.id, prompt: p.prompt, options: p.options, category: p.category, risk: p.risk, source: p.source, missionId };
 }
 
+/** A mission approval row without usable options gets the broker's default ['yes','no'] (never an empty keyboard). */
+function missionOptions(a: TelegramMissionApproval): string[] {
+  const opts = Array.isArray(a.options) ? a.options.filter((o) => typeof o === 'string' && o.trim() !== '') : [];
+  return opts.length ? opts : ['yes', 'no'];
+}
+
 function missionCard(a: TelegramMissionApproval): F.ApprovalCardInput {
-  return { id: a.id, prompt: a.prompt, options: a.options, category: a.category, risk: a.risk, missionId: a.missionId };
+  return { id: a.id, prompt: a.prompt, options: missionOptions(a), category: a.category, risk: a.risk, missionId: a.missionId };
 }
 
 function describeChat(c: Pick<PairedChat, 'chatId' | 'username'>): string {
