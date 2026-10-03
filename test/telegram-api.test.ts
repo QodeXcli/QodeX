@@ -199,7 +199,7 @@ describe('errors and token redaction', () => {
     expect(redactToken(`see https://api.telegram.org/bot${TOKEN}/getMe`)).toBe('see https://api.telegram.org/bot<redacted>/getMe');
     expect(redactToken(`token=${TOKEN}`, TOKEN)).toBe('token=<redacted>');
     expect(redactToken('nothing secret 12:34')).toBe('nothing secret 12:34');
-    expect(maskToken(TOKEN)).toBe('123456789:AA…(redacted)');
+    expect(maskToken(TOKEN)).toBe('123456789:…(redacted)');
     expect(maskToken(TOKEN)).not.toContain('dqTc');
     expect(maskToken('')).toBe('(not set)');
     expect(looksLikeBotToken(TOKEN)).toBe(true);

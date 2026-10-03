@@ -102,7 +102,8 @@ export function maskToken(token: string): string {
   if (!t) return '(not set)';
   const colon = t.indexOf(':');
   if (colon <= 0) return '***(redacted)';
-  return `${t.slice(0, colon)}:${t.slice(colon + 1, colon + 3)}…(redacted)`;
+  // Only the bot id (public, it's in the bot's t.me profile); no character of the secret part.
+  return `${t.slice(0, colon)}:…(redacted)`;
 }
 
 /** Loose syntactic check of a BotFather token: `<digits>:<35-ish url-safe chars>`. */

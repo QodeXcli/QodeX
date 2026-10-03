@@ -136,7 +136,7 @@ describe('qodex telegram pair / status / unpair', () => {
     const h = harness();
     await h.run('status');
     const text = h.all();
-    expect(text).toContain('123456789:AA…(redacted)');
+    expect(text).toContain('123456789:…(redacted)');
     expect(text).not.toContain(TOKEN);
     expect(text).toContain('Bot:      @qx_test_bot');
     expect(text).toContain('Paired:   1 chat(s)');
@@ -215,7 +215,7 @@ describe('/telegram slash command', () => {
     const base = { config: {}, env: { TELEGRAM_BOT_TOKEN: TOKEN }, pairingFile, fetch: longPoll };
 
     const st = await telegramSlashCommand('', base);
-    expect(st).toContain('123456789:AA…(redacted)');
+    expect(st).toContain('123456789:…(redacted)');
     expect(st).toContain('not running');
     expect(st).not.toContain(TOKEN);
 
