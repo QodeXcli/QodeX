@@ -74,6 +74,28 @@ describe('InMemoryMailTransport', () => {
   });
 });
 
+describe('InMemoryMailTransport watch support', () => {
+  it('status counts and waitForNew wakes on delivery, times out, aborts and ends on close', async () => {
+    const t = new InMemoryMailTransport();
+    t.deliver({ from: 'a@x.org', subject: 'old', flags: ['\\Seen'] });
+    expect(await t.status('inbox')).toEqual({ folder: 'INBOX', messages: 1, unseen: 0, uidNext: 2, uidValidity: '1' });
+    const waiting = t.waitForNew('INBOX', { timeoutMs: 5000 });
+    t.deliver({ from: 'b@x.org', subject: 'new' });
+    expect(await waiting).toEqual({ changed: true, reason: 'exists' });
+    expect((await t.list({ sinceUid: 1 })).map(m => m.subject)).toEqual(['new']);
+    expect(await t.waitForNew('INBOX', { timeoutMs: 10 })).toEqual({ changed: false, reason: 'timeout' });
+    const ac = new AbortController();
+    const aborted = t.waitForNew('INBOX', { signal: ac.signal });
+    ac.abort();
+    expect(await aborted).toEqual({ changed: false, reason: 'abort' });
+    const other = t.waitForNew('Archive', { timeoutMs: 5000 });
+    t.deliver({ from: 'c@x.org' }); // INBOX, not Archive
+    const closing = t.close();
+    expect(await other).toEqual({ changed: false, reason: 'closed' });
+    await closing;
+  });
+});
+
 describe('DraftStore', () => {
   it('creates immutable signed drafts with a pre-assigned Message-ID', async () => {
     const d = await drafts.create(baseDraft());

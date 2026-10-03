@@ -116,6 +116,22 @@ export interface TransportCheck {
   smtp: { ok: boolean; error?: string };
 }
 
+/** A folder's counters (watchers persist uidValidity + the last seen UID). */
+export interface FolderStatus {
+  folder: string;
+  messages: number;
+  unseen: number;
+  uidNext: number;
+  /** Changes when the server renumbers the folder: forget the last seen UID then. */
+  uidValidity: string;
+}
+
+export interface WaitResult {
+  /** New mail arrived (EXISTS grew). */
+  changed: boolean;
+  reason: 'exists' | 'timeout' | 'abort' | 'closed';
+}
+
 export interface MailTransport {
   /** Account name this transport serves. */
   readonly account: string;
@@ -137,6 +153,13 @@ export interface MailTransport {
   folders(): Promise<FolderInfo[]>;
   /** Log in to IMAP and SMTP without changing anything. */
   test(): Promise<TransportCheck>;
+  /** Counters for a folder (watchers). Optional: a transport without it is polled with list(). */
+  status?(folder: string): Promise<FolderStatus>;
+  /**
+   * Wait until new mail arrives in `folder` (IMAP IDLE on a dedicated connection, NOOP
+   * polling where the server has no IDLE), a timeout, or an abort. Optional.
+   */
+  waitForNew?(folder: string, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<WaitResult>;
   close(): Promise<void>;
 }
 

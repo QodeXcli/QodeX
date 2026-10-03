@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createRequire } from 'module';
+import { EventEmitter } from 'events';
 import type { AddressInfo } from 'net';
 import { ImapSmtpTransport, hasAttachmentPart, htmlToText } from '../src/mail/imap-smtp.js';
 import type { MailAccountSummary } from '../src/mail/accounts.js';
@@ -267,5 +268,45 @@ describe('IMAP mapping (imapflow double + real mailparser)', () => {
     expect(htmlToText('<style>x{}</style><p>a&amp;b</p><br>c')).toBe('a&b\n\nc');
     expect(hasAttachmentPart({ childNodes: [{ childNodes: [{ disposition: 'ATTACHMENT' }] }] })).toBe(true);
     expect(hasAttachmentPart({ childNodes: [{ disposition: 'inline' }] })).toBe(false);
+  });
+});
+
+describe('IMAP watch support (IDLE on its own connection)', () => {
+  function watchModule(log: string[]) {
+    const clients: any[] = [];
+    class W extends EventEmitter {
+      usable = false;
+      constructor(public options: any) { super(); clients.push(this); log.push(`new idleFallback=${options.missingIdleCommand ?? '-'}`); }
+      async connect() { this.usable = true; }
+      async list() { return [{ path: 'INBOX', specialUse: '\\Inbox', flags: new Set() }]; }
+      async status(p: string) { log.push(`status ${p}`); return { path: p, messages: 3, unseen: 1, uidNext: 10, uidValidity: 777n }; }
+      async getMailboxLock(p: string) { log.push(`lock ${p}`); return { release: () => log.push('release') }; }
+      idle() { log.push('idle'); return new Promise(() => {}); }
+      async logout() { log.push('logout'); this.emit('close'); }
+      close() { log.push('close'); }
+    }
+    return { loader: async () => ({ ImapFlow: W }), clients };
+  }
+
+  it('status maps counters; waitForNew resolves on a growing EXISTS and logs out', async () => {
+    const log: string[] = [];
+    const m = watchModule(log);
+    const t = new ImapSmtpTransport({ account: account(), secret: { password: PASS }, loaders: { imapflow: m.loader } });
+    expect(await t.status('inbox')).toEqual({ folder: 'INBOX', messages: 3, unseen: 1, uidNext: 10, uidValidity: '777' });
+    const p = t.waitForNew('INBOX', { timeoutMs: 5000 });
+    await new Promise(r => setTimeout(r, 20));
+    const idleClient = m.clients[m.clients.length - 1];
+    expect(idleClient).not.toBe(m.clients[0]); // a dedicated connection
+    idleClient.emit('exists', { path: 'INBOX', count: 3, prevCount: 3 }); // not growing: ignored
+    idleClient.emit('exists', { path: 'INBOX', count: 4, prevCount: 3 });
+    expect(await p).toEqual({ changed: true, reason: 'exists' });
+    expect(log).toContain('new idleFallback=NOOP');
+    expect(log).toContain('idle');
+    expect(log[log.length - 1]).toBe('logout');
+    expect(await t.waitForNew('INBOX', { timeoutMs: 10 })).toEqual({ changed: false, reason: 'timeout' });
+    const ac = new AbortController();
+    ac.abort();
+    expect(await t.waitForNew('INBOX', { signal: ac.signal })).toEqual({ changed: false, reason: 'abort' });
+    await t.close();
   });
 });

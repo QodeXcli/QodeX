@@ -21,7 +21,8 @@ import { safeErrorMessage, scrubSecrets } from './secrets.js';
 import {
   asSpecialFolder, makeMessageId, parseMessageId,
   type AppendResult, type FolderInfo, type ListQuery, type MailAddress, type MailAttachmentData, type MailMessage,
-  type MailSummary, type MailTransport, type OutgoingMail, type SendResult, type SpecialFolder, type TransportCheck,
+  type FolderStatus, type MailSummary, type MailTransport, type OutgoingMail, type SendResult, type SpecialFolder, type TransportCheck,
+  type WaitResult,
 } from './types.js';
 
 export interface ImapSmtpOptions {
@@ -472,6 +473,68 @@ export class ImapSmtpTransport implements MailTransport {
       try { transporter?.close?.(); } catch { /* ignore */ }
     }
     return out;
+  }
+
+  async status(folder: string): Promise<FolderStatus> {
+    const path = await this.resolveFolder(folder || 'inbox');
+    const c = await this.imap();
+    try {
+      const st = await c.status(path, { messages: true, unseen: true, uidNext: true, uidValidity: true });
+      return {
+        folder: path, messages: Number(st?.messages ?? 0), unseen: Number(st?.unseen ?? 0),
+        uidNext: Number(st?.uidNext ?? 0), uidValidity: String(st?.uidValidity ?? ''),
+      };
+    } catch (e) {
+      throw this.fail('IMAP', e);
+    }
+  }
+
+  /**
+   * IMAP IDLE on a dedicated connection (the shared one stays free for list / fetch):
+   * resolves on the first EXISTS that grows the folder, on timeout, or on abort. Servers
+   * without IDLE get imapflow's NOOP polling. Default timeout 25 min (servers drop IDLE ~29).
+   */
+  async waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<WaitResult> {
+    if (opts.signal?.aborted) return { changed: false, reason: 'abort' };
+    const path = await this.resolveFolder(folder || 'inbox');
+    const mod = await (this.opts.loaders?.imapflow ?? loadImapFlow)();
+    const ImapFlow = pick(mod, 'ImapFlow') ?? pick(mod, 'default');
+    const c = new ImapFlow({ ...this.imapOptions(), missingIdleCommand: 'NOOP' });
+    c.on?.('error', () => { /* ends the wait below */ });
+    try {
+      await c.connect();
+    } catch (e) {
+      try { c.close?.(); } catch { /* ignore */ }
+      throw this.fail('IMAP', e);
+    }
+    let lock: any;
+    try {
+      lock = await c.getMailboxLock(path, { readOnly: true });
+      return await new Promise<WaitResult>((resolve) => {
+        let done = false;
+        const finish = (r: WaitResult) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          c.off?.('exists', onExists);
+          c.off?.('close', onClose);
+          resolve(r);
+        };
+        const onExists = (ev: any) => { if (Number(ev?.count ?? 0) > Number(ev?.prevCount ?? 0)) finish({ changed: true, reason: 'exists' }); };
+        const onClose = () => finish({ changed: false, reason: 'closed' });
+        const timer = setTimeout(() => finish({ changed: false, reason: 'timeout' }), opts.timeoutMs ?? 25 * 60_000);
+        timer.unref?.();
+        c.on?.('exists', onExists);
+        c.on?.('close', onClose);
+        opts.signal?.addEventListener('abort', () => finish({ changed: false, reason: 'abort' }), { once: true });
+        Promise.resolve(c.idle?.()).catch(() => finish({ changed: false, reason: 'closed' }));
+      });
+    } catch (e) {
+      throw this.fail('IMAP', e);
+    } finally {
+      try { lock?.release(); } catch { /* ignore */ }
+      try { await c.logout(); } catch { try { c.close?.(); } catch { /* ignore */ } }
+    }
   }
 
   async close(): Promise<void> {

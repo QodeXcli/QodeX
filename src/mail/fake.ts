@@ -8,7 +8,8 @@ import { randomBytes } from 'crypto';
 import {
   asSpecialFolder, makeMessageId, parseMessageId,
   type AppendResult, type FolderInfo, type ListQuery, type MailAddress, type MailAttachmentData, type MailMessage,
-  type MailSummary, type MailTransport, type OutgoingMail, type SendResult, type SpecialFolder, type TransportCheck,
+  type FolderStatus, type MailSummary, type MailTransport, type OutgoingMail, type SendResult, type SpecialFolder, type TransportCheck,
+  type WaitResult,
 } from './types.js';
 
 export interface FakeMessageInput {
@@ -54,6 +55,9 @@ export interface FakeTransportOptions {
 export class InMemoryMailTransport implements MailTransport {
   readonly account: string;
   private boxes = new Map<string, { nextUid: number; messages: StoredMessage[] }>();
+  private waiters: Array<{ folder: string; wake: (r?: WaitResult) => void }> = [];
+  /** UIDVALIDITY of every folder (tests may change it to simulate a renumbering). */
+  uidValidity = '1';
   /** Everything send() accepted, in order. */
   readonly sent: OutgoingMail[] = [];
   /** Drafts appended to the server. */
@@ -123,7 +127,42 @@ export class InMemoryMailTransport implements MailTransport {
       headers: input.headers ? { ...input.headers } : undefined,
     };
     b.messages.push({ uid, msg, data: attachments.map(a => a.data) });
-    return makeMessageId(this.resolveFolderName(folder), uid);
+    const name = this.resolveFolderName(folder);
+    const woken = this.waiters.filter(w => w.folder.toLowerCase() === name.toLowerCase());
+    this.waiters = this.waiters.filter(w => !woken.includes(w));
+    for (const w of woken) w.wake();
+    return makeMessageId(name, uid);
+  }
+
+  async status(folder: string): Promise<FolderStatus> {
+    this.check();
+    const name = this.resolveFolder(folder);
+    const b = this.box(name);
+    return {
+      folder: name, messages: b.messages.length, unseen: b.messages.filter(m => !m.msg.flags.includes('\\Seen')).length,
+      uidNext: b.nextUid, uidValidity: this.uidValidity,
+    };
+  }
+
+  waitForNew(folder: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<WaitResult> {
+    this.check();
+    const name = this.resolveFolder(folder);
+    return new Promise<WaitResult>((resolve) => {
+      let done = false;
+      const finish = (r: WaitResult) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this.waiters = this.waiters.filter(w => w !== waiter);
+        resolve(r);
+      };
+      const waiter = { folder: name, wake: (r?: WaitResult) => finish(r ?? { changed: true, reason: 'exists' }) };
+      const timer = setTimeout(() => finish({ changed: false, reason: 'timeout' }), opts.timeoutMs ?? 60_000);
+      timer.unref?.();
+      if (opts.signal?.aborted) { finish({ changed: false, reason: 'abort' }); return; }
+      opts.signal?.addEventListener('abort', () => finish({ changed: false, reason: 'abort' }), { once: true });
+      this.waiters.push(waiter);
+    });
   }
 
   private resolveFolderName(folder: string): string {
@@ -276,5 +315,8 @@ export class InMemoryMailTransport implements MailTransport {
 
   async close(): Promise<void> {
     this.closed = true;
+    const waiting = this.waiters;
+    this.waiters = [];
+    for (const w of waiting) w.wake({ changed: false, reason: 'closed' });
   }
 }

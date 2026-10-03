@@ -15,7 +15,7 @@ export {
   makeMessageId, parseMessageId, formatAddress, formatAddresses, asSpecialFolder,
   type MailTransport, type MailSummary, type MailMessage, type MailAddress, type MailAttachmentInfo, type MailAttachmentData,
   type ListQuery, type OutgoingMail, type OutgoingAttachment, type SendResult, type AppendResult, type FolderInfo,
-  type SpecialFolder, type TransportCheck,
+  type SpecialFolder, type TransportCheck, type FolderStatus, type WaitResult,
 } from './types.js';
 export { InMemoryMailTransport, type FakeMessageInput, type FakeTransportOptions } from './fake.js';
 export { ImapSmtpTransport, type ImapSmtpOptions } from './imap-smtp.js';
