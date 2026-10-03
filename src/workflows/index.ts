@@ -6,8 +6,9 @@
  * Integration surface:
  *   - WORKFLOW_TOOL_CLASSES  → register in the tool registry (`new C()` each)
  *   - buildWorkflowCommand() → `program.addCommand(buildWorkflowCommand())`
- *   - setWorkflowGuard / setWorkflowSecretFiller → optional explicit wiring of
- *     Sentinel / the vault (both are auto-detected when those modules exist)
+ *   - setWorkflowGuard / setWorkflowSecretFiller → explicit wiring of the guard /
+ *     the vault (defaults: Sentinel — fail closed — and the vault's
+ *     browser_fill_secret)
  */
 
 export * from './types.js';
@@ -30,6 +31,8 @@ export {
   canonicalAction,
   captureScript,
   captureToRecord,
+  captureTag,
+  parameterizeUrl,
   targetKey,
   CAPTURE_BINDING,
   type RawRecord,
@@ -65,6 +68,7 @@ export {
   writeWorkflowSkill,
   removeWorkflowSkill,
   deriveTriggers,
+  workflowInjectionFindings,
   workflowSkillName,
   getWorkflowSkillsDir,
   setWorkflowSkillsDirForTests,

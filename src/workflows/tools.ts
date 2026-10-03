@@ -224,6 +224,8 @@ export class WorkflowShowTool extends Tool<z.infer<typeof ShowArgs>> {
   description = 'Show one saved workflow: description, parameters (with recorded examples; secrets never shown), numbered steps with their selectors, and its file/skill.';
   isReadOnly = true;
   isDestructive = false;
+  /** Step labels, notes and examples were captured from web pages: Sentinel fences them as data. */
+  untrustedOutput = true;
   argsSchema = ShowArgs;
 
   async execute(args: z.infer<typeof ShowArgs>, _ctx: ToolContext): Promise<ToolResult> {
@@ -310,6 +312,7 @@ export class WorkflowRunTool extends Tool<z.infer<typeof RunArgs>> {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
     const r = { ...(raw as Record<string, unknown>) };
     let p = r.params;
+    if (p === null) { delete r.params; return r; }
     if (typeof p === 'string') {
       try { p = JSON.parse(p); } catch { /* leave for validation */ }
     }

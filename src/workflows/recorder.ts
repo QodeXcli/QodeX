@@ -24,11 +24,13 @@
  *
  * Security: the binding is reachable from page scripts, so every capture call
  * carries a per-recording random nonce held in the capture script's closure (a
- * page can't read it), and payloads are validated and size-capped in Node.
- * One recording per process.
+ * page can't read it — window property names use a one-way tag, never the
+ * nonce), only trusted (user / browser generated) events count, input inside a
+ * cross-origin iframe is ignored, and payloads are validated and size-capped in
+ * Node. One recording per process.
  */
 
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import {
   getBrowserManager,
   type BrowserActionRecord,
@@ -288,8 +290,14 @@ function recordToProtos(rec: RawRecord, warnings: string[]): Proto[] {
     }
     case 'fill_secret': {
       const t = targetOf(rec);
-      if (!hasTarget(t)) { warnings.push('skipped a vault fill with no target element'); return []; }
       const field: VaultField = (['username', 'password', 'totp'] as const).find(f => f === a.field) ?? 'password';
+      if (!hasTarget(t)) {
+        // browser_fill_secret without ref/selector auto-detected the login field;
+        // keep the login step replayable for the fields that can be found generically.
+        if (field === 'password') t.selector = 'input[type="password"]';
+        else if (field === 'totp') t.selector = 'input[autocomplete="one-time-code"]';
+        else { warnings.push('skipped a vault username fill with no target element — add a selector to that step by hand'); return []; }
+      }
       return [mk({ kind: 'fill', ...t, value: '' }, { secret: { field, vaultEntry: str(a.secret) }, textEntry: true })];
     }
     case 'fill_form': {
@@ -419,14 +427,52 @@ function sameTarget(a: ElementInfo | undefined, b: ElementInfo | undefined, aArg
 const DEDUPE_WINDOW_MS = 15_000;
 const NAV_WINDOW_MS = 5_000;
 
-function dedupeKind(c: Canon): string | null {
-  switch (c) {
-    case 'click': return 'click';
-    case 'fill': case 'type': case 'fill_secret': case 'check': return 'fill';
-    case 'select': return 'select';
-    case 'press': return 'press';
-    default: return null;
+/** What the in-page capture sees when the agent performs `r` through Playwright (its "echo"). */
+interface EchoSpec {
+  /** Canonical actions of the capture record(s) that mirror it. */
+  kinds: Canon[];
+  /** press: the key. */
+  key?: string;
+  /** fill/type: the value the field ends up with (undefined = unknown, e.g. clear:false). */
+  value?: string;
+  /** The agent's record has no element info (Enter on the focused field): match by key + time. */
+  anyTarget?: boolean;
+  /**
+   * The echo fires DURING the action, so before the agent's record (which is
+   * published after the action settled). Only a field's value may be reported
+   * later (on blur / change).
+   */
+  before?: boolean;
+}
+
+function echoSpecs(r: RawRecord): EchoSpec[] {
+  const a = r.args ?? {};
+  switch (canonicalAction(r.tool, a).action) {
+    // A click on a checkbox / radio reaches the capture as a change ("check").
+    case 'click': case 'check': return [{ kinds: ['click', 'check'], before: true }];
+    case 'fill': case 'type': case 'fill_secret': {
+      const out: EchoSpec[] = [{ kinds: ['fill', 'type'], value: a.clear === false ? undefined : (str(a.value) ?? str(a.text)) }];
+      if (a.submit === true) out.push({ kinds: ['press'], key: 'Enter', before: true });
+      return out;
+    }
+    case 'select': return [{ kinds: ['select'], before: true }];
+    case 'press': return [{ kinds: ['press'], key: str(a.key), anyTarget: !r.element?.selector && !r.element?.name && !str(a.selector) && !str(a.ref), before: true }];
+    default: return [];
   }
+}
+
+function isEcho(c: RawRecord, r: RawRecord, spec: EchoSpec): boolean {
+  if (!spec.kinds.includes(canonicalAction(c.tool, c.args).action)) return false;
+  if (spec.before && c.ts > r.ts + 50) return false;
+  if (spec.key !== undefined && String(c.args.key ?? '').toLowerCase() !== spec.key.toLowerCase()) return false;
+  if (spec.value !== undefined && c.tool === 'fill') {
+    // The capture reports the field's final value (secrets: only that one was filled).
+    const agentSecret = spec.value === '***' || r.element?.isPassword === true;
+    const capSecret = c.args.secret === true;
+    if (agentSecret || capSecret) { if (!(agentSecret && capSecret)) return false; }
+    else if (String(c.args.value ?? '') !== spec.value) return false;
+  }
+  return spec.anyTarget === true || sameTarget(c.element, r.element, c.args, r.args);
 }
 
 /**
@@ -455,21 +501,27 @@ export function selectRecords(records: RawRecord[], source: WorkflowSource): Raw
   });
 
   const drop = new Set<RawRecord>();
+  // When an agent action really happened: its record is stamped after the action
+  // settled; the in-page echo is stamped when the DOM event fired.
+  const actedAt = new Map<RawRecord, number>();
   // Mixed: in-page capture events mirroring an agent action.
   if (source === 'mixed') {
     for (const r of kept) {
       if (r.origin !== 'action' || r.actor !== 'agent') continue;
-      const dk = dedupeKind(canonicalAction(r.tool, r.args).action);
-      if (!dk) continue;
-      let best: RawRecord | null = null;
-      for (const c of kept) {
-        if (c.origin !== 'capture' || drop.has(c)) continue;
-        if (Math.abs(c.ts - r.ts) > DEDUPE_WINDOW_MS) continue;
-        if (dedupeKind(canonicalAction(c.tool, c.args).action) !== dk) continue;
-        if (!sameTarget(c.element, r.element, c.args, r.args)) continue;
-        if (!best || Math.abs(c.ts - r.ts) < Math.abs(best.ts - r.ts)) best = c;
+      // One agent action can echo several times (type + submit → fill AND Enter).
+      for (const spec of echoSpecs(r)) {
+        let best: RawRecord | null = null;
+        for (const c of kept) {
+          if (c.origin !== 'capture' || drop.has(c)) continue;
+          if (Math.abs(c.ts - r.ts) > DEDUPE_WINDOW_MS) continue;
+          if (!isEcho(c, r, spec)) continue;
+          if (!best || Math.abs(c.ts - r.ts) < Math.abs(best.ts - r.ts)) best = c;
+        }
+        if (best) {
+          drop.add(best);
+          actedAt.set(r, Math.min(actedAt.get(r) ?? Infinity, best.ts));
+        }
       }
-      if (best) drop.add(best);
     }
   }
   // Address-bar navigations caused by something else we already recorded.
@@ -480,7 +532,16 @@ export function selectRecords(records: RawRecord[], source: WorkflowSource): Raw
       const c = canonicalAction(r.tool, r.args).action;
       const dt = n.ts - r.ts;
       if ((c === 'navigate' || c === 'history' || c === 'tab') && Math.abs(dt) <= NAV_WINDOW_MS) return true;
-      return ['click', 'press', 'select', 'check', 'fill', 'type', 'fill_form', 'fill_secret'].includes(c) && dt >= 0 && dt <= NAV_WINDOW_MS;
+      if (!['click', 'press', 'select', 'check', 'fill', 'type', 'fill_form', 'fill_secret'].includes(c)) return false;
+      // browser_* tools publish their record AFTER the action settled, so a page load
+      // the agent's click / Enter caused is seen BEFORE its record. In-page captures
+      // are stamped when the event happens, before the navigation it causes.
+      if (r.origin === 'action' && r.actor === 'agent') {
+        const at = actedAt.get(r);
+        if (at !== undefined) return n.ts >= at && n.ts - at <= NAV_WINDOW_MS && n.ts <= r.ts;
+        return dt <= 0 && dt >= -NAV_WINDOW_MS;
+      }
+      return dt >= 0 && dt <= NAV_WINDOW_MS;
     });
     if (redundant) drop.add(n);
   }
@@ -575,10 +636,34 @@ function uniqueName(base: string, used: Set<string>): string {
   return candidate;
 }
 
-function urlVariants(value: string): string[] {
-  const enc = encodeURIComponent(value);
-  const plus = enc.replace(/%20/g, '+');
-  return [...new Set([enc, plus])].filter(v => v.length >= 3);
+function decodeComponent(s: string, plusIsSpace: boolean): string {
+  try {
+    return decodeURIComponent(plusIsSpace ? s.replace(/\+/g, ' ') : s);
+  } catch {
+    return s;
+  }
+}
+
+/**
+ * Put `{{name}}` where `value` is a WHOLE query-parameter value or path segment
+ * of `url`. Never inside the origin (typing "shop" on shop.example must not turn
+ * the host into a param — replaying with another value would then navigate to a
+ * different site) and never inside other words ("news" vs "/newsletter"). PURE.
+ */
+export function parameterizeUrl(url: string, value: string, name: string): string {
+  if (value.trim().length < 3) return url;
+  const m = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(url);
+  if (!m) return url;
+  const [, origin, pathPart, query, hash] = m;
+  const ph = `{{${name}}}`;
+  const pathOut = pathPart!.split('/').map(seg => (seg && decodeComponent(seg, false) === value ? ph : seg)).join('/');
+  const queryOut = query
+    ? '?' + query.slice(1).split('&').map(kv => {
+      const i = kv.indexOf('=');
+      return i >= 0 && decodeComponent(kv.slice(i + 1), true) === value ? kv.slice(0, i + 1) + ph : kv;
+    }).join('&')
+    : '';
+  return origin! + pathOut + queryOut + (hash ?? '');
 }
 
 function parameterize(protos: Proto[], warnings: string[]): { steps: WorkflowStep[]; params: WorkflowParam[] } {
@@ -618,12 +703,10 @@ function parameterize(protos: Proto[], warnings: string[]): { steps: WorkflowSte
         // A later navigation whose URL embeds the typed value (search results page)
         // should follow the param too.
         for (const later of protos.slice(idx + 1)) {
-          let url = later.step.kind === 'navigate' ? later.step.url : undefined;
+          const url = later.step.kind === 'navigate' ? later.step.url : undefined;
           if (!url) continue;
-          for (const v of urlVariants(value)) {
-            if (url.includes(v)) url = url.split(v).join(`{{${name}}}`);
-          }
-          if (url !== later.step.url) later.step = { ...later.step, url };
+          const next = parameterizeUrl(url, value, name);
+          if (next !== url) later.step = { ...later.step, url: next };
         }
       }
       s.value = `{{${name}}}`;
@@ -688,23 +771,37 @@ export function buildWorkflowFromRecords(records: RawRecord[], meta: BuildMeta):
 export const CAPTURE_BINDING = '__qxRecord';
 
 /**
+ * Public id for the window properties the capture defines. One-way derived from
+ * the nonce: page scripts can list window's own properties, so a property NAME
+ * must never contain the nonce itself (it would let any page forge events).
+ */
+export function captureTag(nonce: string): string {
+  return createHash('sha256').update(`qx-capture-tag:${nonce}`).digest('hex').slice(0, 16);
+}
+
+/**
  * The capture script injected into every frame for human demonstrations.
  * Plain ES2017 string (tsconfig has no DOM lib). It NEVER sends the value of a
  * password / one-time-code / card field — only the fact that one was filled.
+ * The nonce lives only in this closure.
  */
 export function captureScript(nonce: string): string {
+  const tag = captureTag(nonce);
   return `(() => {
   const NONCE = ${JSON.stringify(nonce)};
+  const TAG = ${JSON.stringify(tag)};
   const w = window;
-  const mark = '__qxRecInstalled_' + NONCE;
+  const mark = '__qxRecInstalled_' + TAG;
   if (w[mark]) return;
+  // Grab the binding now, before page scripts run, so a page can't swap it to sniff
+  // the nonce. Never pick it up later from the page global: by then a page script
+  // could have replaced it with a function that records the nonce.
+  const post = typeof w[${JSON.stringify(CAPTURE_BINDING)}] === 'function' ? w[${JSON.stringify(CAPTURE_BINDING)}] : null;
+  if (!post) return;
   try { Object.defineProperty(w, mark, { value: true }); } catch (e) { return; }
-  // Grab the binding now, before page scripts run, so a page can't swap it to sniff the nonce.
-  let post = typeof w[${JSON.stringify(CAPTURE_BINDING)}] === 'function' ? w[${JSON.stringify(CAPTURE_BINDING)}] : null;
   const send = (ev) => {
     try {
-      if (!post && typeof w[${JSON.stringify(CAPTURE_BINDING)}] === 'function') post = w[${JSON.stringify(CAPTURE_BINDING)}];
-      if (post) post(NONCE, ev);
+      post(NONCE, ev);
     } catch (e) {}
   };
   const txt = (s) => String(s == null ? '' : s).replace(/\\s+/g, ' ').trim();
@@ -847,23 +944,35 @@ export function captureScript(nonce: string): string {
   const valueOf = (el) => el.isContentEditable && tagOf(el) !== 'input' && tagOf(el) !== 'textarea' ? String(el.innerText || '') : String(el.value == null ? '' : el.value);
   const base = () => ({ url: String(location.href).slice(0, 2000), title: String(document.title || '').slice(0, 200) });
   const pending = [];
+  // Last value reported per field (kept in this closure only): Enter fires keydown
+  // AND change, focusout follows — the same value must not become a second step.
+  const lastSent = new WeakMap();
   const flushOne = (el) => {
     const i = pending.indexOf(el);
     if (i < 0) return;
     pending.splice(i, 1);
+    const v = valueOf(el);
+    if (lastSent.get(el) === v) return;
+    lastSent.set(el, v);
     const secret = isSecret(el);
     const ev = base();
     ev.type = 'fill';
     ev.el = describe(el);
     ev.secret = secret;
-    ev.value = secret ? '' : valueOf(el).slice(0, 5000);
+    ev.value = secret ? '' : v.slice(0, 5000);
     send(ev);
   };
+  // Enter in a text field submits its form through a synthetic click on the
+  // default button; that click is part of the recorded "press Enter".
+  let lastEnter = null;
   const flushAll = () => { const els = pending.slice(); for (let i = 0; i < els.length; i++) flushOne(els[i]); };
-  try { Object.defineProperty(w, '__qxRecFlush_' + NONCE, { value: flushAll }); } catch (e) {}
+  try { Object.defineProperty(w, '__qxRecFlush_' + TAG, { value: flushAll }); } catch (e) {}
   // Nearest genuinely interactive ancestor (not any focusable wrapper / container).
   const CLICKABLE = 'a,button,input,select,textarea,label,summary,option,[role=button],[role=link],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[role=switch],[role=option],[role=treeitem],[onclick]';
+  // Only trusted (user / browser-generated) input counts: a page script that sets a
+  // value and dispatches a synthetic input/change event must not author steps.
   document.addEventListener('input', (e) => {
+    if (!e.isTrusted) return;
     const el = targetOf(e);
     if (isTextField(el)) {
       isSecret(el);
@@ -871,6 +980,7 @@ export function captureScript(nonce: string): string {
     }
   }, true);
   document.addEventListener('change', (e) => {
+    if (!e.isTrusted) return;
     const el = targetOf(e);
     if (!el || el.nodeType !== 1) return;
     const tag = tagOf(el);
@@ -903,6 +1013,7 @@ export function captureScript(nonce: string): string {
     if (!(tagOf(el) === 'input' && TEXT_TYPES[typeOf(el)])) return;
     if (pending.indexOf(el) < 0) pending.push(el);
     flushOne(el);
+    lastEnter = { form: el.form || null, t: Date.now() };
     const ev = base(); ev.type = 'press'; ev.key = 'Enter'; ev.el = describe(el);
     send(ev);
   }, true);
@@ -911,6 +1022,8 @@ export function captureScript(nonce: string): string {
     const t0 = targetOf(e);
     if (!t0 || t0.nodeType !== 1) return;
     const el = (t0.closest && t0.closest(CLICKABLE)) || t0;
+    // Implicit submission: detail 0 (no pointer), on the form the Enter was pressed in.
+    if (e.detail === 0 && lastEnter && lastEnter.form && el.form === lastEnter.form && Date.now() - lastEnter.t < 1000) { lastEnter = null; return; }
     flushAll();
     const tag = tagOf(el);
     const t = typeOf(el);
@@ -1015,12 +1128,34 @@ const boundContexts = new WeakSet<object>();
 let activeRecorder: WorkflowRecorder | null = null;
 const MAX_RECORDS = 10_000;
 const TOO_MANY = `recording reached ${MAX_RECORDS} raw events — later events were dropped; stop and split the task into smaller workflows`;
+const CROSS_ORIGIN_FRAME = 'ignored input inside a cross-origin frame (embedded widget / ad) — it cannot be replayed; do that part by hand';
+
+/** Same web origin? about:blank / about:srcdoc frames inherit their parent's origin. */
+function sameOrigin(frameUrl: string, mainUrl: string): boolean {
+  if (/^about:/i.test(frameUrl)) return true;
+  try {
+    const a = new URL(frameUrl).origin;
+    const b = new URL(mainUrl).origin;
+    return a !== 'null' && a === b;
+  } catch {
+    return false;
+  }
+}
 
 function captureBinding(source: any, nonce: unknown, payload: unknown): void {
   if (typeof nonce !== 'string') return;
   const route = captureRoutes.get(nonce);
   if (route) {
     try { route(source, payload); } catch (e: any) { logger.debug('workflow capture handler failed', { err: e?.message }); }
+  }
+}
+
+function runDisposers(list: Array<() => unknown>): void {
+  for (const d of list.splice(0)) {
+    try {
+      const r = d();
+      if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch(() => {});
+    } catch { /* ignore */ }
   }
 }
 
@@ -1043,6 +1178,8 @@ export class WorkflowRecorder {
   private startedAt = 0;
   private captureCtx: any = null;
   private installing: Promise<boolean> | null = null;
+  /** Bumped by every start(): a slow capture install from an earlier recording must not attach to this one. */
+  private generation = 0;
   private disposers: Array<() => unknown> = [];
   private lastUrlByPage = new WeakMap<object, string>();
   private lastCapturePage: object | null = null;
@@ -1070,6 +1207,8 @@ export class WorkflowRecorder {
     // Claim the process-wide slot synchronously so two concurrent starts can't both win.
     this.state = 'recording';
     activeRecorder = this;
+    this.generation++;
+    this.installing = null;
     this.opts = { ...opts, name: opts.name, source };
     this.records = [];
     this.pending = new Set();
@@ -1180,12 +1319,7 @@ export class WorkflowRecorder {
     this.state = 'stopped';
     for (const u of this.unsubs.splice(0)) { try { u(); } catch { /* ignore */ } }
     captureRoutes.delete(this.nonce);
-    for (const d of this.disposers.splice(0)) {
-      try {
-        const r = d();
-        if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch(() => {});
-      } catch { /* ignore */ }
-    }
+    runDisposers(this.disposers.splice(0));
     this.captureCtx = null;
     if (activeRecorder === this) activeRecorder = null;
   }
@@ -1246,44 +1380,66 @@ export class WorkflowRecorder {
     try { ctx = this.mgr.isRunning() ? this.mgr.context() : null; } catch { ctx = null; }
     if (!ctx) return false;
     if (ctx === this.captureCtx) return true;
-    this.installing = this.installCapture(ctx).finally(() => { this.installing = null; });
-    return this.installing;
+    const p: Promise<boolean> = this.installCapture(ctx).finally(() => { if (this.installing === p) this.installing = null; });
+    this.installing = p;
+    return p;
   }
 
+  /**
+   * Install the in-page capture on `ctx`. Everything it registers (binding, init
+   * script, listeners) goes into a local list that is handed to the recording
+   * only if that SAME recording is still running when the install finishes —
+   * otherwise (stopped / discarded / a new recording started meanwhile) it is
+   * disposed right away, so a slow install can't leave a capture script injected
+   * into every page of the context for the rest of the browser's life.
+   */
   private async installCapture(ctx: any): Promise<boolean> {
+    const gen = this.generation;
+    const own: Array<() => unknown> = [];
+    const stillMine = () => this.state === 'recording' && this.generation === gen;
+    const finish = (ok: boolean): boolean => {
+      if (ok && stillMine()) {
+        this.disposers.push(...own);
+        this.captureCtx = ctx;
+        return true;
+      }
+      runDisposers(own);
+      return false;
+    };
     const script = captureScript(this.nonce);
     try {
       if (!boundContexts.has(ctx)) {
         const disp = await ctx.exposeBinding(CAPTURE_BINDING, captureBinding);
         boundContexts.add(ctx);
         if (disp && typeof disp.dispose === 'function') {
-          this.disposers.push(() => { boundContexts.delete(ctx); return disp.dispose(); });
+          own.push(() => { boundContexts.delete(ctx); return disp.dispose(); });
         }
       }
     } catch (e: any) {
       // Another owner registered it (an older Playwright without dispose): our router still works.
       if (!/already registered/i.test(String(e?.message ?? e))) {
-        this.warnings.push(`human capture unavailable: ${String(e?.message ?? e).split('\n')[0]}`);
-        return false;
+        if (stillMine()) this.warnings.push(`human capture unavailable: ${String(e?.message ?? e).split('\n')[0]}`);
+        return finish(false);
       }
       boundContexts.add(ctx);
     }
     try {
       const disp = await ctx.addInitScript({ content: script });
-      if (disp && typeof disp.dispose === 'function') this.disposers.push(() => disp.dispose());
+      if (disp && typeof disp.dispose === 'function') own.push(() => disp.dispose());
     } catch (e: any) {
-      this.warnings.push(`human capture init script failed: ${String(e?.message ?? e).split('\n')[0]}`);
+      if (stillMine()) this.warnings.push(`human capture init script failed: ${String(e?.message ?? e).split('\n')[0]}`);
     }
+    if (!stillMine()) return finish(false);
     // New pages get the capture from the init script; we only need their navigations.
-    const onPage = (page: any) => { this.watchPage(page); };
+    const onPage = (page: any) => { if (stillMine()) this.watchPage(page, this.disposers); };
     try {
       ctx.on('page', onPage);
-      this.disposers.push(() => { try { ctx.off?.('page', onPage); } catch { /* ignore */ } });
+      own.push(() => { try { ctx.off?.('page', onPage); } catch { /* ignore */ } });
     } catch { /* ignore */ }
     let pages: any[] = [];
     try { pages = ctx.pages(); } catch { pages = []; }
     for (const page of pages) {
-      this.watchPage(page);
+      this.watchPage(page, own);
       let frames: any[] = [];
       try { frames = page.frames(); } catch { frames = []; }
       await Promise.all(frames.map(f => withTimeout(Promise.resolve(f.evaluate(script)), 2000)));
@@ -1292,12 +1448,10 @@ export class WorkflowRecorder {
         if (typeof u === 'string') this.lastUrlByPage.set(page, u);
       } catch { /* ignore */ }
     }
-    if (this.state !== 'recording') return false;
-    this.captureCtx = ctx;
-    return true;
+    return finish(true);
   }
 
-  private watchPage(page: any): void {
+  private watchPage(page: any, sink: Array<() => unknown>): void {
     const onNav = (frame: any) => {
       try {
         if (frame !== page.mainFrame()) return;
@@ -1306,7 +1460,7 @@ export class WorkflowRecorder {
     };
     try {
       page.on('framenavigated', onNav);
-      this.disposers.push(() => { try { page.off?.('framenavigated', onNav); } catch { /* ignore */ } });
+      sink.push(() => { try { page.off?.('framenavigated', onNav); } catch { /* ignore */ } });
     } catch { /* ignore */ }
   }
 
@@ -1321,9 +1475,23 @@ export class WorkflowRecorder {
     if (this.state !== 'recording') return;
     let frame: 'main' | 'child' = 'main';
     const page = source?.page ?? null;
+    let crossOrigin = false;
     try {
-      if (page && source?.frame && source.frame !== page.mainFrame()) frame = 'child';
-    } catch { /* ignore */ }
+      const main = page?.mainFrame?.() ?? null;
+      if (page && source?.frame && source.frame !== main) {
+        frame = 'child';
+        crossOrigin = !sameOrigin(String(source.frame.url?.() ?? ''), String(main?.url?.() ?? page.url?.() ?? ''));
+      }
+    } catch {
+      crossOrigin = frame === 'child';
+    }
+    if (crossOrigin) {
+      // An embedded third-party frame (ad, widget, tracker) can post forged events
+      // whose selectors would replay against the MAIN page; and real input there
+      // can't be replayed (replay doesn't enter frames). Never record it.
+      if (!this.warnings.includes(CROSS_ORIGIN_FRAME)) this.warnings.push(CROSS_ORIGIN_FRAME);
+      return;
+    }
     const rec = captureToRecord(payload, { frame });
     if (!rec) return;
     if (page && this.lastCapturePage && page !== this.lastCapturePage) {
@@ -1341,7 +1509,7 @@ export class WorkflowRecorder {
     if (!ctx) return;
     let pages: any[] = [];
     try { pages = ctx.pages(); } catch { pages = []; }
-    const expr = `(() => { const f = window[${JSON.stringify('__qxRecFlush_' + this.nonce)}]; if (typeof f === 'function') f(); return true; })()`;
+    const expr = `(() => { const f = window[${JSON.stringify('__qxRecFlush_' + captureTag(this.nonce))}]; if (typeof f === 'function') f(); return true; })()`;
     const calls: Array<Promise<unknown>> = [];
     for (const page of pages) {
       let frames: any[] = [];
