@@ -360,7 +360,7 @@ export class TelegramApi {
   answerCallbackQuery(callbackQueryId: string, opts: { text?: string; showAlert?: boolean; signal?: AbortSignal } = {}): Promise<true> {
     return this.call<true>('answerCallbackQuery', {
       callback_query_id: callbackQueryId,
-      text: opts.text ? opts.text.slice(0, 200) : undefined,
+      text: opts.text ? cutUtf16(opts.text, 200) : undefined,
       show_alert: opts.showAlert || undefined,
     }, { signal: opts.signal });
   }
@@ -458,6 +458,15 @@ export class TelegramApi {
       opts.signal?.removeEventListener('abort', onAbort);
     }
   }
+}
+
+/** First `max` UTF-16 units without leaving half a surrogate pair (invalid UTF-8 → 400). */
+function cutUtf16(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = max;
+  const c = s.charCodeAt(cut - 1);
+  if (c >= 0xd800 && c <= 0xdbff) cut--;
+  return s.slice(0, cut);
 }
 
 function dropUndefined(obj: Record<string, unknown>): Record<string, unknown> {
