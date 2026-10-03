@@ -663,6 +663,9 @@ export class BrowserExtractTool extends Tool<z.infer<typeof ExtractArgs>> {
       const page = await mgr.activePage();
       const format: ExtractFormat = args.format ?? 'markdown';
       const r = await extractContent(page, { format, selector: args.selector, maxChars: args.max_chars ?? 20_000 });
+      // A site may echo a revealed password into the page: hide secrets / vault fills.
+      const qm = asQodex(mgr);
+      if (qm) r.content = await qm.maskText(page, r.content);
       let title = '';
       try { title = String(await page.title()); } catch { /* ignore */ }
       const header = `Page: ${title || '(untitled)'}\nURL: ${mgr.activeUrl()}\nFormat: ${format}${args.selector ? ` (selector ${args.selector})` : ''} — ${r.length} chars`;

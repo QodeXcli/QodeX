@@ -41,7 +41,7 @@ import {
   QodexBrowserManager, normalizeUrl, formatBytes, refFromSelector, redactTypedArgs,
   isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal,
 } from './session.js';
-import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets } from './snapshot.js';
+import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets, maskSecretText } from './snapshot.js';
 import { challengeHint, challengeLabel, isChallengeElement, isChallengeFrameUrl, type ChallengeInfo } from './challenge.js';
 import { QODEX_SCREENSHOTS_DIR } from '../../config/paths.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
@@ -553,7 +553,7 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
       if (args.return_html === true || timedOut) {
         try {
           // Frameworks mirror field values into the value="" attribute: mask secrets.
-          const html = await maskPageSecrets(page, String(await page.content()));
+          const html = await maskPageSecrets(page, String(await page.content()), qm?.extraSecretsFor(page) ?? []);
           const max = 25_000;
           const slice = html.length > max ? html.slice(0, max) + `\n\n…[truncated, ${html.length - max} more chars]` : html;
           htmlSection = `\n\n--- HTML (${html.length} chars) ---\n${slice}`;
@@ -776,8 +776,10 @@ export class BrowserConsoleTool extends Tool<z.infer<typeof ConsoleArgs>> {
       ? '  (no messages)'
       : slice.map(m => `  [${m.type}] ${m.text}${m.location ? `  (${m.location})` : ''}`).join('\n');
     const errors = bufs.errors.length === 0 ? '  (no page errors)' : bufs.errors.slice(-limit).map(e => `  ${e.message}`).join('\n');
+    // A page that logs a vault-filled value must not carry it into the conversation.
+    const extra = asQodex(mgr)?.extraSecretsFor() ?? [];
     return {
-      content: `Console (${slice.length}/${filtered.length} ${level} message(s)):\n${consoleLines}\n\nPage errors (${bufs.errors.length}):\n${errors}`,
+      content: maskSecretText(`Console (${slice.length}/${filtered.length} ${level} message(s)):\n${consoleLines}\n\nPage errors (${bufs.errors.length}):\n${errors}`, extra),
     };
   }
 }
@@ -855,7 +857,7 @@ export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
       }
       // A script reading a password / card field (e.g. one filled from the vault)
       // must not carry its value into the conversation.
-      formatted = await maskPageSecrets(page, formatted);
+      formatted = await maskPageSecrets(page, formatted, asQodex(mgr)?.extraSecretsFor(page) ?? []);
       const notes = asQodex(mgr)?.drainNotices() ?? [];
       return {
         content: `Result:\n${formatted.slice(0, 5000)}${formatted.length > 5000 ? `\n…[truncated, ${formatted.length - 5000} more chars]` : ''}${notes.length ? '\n' + notes.map(n => `• ${n}`).join('\n') : ''}`,
@@ -900,6 +902,8 @@ export class BrowserGetTextTool extends Tool<z.infer<typeof GetTextArgs>> {
       } else {
         text = String(await page.innerText('body', { timeout: 5000 }));
       }
+      // A site may echo a revealed password into the page: hide secrets / vault fills.
+      text = await maskPageSecrets(page, text, asQodex(mgr)?.extraSecretsFor(page) ?? []);
       const truncated = text.length > maxChars;
       return {
         content: `${text.slice(0, maxChars)}${truncated ? `\n…[truncated, ${text.length - maxChars} more chars]` : ''}`,

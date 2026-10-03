@@ -16,8 +16,12 @@ import { resolveBrowserExecutable } from '../src/tools/browser/launcher.js';
 import { QodexBrowserManager } from '../src/tools/browser/session.js';
 import { setBrowserManagerForTests } from '../src/tools/browser/types.js';
 import { detectChallenge } from '../src/tools/browser/challenge.js';
-import { BrowserNavigateTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool } from '../src/tools/browser/tools.js';
-import { BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool, BrowserHistoryTool } from '../src/tools/browser/tools-extra.js';
+import {
+  BrowserNavigateTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool, BrowserGetTextTool, BrowserEvaluateTool, BrowserConsoleTool,
+} from '../src/tools/browser/tools.js';
+import {
+  BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool, BrowserHistoryTool, BrowserExtractTool,
+} from '../src/tools/browser/tools-extra.js';
 import { getBus } from '../src/control/bus.js';
 import { BrowserRequestHumanTool, pendingHandoffs, resolveHandoff } from '../src/tools/browser/handoff.js';
 
@@ -103,6 +107,14 @@ const INTERSTITIAL = `<!doctype html><html><head><title>Just a moment...</title>
 <script>setTimeout(function () { document.title = 'Shop home'; document.body.innerHTML = '<h1>Real content</h1><button>Buy</button>'; }, 2000);</script>
 </body></html>`;
 
+/** A login page whose "show password" toggle turns the field into type=text, and which echoes / logs the value. */
+const REVEAL = `<!doctype html><html><head><title>Account</title></head><body>
+<label for="pw">Password</label><input id="pw" type="password">
+<button id="show" onclick="document.getElementById('pw').type = 'text'">Show password</button>
+<button id="echo" onclick="var v = document.getElementById('pw').value; document.getElementById('out').textContent = 'Your password is ' + v; console.log('pw=' + v)">Echo</button>
+<div id="out"></div>
+</body></html>`;
+
 /** A PerimeterX-style "Press & Hold" page: only a ≥1 s hold (the human's own) passes it. */
 const PRESS_HOLD = `<!doctype html><html><head><title>Access to this page has been denied</title></head><body>
 <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
@@ -151,6 +163,7 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
         return;
       }
       if (url.pathname === '/hold') { res.end(PRESS_HOLD); return; }
+      if (url.pathname === '/reveal') { res.end(REVEAL); return; }
       if (url.pathname === '/plain') { res.end('<title>Plain</title><h1>Hello</h1><a href="/recaptcha">login</a>'); return; }
       res.statusCode = 404; res.end('not found');
     });
@@ -432,6 +445,39 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     expect(mgr.challengeLoadCount(`${base}/again`)).toBe(0);
     const ok = await run(new BrowserNavigateTool(), { url: `${base}/again`, snapshot: false });
     expect(ok.content).toMatch(/^✓ Loaded/);
+  }, 60_000);
+
+  it('maskExtra hides vault-filled values even after the site reveals them (snapshot, text, extract, evaluate, console)', async () => {
+    const SECRET = 'Vault-Pa55word-XYZ';
+    await run(new BrowserNavigateTool(), { url: `${base}/reveal`, snapshot: false });
+    const page = await mgr.activePage();
+    await page.fill('#pw', SECRET); // what browser_fill_secret does
+    await page.click('#show');
+    // Control: a revealed type=text field is no longer recognised as a secret by the page scan.
+    expect((await run(new BrowserSnapshotTool(), {})).content).toContain(SECRET);
+
+    mgr.maskExtra(page, [SECRET]);
+    await page.click('#echo');
+    const outputs = [
+      (await run(new BrowserSnapshotTool(), {})).content,
+      (await run(new BrowserGetTextTool(), {})).content,
+      (await run(new BrowserExtractTool(), { format: 'text' })).content,
+      (await run(new BrowserEvaluateTool(), { script: "return document.getElementById('pw').value" })).content,
+      (await run(new BrowserConsoleTool(), {})).content,
+      (await run(new BrowserClickTool(), { selector: '#echo' })).content,
+    ];
+    for (const o of outputs) expect(o).not.toContain(SECRET);
+    expect(outputs[0]).toContain('[hidden]');
+    expect(outputs[1]).toContain('Your password is [hidden]');
+    // Never published: not in status, not on the bus.
+    expect(JSON.stringify(mgr.status())).not.toContain(SECRET);
+    expect(JSON.stringify(getBus().recent(300))).not.toContain(SECRET);
+    // TTL: an expired value is forgotten.
+    mgr.maskExtra(page, ['short-lived-value-1'], 1000);
+    expect(mgr.extraSecretsFor(page)).toContain('short-lived-value-1');
+    await new Promise(r => setTimeout(r, 1100));
+    expect(mgr.extraSecretsFor(page)).not.toContain('short-lived-value-1');
+    expect(mgr.extraSecretsFor(page)).toContain(SECRET);
   }, 60_000);
 
   it('navigate waits out a self-clearing interstitial without the human', async () => {

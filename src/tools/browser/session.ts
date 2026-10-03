@@ -58,6 +58,7 @@ import {
 import {
   takeSnapshotDetailed,
   snapshotWithBoxes,
+  maskPageSecrets,
   DESCRIBE_ELEMENT_FN,
   DESCRIBE_AT_POINT_FN,
   FOCUS_PROBE_FN,
@@ -139,6 +140,11 @@ interface TabState {
   challengeBeat?: NodeJS.Timeout | null;
   /** In-flight detection (coalesced). */
   challengeRun?: Promise<ChallengeInfo | null | 'unknown'> | null;
+  /**
+   * Values filled from the vault into this tab: masked in snapshots / page text even if
+   * the site reveals them. In memory only, with a TTL — never logged, published or stored.
+   */
+  masked?: Array<{ value: string; until: number }>;
 }
 
 /** Bus / listener payload when a tab's challenge appears, changes or clears. */
@@ -1316,6 +1322,45 @@ export class QodexBrowserManager implements BrowserManager {
     if (this.challengeLoads.size > 200) this.challengeLoads.delete(this.challengeLoads.keys().next().value as string);
   }
 
+  // ── vault-filled values (masked everywhere page text leaves the browser) ─────
+
+  /**
+   * Remember values the vault filled into a tab (`page` / tab id; default: active tab)
+   * so snapshots and page text hide them even when the site reveals them (a "show
+   * password" toggle, an echo). In memory only, expiring after `ttlMs` (default 15 min)
+   * or when the tab closes — never logged, published, stored or returned.
+   */
+  maskExtra(tab: Page | string | undefined, values: string[], ttlMs = 15 * 60_000): void {
+    const st = this.tabOf(tab);
+    if (!st) return;
+    const until = Date.now() + Math.max(1000, ttlMs);
+    const now = Date.now();
+    const keep = (st.masked ?? []).filter(m => m.until > now);
+    for (const v of values) {
+      if (typeof v !== 'string' || !v) continue;
+      const hit = keep.find(m => m.value === v);
+      if (hit) hit.until = Math.max(hit.until, until);
+      else keep.push({ value: v, until });
+    }
+    st.masked = keep.slice(-50);
+  }
+
+  /** The unexpired vault-filled values of a tab (for maskPageSecrets / snapshots). Never output these. */
+  extraSecretsFor(tab?: Page | string): string[] {
+    const st = this.tabOf(tab);
+    if (!st?.masked?.length) return [];
+    const now = Date.now();
+    st.masked = st.masked.filter(m => m.until > now);
+    return st.masked.map(m => m.value);
+  }
+
+  /** `text` with this tab's secret field values and vault fills hidden. */
+  async maskText(tab: Page | string | undefined, text: string): Promise<string> {
+    const st = this.tabOf(tab);
+    if (!st) return text;
+    return maskPageSecrets(st.page, text, this.extraSecretsFor(st.page));
+  }
+
   /** The Playwright page of a tab index (null when out of range). */
   pageAt(index: number): Page | null {
     return this.tabList[index]?.page ?? null;
@@ -1334,6 +1379,7 @@ export class QodexBrowserManager implements BrowserManager {
     const st = this.tabList.find(t => t.page === page);
     const r = await takeSnapshotDetailed(page, {
       ...opts,
+      extraSecrets: [...(opts.extraSecrets ?? []), ...this.extraSecretsFor(page)],
       tabs: { count: this.tabList.length, active: st ? this.tabList.indexOf(st) : 0 },
     });
     if (st) { st.refMode = r.mode; st.title = r.title || st.title; }
@@ -1343,7 +1389,7 @@ export class QodexBrowserManager implements BrowserManager {
   /** Snapshot with element boxes (set-of-marks); refreshes the tab's refs like snapshot(). */
   async boxes(): Promise<{ text: string; marks: MarkBox[]; mode: 'aria' | 'dom' }> {
     const page = await this.activePage();
-    const r = await snapshotWithBoxes(page);
+    const r = await snapshotWithBoxes(page, { extraSecrets: this.extraSecretsFor(page) });
     const st = this.tabList.find(t => t.page === page);
     if (st) st.refMode = r.mode;
     return r;
