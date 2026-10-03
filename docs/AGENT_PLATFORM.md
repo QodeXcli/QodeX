@@ -15,7 +15,7 @@ choice of model, and also controls your desktop.
 | Own browser with persistent logins | local persistent profiles, or attach to your Chrome over CDP |
 | Desktop control | macOS, Linux (X11 + Wayland), Windows |
 | Keeps working after you close the app | detached, resumable missions with milestones and a final report |
-| Guard for purchases / payments / sending / credentials | Sentinel — cannot be bypassed by auto-approve or `--yes` |
+| Guard for purchases / payments / sending / credentials | Sentinel — cannot be bypassed by auto mode or `--yes` |
 | Credentials the model never sees | encrypted vault, origin-bound (anti-phishing), TOTP |
 | Prompt-injection defense for web content | English + Persian detection, page text fenced as data |
 | Live view + human takeover | token-protected web control center |
@@ -110,6 +110,9 @@ shown in `mission status`.
 
 From a session: `/mission <goal>`, `/missions`, or let the agent call `mission_start` itself
 for long jobs. Routines: `qodex schedule add --name news --cron "0 8 * * *" --mission --prompt "..."`.
+`qodex mission start "…" --auto` (or `--yes`, `--approval-mode auto`) runs the mission in auto
+mode — see [Auto mode](#auto-mode--what-still-asks); a mission started from an auto session
+inherits it.
 
 ```yaml
 missions:
@@ -129,9 +132,44 @@ card numbers via Luhn, Sheba/IBAN, API keys):
 
 | Category | Default |
 |---|---|
-| **purchase, payment, credential, send** | **critical** — always needs an explicit human answer. `/auto on` and `--yes` can't approve these. With no human reachable the action is refused (`[SENTINEL_BLOCKED]`). |
-| delete, account, upload, publish, desktop | asks through the normal permission flow ("always for this site" remembered per session) |
+| **purchase, payment, credential, send** | **critical** — always needs an explicit human answer. Auto mode (`/auto on`, `--auto`, `--yes`) can't approve these. With no human reachable the action is refused (`[SENTINEL_BLOCKED]`). |
+| delete, account, upload, publish, desktop | asks through the normal permission flow ("always for this site" remembered per session). In auto mode these run without asking, except deleting data / changing an account / publishing on a non-local site and uploading a file from outside the project |
 | navigation | blocked/allowed domains, optional private-network block |
+
+### Auto mode — what still asks
+
+QodeX has three approval modes (Shift+Tab cycles them; the status bar shows the current one):
+`manual` asks before edits and shell, `edits` lets file edits through, and **`auto`** works
+without asking. In auto mode everything inside the project is automatic — edits, shell,
+installs, commits, ordinary pushes, deleting project files, browser and desktop work that
+Sentinel rates non-critical. Only these still stop for a human:
+
+- **purchases, payments, passwords / credentials, sending messages** (and QodeX's own safety
+  settings) — Sentinel-critical, as in every mode;
+- **destructive actions outside the project** — deleting or overwriting paths outside the
+  workspace roots, force-push / remote branch deletes, deleting remote data (cloud, Kubernetes,
+  `terraform destroy`, other hosts' databases, package unpublish), publishing (`npm publish`,
+  `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks), and on
+  the web deleting data or changing an account on a non-local site.
+
+With no human at the terminal (`-p`, schedules, detached missions) those questions go to the
+control center, Telegram or the mission's approval queue, and are refused when none is
+connected — never answered "yes" automatically. The agent's own questions (`ask_user`, plan
+approval) are not asked in auto mode: it decides, continues and lists its assumptions at the end.
+Sub-agents, side runs and missions started from an auto session follow the same policy.
+
+Turn it on with Shift+Tab, `/auto on` (or `/mode auto`), `qodex --auto` /
+`qodex --approval-mode auto` (`-y` means the same for `-p` runs and `mission start`), or as the
+default in **your user config** (a project's `.qodex/config.yaml` cannot switch you into auto):
+
+```yaml
+# ~/.qodex/config.yaml
+approval:
+  defaultMode: auto        # manual | edits | auto
+  extraRoots: [~/code/shared-libs]   # also "the project" for auto mode (cwd + temp dir always are)
+```
+
+`security.denyRules`, the hard-deny patterns and budgets still apply in auto mode.
 
 Web and window text is **untrusted data**: it is wrapped in `<untrusted_content>` and scanned
 for prompt injection (English and Persian, hidden Unicode); detections are flagged to the model
@@ -256,6 +294,7 @@ with their own session and budget.
 - **کنترل دسکتاپ** روی مک، لینوکس و ویندوز (اسکرین‌شات، کلیک، تایپ فارسی، کلیپ‌بورد، باز کردن برنامه).
 - **مأموریت‌های پس‌زمینه** که بعد از بستن برنامه هم ادامه می‌دهند: `qodex mission start "..."`
 - **Sentinel**: خرید، پرداخت، ارسال پیام و ورود اطلاعات حساس بدون تأیید شما انجام نمی‌شود — حتی با `/auto on` یا `--yes`. محتوای صفحات وب «داده» حساب می‌شود و تزریق دستور (فارسی و انگلیسی) شناسایی می‌شود.
+- **حالت خودکار (auto)**: سه حالت تأیید داریم — `manual` (پیش‌فرض)، `edits` و `auto`؛ با Shift+Tab عوض می‌شوند و نوار وضعیت حالت فعلی را نشان می‌دهد. در حالت auto هر کاری داخل پروژه (ویرایش، شل، نصب پکیج، کامیت و push معمولی، حذف فایل‌های پروژه) بدون پرسش انجام می‌شود و ایجنت سؤال‌های خودش را هم نمی‌پرسد: خودش تصمیم می‌گیرد و فرض‌هایش را در پایان می‌گوید. فقط این‌ها هنوز تأیید شما را لازم دارند: خرید، پرداخت، رمز عبور، ارسال پیام، و کارهای مخرب بیرون از پروژه (حذف فایل بیرون از پروژه، force-push، حذف داده‌ی راه‌دور، انتشار پکیج، sudo). اگر کسی پای ترمینال نباشد این موارد به مرکز کنترل / تلگرام می‌روند یا رد می‌شوند. روشن کردن: Shift+Tab، `/auto on`، `qodex --auto`، یا `approval.defaultMode: auto` فقط در `~/.qodex/config.yaml` (تنظیمات پروژه نمی‌تواند شما را به auto ببرد). `approval.extraRoots` پوشه‌های دیگری را جزو پروژه حساب می‌کند. قوانین deny و بودجه‌ها همچنان اعمال می‌شوند.
 - **گاوصندوق رمزها**: ایجنت رمز را هرگز نمی‌بیند و فقط روی سایت اصلی پر می‌کند (ضد فیشینگ)، با پشتیبانی از کد دومرحله‌ای.
 - **مرکز کنترل وب**: تماشای زنده‌ی مرورگر ایجنت، در دست گرفتن کنترل، تأیید با یک کلیک — حتی از گوشی. `qodex control --lan`
 - **یادگیری از نمایش**: یک بار کار را انجام دهید، QodeX ضبط و بعداً تکرار می‌کند. `qodex workflow record`

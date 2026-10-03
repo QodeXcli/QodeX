@@ -25,7 +25,7 @@ qodex setup && qodex
 QodeX is no longer only a coding agent. It now has a **dedicated browser** with persistent
 logins, **controls your desktop** (macOS, Linux, Windows), runs **missions that keep working
 after you close it**, and never buys, pays, sends or types a password **without your
-approval** — even under `/auto on`. Full guide: **[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)**.
+approval** — even in auto mode (`/auto on`). Full guide: **[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)**.
 
 ```bash
 qodex browser open https://mail.example.com      # log in once — the agent stays logged in
@@ -88,7 +88,7 @@ QodeX takes the opposite stance: **protect the model.** A layer of deterministic
 - **Syntax gate** — every edit is parsed before it's written; broken syntax is rejected, not saved.
 - **Completion gate** — the model can't claim "tests pass" or "I fixed it" unless a test actually ran / an edit actually succeeded. Unsupported claims get bounced back for correction.
 - **Auto-verification** — after the model thinks it's done, QodeX detects the project type and runs the real checker (`tsc`, `eslint`, `ruff`, `pyright`, `go vet`, `cargo`, `php -l` …) on touched files and force-feeds any errors back.
-- **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or `/auto on` to skip).
+- **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or Shift+Tab to `edits` / `auto` to skip — see [Approval modes](#approval-modes)).
 - **Git-backed sandbox** — risky work runs on a hidden branch with checkpoints; auto-snapshot (`git stash`) before destructive commands, one command to roll back.
 - **Process sandbox (Docker)** — a second, different isolation: the *shell* runs in a container so a remote-ish turn cannot `rm` your home directory. Pair it with `--profile cloud`. Not a Hub client — Hub is for approvals; this is where commands actually execute.
 - **Skill security scanner** — skills installed from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode payloads *before* they touch disk.
@@ -541,7 +541,8 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /network           Diagnose internet + Ollama + LM Studio connectivity
 /tools [--all]     List registered tools by category
 /plan  /normal     Plan mode (read-only)  /  back to normal
-/auto on|off       Auto-approve permissions
+/auto [manual|edits|auto]   Approval mode (also /mode; Shift+Tab cycles) — see "Approval modes"
+/status            Approval mode, strict mode, session
 /model <id>        Override model for this conversation
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
@@ -557,6 +558,53 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 From the shell: `qodex sessions list|show <id>|export <id>|search <query>`. Safe shell that should skip the approval hub: `execution.allow` in `config.yaml` (`git status`, `npm test`, …).
+
+## Approval modes
+
+Three modes decide what QodeX asks before it acts. **Shift+Tab** cycles them in the TUI; the
+status bar always shows the current one (`/status` prints it).
+
+| Mode | What runs without asking | What still asks |
+|---|---|---|
+| `manual` (default) | read-only tools, `execution.allow` / `autoApprove` matches | file edits, shell, MCP tools, missions, Sentinel actions |
+| `edits` | + every file edit (with its diff shown) | shell, MCP tools, missions, Sentinel actions |
+| `auto` | everything inside the project: edits, shell, installs, `git commit` / `rebase` / ordinary `push`, deleting project files, MCP and browser/desktop work Sentinel rates non-critical | see below |
+
+**What auto mode still asks a human for** (with nobody at the terminal — `-p` runs, schedules,
+detached missions — the question goes to the control center / Telegram / the mission's approval
+queue when one is connected, and is refused otherwise; it is never answered "yes" for you):
+
+- **Purchases, payments, passwords / credentials, sending messages** and changes to QodeX's own
+  safety settings — Sentinel-critical, a human answers in every mode.
+- **Destructive actions outside the project**: deleting or overwriting paths outside the workspace
+  roots, force-pushes and remote branch deletes, deleting remote data (cloud, Kubernetes,
+  `terraform destroy`, databases on other hosts, package unpublish), publishing (`npm publish`,
+  `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks); on the
+  web, deleting data or changing an account on a non-local site.
+
+The agent's **own questions** are not asked in auto mode either: `ask_user` and plan approval
+(`present_plan`) return "decide yourself", so the model picks a sensible default, keeps going and
+lists its assumptions in the final answer. A plan presented in plan mode is approved and carried
+out in the same turn.
+
+**Turning it on:** Shift+Tab, `/auto on` (or `/auto auto`, `/mode auto`), `qodex --auto` /
+`qodex --approval-mode auto` (TUI and `-p`; `-y`/`--yes` means the same for a `-p` run), or
+`approval.defaultMode: auto` in **`~/.qodex/config.yaml`** — only the user config counts; a
+project's `.qodex/config.yaml` can never switch you into auto. Missions follow the session mode
+(`qodex mission start … --auto`). Answering **always yes** to a prompt switches the session to auto
+(a Sentinel "always" stays limited to that category on that site). When the mode changes mid-task
+the running agent is told.
+
+```yaml
+# ~/.qodex/config.yaml
+approval:
+  defaultMode: auto          # manual | edits | auto
+  extraRoots:                # more folders auto mode treats as "the project" (cwd and the temp dir always count)
+    - ~/code/shared-libs
+```
+
+Your `security.denyRules` and the hard-deny patterns still refuse in every mode, and budgets
+(`--budget-usd`, per-task caps) still stop a run — auto mode never raises them.
 
 ## End-to-end example
 
@@ -614,7 +662,7 @@ One transport-agnostic gateway does all the work; the platform adapters are thin
 | `/new` | fresh conversation (new session) |
 | `/stop` | abort the running task |
 | `/status` | running/queued · model · project · session · auto state |
-| `/auto on \| off` | auto-approve actions (skip the buttons) — handy on mobile, off by default |
+| `/auto on \| off` | auto mode for this chat (skip the buttons) — purchases, payments, passwords, sending messages and destructive actions outside the project still ask; off by default |
 | `/model [id]` | show or switch the model for this conversation |
 | `/sessions` · `/resume <id>` | list past sessions and continue one (same store as the CLI) |
 | `/episodes` | past tasks solved here, from episodic memory |
