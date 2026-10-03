@@ -8,7 +8,9 @@
  *   - the Wayland clipboard is read as a TEXT type (`wl-paste` alone prints a
  *     copied image's PNG bytes);
  *   - Wayland screen_info notes that ydotool types through the active
- *     keyboard layout (ASCII comes out wrong under a Persian layout).
+ *     keyboard layout (ASCII comes out wrong under a Persian layout);
+ *   - the Windows paste script restores the old clipboard in a `finally`
+ *     (with ErrorActionPreference Stop a throwing SendWait skipped it).
  * Fakes only (setDesktopExec) — no real input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -16,8 +18,9 @@ import { promises as fs, existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { setDesktopExec, type ExecOptions, type ExecResult } from '../src/tools/computer/exec.js';
-import { X11Backend, WaylandBackend, type BackendDeps } from '../src/tools/computer/backends/index.js';
+import { X11Backend, WaylandBackend, WindowsBackend, type BackendDeps } from '../src/tools/computer/backends/index.js';
 import { pickTextMime } from '../src/tools/computer/backends/wayland.js';
+import { decodePowerShellStdin } from '../src/tools/computer/backends/windows.js';
 
 interface Call { cmd: string; args: string[]; opts?: ExecOptions }
 type Responder = (c: Call) => Partial<ExecResult> | void | Promise<Partial<ExecResult> | void>;
@@ -154,6 +157,31 @@ describe('wayland: screenshots fall back to the next tool that works', () => {
     }, ['swaymsg', 'hyprctl']);
     await expect(wl(undefined, { signal: ac.signal }).screenshot({ path: path.join(tmp, 's.png') })).rejects.toThrow(/^\[ABORTED\]/);
     expect(calls.map(c => c.cmd)).toEqual(['grim']);
+  });
+});
+
+describe('windows: the paste script restores the old clipboard even when the paste throws', () => {
+  it('SetText / SendWait run in a try whose finally holds the restore', async () => {
+    const calls = fakeExec();
+    expect((await new WindowsBackend(deps({ env: {}, platform: 'win32' })).type('سلام', { method: 'paste' })).method).toBe('paste');
+    // The loader runs with ErrorActionPreference Stop: an exception ends the script at once,
+    // and the saved clipboard ($oldText / $oldImage / $oldFiles) exists only inside it.
+    expect(calls[0]!.opts!.stdin!).toContain("$ErrorActionPreference = 'Stop'");
+    const s = decodePowerShellStdin(calls[0]!.opts!.stdin!)!;
+    const at = (needle: string, from = 0) => {
+      const i = s.indexOf(needle, from);
+      expect(i, needle).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    const saved = at('GetFileDropList()');
+    const setText = at("SetText('سلام')", saved);
+    const tryAt = s.lastIndexOf('try {', setText);
+    const fin = at('} finally {', setText);
+    expect(tryAt).toBeGreaterThan(saved); // the old contents are saved before the guarded block
+    expect(at("SendWait('^v')", setText)).toBeLessThan(fin);
+    for (const restore of ['SetText($oldText)', 'SetImage($oldImage)', 'SetFileDropList($oldFiles)', '[System.Windows.Forms.Clipboard]::Clear()']) {
+      expect(at(restore, setText), restore).toBeGreaterThan(fin);
+    }
   });
 });
 

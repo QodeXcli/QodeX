@@ -375,16 +375,21 @@ try {
   elseif ([System.Windows.Forms.Clipboard]::ContainsImage()) { $oldImage = [System.Windows.Forms.Clipboard]::GetImage() }
   elseif ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) { $oldFiles = [System.Windows.Forms.Clipboard]::GetFileDropList() }
 } catch {}
-[System.Windows.Forms.Clipboard]::SetText(${psQuote(text)})
-Start-Sleep -Milliseconds 60
-[System.Windows.Forms.SendKeys]::SendWait('^v')
-Start-Sleep -Milliseconds 350
 try {
-  if ($null -ne $oldText) { [System.Windows.Forms.Clipboard]::SetText($oldText) }
-  elseif ($null -ne $oldImage) { [System.Windows.Forms.Clipboard]::SetImage($oldImage) }
-  elseif ($null -ne $oldFiles) { [System.Windows.Forms.Clipboard]::SetFileDropList($oldFiles) }
-  else { [System.Windows.Forms.Clipboard]::Clear() }
-} catch {}`, 30_000 + text.length * 2);
+  [System.Windows.Forms.Clipboard]::SetText(${psQuote(text)})
+  Start-Sleep -Milliseconds 60
+  [System.Windows.Forms.SendKeys]::SendWait('^v')
+  Start-Sleep -Milliseconds 350
+} finally {
+  # Restore even when SetText / SendWait throws ($ErrorActionPreference is Stop):
+  # the old contents live only in this script.
+  try {
+    if ($null -ne $oldText) { [System.Windows.Forms.Clipboard]::SetText($oldText) }
+    elseif ($null -ne $oldImage) { [System.Windows.Forms.Clipboard]::SetImage($oldImage) }
+    elseif ($null -ne $oldFiles) { [System.Windows.Forms.Clipboard]::SetFileDropList($oldFiles) }
+    else { [System.Windows.Forms.Clipboard]::Clear() }
+  } catch {}
+}`, 30_000 + text.length * 2);
   }
 
   async key(combo: string, opts: { repeat?: number } = {}): Promise<void> {
