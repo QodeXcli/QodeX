@@ -380,3 +380,32 @@ describe('WorkflowRecorder', () => {
     expect(disposed.sort()).toEqual(['binding', 'init']);
   });
 });
+
+describe('echo matching on a fast machine', () => {
+  it("a human's Enter right after an agent's submit is not the agent's echo; the human's Back is kept", () => {
+    // Real records from the mixed e2e recording, replayed at the speed CI ran it (half the
+    // local gaps): the human's Enter lands within 50 ms of the agent's type+submit record.
+    const records = [
+      {"origin":"start","tool":"navigate","args":{"url":"http://shop.test/"},"url":"http://shop.test/","actor":"agent","ts":1000},
+      {"origin":"capture","url":"http://shop.test/","element":{"selector":"input[name=\"q\"]","role":"searchbox","name":"Search","tag":"input","inputType":"search","formAction":"http://shop.test/results"},"actor":"human","ts":1069,"frame":"main","tool":"fill","args":{"value":"rooibos"}},
+      {"origin":"capture","url":"http://shop.test/","element":{"selector":"input[name=\"q\"]","role":"searchbox","name":"Search","tag":"input","inputType":"search","formAction":"http://shop.test/results"},"actor":"human","ts":1072,"frame":"main","tool":"press","args":{"key":"Enter"}},
+      {"origin":"nav","tool":"navigate","args":{"url":"http://shop.test/results?q=rooibos"},"url":"http://shop.test/results?q=rooibos","actor":"human","ts":1078},
+      {"origin":"action","tool":"browser_type","args":{"selector":"input[name=\"q\"]","text":"rooibos","submit":true},"url":"http://shop.test/","element":{"role":"searchbox","name":"Search","tag":"input","isPassword":false,"selector":"#search input[name=\"q\"]","inputType":"search","formAction":"http://shop.test/results"},"actor":"agent","ts":1162},
+      {"origin":"nav","tool":"navigate","args":{"url":"http://shop.test/"},"url":"http://shop.test/","actor":"human","ts":1185},
+      {"origin":"capture","url":"http://shop.test/","element":{"selector":"input[name=\"q\"]","role":"searchbox","name":"Search","tag":"input","inputType":"search","formAction":"http://shop.test/results"},"actor":"human","ts":1212,"frame":"main","tool":"fill","args":{"value":"mate"}},
+      {"origin":"capture","url":"http://shop.test/","element":{"selector":"input[name=\"q\"]","role":"searchbox","name":"Search","tag":"input","inputType":"search","formAction":"http://shop.test/results"},"actor":"human","ts":1212,"frame":"main","tool":"press","args":{"key":"Enter"}},
+      {"origin":"nav","tool":"navigate","args":{"url":"http://shop.test/results?q=mate"},"url":"http://shop.test/results?q=mate","actor":"human","ts":1221},
+      {"origin":"action","tool":"browser_press","args":{"key":"Enter"},"url":"http://shop.test/","element":{"role":"searchbox","name":"Search","tag":"input","isPassword":false,"selector":"#search input[name=\"q\"]","inputType":"search","formAction":"http://shop.test/results"},"actor":"agent","ts":1290},
+    ] as any[];
+    const steps = buildWorkflowFromRecords(records, { name: 'mixed', source: 'mixed' } as any).workflow.steps
+      .map(s => `${s.actor}:${s.kind} ${s.url ?? s.key ?? s.value ?? ''}`.trim());
+    expect(steps).toEqual([
+      'agent:navigate http://shop.test/',
+      'agent:fill {{search}}',
+      'agent:press Enter',
+      'human:navigate http://shop.test/',
+      'human:fill {{search_2}}',
+      'agent:press Enter',
+    ]);
+  });
+});

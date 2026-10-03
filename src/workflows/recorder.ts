@@ -461,6 +461,19 @@ function echoSpecs(r: RawRecord): EchoSpec[] {
   }
 }
 
+/**
+ * How good an echo candidate is (lower wins). An echo that happens BEFORE the record is
+ * stamped (browser_* tools record after the action settled) is preferred; the short
+ * late-delivery slack only counts when there is none. Otherwise, on a fast machine, a
+ * human's Enter right after an agent's typed-and-submitted search would be taken as the
+ * agent's echo, the agent's NEXT Enter would be pinned to the earlier one, and the
+ * human's Back in between would be dropped as "caused by" it.
+ */
+function echoRank(c: RawRecord, r: RawRecord, spec: EchoSpec): [number, number] {
+  if (!spec.before) return [0, Math.abs(c.ts - r.ts)];
+  return c.ts <= r.ts ? [0, r.ts - c.ts] : [1, c.ts - r.ts];
+}
+
 function isEcho(c: RawRecord, r: RawRecord, spec: EchoSpec): boolean {
   if (!spec.kinds.includes(canonicalAction(c.tool, c.args).action)) return false;
   if (spec.before && c.ts > r.ts + 50) return false;
@@ -511,11 +524,13 @@ export function selectRecords(records: RawRecord[], source: WorkflowSource): Raw
       // One agent action can echo several times (type + submit → fill AND Enter).
       for (const spec of echoSpecs(r)) {
         let best: RawRecord | null = null;
+        let bestRank: [number, number] | null = null;
         for (const c of kept) {
           if (c.origin !== 'capture' || drop.has(c)) continue;
           if (Math.abs(c.ts - r.ts) > DEDUPE_WINDOW_MS) continue;
           if (!isEcho(c, r, spec)) continue;
-          if (!best || Math.abs(c.ts - r.ts) < Math.abs(best.ts - r.ts)) best = c;
+          const rank = echoRank(c, r, spec);
+          if (!bestRank || rank[0] < bestRank[0] || (rank[0] === bestRank[0] && rank[1] < bestRank[1])) { best = c; bestRank = rank; }
         }
         if (best) {
           drop.add(best);
