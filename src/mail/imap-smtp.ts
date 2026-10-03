@@ -32,6 +32,8 @@ export interface ImapSmtpOptions {
   timeoutMs?: number;
   /** TLS overrides (tests: a local self-signed server). */
   tls?: { rejectUnauthorized?: boolean };
+  /** Log out of an unused IMAP connection after this long, ms. Default 5 min. */
+  idleCloseMs?: number;
   /** Module loaders (tests). */
   loaders?: {
     imapflow?: () => Promise<any>;
@@ -105,6 +107,7 @@ export class ImapSmtpTransport implements MailTransport {
   private client: any = null;
   private connecting: Promise<any> | null = null;
   private folderCache: FolderInfo[] | null = null;
+  private idleTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly opts: ImapSmtpOptions) {
     this.account = opts.account.name;
@@ -149,7 +152,15 @@ export class ImapSmtpTransport implements MailTransport {
     };
   }
 
+  /** (Re)arm the idle logout: a stale connection is closed rather than kept for hours. */
+  private touch(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => { void this.close(); }, this.opts.idleCloseMs ?? 5 * 60_000);
+    this.idleTimer.unref?.();
+  }
+
   private async imap(): Promise<any> {
+    this.touch();
     if (this.client?.usable) return this.client;
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
@@ -538,6 +549,7 @@ export class ImapSmtpTransport implements MailTransport {
   }
 
   async close(): Promise<void> {
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     const c = this.client;
     this.client = null;
     this.folderCache = null;
