@@ -551,6 +551,7 @@ function openSse(res: ServerResponse): void {
     'X-Accel-Buffering': 'no',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
+    'Cross-Origin-Resource-Policy': 'same-origin',
   });
   res.flushHeaders?.();
   res.write('retry: 2000\n\n');
@@ -1120,6 +1121,9 @@ const BASE_HEADERS: Record<string, string> = {
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
   'Cache-Control': 'no-store',
+  // Another site on the same host (any port counts as same-site) must not be able to
+  // embed /api/frame.jpg or other responses with <img>/<script> and probe them.
+  'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
 const HTML_CSP = [
