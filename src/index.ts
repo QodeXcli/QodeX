@@ -22,7 +22,8 @@ import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './co
 import { handBackRootFlags } from './cli/root-flags.js';
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
-import { PermissionEngine } from './security/permissions.js';
+import { PermissionEngine, setApprovalMode } from './security/permissions.js';
+import { approvalModeFromFlags, startupApprovalMode } from './cli/approval-flags.js';
 import { appendAudit } from './security/audit-log.js';
 import { App } from './cli/ui.js';
 import { runHeadless } from './cli/modes/headless.js';
@@ -208,7 +209,9 @@ program
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
   .option('--profile <name>', 'Named config overlay (~/.qodex/profiles/<name>.yaml or QODEX_PROFILE). Not -p — that is --print.')
   .option('--json', 'When used with --print, emit NDJSON events to stdout')
-  .option('-y, --yes', 'Auto-approve all permission prompts (headless mode only)')
+  .option('-y, --yes', 'Same as --auto (unattended -p runs and schedules pass it): with no human, critical and outside-project destructive actions are refused')
+  .option('--auto', 'Start in auto mode: work without asking; purchases, payments, passwords, sending messages and destructive actions outside the project still need a human')
+  .option('--approval-mode <mode>', 'Approval mode to start in: manual | edits | auto (default: approval.defaultMode in ~/.qodex/config.yaml, else manual)')
   // ── Guardrailed autonomy contract (headless -p only) ──
   .option('--budget-tokens <n>', 'Kill the run after N total (novel) tokens; triggers rollback-on-fail')
   .option('--budget-usd <n>', 'Kill the run after $N spend; triggers rollback-on-fail')
@@ -230,6 +233,16 @@ program
   // Flags written before the subcommand stay the root's; see src/cli/root-flags.ts.
   .hook('preAction', (thisCommand, actionCommand) => {
     handBackRootFlags(thisCommand, actionCommand, process.argv.slice(2));
+  })
+  // Approval-mode flags the root kept (--auto / --approval-mode / -y written before a
+  // subcommand, or on the bare `qodex` / `qodex -p` line) set this process's session mode,
+  // which sub-agents, inline missions and `mission start`'s default follow. Flags written
+  // after a subcommand that declares them (mission start --auto) were handed back above.
+  .hook('preAction', (thisCommand, actionCommand) => {
+    const o = thisCommand.opts() as { auto?: boolean; approvalMode?: string; yes?: boolean };
+    // -y keeps meaning "this headless/TUI run" only: `qodex -y <subcommand>` never did more.
+    const mode = approvalModeFromFlags({ auto: o.auto, approvalMode: o.approvalMode, yes: actionCommand === thisCommand ? o.yes : undefined });
+    if (mode) setApprovalMode(mode);
   })
   .hook('preAction', thisCommand => {
     const name = (thisCommand.opts() as { profile?: string }).profile;
@@ -256,6 +269,14 @@ program
     }
 
     const { config, router, registry, permissions } = await bootstrap();
+
+    // Session approval mode: flags (already applied by the preAction hook), else the user
+    // config's approval.defaultMode, else manual. Headless and the TUI both start in it.
+    const startup = startupApprovalMode(
+      { auto: opts.auto, approvalMode: opts.approvalMode, yes: opts.yes },
+      config as { approval?: { defaultMode?: unknown } },
+    );
+    setApprovalMode(startup.mode);
 
     if (opts.listModels) {
       const models = router.listAvailableModels();
