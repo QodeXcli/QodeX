@@ -149,14 +149,19 @@ export class WebSearchTool extends Tool<z.infer<typeof WebSearchArgs>> {
       }
     }
 
+    // When failing, tell the user EXACTLY how to unlock a content-grade backend — including that
+    // they can paste a key in chat and the agent saves it (save_api_key) and retries.
+    const { missingWebKeysGuidance } = await import('../../setup/key-guidance.js');
+    const guidance = missingWebKeysGuidance(process.env as Record<string, string | undefined>);
+    const unlockHint = guidance ? `\n\n${guidance}` : '\n\nRun /network to check connectivity.';
+
     // Every backend errored at the transport level (and none cleanly returned an
     // empty result set) → this is a real failure, not just "nothing found".
     if (anyTransportError && !anyEmpty) {
       return {
         isError: true,
         content: `[WEB_SEARCH_ERROR] All ${chain.length} backend(s) errored for "${args.query}":\n` +
-          failures.map(f => `  - ${f}`).join('\n') +
-          `\n\nRun /network to check connectivity, or set TAVILY_API_KEY / BRAVE_SEARCH_API_KEY for additional backends.`,
+          failures.map(f => `  - ${f}`).join('\n') + unlockHint,
       };
     }
 
@@ -164,8 +169,7 @@ export class WebSearchTool extends Tool<z.infer<typeof WebSearchArgs>> {
     return {
       content: `[NO_RESULTS] All ${chain.length} backend(s) failed for "${args.query}":\n` +
         failures.map(f => `  - ${f}`).join('\n') +
-        `\n\nTry a different/more specific query, run /network to check connectivity, ` +
-        `or set TAVILY_API_KEY / BRAVE_SEARCH_API_KEY for additional backends.`,
+        `\n\nTry a different/more specific query.` + unlockHint,
     };
   }
 }

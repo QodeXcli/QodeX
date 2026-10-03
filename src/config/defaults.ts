@@ -38,6 +38,8 @@ function resolveHomedir(): string {
 export const QODEX_HOME = path.join(resolveHomedir(), '.qodex');
 export const QODEX_LOG_FILE = path.join(QODEX_HOME, 'qodex.log');
 export const QODEX_CONFIG_FILE = path.join(QODEX_HOME, 'config.yaml');
+/** Named overlays: `qodex --profile studio` reads ~/.qodex/profiles/studio.yaml */
+export const QODEX_PROFILES_DIR = path.join(QODEX_HOME, 'profiles');
 export const QODEX_TXN_DB = path.join(QODEX_HOME, 'transactions.db');
 export const QODEX_SESSION_DB = path.join(QODEX_HOME, 'sessions.db');
 export const QODEX_TELEMETRY_DB = path.join(QODEX_HOME, 'telemetry.db');
@@ -75,6 +77,18 @@ export interface QodexConfig {
     // A built-in provider, OR a custom gateway name from providers.custom[].name.
     provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | (string & {});
     model: string;
+    /**
+     * If the primary model errors before the first token (Ollama down, 5xx,
+     * timeout), retry the same turn once on this model. Hermes-style provider
+     * fallback — the thing that keeps a local-first session alive when the
+     * resident model flakes. Unset = no fallback.
+     */
+    fallbackModel?: string;
+    /**
+     * Named overlay applied last (after user + project yaml). Overridden by
+     * `--profile` / `QODEX_PROFILE`. `-p` is `--print`, not this.
+     */
+    profile?: string;
     preferLocal: boolean;
     /** Preload the local default model at startup so the first prompt isn't a cold load.
      *  Local backends only; no effect on cloud models. Default true. */
@@ -92,10 +106,16 @@ export interface QodexConfig {
       /** Ollama `keep_alive` — how long the model stays resident after a request.
        *  Longer avoids a cold reload (and full prefill) between turns. Default '30m'. */
       keepAlive?: string;
-      /** Extra Ollama runtime `options` merged into every request (num_ctx, num_batch,
-       *  num_gpu, …). `num_ctx` defaults to the routed model's context window so long
-       *  sessions aren't silently truncated by the server's default 2k/4k window. */
-      options?: Record<string, number>;
+      /** Extra Ollama runtime `options` merged verbatim into every request. Numbers, strings,
+       *  and bools all pass through, so any llama.cpp/Ollama runtime flag works — including the
+       *  ones that matter for large MoE coders on limited VRAM:
+       *    - `num_gpu`: layers to keep on the GPU (the rest run on CPU). Lower it to fit a big
+       *      MoE model in VRAM. See src/llm/offload.ts `suggestGpuLayers` for a sensible value.
+       *    - `num_ctx`: defaults to the routed model's context window so long sessions aren't
+       *      silently truncated by the server's 2k/4k default. Bigger num_ctx ⇒ bigger KV cache.
+       *  `keep_alive` (above) keeps the model + its KV cache warm between turns — the local
+       *  "turbo cache" that, with QodeX's byte-stable prompt prefix, avoids a full re-prefill. */
+      options?: Record<string, number | string | boolean>;
       /** Draft model for speculative decoding, if the local server supports it. Passed
        *  through verbatim; servers that don't read it ignore it. */
       draftModel?: string;
@@ -205,13 +225,60 @@ export interface QodexConfig {
      * back-compat; defaults applied at load.
      */
     alwaysAsk?: string[];
+    /**
+     * User deny rules that override EVERYTHING — auto-approve, `/auto on`, and `--yes`.
+     * A plain string matches as a substring; `/regex/flags` matches as a regex. Use this to
+     * fence off things no agent run of yours should ever do (e.g. 'git push', '/prod$/').
+     */
+    denyRules?: string[];
     sandboxShell: boolean;
+  };
+  /**
+   * Safe-command allow-list. Literals (`git status`, `npm test`) skip the
+   * OperatorHub without turning `/auto` on. `/regex/` and `^…` still work.
+   * Deny / always-ask / irreversible still win. Empty by default — the built-in
+   * `security.autoApprove` regexes already cover the common read-only set.
+   */
+  execution?: {
+    allow?: string[];
   };
   ui: {
     theme: 'dark' | 'light';
     showThinking: boolean;
     showTokenCount: boolean;
     showCost: boolean;
+  };
+  /**
+   * Cross-cutting tool-result policies (applied at the registry/loop boundary,
+   * not per-tool). Optional for back-compat; defaults applied at load.
+   */
+  tools?: {
+    /**
+     * Universal spill guard: any tool result whose content exceeds this many
+     * chars is written IN FULL to ~/.qodex/tool-spill/<sessionId>/ and enters
+     * the model context as head + "[N chars spilled — full output: <path>]" +
+     * tail instead. Covers every tool (http_request, web_fetch, shell, grep…)
+     * at one choke point. 0 disables. Default 16000 (~4k tokens).
+     */
+    maxResultChars?: number;
+  };
+  /**
+   * Telegram/Discord bot front-end (`qodex bot`). Tokens are NOT here — they're secrets read
+   * from ~/.qodex/.env (TELEGRAM_BOT_TOKEN / DISCORD_TOKEN). Only the (non-secret) allowlists
+   * live in config. `allowedUsers` is DENY-by-default: an empty list lets nobody in; the
+   * literal '*' opts a platform into public access (a deliberate foot-gun — a coding agent
+   * runs shell on your host). Optional for back-compat; defaults applied at load.
+   */
+  bot?: {
+    telegram?: { enabled?: boolean; allowedUsers?: string[] };
+    discord?: { enabled?: boolean; allowedUsers?: string[] };
+    /** Slack via Socket Mode. Tokens (SLACK_APP_TOKEN + SLACK_BOT_TOKEN) live in ~/.qodex/.env;
+     *  needs `npm i @slack/socket-mode @slack/web-api`. allowedUsers holds Slack user ids. */
+    slack?: { enabled?: boolean; allowedUsers?: string[] };
+    /** Official WhatsApp Cloud API (webhook + Graph). Tokens in ~/.qodex/.env. */
+    whatsapp?: { enabled?: boolean; allowedUsers?: string[] };
+    /** signal-cli daemon (JSON-RPC or REST). Account in SIGNAL_ACCOUNT. */
+    signal?: { enabled?: boolean; allowedUsers?: string[] };
   };
   mcp: {
     servers: Record<string, {
@@ -226,14 +293,14 @@ export interface QodexConfig {
     }>;
   };
   /**
-   * Auto-compaction tuning. When the conversation exceeds `threshold` of the
-   * context window, older turns are summarized into a single system message and
-   * recent turns are kept verbatim. All optional — sane defaults apply.
+   * Auto-compaction tuning. When the conversation reaches `threshold` of the
+   * context window (default 80%), older turns are summarized and the run
+   * CONTINUES — a full window never stops the agent. All optional.
    */
   compaction?: {
     /** Master switch. Default true. */
     enabled?: boolean;
-    /** Fraction of the context window that triggers compaction. Default 0.75. */
+    /** Fraction of the context window that triggers compaction. Default 0.80. */
     threshold?: number;
     /**
      * Context window in tokens for the threshold math. When unset, QodeX uses
@@ -287,6 +354,10 @@ export interface QodexConfig {
    *                    with a vision-tuned system prompt; expects a vision-capable model
    *   - `summarization` — used by /compact (when implemented)
    *   - `planning`   — used in plan mode (when implemented)
+   *   - `offload`    — the CHEAP model for auto-offloaded calls (compaction/summarization,
+   *                    read-only scout dispatches) when `offload.enabled` is on. Falls back
+   *                    to `roles.subagent`; when neither is set, auto-offload is a no-op.
+   *                    e.g. `roles: { offload: { provider: ollama, model: qwen2.5-coder:7b } }`
    *
    * Custom roles are also allowed — callers can pass any role name to `task` and
    * if a config entry exists, that provider/model is used. Otherwise it falls back
@@ -294,12 +365,28 @@ export interface QodexConfig {
    */
   roles?: Record<string, RoleConfig | undefined>;
   /**
+   * Token-efficiency auto-offload — route cheap, non-critical LLM calls (context
+   * compaction/summarization, read-only scout sub-agents) to a smaller model instead of
+   * the main one. OPT-IN: `offload.enabled: true` plus a cheap model via `roles.offload`
+   * (falling back to `roles.subagent`). NEVER applied to plan mode, mutating turns, or the
+   * final user-facing answer — see src/llm/offload-policy.ts for the exact safe set.
+   * Offloaded-call count is surfaced on budget_update as `offloadedCalls`.
+   */
+  offload?: {
+    /** Master switch. Default false (opt-in). */
+    enabled?: boolean;
+  };
+  /**
    * Context-assembly settings. The auto-retrieval pre-pass embeds the user's request and
    * injects the most semantically-relevant files into the first turn — so the model
    * starts pointed at the right code instead of grepping blind. Best-effort: a no-op when
    * Ollama / an embedding index isn't available, never blocks startup.
    */
   context?: {
+    /** Auto-infer the project's code style (indentation, quotes, semicolons, naming) from
+     *  its source + .editorconfig and inject it so generated code matches — no explicit
+     *  `remember` needed. Deterministic, computed once per session. Default true. */
+    styleProfile?: boolean;
     /** Enable the auto-retrieval pre-pass. Default true (silently skips when unavailable). */
     autoRetrieve?: boolean;
     /** How many files to surface. Default 6. */
@@ -323,15 +410,15 @@ export interface QodexConfig {
     dependencyMap?: boolean;
     /** Stale large tool results are stubbed after they age. Set false to disable. */
     resultAging?: boolean;
-    /** Age tool results after this many assistant turns. Default 3 (2 when efficient). */
+    /** Age tool results after this many assistant turns. Default 3 (1 when efficient). */
     resultAgingMinTurns?: number;
-    /** Only age results larger than this many chars. Default 8000 (4000 when efficient). */
+    /** Only age results larger than this many chars. Default 6000 (2000 when efficient). */
     resultAgingMaxChars?: number;
-    /** Efficiency profile — opt-in aggressive token saving for long sessions on weak/
-     *  local models: ages results sooner (minTurns 2, maxChars 4000) and compacts
-     *  earlier (threshold 0.60). Default false. Explicit values above/in `compaction`
-     *  always override the profile. Trade-off: the model may occasionally re-read an
-     *  aged-out file. */
+    /** Efficiency profile — opt-in "sliding token window" for long sessions on weak/local
+     *  models (the volatile tier where prompt-caching doesn't apply): ages large results the
+     *  very next turn (minTurns 1, maxChars 2000) and compacts earlier (threshold 0.55).
+     *  Default false. Explicit values above/in `compaction` always override the profile.
+     *  Trade-off: the model may occasionally re-read an aged-out file. */
     efficient?: boolean;
   };
   /**
@@ -356,6 +443,23 @@ export interface QodexConfig {
   sandbox?: {
     /** Enable git-backed isolation for normal-mode tasks. Default false. */
     enabled?: boolean;
+  };
+  /**
+   * Where the agent's *shell* runs. Distinct from `sandbox` (git branches).
+   *   - local  : today's bare metal (default)
+   *   - docker : command runs in a container; project bind-mounted at /workspace;
+   *              host $HOME and docker.sock are not visible. Pair with --profile cloud.
+   */
+  runtime?: {
+    backend?: 'local' | 'docker';
+    docker?: {
+      image?: string;
+      network?: 'none' | 'bridge';
+      memory?: string;
+      cpus?: string;
+      workdir?: string;
+      user?: string;
+    };
   };
   /**
    * MCP SERVER mode — when QodeX runs as an MCP server (`qodex mcp serve`),
@@ -393,6 +497,103 @@ export interface QodexConfig {
   flywheel?: {
     /** Record successful trajectories. Default false. Requires sandbox.enabled. */
     enabled?: boolean;
+    /** Also export each successful task as a ShareGPT JSONL record to
+     *  ~/.qodex/dataset/<project>.jsonl — a ready-to-use corpus for a future
+     *  zero-cost local fine-tune. Default false. Strictly local. */
+    datasetExport?: boolean;
+  };
+  /**
+   * Skill-learning loop — capture reusable methodology from OBJECTIVELY-successful tasks
+   * into quarantined candidate skills, promoted only by an INDEPENDENT judge and never
+   * over a human-authored skill. Off by default (it writes files + costs a judge call).
+   * See src/skills/learning/. Designed to avoid the "self-congratulation" failure mode:
+   * eligibility is gated on verify/completion signals, not the worker's self-grade.
+   */
+  /** Memory injection. 'full' (default) injects every learned fact into the prompt; 'lightweight'
+   *  injects only `!important`-tagged facts + as many recent facts as fit `injectMaxTokens`, leaving
+   *  the rest to load on demand via recall / `/memory`; 'auto' picks lightweight on a small context
+   *  window and full on a roomy one. The DB + markdown mirror are unaffected. */
+  memory?: {
+    mode?: 'full' | 'lightweight' | 'auto';
+    injectMaxTokens?: number;
+  };
+  learning?: {
+    /** Capture candidate skills after eligible tasks. Default false. */
+    enabled?: boolean;
+    /** When `enabled` is OFF, still SUGGEST capturing a skill after a successful task that looks
+     *  like a reusable pattern (judged from the code graph). Default true; set false to silence. */
+    suggestSkills?: boolean;
+    /** Auto-run `skill eval` immediately after a capture (replay in a clean worktree +
+     *  objective verify, recorded into the candidate). Costs a model call + worktree per
+     *  capture, so it's opt-in. Default false; otherwise run `qodex skill eval` on demand. */
+    autoEval?: boolean;
+    /** Minimum tool calls for a task to be capture-worthy. Default 5. */
+    minToolCalls?: number;
+    /** Require objective verification to have passed before capturing. Default true.
+     *  Turning this off re-introduces self-grade risk — deliberately loud. */
+    requireObjectiveSuccess?: boolean;
+    /** Auto-promote candidates whose independent judge passes (vs. leaving them for
+     *  a human to review with `qodex skill promote`). Default false. */
+    autoPromote?: boolean;
+    /** Explicit model id for the independent judge. Must differ from defaults.model
+     *  (self-grade is rejected). Falls back to the 'reflection' routing role when unset. */
+    judgeModel?: string;
+    /** Tier-2 (heavy/cloud) judge for the escalating cascade — used ONLY when the Tier-1
+     *  judge is unsure (grey-zone average or high cross-dimension variance). Must differ from
+     *  defaults.model and judgeModel. Unset ⇒ no escalation (Tier-1 verdict stands). */
+    judgeModelTier2?: string;
+    /** Skill versioning + UCB1 adaptive-bandit routing knobs. */
+    versioning?: {
+      /** UCB1 exploration factor `c` — higher explores challengers more. Default √2 (~1.41). */
+      ucbExplorationFactor?: number;
+      /** Force-route a challenger at least this many times before UCB1 can starve it, so a
+       *  decision is never made on too little signal. Default 5. */
+      minChallengerTrials?: number;
+      /** Composite-reward weights (success + token-efficiency + time-efficiency). Defaults
+       *  { success: 0.7, token: 0.15, time: 0.15 }. */
+      rewardWeights?: { success?: number; token?: number; time?: number };
+      /** Routing strategy when a manifest doesn't pin one: 'ucb1' (default), 'static', or
+       *  'champion-only' (UCB OFF — always the stable version, for sensitive skills). */
+      strategy?: 'ucb1' | 'static' | 'champion-only';
+    };
+    /** When auto-promoting, require at least this confidence (0–100). Default 0 (the
+     *  judge's pass is sufficient); raise it to gate low-confidence captures. */
+    autoPromoteMinConfidence?: number;
+    /** `qodex skill eval` cache TTL in hours — skip re-evaluating an unchanged skill
+     *  within this window. Default 24. */
+    evalCacheTtlHours?: number;
+    /**
+     * Episodic memory — record a lean episode after each successful task and, at the start
+     * of a new one, inject the most SIMILAR past episode(s) so the agent reuses its own
+     * proven approach. Smart retrieval (top-K above a threshold), concise injection.
+     */
+    episodicMemory?: {
+      /** Record a lean "how I solved this" episode after a finished run() turn that
+       *  actually did work (a file change, or ≥2 tool calls), and inject the most
+       *  similar past ones next time. Independent of sandbox / flywheel. Default TRUE. */
+      enabled?: boolean;
+      /** How many past episodes to inject. Default 2. */
+      topK?: number;
+      /** Min lexical similarity (0–1) to inject — below this, nothing. Default 0.18. */
+      minSimilarity?: number;
+      /** Diversity weight (0–1) for MMR selection — keeps the injected top-K distinct rather
+       *  than K near-duplicates of one recurring task. 0 = pure relevance. Default 0.3. */
+      diversity?: number;
+    };
+    /**
+     * Failure-driven learning — record tool failures and, once a pattern RECURS across
+     * tasks, inject a deterministic "learned caution" into the system prompt so the agent
+     * stops repeating it. Off by default. See src/skills/learning/failures.ts.
+     */
+    failureLessons?: {
+      enabled?: boolean;
+      /** Min total occurrences before a pattern is learned. Default 3. */
+      minOccurrences?: number;
+      /** Min DISTINCT tasks the pattern must span (a one-off never teaches). Default 2. */
+      minDistinctTasks?: number;
+      /** Max cautions injected into the prompt. Default 5. */
+      maxInjected?: number;
+    };
   };
   /**
    * Auto-verify gate — the model-agnostic quality floor. After the model thinks it has
@@ -470,7 +671,12 @@ export interface QodexConfig {
    * src/config/agent-config.ts (resolveBrowserConfig, resolveSentinelConfig, ...)
    * so `qx setup` never freezes them into the user's YAML.
    */
-  /** Dedicated QodeX Browser (persistent profile, headed/headless, CDP attach). */
+  /**
+   * Dedicated QodeX Browser (persistent profile, headed/headless). Set `cdpUrl` to ATTACH
+   * to an already-running browser over the Chrome DevTools Protocol instead — drive your
+   * OWN logged-in Chrome / Brave / Arc / Edge (started with `--remote-debugging-port=9222`)
+   * with your real cookies and sessions. `QODEX_BROWSER_CDP_URL` overrides it.
+   */
   browser?: Partial<Omit<BrowserConfig, 'viewport'>> & { viewport?: Partial<BrowserConfig['viewport']> };
   /** Cross-platform desktop control (computer_use_* tools). */
   desktop?: Partial<DesktopConfig>;
@@ -490,13 +696,15 @@ export const DEFAULT_CONFIG: QodexConfig = {
     model: 'qwen2.5-coder:32b',
     preferLocal: true,
     warmOnStart: true,
-    // Headroom for larger multi-file / creative tasks. Local models in particular
-    // spend iterations re-reading + self-correcting; 25 was too tight and tasks hit
-    // the cap mid-flight. The loop now also warns at ~80% before the hard stop.
-    // Set to 0 for NO iteration limit (token/cost/time budgets still apply). You can
-    // also lift it per-session at runtime with /unlimited or /iterations <n>.
+    // First review point, not a finish line. Hitting this while the task is
+    // still making progress EXTENDS the cap (see iteration-pressure.ts). The
+    // run only stops here if loop detectors say it's stuck. 0 = no review point.
     maxIterations: 50,
     web_search_backend: 'duckduckgo',
+  },
+  runtime: {
+    backend: 'local',
+    docker: { image: 'node:22-bookworm', network: 'none', memory: '2g', cpus: '2' },
   },
   providers: {
     ollama: { baseUrl: 'http://localhost:11434' },
@@ -514,8 +722,20 @@ export const DEFAULT_CONFIG: QodexConfig = {
     dailyLimitUsd: 10.0,
     perTaskLimitUsd: 1.0,
     perTaskMaxTokens: 200_000,
-    perTaskMaxWallSeconds: 600,
+    // Ceiling, not pace-setter: since the stall-aware checkpoint (budget.ts) it only fires
+    // when the task ALSO stopped progressing. 600s was calibrated for cloud latency; a local
+    // model legitimately spends that on a handful of long generations.
+    perTaskMaxWallSeconds: 3600,
     toolTimeoutSeconds: 300,
+  },
+  learning: {
+    // Skill CAPTURE stays off: it writes candidate files and spends a judge call, so it is a
+    // deliberate opt-in rather than something that starts happening to a new user's disk.
+    enabled: false,
+    // Episodic memory is ON. Recording is one JSONL line at the end of a live run()
+    // (not gated on sandbox/flywheel); recall is a lexical match. Leaving the write
+    // nested under those flags meant daily sessions never stored anything.
+    episodicMemory: { enabled: true },
   },
   security: {
     autoApprove: [
@@ -577,11 +797,27 @@ export const DEFAULT_CONFIG: QodexConfig = {
     ],
     sandboxShell: false,
   },
+  execution: {
+    allow: [],
+  },
   ui: {
     theme: 'dark',
     showThinking: true,
     showTokenCount: true,
     showCost: true,
+  },
+  tools: {
+    // Spill guard threshold. A 278KB http_request page used to enter the context
+    // whole (~70k tokens) and only get aged 2 turns later; now anything past this
+    // cap lives on disk and the context gets head+tail+path. 0 = disabled.
+    maxResultChars: 16_000,
+  },
+  bot: {
+    telegram: { enabled: false, allowedUsers: [] },
+    discord: { enabled: false, allowedUsers: [] },
+    slack: { enabled: false, allowedUsers: [] },
+    whatsapp: { enabled: false, allowedUsers: [] },
+    signal: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

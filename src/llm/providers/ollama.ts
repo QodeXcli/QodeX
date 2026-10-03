@@ -1,3 +1,4 @@
+import { resolveCapability } from '../model-catalog.js';
 import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } from '../types.js';
 import { ProviderError } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
@@ -6,10 +7,19 @@ import { computeThroughput } from '../cache-layout.js';
 export interface OllamaOptions {
   /** `keep_alive` — how long to keep the model resident. Default '30m'. */
   keepAlive?: string;
-  /** Extra runtime options merged into every request's `options` (num_ctx, num_batch, …). */
-  options?: Record<string, number>;
+  /** Extra runtime options merged into every request's `options` (num_ctx, num_batch, num_gpu,
+   *  … — numbers, strings, or bools so any llama.cpp/Ollama runtime flag passes through). */
+  options?: Record<string, number | string | boolean>;
   /** Draft model for speculative decoding, passed through if the server supports it. */
   draftModel?: string;
+  /**
+   * Upper bound for the per-request `num_ctx`, derived from the host's hardware tier.
+   * Ollama allocates a KV cache sized to `num_ctx` regardless of the actual prompt
+   * length, so defaulting it to a model's full 32k/128k window on a small/8GB box
+   * causes heavy memory pressure and swapping — every turn crawls, even warm. We cap
+   * the DEFAULT to something the box can hold; an explicit `options.num_ctx` still wins.
+   */
+  numCtxCeiling?: number;
 }
 
 interface OllamaModel {
@@ -56,10 +66,16 @@ export class OllamaProvider extends Provider {
       const data = (await res.json()) as { models: OllamaModel[] };
       return (data.models ?? []).map(m => ({
         id: m.name,
-        contextWindow: this.guessContextWindow(m.name),
+        // Advertise the window we actually ALLOCATE, not the catalog's 128k/256k
+        // marketing number. Otherwise the agent packs 200k and Ollama either
+        // truncates the system prompt or spends seconds zeroing a huge KV cache.
+        contextWindow: this.numCtxFor(m.name),
         maxOutput: 8192,
         inputCostPerMillion: 0,
         outputCostPerMillion: 0,
+        // Local weights: genuinely free, not merely unpriced. The distinction keeps
+        // `--budget-usd` meaningful (a $0 local run is correct, an unpriced cloud run is not).
+        pricingSource: 'free' as const,
         supportsToolCalls: this.supportsTools(m.name),
         supportsStreaming: true,
       }));
@@ -68,15 +84,22 @@ export class OllamaProvider extends Provider {
     }
   }
 
+  /** Context window for a local model. Delegates to the shared catalog so a model's real
+   *  window is maintained in ONE place — these per-provider guesses had drifted badly
+   *  (qwen3-coder reported as 32k when it ships 256k, deepseek as 16k when v3 is 128k). */
   private guessContextWindow(model: string): number {
-    const lower = model.toLowerCase();
-    if (lower.includes('qwen2.5-coder') || lower.includes('qwen3-coder')) return 32768;
-    if (lower.includes('qwen')) return 32768;
-    if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('llama3.3')) return 131072;
-    if (lower.includes('mistral')) return 32768;
-    if (lower.includes('gemma2')) return 8192;
-    if (lower.includes('deepseek')) return 16384;
-    return 8192;
+    return resolveCapability(model).contextWindow;
+  }
+
+  /**
+   * The `num_ctx` to REQUEST for a model: its real context window, capped by the
+   * hardware-derived ceiling. This is distinct from {@link guessContextWindow},
+   * which advertises the model's true capability to the router — we only shrink the
+   * runtime KV allocation, not the model's stated window.
+   */
+  private numCtxFor(model: string): number {
+    const full = this.guessContextWindow(model);
+    return this.opts.numCtxCeiling ? Math.min(full, this.opts.numCtxCeiling) : full;
   }
 
   private supportsTools(model: string): boolean {
@@ -156,7 +179,7 @@ export class OllamaProvider extends Provider {
         // model's real context window stops Ollama from silently clamping long
         // sessions to its 2k/4k server default (a classic "it forgot everything"
         // cause) — and keeping it stable across turns preserves the KV cache.
-        num_ctx: this.guessContextWindow(req.model),
+        num_ctx: this.numCtxFor(req.model),
         temperature: req.temperature ?? 0.3,
         ...(req.maxTokens ? { num_predict: req.maxTokens } : {}),
         ...(this.opts.options ?? {}),
@@ -165,6 +188,9 @@ export class OllamaProvider extends Provider {
       // so we pay prefill once, not on every iteration. Configurable; default 30m.
       keep_alive: this.opts.keepAlive ?? '30m',
       ...(this.opts.draftModel ? { draft_model: this.opts.draftModel } : {}),
+      // Native thinking switch. `/no_think` in the prompt is a soft hint; this is
+      // what actually turns Qwen3/DeepSeek-R1 thinking off on Ollama 0.9+.
+      ...(req.think !== undefined ? { think: req.think } : {}),
     };
 
     if (req.tools && req.tools.length > 0) {
@@ -241,6 +267,15 @@ export class OllamaProvider extends Provider {
 
           try {
             const chunk = JSON.parse(line);
+
+            // Hidden reasoning — Ollama 0.9+ thinking models (Qwen3, DeepSeek-R1,
+            // GPT-OSS…) stream this in `message.thinking`, NOT `message.content`.
+            // Dropping it made the TUI sit on "crafting…" for tens of seconds after
+            // the weights were already loaded. Forward it so the UI can show progress
+            // and so TTFT isn't the entire think pass.
+            if (chunk.message?.thinking) {
+              yield { type: 'thinking_delta', delta: String(chunk.message.thinking) };
+            }
 
             // Text content
             if (chunk.message?.content) {

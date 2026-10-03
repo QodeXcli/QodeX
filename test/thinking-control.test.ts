@@ -8,6 +8,12 @@ describe('decideThinking', () => {
   it('thinks on the first iteration (plan the approach)', () => {
     expect(decideThinking({ iteration: 1, taskComplex: true, recentToolErrors: 0, forceThink: false })).toBe('think');
   });
+  it('skips thinking on a trivial greeting even on iteration 1', () => {
+    expect(decideThinking({ iteration: 1, taskComplex: false, recentToolErrors: 0, forceThink: false, trivial: true })).toBe('no_think');
+  });
+  it('still thinks after errors even when the prompt looked trivial', () => {
+    expect(decideThinking({ iteration: 2, taskComplex: false, recentToolErrors: 1, forceThink: false, trivial: true })).toBe('think');
+  });
   it('skips thinking on routine mid-task steps', () => {
     expect(decideThinking({ iteration: 5, taskComplex: true, recentToolErrors: 0, forceThink: false })).toBe('no_think');
   });

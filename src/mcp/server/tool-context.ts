@@ -64,6 +64,10 @@ export async function makeServerToolContext(
     askUser,
     emit: () => { /* no UI sink in server mode */ },
     currentTurn: 0,
+    exec: async (req) => {
+      const { resolveRuntime } = await import('../../runtime/exec.js');
+      return resolveRuntime(config).exec(req);
+    },
     _cleanup: async () => {
       try { await transaction.commit?.(); } catch { /* best-effort */ }
     },

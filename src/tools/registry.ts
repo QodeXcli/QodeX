@@ -38,6 +38,7 @@ import {
 import { ProjectOverviewTool } from './codegraph/project-overview.js';
 import { AnalyzeImpactTool } from './codegraph/analyze-impact.js';
 import { FindDeadCodeTool } from './codegraph/find-dead-code.js';
+import { FindSimilarHelpersTool } from './codegraph/find-similar-helpers.js';
 import { SafeRenameTool, SafeDeleteFileTool } from './codegraph/safe-refactor.js';
 import { ReviewMyChangesTool } from './safety/review-changes.js';
 import { SmartDiffTool } from './codegraph/smart-diff.js';
@@ -81,6 +82,10 @@ import { GatherTool } from './builtin/gather.js';
 import { AutoFixTool } from './builtin/auto-fix.js';
 import { DiagnosticsTool } from './diagnostics/diagnostics-tool.js';
 import { RememberTool, RecallTool, ForgetTool } from './builtin/memory.js';
+import { RecallApproachTool } from './builtin/recall-approach.js';
+import { SuggestSkillTool } from './builtin/suggest-skill.js';
+import { SaveApiKeyTool } from './builtin/save-api-key.js';
+import { AddProviderTool } from './builtin/add-provider.js';
 // v1.40 — infrastructure tool groups
 import { NetworkOptimizeTool } from './network/network-optimize.js';
 import { DockerPsTool, DockerLogsTool, DockerInspectTool, DockerExecTool, DockerBuildTool, DockerComposeTool } from './docker/docker-tools.js';
@@ -116,7 +121,9 @@ export interface ToolExecutionMode {
  * shrinks per-iteration prompt size. Pure — unit-testable without the registry.
  */
 const NEVER_BLOCK = new Set([
-  'shell', 'read_file', 'write_file', 'edit_text', 'ls', 'glob', 'grep',
+  // NB: the real edit tool is `edit_text` (there is no `edit_file`). Protecting the phantom
+  // name left the actual editor gate-able by tool-profiling — a latent "can't edit" bug.
+  'shell', 'read_file', 'write_file', 'edit_text', 'edit_symbol', 'multi_edit', 'ls', 'glob', 'grep',
 ]);
 export function expandToolPatterns(patterns: string[], allNames: string[]): string[] {
   const out = new Set<string>();
@@ -157,6 +164,15 @@ export class ToolRegistry {
     terminal: 'shell',
     shell_command: 'shell',
     cmd: 'shell',
+    // Edit/write aliases — models trained on Claude Code / Cursor / str_replace reach for
+    // these names; without the alias `edit_file` (etc.) hit "unknown tool" and burned a turn.
+    edit_file: 'edit_text',
+    edit: 'edit_text',
+    str_replace: 'edit_text',
+    str_replace_editor: 'edit_text',
+    str_replace_based_edit_tool: 'edit_text',
+    create_file: 'write_file',
+    view_file: 'read_file',
   };
 
   /** Resolve an incoming tool name to a registered one, applying aliases. */
@@ -211,6 +227,7 @@ export class ToolRegistry {
       new AnalyzeImpactTool(),
       // v1.11 — quality + refactor-safety tools
       new FindDeadCodeTool(),
+      new FindSimilarHelpersTool(),
       new SafeRenameTool(),
       new SafeDeleteFileTool(),
       // v1.12 — self-critique
@@ -261,7 +278,11 @@ export class ToolRegistry {
       new DiagnosticsTool(),
       new RememberTool(),
       new RecallTool(),
+      new RecallApproachTool(),
+      new SuggestSkillTool(),
+      new SaveApiKeyTool(),
       new ForgetTool(),
+      new AddProviderTool(),
       new ProjectLogTool(),
       new ProjectRecallTool(),
       new BackgroundJobStartTool(),
@@ -453,6 +474,10 @@ export class ToolRegistry {
       const result = await tool.execute(parsed, ctx);
       return sentinel.afterTool(tool.name, parsed, result, meta);
     } catch (e: any) {
+      // Apply-guard CAS refusals are already a complete observation for the model.
+      if (typeof e?.message === 'string' && e.message.startsWith('[FILE_CHANGED]')) {
+        return { content: e.message, isError: true };
+      }
       return {
         content: `[TOOL_ERROR] ${name} failed: ${e.message}\nReview the error and try a different approach.`,
         isError: true,

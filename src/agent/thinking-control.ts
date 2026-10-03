@@ -44,13 +44,17 @@ export interface ThinkingContext {
   forceThink: boolean;
   /** Re-ground every Nth iteration on complex tasks (default 8). */
   rethinkEvery?: number;
+  /** Greeting / one-liner — skip the first-iter think tax. */
+  trivial?: boolean;
 }
 
 export function decideThinking(ctx: ThinkingContext): ThinkingDecision {
   const every = ctx.rethinkEvery ?? 8;
-  if (ctx.iteration <= 1) return 'think';
   if (ctx.forceThink) return 'think';
   if (ctx.recentToolErrors > 0) return 'think';
+  // A "hi" / "thanks" must not pay a 30–90s hidden reasoning pass.
+  if (ctx.trivial) return 'no_think';
+  if (ctx.iteration <= 1) return 'think';
   if (ctx.taskComplex && every > 0 && ctx.iteration % every === 0) return 'think';
   return 'no_think';
 }

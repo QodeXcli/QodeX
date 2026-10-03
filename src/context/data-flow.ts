@@ -53,7 +53,6 @@ const BUILTINS = new Set([
 ]);
 
 const FUNC_NODE_RE = /function_declaration|function_definition|method_definition|method_declaration|arrow_function|function_item|function|method/;
-const DECL_PARAM_RE = /parameter|formal_parameter|required_parameter|optional_parameter|identifier_pattern|typed_parameter|default_parameter/;
 const LOCAL_DECL_RE = /variable_declarator|lexical_declaration|let_declaration|assignment|short_var_declaration|expression_statement/;
 
 /** Extract the function name from a function-ish node. */

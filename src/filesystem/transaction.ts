@@ -1,12 +1,14 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import simpleGit, { SimpleGit } from 'simple-git';
+import simpleGit from 'simple-git';
 import type Database from 'better-sqlite3';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_TXN_DB, QODEX_BLOBS_DIR } from '../config/defaults.js';
 import { logger } from '../utils/logger.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { checkWriteScope } from '../agent/autonomy-contract.js';
+import { FileChangedError, getApplyGuard, operatorSourceFromSession } from './apply-guard.js';
 
 export type FileOperation = 'write' | 'delete' | 'create' | 'rename';
 
@@ -49,10 +51,6 @@ INSERT OR IGNORE INTO counters (name, value) VALUES ('next_txn_id', 1);
 -- Idempotent migration: add new columns if upgrading from a v0.1.0 db
 `;
 
-const MIGRATIONS: Array<{ check: string; sql: string }> = [
-  { check: "PRAGMA table_info(transactions)", sql: "ALTER TABLE transactions ADD COLUMN git_status TEXT" },
-  { check: "PRAGMA table_info(transactions)", sql: "ALTER TABLE transactions ADD COLUMN git_fail_reason TEXT" },
-];
 
 function hashContent(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
@@ -68,11 +66,36 @@ export class Transaction {
     private journal: TransactionJournal,
     public readonly sessionId: string,
     private toolCallId?: string,
+    /** Session working root — git + relative labels. Never process.cwd() after a handoff. */
+    private readonly cwd: string = process.cwd(),
   ) {}
 
-  async write(filePath: string, content: string): Promise<void> {
+  /**
+   * Journaled write. Pass `base` when the caller computed `content` from a
+   * snapshot (every agent edit/write tool). After the approval queue parks
+   * the call, disk is re-read under a brief exclusive apply:
+   *   - `base: string`  file must still equal that snapshot
+   *   - `base: null`    file must still not exist (create)
+   * Omit `base` for undo/rollback/artifact restores that already know the bytes.
+   */
+  async write(filePath: string, content: string, opts?: { base?: string | null; label?: string }): Promise<void> {
     this.ensureOpen();
     const abs = path.resolve(filePath);
+    const guard = getApplyGuard();
+    const source = operatorSourceFromSession(this.sessionId);
+
+    await guard.exclusive(abs, async () => {
+    // ─── Autonomy-contract scope gate (--scope) ───
+    // When a headless contract run pins a write scope, edits outside it are refused
+    // BEFORE anything touches disk. No-op unless a scope root is registered (see
+    // autonomy-contract.ts). Rollback/undo paths write via fs directly — never gated.
+    {
+      const denial = checkWriteScope(abs);
+      if (denial) {
+        logger.info('Scope gate refused write', { txnId: this.id, path: abs });
+        throw new Error(denial);
+      }
+    }
 
     let beforeContent: string | null = null;
     let beforeHash: string | null = null;
@@ -86,6 +109,16 @@ export class Transaction {
         isCreate = true;
       } else {
         throw e;
+      }
+    }
+
+    if (opts && 'base' in opts) {
+      const expected = opts.base ?? null;
+      const actual = isCreate ? null : beforeContent;
+      if (expected !== actual) {
+        const label = opts.label || path.relative(this.cwd, abs) || abs;
+        logger.info('Apply-guard refused stale write', { txnId: this.id, path: abs, source, other: guard.last(abs) ?? null });
+        throw new FileChangedError(label, guard.last(abs) ?? null);
       }
     }
 
@@ -124,12 +157,24 @@ export class Transaction {
       afterContent: content,
     });
 
-    logger.debug('Transaction write', { txnId: this.id, path: abs, isCreate });
+    guard.noteWriter(abs, source);
+    logger.debug('Transaction write', { txnId: this.id, path: abs, isCreate, source });
+    });
   }
 
   async delete(filePath: string): Promise<void> {
     this.ensureOpen();
     const abs = path.resolve(filePath);
+    const guard = getApplyGuard();
+    await guard.exclusive(abs, async () => {
+    // Scope gate — same contract as write() above.
+    {
+      const denial = checkWriteScope(abs);
+      if (denial) {
+        logger.info('Scope gate refused delete', { txnId: this.id, path: abs });
+        throw new Error(denial);
+      }
+    }
     const content = await fs.readFile(abs, 'utf-8');
     const hash = hashContent(content);
     await this.journal.storeBlob(hash, content);
@@ -142,6 +187,7 @@ export class Transaction {
       beforeHash: hash,
       afterHash: null,
       beforeContent: content,
+    });
     });
   }
 
@@ -156,10 +202,10 @@ export class Transaction {
     let gitStatus: 'committed' | 'skipped-not-a-repo' | 'skipped-gitignored' | 'failed' = 'skipped-not-a-repo';
     let gitFailReason: string | null = null;
     try {
-      const git = simpleGit(process.cwd());
+      const git = simpleGit(this.cwd);
       const isRepo = await git.checkIsRepo();
       if (isRepo) {
-        const relPaths = this.ops.map(o => path.relative(process.cwd(), o.path));
+        const relPaths = this.ops.map(o => path.relative(this.cwd, o.path));
 
         // Filter out paths that are ignored — git add will refuse them and abort the whole add.
         const trackable: string[] = [];
@@ -309,12 +355,12 @@ export class TransactionJournal {
     this.markRolledBackStmt = this.db.prepare(`UPDATE transactions SET status = 'rolled-back' WHERE txn_id = ?`);
   }
 
-  async begin(sessionId: string, toolCallId?: string): Promise<Transaction> {
+  async begin(sessionId: string, toolCallId?: string, cwd?: string): Promise<Transaction> {
     await fs.mkdir(this.blobsDir, { recursive: true });
     const row = this.getNextIdStmt.get() as { value: number };
     const txnId = row.value;
     this.incrementStmt.run();
-    return new Transaction(txnId, this, sessionId, toolCallId);
+    return new Transaction(txnId, this, sessionId, toolCallId, cwd);
   }
 
   persistOps(
@@ -432,6 +478,16 @@ export class TransactionJournal {
     tx();
 
     return { filesRestored, txnsRolled: ids.length };
+  }
+
+  /** Distinct file paths touched by still-committed transactions in a session.
+   *  Used by the autonomy-contract RUN REPORT (headless --verify/--budget runs). */
+  listSessionFiles(sessionId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT path FROM transactions WHERE session_id = ? AND status = 'committed'
+      ORDER BY path
+    `).all(sessionId) as { path: string }[];
+    return rows.map(r => r.path);
   }
 
   listRecentTransactions(sessionId: string, limit = 20): Array<{

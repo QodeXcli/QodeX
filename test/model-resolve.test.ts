@@ -130,5 +130,23 @@ console.log('— defaults.provider breaks ties for a bare model id (regression) 
     r3.provider.name === 'glm');
 }
 
+console.log('— resolvedId is the model\'s OWN id (vendor-prefix collision fix) —');
+{
+  // RouterCore.resolveModel returns direct.info.id as the wire id. Replicate that and
+  // assert the bug is fixed: a provider NAMED `nvidia` must not strip the `nvidia/` VENDOR
+  // prefix off the model id (that sent `nemotron-…` to NVIDIA and 404'd).
+  const idx = buildIndex([
+    { provider: 'openai', id: 'gpt-4o' },
+    { provider: 'nvidia', id: 'nvidia/nemotron-3-super-120b-a12b' }, // provider name == vendor prefix
+    { provider: 'openai', id: 'qwen/qwen3-coder-next' },             // LM Studio HF-publisher prefix
+  ]);
+  const wireId = (modelId: string) => idx.get(modelId)?.info.id;
+  check('openai/gpt-4o → gpt-4o (provider prefix dropped)', wireId('openai/gpt-4o') === 'gpt-4o');
+  check('nvidia/nemotron-… kept VERBATIM (not stripped to nemotron-…)',
+    wireId('nvidia/nemotron-3-super-120b-a12b') === 'nvidia/nemotron-3-super-120b-a12b');
+  check('qwen/qwen3-coder-next kept (HF publisher prefix, not a provider)',
+    wireId('qwen/qwen3-coder-next') === 'qwen/qwen3-coder-next');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

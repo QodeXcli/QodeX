@@ -46,6 +46,13 @@ export interface SubAgentRunOptions {
   askUser?: (prompt: string, options?: string[]) => Promise<string>;
   /** Wall/token/cost caps for this run (browser/computer roles have sensible defaults). */
   budgetOverride?: SubAgentBudgetOverride;
+  /**
+   * Operator-owned runs (`/background`) use the full tool surface minus
+   * recursion. Model-owned `task` stays on 'subagent'.
+   */
+  executionMode?: 'subagent' | 'normal';
+  /** Live tool UI events (progress, diffs) of the sub-agent, for side-run docks. */
+  onToolUI?: (event: import('../base.js').ToolUIEvent) => void;
 }
 
 export interface SubAgentResult {
@@ -90,6 +97,8 @@ const OPERATOR_ROLE_MAX_ITERATIONS = 25;
  *   setSubAgentRunner((prompt, opts) => agent.runSubagent(prompt, opts))
  */
 export type SubAgentRunner = (prompt: string, opts: SubAgentRunOptions) => Promise<SubAgentResult>;
+/** Alias kept for callers written against the operator-plane name. */
+export type SubAgentOpts = SubAgentRunOptions;
 
 let subAgentRunner: SubAgentRunner | null = null;
 export function setSubAgentRunner(runner: SubAgentRunner | null): void {

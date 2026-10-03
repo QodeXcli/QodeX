@@ -2,7 +2,7 @@
   "name": "qodex-vscode",
   "displayName": "QodeX",
   "description": "Launch QodeX (local-first agentic coding CLI) from inside VS Code with editor context.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "publisher": "qodex",
   "engines": {
     "vscode": "^1.85.0"
@@ -50,6 +50,16 @@
       {
         "command": "qodex.explainDiagnostic",
         "title": "QodeX: Explain Problem at Cursor",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.continueLastSession",
+        "title": "QodeX: Continue Last Session",
+        "category": "QodeX"
+      },
+      {
+        "command": "qodex.backgroundFromEditor",
+        "title": "QodeX: Background Task…",
         "category": "QodeX"
       }
     ],

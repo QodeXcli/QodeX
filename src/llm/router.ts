@@ -26,6 +26,21 @@ import { ProviderError } from '../utils/errors.js';
 
 export type TaskClass = 'planning' | 'tool-decision' | 'code-generation' | 'reflection' | 'general';
 
+/**
+ * Cap Ollama's default `num_ctx` to what the host can hold. Ollama allocates a KV
+ * cache sized to `num_ctx` up front, so a model's full 32k/128k/256k window makes
+ * every turn crawl — even warm — because the runtime zeros a huge cache before the
+ * first token. We always return a ceiling (never "unlimited"): large/unknown boxes
+ * still get 32k, which is plenty for an agent turn and matches what compaction
+ * can actually use. An explicit `providers.ollama.options.num_ctx` still overrides.
+ */
+export function ollamaNumCtxCeiling(hw?: QodexConfig['hardware']): number {
+  if (hw && (hw.tier === 'small' || (hw.ramGb != null && hw.ramGb <= 8))) return 8192;
+  if (hw && (hw.tier === 'medium' || (hw.ramGb != null && hw.ramGb <= 16))) return 16384;
+  if (hw && (hw.tier === 'xl' || (hw.ramGb != null && hw.ramGb >= 64))) return 65536;
+  return 32768; // large, unknown, or no hardware profile
+}
+
 export interface RouteDecision {
   provider: Provider;
   model: string;
@@ -59,10 +74,12 @@ export class ModelRouter {
       keepAlive: ollamaCfg.keepAlive,
       options: ollamaCfg.options,
       draftModel: ollamaCfg.draftModel,
+      numCtxCeiling: ollamaNumCtxCeiling(this.config.hardware),
     }));
-    // Anthropic prompt caching is opt-in via config. Default off — first run after
-    // `qx setup` may flip this on when the user opts in.
-    const anthropicUseCaching = (this.config.providers.anthropic as any)?.useCaching === true;
+    // Anthropic prompt caching is ON by default — strictly cheaper for multi-iteration agent
+    // loops (the shared tools+system+history prefix is served at 0.1× instead of full price
+    // each turn). Opt out with providers.anthropic.useCaching: false.
+    const anthropicUseCaching = (this.config.providers.anthropic as any)?.useCaching !== false;
     this.providers.set('anthropic', new AnthropicProvider(
       process.env[this.config.providers.anthropic.apiKeyEnv],
       { useCaching: anthropicUseCaching },
@@ -184,18 +201,15 @@ export class ModelRouter {
     // Try exact match first
     const direct = this.modelIndex.get(modelId);
     if (direct) {
-      // The map stores entries under both `${providerName}/${modelId}` AND `${modelId}`.
-      // We only want to strip the prefix if it's actually a QodeX provider name
-      // (ollama, openai, anthropic, deepseek) — NOT a HuggingFace-style publisher
-      // prefix like `qwen/qwen3-coder-next` that LM Studio uses.
-      let resolvedId = modelId;
-      if (modelId.includes('/')) {
-        const [first, ...rest] = modelId.split('/');
-        if (first && this.providers.has(first)) {
-          resolvedId = rest.join('/');
-        }
-      }
-      return { provider: direct.provider, modelInfo: direct.info, resolvedId };
+      // The matched model's OWN id is exactly what the provider expects on the wire.
+      // Using it (instead of stripping a leading "provider/") is correct in every case:
+      //   - `openai/gpt-4o`        → info.id `gpt-4o`                       (provider prefix dropped)
+      //   - `qwen/qwen3-coder-next`→ info.id `qwen/qwen3-coder-next`        (HF publisher kept)
+      //   - `nvidia/nemotron-3-super-120b-a12b` on a provider NAMED nvidia → info.id kept VERBATIM.
+      // The old "strip if first segment is a provider name" heuristic broke that last case: a
+      // custom provider named `nvidia` made it strip the model's `nvidia/` VENDOR prefix, so the
+      // gateway got `nemotron-3-...` and 404'd. info.id never has that collision.
+      return { provider: direct.provider, modelInfo: direct.info, resolvedId: direct.info.id };
     }
     // Try fuzzy match — only for QodeX-provider prefixes, same rule as above.
     for (const [key, val] of this.modelIndex) {
@@ -341,6 +355,19 @@ export class ModelRouter {
   }
 }
 
-export function computeCost(usage: { input: number; output: number }, info: ModelInfo): number {
-  return (usage.input * info.inputCostPerMillion + usage.output * info.outputCostPerMillion) / 1_000_000;
+/**
+ * Cost for one call. `input`/`output` are FRESH tokens at full price. Anthropic prompt-cache
+ * tokens are priced separately: cacheRead at 0.1× input, cacheCreation at 1.25× input — so a
+ * cached agent loop reports its REAL (much lower) cost instead of billing every re-sent token
+ * at full price. PURE. Absent cache fields ⇒ the old plain formula.
+ */
+export function computeCost(
+  usage: { input: number; output: number; cacheRead?: number; cacheCreation?: number },
+  info: ModelInfo,
+): number {
+  const inP = info.inputCostPerMillion;
+  const fresh = usage.input * inP;
+  const read = (usage.cacheRead ?? 0) * inP * 0.1;
+  const write = (usage.cacheCreation ?? 0) * inP * 1.25;
+  return (fresh + read + write + usage.output * info.outputCostPerMillion) / 1_000_000;
 }

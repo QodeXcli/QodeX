@@ -22,6 +22,7 @@
  */
 
 import type { TaskClass } from '../llm/prompts/task-addenda.js';
+import { classifyPromptClass } from './task-brief.js';
 
 export type { TaskClass as PromptTaskClass };
 
@@ -206,41 +207,24 @@ function isDesktop(n: string): boolean {
  * Returns one of the prompt TaskClass values ('general' when nothing specific fits).
  */
 export function classifyTaskForPrompt(input: string): TaskClass {
-  const text = String(input ?? '').toLowerCase();
   const n = normalizeForClassify(input);
 
   // Unambiguous "do this on <site>" wins even over backend words ("go to
   // https://api.example.com/docs and summarize the REST API").
   if (isStrongWeb(n)) return 'web';
 
-  // Backend / Django signals — checked FIRST among the coding classes so "design the Django
-  // models" classifies as backend, not frontend. Persian terms are matched WITHOUT \b — JS
-  // word boundaries don't fire around non-ASCII letters.
-  if (/\b(django|drf|django ?rest|serializer|viewset|queryset|orm|migration|makemigrations|models?\.py|celery|wsgi|asgi|manage\.py|backend|back ?end|api ?endpoint|rest ?api)\b/.test(text)
-    || /(جنگو|بک‌?اند|بک ?اند|بکند|سمت ?سرور|پایگاه ?داده|دیتابیس)/.test(text)) {
-    return 'backend';
-  }
+  // The coding classes come from the shared, path-blind classifier (task-brief.ts):
+  // mentioned file paths like ui.tsx / button.tsx never flip the class.
+  const coding = classifyPromptClass(input);
 
-  // Jobs on a website / on the desktop — before frontend, whose regex is broad.
+  // Backend / Django signals stay first among the coding classes, so "design the Django
+  // models" classifies as backend.
+  if (coding === 'backend') return 'backend';
+
+  // Jobs on a website / on the desktop — before frontend, whose regex is broad
+  // ("fill the form on the site" / "برو تو سایت ..." are not frontend work).
   if (isWeb(n)) return 'web';
   if (isDesktop(n)) return 'desktop';
 
-  // Frontend signals — strongest match (overrides feature/refactor when explicit).
-  if (/\b(design|redesign|ui|ux|frontend|landing(?: ?page)?|hero(?: section)?|component|style|theme|layout|animation|three\.?js|react three|r3f|page|button|navbar|header|footer|card|modal|dropdown|form ?design|color|palette|tailwind|shadcn|figma|wireframe|prototype|mockup|polish|aesthetic|beautiful|elegant|modern|minimalist|gradient|glassmorphism|neumorphism|skeuomorphic|3d|scene|webgl|shader|seo|json-?ld|structured ?data|schema\.?org|rich ?results|open ?graph|sitemap)\b/.test(text)
-    || /(دیزاین|طراحی|زیبا|فرانت|قشنگ|مدرن|گرادیان|ظاهر|رابط ?کاربری|سایت|وب ?سایت)/.test(text)) {
-    return 'frontend';
-  }
-  // Highest-signal first
-  if (/\b(refactor|restructure|clean ?up|simplify|extract|inline|rename|move|consolidate|deduplicate|untangle)\b/.test(text)) return 'refactor';
-  if (/\b(debug|fix|error|exception|crash|broken|bug|broke|stuck|hang|throwing|undefined|null|fail|regression|نمی‌?کار|نمیکار|خراب|باگ|اشکال|درست(?: نمی| نمی))\b/.test(text)) return 'debug';
-  if (/\b(review|critique|audit|inspect|code ?review|smell|improve|quality|بررسی)\b/.test(text)) return 'review';
-  if (/\b(explain|describe|what does|how does|walk through|understand|چطور|چگونه|توضیح)\b/.test(text)) return 'explain';
-  // Analytical / decision / business tasks — NOT coding. Checked before `feature` so
-  // "build a business plan" / "develop a strategy" classify as analysis, not a build task.
-  if (/\b(trade-?offs?|business ?plan|pros and cons|cost[- ]benefit|swot|feasibility|go-to-market|value proposition|market analysis|competitive analysis|monetiz|decision matrix|which (?:option |one )?(?:is )?better|compare\b[\s\S]*\b(?:vs|versus)\b|evaluate (?:the )?options|weigh (?:the )?(?:options|pros)|should (?:i|we) (?:use|choose|pick|go with)|strategy|analy[sz]e|analysis)\b/.test(text)
-    || /(تحلیل|بیزینس ?پلن|طرح ?کسب|کسب ?و ?کار|استراتژی|مقایسه|مزایا و معایب|سود و زیان|گزینه|ارزیابی|امکان ?سنجی|تصمیم|بازار)/.test(text)) {
-    return 'analysis';
-  }
-  if (/\b(add|build|implement|create|new feature|develop|integrate|بساز|اضافه|پیاده ?سازی|ایجاد)\b/.test(text)) return 'feature';
-  return 'general';
+  return coding;
 }

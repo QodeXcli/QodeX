@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { compactMessages } from '../src/utils/compaction.js';
 import { detectStuckLoop, readLoopAction } from '../src/agent/recovery.js';
 import { AgentLoop } from '../src/agent/loop.js';
 import type { Message } from '../src/session/store.js';
@@ -105,5 +106,59 @@ describe('pruneMessages — intra-group compaction for single-turn tasks', () =>
     const last = out[out.length - 1]!;
     expect(last.role === 'tool' || last.role === 'assistant').toBe(true);
     assertInvariants(out);
+  });
+});
+
+describe('compaction refuses to trade real history for an empty summary', () => {
+  // The user's instruction is stated ONCE at the start — exactly what compaction exists to
+  // carry forward, and exactly what a failed summarization used to destroy.
+  const build = () => {
+    const m: any[] = [{ role: 'system', content: 'sys' }];
+    m.push({ role: 'user', content: 'Refactor auth. IMPORTANT: do NOT run npm install, frontend at web/src/.' });
+    m.push({ role: 'assistant', content: 'ok' });
+    for (let i = 0; i < 20; i++) {
+      m.push({ role: 'user', content: `step ${i}` });
+      m.push({ role: 'assistant', content: `did ${i}` });
+    }
+    return m;
+  };
+  const survives = (msgs: any[]) => {
+    const all = JSON.stringify(msgs);
+    return all.includes('do NOT run npm install') && all.includes('web/src/');
+  };
+
+  it('still compacts on a usable summary', async () => {
+    const r = await compactMessages(build(), {
+      keepLastTurns: 6,
+      summarize: async () => '[CTX_SUMMARY]\nGoal: refactor auth. Constraint: do NOT run npm install. Frontend at web/src/. Files: auth.ts.',
+    });
+    expect(r.turnsCompacted).toBeGreaterThan(0);
+    expect(survives(r.messages)).toBe(true);
+  });
+
+  for (const [label, summary] of [
+    ['an empty string (aborted stream)', ''],
+    ['whitespace only', '   \n  '],
+    ['the prefix with no body', '[CTX_SUMMARY]'],
+    ['a summary too short to carry goal + path + constraint', '[CTX_SUMMARY]\nrefactored stuff'],
+  ] as [string, string][]) {
+    it(`keeps the original messages when the summarizer returns ${label}`, async () => {
+      const original = build();
+      const r = await compactMessages(original, { keepLastTurns: 6, summarize: async () => summary });
+      // Skipping one compaction is cheap; losing the user's standing instruction is not.
+      expect(r.turnsCompacted).toBe(0);
+      expect(r.messages).toEqual(original);
+      expect(survives(r.messages)).toBe(true);
+    });
+  }
+
+  it('keeps the original messages when the summarizer throws', async () => {
+    const original = build();
+    const r = await compactMessages(original, {
+      keepLastTurns: 6,
+      summarize: async () => { throw new Error('stream died'); },
+    });
+    expect(r.turnsCompacted).toBe(0);
+    expect(survives(r.messages)).toBe(true);
   });
 });

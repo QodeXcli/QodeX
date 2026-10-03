@@ -26,10 +26,22 @@ export function tailForViewport(text: string, rows: number, cols: number): strin
   let used = 0;
   const kept: string[] = [];
   for (let i = logical.length - 1; i >= 0; i--) {
-    const vis = Math.max(1, Math.ceil(logical[i].length / width)); // wrapped rows for this line
-    if (used + vis > budget && kept.length > 0) break;
+    const line = logical[i];
+    const vis = Math.max(1, Math.ceil(line.length / width)); // wrapped rows for this line
+    if (used + vis > budget) {
+      // This line doesn't fully fit. A SINGLE line can wrap to more rows than the
+      // whole budget (a long unbroken line, or wrapped RTL/Persian paragraph). If we
+      // kept it whole it would push the live region past the terminal height, scroll
+      // into scrollback, and — repainted each token — oscillate. So keep only the
+      // TRAILING rows of this top line that still fit; its scrolled-off head is
+      // exactly what the terminal would have hidden anyway. (Also covers the case
+      // where nothing has been kept yet — the bottom line alone is taller than budget.)
+      const rowsLeft = budget - used;
+      if (rowsLeft > 0) kept.unshift(line.slice(line.length - rowsLeft * width));
+      break;
+    }
     used += vis;
-    kept.unshift(logical[i]);
+    kept.unshift(line);
     if (used >= budget) break;
   }
   return kept.join('\n');

@@ -41,6 +41,8 @@ export interface ScheduleEntry {
   last_duration_ms?: number;
   next_run_at?: string;       // ISO; recomputed on save / on tick
   run_count: number;
+  deliver?: string;           // chat target, e.g. "telegram:<chatId>" — null = desktop only
+  recipe?: string;            // a recipe kind, e.g. "verified-pr" — null = run prompt as-is
 }
 
 const SCHEMA = `
@@ -59,7 +61,9 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_message TEXT,
   last_duration_ms INTEGER,
   next_run_at DATETIME,
-  run_count INTEGER DEFAULT 0
+  run_count INTEGER DEFAULT 0,
+  deliver TEXT,
+  recipe TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(next_run_at) WHERE enabled = 1;
 
@@ -71,7 +75,8 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
   status TEXT,
   exit_code INTEGER,
   message TEXT,
-  duration_ms INTEGER
+  duration_ms INTEGER,
+  receipt TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_schedule ON schedule_runs(schedule_id, started_at DESC);
 `;
@@ -85,6 +90,7 @@ export interface ScheduleRun {
   exit_code?: number;
   message?: string;
   duration_ms?: number;
+  receipt?: string;           // JSON-encoded RunReceipt — the audit trail of an autonomous run
 }
 
 export class ScheduleStore {
@@ -93,6 +99,12 @@ export class ScheduleStore {
   constructor(dbPath: string = QODEX_SESSION_DB) {
     this.db = openDatabase(dbPath);
     this.db.exec(SCHEMA);
+    // Migrate DBs created before deliver/recipe existed. ADD COLUMN throws on an existing
+    // column, so each is guarded — idempotent and safe to run every startup.
+    for (const col of ['deliver TEXT', 'recipe TEXT']) {
+      try { this.db.exec(`ALTER TABLE schedules ADD COLUMN ${col}`); } catch { /* already present */ }
+    }
+    try { this.db.exec(`ALTER TABLE schedule_runs ADD COLUMN receipt TEXT`); } catch { /* already present */ }
     this.migrate();
   }
 
@@ -118,6 +130,8 @@ export class ScheduleStore {
     allowedTools?: string[];
     /** Default 'prompt'. 'mission' starts a background mission each run. */
     kind?: ScheduleKind;
+    deliver?: string;
+    recipe?: string;
   }): ScheduleEntry {
     const parsed = parseCron(input.cron); // throws on invalid
     const next = nextAfter(parsed, new Date());
@@ -125,9 +139,10 @@ export class ScheduleStore {
     const allowed = input.allowedTools && input.allowedTools.length > 0 ? JSON.stringify(input.allowedTools) : null;
     const kind: ScheduleKind = input.kind === 'mission' ? 'mission' : 'prompt';
     this.db.prepare(`
-      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null, kind);
+      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind, deliver, recipe)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null,
+           kind, input.deliver ?? null, input.recipe ?? null);
     return this.get(id)!;
   }
 
@@ -258,6 +273,12 @@ export class ScheduleStore {
       : this.db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ? AND next_run_at = ?`)
           .run(next?.toISOString() ?? null, scheduleId, prev);
     return res.changes === 1;
+  }
+
+  /** Attach a parsed trust receipt (JSON) to a finished run — the audit record. Best-effort. */
+  attachReceipt(runId: number, receiptJson: string): void {
+    try { this.db.prepare(`UPDATE schedule_runs SET receipt = ? WHERE id = ?`).run(receiptJson, runId); }
+    catch { /* best-effort — a missing receipt never fails a run */ }
   }
 
   recentRuns(scheduleId: string, limit = 10): ScheduleRun[] {

@@ -118,9 +118,11 @@ async function askAboutSelection(): Promise<void> {
   const term = getOrCreateTerminal(cwd);
   // Build a self-contained prompt: file context + user question
   // We pass via the CLI's headless mode if configured, else interactive
+  await writeEditorContext(document, selection);
+  const { text: diags, count: diagCount } = collectDiagnostics(document.uri, selection.isEmpty ? undefined : selection);
   const promptText =
-    `Look at ${filePath} ${lineRange}:\n` +
-    `\n\`\`\`\n${selectedText.slice(0, 4000)}${selectedText.length > 4000 ? '\n…[truncated]' : ''}\n\`\`\`\n\n` +
+    `Look at ${filePath} (${lineRange}). Editor snapshot is in .qodex/editor-context.md — read that first.\n` +
+    (diagCount ? `The editor currently reports:\n${diags}\n` : '') +
     `Question: ${question}`;
   if (cfg.openHeadless) {
     term.sendText(`${cfg.executablePath} --headless ${shellQuote(promptText)}`);
@@ -329,14 +331,79 @@ class QodexCodeActionProvider implements vscode.CodeActionProvider {
   }
 }
 
-/** Status bar entry — quick launch button. */
+/** Write a tiny editor snapshot the CLI can read — no 4k paste on the command line. */
+async function writeEditorContext(document: vscode.TextDocument, selection: vscode.Selection): Promise<void> {
+  const cwd = getCwd();
+  const dir = path.join(cwd, '.qodex');
+  try { await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir)); } catch { /* exists */ }
+  const { text: diags, count } = collectDiagnostics(document.uri, selection.isEmpty ? undefined : selection);
+  const body = [
+    `# Editor context`,
+    `- file: ${document.uri.fsPath}`,
+    `- language: ${document.languageId}`,
+    `- selection: lines ${selection.start.line + 1}-${selection.end.line + 1}`,
+    count ? `- diagnostics:\n${diags}` : '- diagnostics: none',
+    '',
+    '## Selection',
+    '```',
+    document.getText(selection.isEmpty ? undefined : selection).slice(0, 6000),
+    '```',
+    '',
+  ].join('\n');
+  await vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(dir, 'editor-context.md')), Buffer.from(body, 'utf-8'));
+}
+
+async function continueLastSession(): Promise<void> {
+  const handoffFile = path.join(os.homedir(), '.qodex', 'handoff.json');
+  let id = '';
+  try {
+    const raw = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(handoffFile))).toString('utf-8'));
+    id = String(raw.sessionId ?? '');
+  } catch { /* none */ }
+  const cfg = getConfig();
+  const term = getOrCreateTerminal(getCwd());
+  if (id) term.sendText(`${cfg.executablePath} --resume ${id.slice(0, 8)}`);
+  else term.sendText(`${cfg.executablePath} --continue`);
+}
+
+async function backgroundFromEditor(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const what = await vscode.window.showInputBox({
+    prompt: 'Background task (runs isolated; the main chat stays free)',
+    placeHolder: 'e.g. write tests for the current file and run them',
+  });
+  if (!what) return;
+  if (editor) await writeEditorContext(editor.document, editor.selection);
+  const fileHint = editor ? ` Current file: ${editor.document.uri.fsPath}.` : '';
+  const cfg = getConfig();
+  const term = getOrCreateTerminal(getCwd());
+  term.sendText(cfg.executablePath);
+  setTimeout(() => term.sendText(`/background ${what}.${fileHint}`), 900);
+}
+
+/** Status bar entry — launch + last-session hint. */
 function createStatusBar(context: vscode.ExtensionContext): vscode.StatusBarItem {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.text = '$(rocket) QodeX';
-  item.tooltip = 'Open QodeX in terminal (Cmd+Alt+Q)';
+  item.tooltip = 'Open QodeX (Cmd+Alt+Q). Right-click status for Continue last session.';
   item.command = 'qodex.openInTerminal';
   item.show();
   context.subscriptions.push(item);
+  const refresh = async () => {
+    try {
+      const raw = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(
+        vscode.Uri.file(path.join(os.homedir(), '.qodex', 'handoff.json')),
+      )).toString('utf-8'));
+      const id = String(raw.sessionId ?? '').slice(0, 8);
+      if (id) {
+        item.text = `$(rocket) QodeX ${id}`;
+        item.tooltip = `Last CLI session ${id} — click to open, or run QodeX: Continue Last Session`;
+      }
+    } catch { /* no handoff */ }
+  };
+  void refresh();
+  const iv = setInterval(() => { void refresh(); }, 15_000);
+  context.subscriptions.push({ dispose: () => clearInterval(iv) });
   return item;
 }
 
@@ -349,6 +416,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('qodex.networkDiag', networkDiag),
     vscode.commands.registerCommand('qodex.fixDiagnostics', fixDiagnostics),
     vscode.commands.registerCommand('qodex.explainDiagnostic', explainDiagnostic),
+    vscode.commands.registerCommand('qodex.continueLastSession', continueLastSession),
+    vscode.commands.registerCommand('qodex.backgroundFromEditor', backgroundFromEditor),
     vscode.languages.registerCodeActionsProvider(
       { scheme: 'file' },
       new QodexCodeActionProvider(),

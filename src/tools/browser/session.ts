@@ -431,7 +431,7 @@ export class QodexBrowserManager implements BrowserManager {
       ...base,
       headless: over?.headless ?? base.headless,
       profile: over?.profile ?? base.profile,
-      cdpUrl: over?.cdpUrl ?? base.cdpUrl,
+      cdpUrl: over?.cdpUrl ?? (base.cdpUrl || configuredCdpUrl || ''),
     };
     const pw = await this.loadPlaywright();
     this.profileNotice = undefined;
@@ -1301,6 +1301,20 @@ export interface BrowserSession {
 }
 
 /** The ACTIVE tab as the old single-page session shape (launches if needed). */
+/**
+ * CDP endpoint set programmatically (bootstrap passes `browser.cdpUrl`). Config and
+ * `QODEX_BROWSER_CDP_URL` are read by resolveBrowserConfig at launch; this is only a
+ * fallback kept for callers of the older API.
+ */
+let configuredCdpUrl: string | undefined;
+export function setBrowserCdpUrl(url: string | undefined): void {
+  configuredCdpUrl = (url ?? '').trim() || undefined;
+}
+/** Where the browser will attach, if anywhere (env wins over config). */
+export function resolveBrowserCdpUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return (env.QODEX_BROWSER_CDP_URL ?? '').trim() || configuredCdpUrl;
+}
+
 export async function getSession(): Promise<BrowserSession> {
   const mgr = await getBrowserManager();
   if (!(mgr instanceof QodexBrowserManager)) {

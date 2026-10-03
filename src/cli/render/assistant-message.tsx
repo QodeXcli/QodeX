@@ -243,6 +243,54 @@ function CodeBlock({ lang, body, incomplete }: { lang: string; body: string; inc
   );
 }
 
+/**
+ * Live-region renderer for STILL-STREAMING text. Unlike {@link AssistantMessage}
+ * it adds ZERO vertical chrome: no card border, no `marginY`, no blank-line
+ * collapsing — every logical line maps to exactly ONE row (plus soft-wrap). That
+ * is the invariant that makes the streaming region's real rendered height equal
+ * `tailForViewport`'s estimate (which counts `ceil(len/cols)` per logical line).
+ *
+ * Why it matters: {@link AssistantMessage} wraps each code block in a bordered card
+ * (+5 rows: marginY 2, label 1, borders 2) plus its own outer `marginY` (+2). The
+ * viewport math doesn't see that chrome, so the boxed live region renders TALLER
+ * than the row budget, overflows into the terminal, and — re-painted on every token
+ * with the fence opening/closing — visibly oscillates, drops a gap, and scrolls
+ * non-stop. Rendering the live tail flat removes the overflow entirely. Code is
+ * still syntax-coloured inline; the pretty bordered card appears once, when the
+ * finished message commits to <Static> via {@link AssistantMessage}.
+ */
+export function StreamingView({ text }: { text: string }): React.ReactElement {
+  const lines = text.split('\n');
+  let inFence = false;
+  let fenceLang = '';
+  return (
+    <Box flexDirection="column">
+      {lines.map((line, i) => {
+        const fence = line.match(/^\s*```([^\n`]*)\s*$/);
+        if (fence) {
+          const wasIn = inFence;
+          inFence = !inFence;
+          if (!wasIn) fenceLang = (fence[1] ?? '').trim();
+          return <Text key={i} dimColor>{line}</Text>;
+        }
+        if (inFence) {
+          if (!line.length) return <Text key={i}> </Text>;
+          const toks = tokenizeCodeLine(line, fenceLang);
+          return (
+            <Text key={i}>
+              {toks.map((t, j) => (
+                <Text key={j} color={t.color} dimColor={t.dim}>{t.text}</Text>
+              ))}
+            </Text>
+          );
+        }
+        if (!line.length) return <Text key={i}> </Text>;
+        return <ProseLine key={i} line={line} />;
+      })}
+    </Box>
+  );
+}
+
 export function AssistantMessage({ text }: { text: string }): React.ReactElement {
   const segments = parseSegments(text);
   return (

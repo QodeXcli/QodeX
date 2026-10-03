@@ -11,6 +11,41 @@ import { logger } from '../../utils/logger.js';
 // for impersonating the OpenAI SDK. A caller-supplied User-Agent still wins.
 const QODEX_USER_AGENT = 'qodex-cli';
 
+/**
+ * Defense-in-depth: the OpenAI wire format requires that EVERY tool_call in an assistant
+ * message is answered by a `role:'tool'` message with the same tool_call_id before the next
+ * non-tool message — otherwise the API rejects the request with a 400 ("tool_call_ids did not
+ * have response messages"). A loop detector or an interrupted turn can leave a tool_call
+ * unanswered in history; the loop.ts fix prevents that at the source, and this is the safety net
+ * so ANY stranding path can never 400 the user. Inserts a synthetic result for each orphan,
+ * right before the message that closes its answer window. Pure.
+ */
+export function answerOrphanToolCalls(messages: Message[]): Message[] {
+  const out: Message[] = [];
+  let pending: { id: string; name: string }[] = [];
+  const flush = () => {
+    for (const p of pending) {
+      out.push({ role: 'tool', tool_call_id: p.id, name: p.name,
+        content: '[skipped] no result was recorded for this tool call — do not wait on it.' } as Message);
+    }
+    pending = [];
+  };
+  for (const m of messages) {
+    if (m.role === 'tool') {
+      pending = pending.filter(p => p.id !== (m as any).tool_call_id);
+      out.push(m);
+      continue;
+    }
+    if (pending.length) flush(); // a non-tool message closes the previous assistant's answer window
+    out.push(m);
+    if (m.role === 'assistant' && (m as any).tool_calls?.length) {
+      pending = (m as any).tool_calls.map((tc: any) => ({ id: tc.id, name: tc.function?.name ?? 'tool' }));
+    }
+  }
+  if (pending.length) flush();
+  return out;
+}
+
 // OpenAI's own models. The DeepSeek models live separately so they're served ONLY
 // by the dedicated DeepSeekProvider — otherwise they'd also surface under the
 // `openai` provider (which shares this base list) and show up twice in --list-models.
@@ -113,7 +148,7 @@ export class OpenAIProvider extends Provider {
   }
 
   private convertMessages(messages: Message[]): OpenAI.Chat.ChatCompletionMessageParam[] {
-    return messages.map(m => {
+    return answerOrphanToolCalls(messages).map(m => {
       if (m.role === 'tool') {
         return {
           role: 'tool',
@@ -180,6 +215,8 @@ export class OpenAIProvider extends Provider {
       if (req.grammar) extra.grammar = req.grammar;
       // Reasoning effort for models that support it. Unknown field elsewhere → ignored.
       if (req.reasoningEffort) extra.reasoning_effort = req.reasoningEffort;
+      // Ollama-compat / some local servers honor `think`. Cloud OpenAI ignores it.
+      if (req.think !== undefined) extra.think = req.think;
       // Speculative decoding hints. Different local servers (LM Studio,
       // llama.cpp, vLLM) read different field names; buildSpecDecodeExtras emits
       // the right one(s). All are ignored by servers/endpoints that don't speak
@@ -227,6 +264,14 @@ export class OpenAIProvider extends Provider {
           yield { type: 'text_delta', delta: delta.content };
         }
 
+        // Local OpenAI-compatible servers (LM Studio, vLLM, llama.cpp) put
+        // reasoning in a separate field. Same bug class as Ollama's
+        // `message.thinking`: ignore it and the TUI looks frozen after a fast load.
+        const reasoning = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
+        if (reasoning) {
+          yield { type: 'thinking_delta', delta: String(reasoning) };
+        }
+
         if (delta?.tool_calls) {
           sawToolCallDelta = true;
           for (const tc of delta.tool_calls) {
@@ -241,9 +286,21 @@ export class OpenAIProvider extends Provider {
         }
 
         if (chunk.usage) {
+          // OpenAI's prompt_tokens INCLUDES server-cached tokens (prompt caching is
+          // automatic on a byte-stable prefix, billed at a discount and reported in
+          // prompt_tokens_details.cached_tokens). Splitting them out keeps usage
+          // semantics aligned with the Anthropic provider — `input` is FRESH tokens
+          // only, `cacheRead` the cached remainder. Without the split, every turn
+          // re-counted the whole context at 1× and long sessions looked like they
+          // burned a 200k budget in minutes.
+          const cached = (chunk.usage as any).prompt_tokens_details?.cached_tokens ?? 0;
           yield {
             type: 'usage',
-            usage: { input: chunk.usage.prompt_tokens, output: chunk.usage.completion_tokens },
+            usage: {
+              input: Math.max(0, chunk.usage.prompt_tokens - cached),
+              output: chunk.usage.completion_tokens,
+              cacheRead: cached,
+            },
           };
         }
       }

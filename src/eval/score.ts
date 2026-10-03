@@ -35,7 +35,12 @@ export interface EvalCheck {
   command?: CommandCheck;
 }
 
-export interface EvalTask {
+/**
+ * The JSON task shape used by the original `eval/run.mjs` + `eval/tasks/*.json` harness.
+ * Renamed from `EvalTask` so the richer `EvalTask` in `types.ts` (which owns `run()`,
+ * `category` and `kind`) can be the one name re-exported from this subsystem.
+ */
+export interface LegacyEvalTask {
   id: string;
   description?: string;
   prompt: string;
@@ -163,4 +168,69 @@ export function formatReport(results: TaskRunResult[], summary: EvalSummary, met
   }
   lines.push('');
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Eval core scoring (the `types.ts` schema). Everything above this line is the
+// original JSON-task harness and is kept working for `eval/run.mjs`.
+// ---------------------------------------------------------------------------
+
+import type { CategoryScore, ScoreSummary, TaskResult, TaskStatus } from './types.js';
+
+function emptyCategory(): CategoryScore {
+  return { total: 0, passed: 0, failed: 0, skipped: 0, scored: 0, score0to100: 0 };
+}
+
+/**
+ * THE HONESTY RULE, in code: skips are excluded from the denominator AND never
+ * counted as passes.
+ *
+ * score = 100 * passed / (passed + failed)
+ *
+ * The consequence that matters: a suite where every task skipped has a denominator of
+ * zero, and we report 0 — NOT 100. A harness that reports "100%" because it couldn't
+ * measure anything (no model key, missing binary, unsupported platform) is worse than
+ * no harness at all: it manufactures confidence. `scored` and `skipped` are always
+ * carried alongside the number so a caller can see how much of the suite actually ran.
+ */
+export function scoreResults(results: TaskResult[]): ScoreSummary {
+  const summary: ScoreSummary = {
+    // `total` is accumulated by bump() below, not pre-seeded — seeding it here would
+    // double-count every task.
+    total: 0,
+    passed: 0, failed: 0, skipped: 0, scored: 0,
+    score0to100: 0,
+    flaky: 0,
+    byCategory: {},
+  };
+
+  const bump = (bucket: { passed: number; failed: number; skipped: number; total: number }, status: TaskStatus) => {
+    bucket.total++;
+    if (status === 'pass') bucket.passed++;
+    else if (status === 'fail') bucket.failed++;
+    else bucket.skipped++;
+  };
+
+  for (const r of results) {
+    bump(summary, r.status);
+    if (r.flaky) summary.flaky++;
+    const cat = (summary.byCategory[r.category] ||= emptyCategory());
+    bump(cat, r.status);
+  }
+
+  summary.scored = summary.passed + summary.failed;
+  summary.score0to100 = summary.scored === 0 ? 0 : (100 * summary.passed) / summary.scored;
+
+  // Rebuild byCategory with sorted keys so reports are byte-stable regardless of the
+  // order categories happened to appear in the suite.
+  const sorted: Record<string, CategoryScore> = {};
+  for (const key of Object.keys(summary.byCategory).sort()) {
+    const c = summary.byCategory[key];
+    c.scored = c.passed + c.failed;
+    c.score0to100 = c.scored === 0 ? 0 : (100 * c.passed) / c.scored;
+    sorted[key] = c;
+  }
+  summary.byCategory = sorted;
+
+  return summary;
 }

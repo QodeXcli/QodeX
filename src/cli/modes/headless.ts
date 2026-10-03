@@ -17,24 +17,31 @@ import { getSessionStore } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 import { StreamDisplayFilter } from '../../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from './final-dedupe.js';
-import { getApprovalBroker, isApproval, safeOption, setInteractiveHuman } from '../../control/approvals.js';
+import { headlessAskChoice } from './headless-ask.js';
+import {
+  type AutonomyContract,
+  type ContractUsage,
+  enforceContract,
+  buildRunReport,
+  exitCodeFor,
+  resolveScopeRoot,
+  setWriteScopeRoot,
+} from '../../agent/autonomy-contract.js';
+import { getApprovalBroker, setInteractiveHuman } from '../../control/approvals.js';
 import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.js';
 
 /**
  * The unattended answer to an approval prompt. PURE.
  *
- *   - without --yes: the safe option (the first option starting with n / deny / reject /
- *     cancel / …), else 'no'. (The old code fell back to options[0], so the edit-approval
- *     prompt ['accept','edit','continue','reject'] was silently ACCEPTED while logging "denied".)
- *   - with --yes: the first approving option (starting with y / accept / approve / allow),
- *     else options[0].
+ * Delegates to headlessAskChoice (headless-ask.ts), the single fail-safe policy:
+ *   - without --yes: the deny option (reject / no / deny), never options[0] — the old
+ *     code silently ACCEPTED the edit-approval prompt while logging "denied".
+ *   - with --yes: the first affirmative option (accept / yes / approve / allow / ...);
+ *     when there is none it still denies.
  */
 export function headlessAnswer(options: string[] | undefined, autoYes: boolean): string {
   const opts = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
-  if (autoYes) {
-    return opts.find(o => /^(y|accept|approve|allow)/i.test(String(o).trim())) ?? opts[0]!;
-  }
-  return safeOption(opts) ?? 'no';
+  return headlessAskChoice(opts, autoYes).choice;
 }
 
 export interface HeadlessOptions {
@@ -48,11 +55,54 @@ export interface HeadlessOptions {
   autoApproveAll?: boolean;
   explicitModel?: string;
   resumeSessionId?: string;
+  /** Guardrailed autonomy contract (--budget-tokens/--budget-usd/--max-wall/--scope/
+   *  --verify/--rollback-on-fail). When set: budgets override config.budget, journaled
+   *  writes are scope-gated, and the run ends with enforcement (verify →
+   *  rollback-on-fail → RUN REPORT). */
+  contract?: AutonomyContract;
+  /** `--receipt <path>`: write a signed, tamper-evident JSON receipt of the run there.
+   *  Requires a contract (there is nothing to attest without one). */
+  receiptPath?: string;
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   const startedAt = Date.now();
   const store = getSessionStore();
+
+  // ── Autonomy contract: apply budgets BEFORE the loop is built ──
+  // Budgets ride the existing BudgetTracker (fromConfig reads config.budget), so a
+  // shallow clone with overridden limits is the whole wiring. (The write-scope gate
+  // is armed further down, right before agent.run() — see the comment there.)
+  let config = opts.config;
+  if (opts.contract) {
+    const c = opts.contract;
+    if (c.budgetTokens !== undefined || c.budgetUsd !== undefined || c.maxWallSec !== undefined) {
+      config = {
+        ...config,
+        budget: {
+          ...config.budget,
+          ...(c.budgetTokens !== undefined ? { perTaskMaxTokens: c.budgetTokens } : {}),
+          ...(c.budgetUsd !== undefined ? { perTaskLimitUsd: c.budgetUsd } : {}),
+          ...(c.maxWallSec !== undefined ? { perTaskMaxWallSeconds: c.maxWallSec } : {}),
+        },
+      };
+    }
+    // A USD budget on a model we cannot price would never fire: computeCost multiplies by a
+    // placeholder 0, spend stays $0.00 forever, and the run is effectively unbounded. Say so
+    // loudly rather than letting the user believe a cap is protecting them.
+    if (c.budgetUsd !== undefined) {
+      try {
+        const routed = opts.router.route('main' as any, 0, {});
+        if (routed?.modelInfo?.pricingSource === 'unknown') {
+          process.stderr.write(
+            `⚠  --budget-usd cannot be enforced for "${routed.modelInfo.id}": no pricing is known for this model, ` +
+            `so spend always computes as $0.00. Use --budget-tokens or --max-wall instead, or set the price under ` +
+            `providers.custom[].models[].inputCostPerMillion.\n`,
+          );
+        }
+      } catch { /* routing probe is best-effort — never block the run on it */ }
+    }
+  }
 
   // Resolve a leading custom slash command into its template + one-shot overrides.
   let effectivePrompt = opts.prompt;
@@ -89,6 +139,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   let sessionId: string;
   let initialMessages;
 
+  let resumeCwd: string | undefined;
   if (opts.resumeSessionId) {
     const loaded = store.loadSession(opts.resumeSessionId);
     if (!loaded) {
@@ -97,6 +148,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     }
     sessionId = opts.resumeSessionId;
     initialMessages = [...loaded.messages, { role: 'user' as const, content: effectivePrompt }];
+    const { pickWorkingCwd } = await import('../../session/handoff.js');
+    resumeCwd = pickWorkingCwd({ sessionCwd: loaded.meta.cwd, hostCwd: opts.cwd });
   } else {
     sessionId = store.createSession(opts.cwd, explicitModelOverride ?? opts.config.defaults.model);
   }
@@ -105,8 +158,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     router: opts.router,
     registry: opts.registry,
     permissions: opts.permissions,
-    config: opts.config,
-    cwd: opts.cwd,
+    config, // contract budgets (if any) applied above
+    cwd: resumeCwd ?? opts.cwd,
   });
 
   // Unattended process: no human at this terminal (Sentinel reads this to decide that
@@ -125,6 +178,13 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   store.recordTurn(sessionId, [{ role: 'user', content: effectivePrompt }], { input: 0, output: 0, costUsd: 0 });
 
   let exitCode = 0;
+  // ── Contract-run telemetry, gathered regardless of --json ──
+  // usage comes from budget_update/final events; budget-exceeded is the loop's
+  // 'error' event carrying a budgetType (tokens/cost/time/iterations — time is the
+  // stall-aware kill); any other error (incl. a fatal throw) counts as agentError.
+  let lastUsage: ContractUsage = { tokens: 0, costUsd: 0, wallTimeMs: 0, iterations: 0 };
+  let budgetExceeded: { type?: string; message: string } | null = null;
+  let agentError: string | null = null;
   // Text streamed (via text_delta) during the CURRENT agent iteration. Reset on each
   // iteration_start so it mirrors the loop's per-iteration assistantText. The 'final'
   // event carries that same text in full, so we compare against this to avoid
@@ -146,8 +206,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // The fixed unattended policy (see headlessAnswer). Approvals under --yes stay quiet in
   // text mode (as before); denials are always reported so the user knows why a step failed.
   const policyAsk = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    const answer = headlessAnswer(options, !!opts.autoApproveAll);
-    const approved = isApproval(answer, options);
+    const { choice: answer, denied } = headlessAskChoice(options.length ? options : ['yes', 'no'], !!opts.autoApproveAll);
+    const approved = !denied;
     if (opts.json) {
       process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, answer, denied: !approved }) + '\n');
     } else if (!approved) {
@@ -182,6 +242,17 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   setSubAgentRunner(subAgentRunner);
   setActiveAgent(agent);
 
+  // ── Autonomy contract: arm the write-scope gate ──
+  // The scope root is a module-global consulted by Transaction.write()/delete() during
+  // agent.run() below; the finally clears it. Armed HERE — after the pre-loop early
+  // returns (slash-command short-circuit, resume-not-found) and buildInitialMessages,
+  // none of which do journaled writes — so those paths can never leak it past this run
+  // (they used to: set on entry, cleared only by the loop's finally). A pre-loop throw
+  // also skips enforcement, which is fine: no journaled writes can exist yet.
+  if (opts.contract?.scopePrefix) {
+    setWriteScopeRoot(resolveScopeRoot(opts.cwd, opts.contract.scopePrefix));
+  }
+
   try {
     for await (const event of agent.run(initialMessages, sessionId, {
       explicitModel: explicitModelOverride,
@@ -192,6 +263,23 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       signal: runAbort.signal,
     })) {
       forwardAgentEvent('headless', event);
+      // Contract telemetry first — independent of the output mode below.
+      if (event.type === 'budget_update' && event.data) {
+        lastUsage = {
+          tokens: event.data.tokens ?? lastUsage.tokens,
+          costUsd: event.data.costUsd ?? lastUsage.costUsd,
+          wallTimeMs: event.data.wallTimeMs ?? lastUsage.wallTimeMs,
+          iterations: event.data.iterations ?? lastUsage.iterations,
+        };
+      } else if (event.type === 'final' && event.data?.usage) {
+        lastUsage = event.data.usage;
+      } else if (event.type === 'error') {
+        if (event.data?.budgetType) {
+          budgetExceeded = { type: event.data.budgetType, message: event.data.message ?? 'budget exceeded' };
+        } else {
+          agentError = event.data?.message ?? 'unknown agent error';
+        }
+      }
       if (opts.json) {
         process.stdout.write(JSON.stringify({ type: event.type, ...event.data }) + '\n');
       } else {
@@ -243,12 +331,116 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   } catch (e: any) {
     logger.error('Headless run failed', { err: e.message });
     console.error('Fatal:', e.message);
-    return 1;
+    // Under a contract, a crash must STILL reach enforcement — otherwise a fatal
+    // mid-run throw would leave half-applied writes on disk with no rollback.
+    if (!opts.contract) return 1;
+    agentError = agentError ?? `fatal: ${e.message}`;
+    exitCode = 1;
   } finally {
     process.removeListener('SIGTERM', onSigterm);
     // Unpublish only what we published (a host may have swapped in its own since).
     if (getSubAgentRunner() === subAgentRunner) setSubAgentRunner(null);
     if (getActiveAgent() === agent) setActiveAgent(null);
+    // Scope root is module-global — never let it leak past this run.
+    if (opts.contract?.scopePrefix) setWriteScopeRoot(null);
+  }
+
+  // ── Autonomy contract enforcement: verify → rollback-on-fail → RUN REPORT ──
+  if (opts.contract) {
+    const { getJournal } = await import('../../filesystem/transaction.js');
+    const outcome = await enforceContract({
+      contract: opts.contract,
+      cwd: opts.cwd,
+      sessionId,
+      usage: lastUsage,
+      budgetExceeded,
+      agentError,
+      journal: getJournal(),
+    });
+    if (opts.json) {
+      process.stdout.write(JSON.stringify({ type: 'run_report', ...outcome }) + '\n');
+    } else {
+      if (!atLineStart) out('\n');
+      out(buildRunReport(outcome) + '\n');
+    }
+
+    // ── Verifiable run receipt ──
+    // The report above is for a human watching the terminal. The receipt is the same facts
+    // as a signed, tamper-evident artifact a CI job or a reviewer can re-check later.
+    // Written only when --receipt is passed, so the default stdout contract is untouched.
+    if (opts.receiptPath) {
+      try {
+        const { buildReceipt, signReceipt } = await import('../../agent/run-receipt.js');
+        // On a rollback every listed file was restored; otherwise none were.
+        const wasReverted = outcome.reverted;
+        let receipt = buildReceipt({
+          runId: sessionId,
+          startedAt: new Date(startedAt).toISOString(),
+          endedAt: new Date().toISOString(),
+          cwd: opts.cwd,
+          scope: opts.contract.scopePrefix ?? null,
+          granted: {
+            tokens: opts.contract.budgetTokens,
+            costUsd: opts.contract.budgetUsd,
+            wallSec: opts.contract.maxWallSec,
+          },
+          consumed: {
+            tokens: lastUsage.tokens,
+            costUsd: lastUsage.costUsd,
+            wallSec: Math.round(lastUsage.wallTimeMs / 1000),
+            iterations: lastUsage.iterations,
+          },
+          verify: outcome.verify
+            ? {
+                command: outcome.verify.cmd,
+                exitCode: outcome.verify.exitCode,
+                ok: outcome.verify.ok,
+                outputTail: outcome.verify.outputTail,
+              }
+            : null,
+          files: outcome.filesChanged.map(p => ({ path: p, reverted: wasReverted })),
+          // Ordered evidence of what the run did. Verify and rollback are known here;
+          // per-tool and permission entries join as those paths start reporting.
+          actions: [
+            ...(outcome.verify
+              ? [{
+                  kind: 'verify' as const,
+                  name: outcome.verify.cmd,
+                  detail: `exit ${outcome.verify.exitCode ?? 'killed'}`,
+                  ok: outcome.verify.ok,
+                }]
+              : []),
+            ...(outcome.rollback
+              ? [{
+                  kind: 'rollback' as const,
+                  name: 'rollbackSession',
+                  detail: `${outcome.rollback.filesRestored} file(s) restored, ${outcome.rollback.txnsRolled} txn(s)`,
+                  ok: true,
+                }]
+              : []),
+          ],
+          verdict: outcome.verdict,
+          failReasons: outcome.failReasons,
+        });
+        // Signing is what makes a FIELD edit detectable. Without a key the chain still
+        // protects the action log and verification honestly reports UNSIGNED.
+        const auditKey = process.env.QODEX_AUDIT_KEY;
+        if (auditKey) receipt = signReceipt(receipt, auditKey);
+        const fsp = await import('fs/promises');
+        await fsp.writeFile(opts.receiptPath, JSON.stringify(receipt, null, 2) + '\n', 'utf-8');
+        if (opts.json) {
+          process.stdout.write(JSON.stringify({ type: 'run_receipt', path: opts.receiptPath, receipt }) + '\n');
+        } else {
+          out(`\nReceipt: ${opts.receiptPath}${auditKey ? ' (signed)' : ' (UNSIGNED — set QODEX_AUDIT_KEY to sign)'}\n`);
+        }
+      } catch (e: any) {
+        // A receipt failure must never change the run's verdict — report it and move on.
+        logger.warn('Failed to write run receipt', { err: e?.message });
+        if (!opts.json) out(`\nReceipt: FAILED to write (${e?.message})\n`);
+      }
+    }
+
+    exitCode = exitCodeFor(outcome.verdict);
   }
 
   // Desktop notification for long autonomous runs (e.g. `qodex --print … --yes`

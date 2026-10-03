@@ -22,8 +22,9 @@ export class TavilyBackend implements WebSearchBackend {
     const apiKey = process.env.TAVILY_API_KEY;
     if (!apiKey) {
       throw new WebSearchError(
-        'Tavily backend selected but TAVILY_API_KEY is not set in the environment. ' +
-        'Either export TAVILY_API_KEY=... or switch to the duckduckgo backend in your config.',
+        'Tavily backend selected but TAVILY_API_KEY is not set. ' +
+        'Get a free key at https://app.tavily.com — then paste it in chat (the agent saves it via save_api_key and retries), ' +
+        'or add TAVILY_API_KEY=... to ~/.qodex/.env.',
         this.name,
       );
     }

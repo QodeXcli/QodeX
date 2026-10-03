@@ -109,6 +109,13 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
     members: ['browser_', 'vault_'],
     keywords: [
       'browser', 'screenshot', 'headless', 'puppeteer', 'playwright', 'scrape', 'navigate', 'selector',
+      // Keyed on INTENT as well as on the tool's own vocabulary: "check how the page looks"
+      // (the natural way to ask) must reach the browser on the OPENING turn. Both
+      // inflections ('does the page LOOK right' / 'the page LOOKS broken').
+      'how it look', 'how it looks', 'page look', 'page looks', 'look right', 'looks right',
+      'look wrong', 'looks wrong', 'look broken', 'looks broken', 'look off', 'looks off', 'looks like',
+      'check the page', 'see the page', 'view the page', 'render', 'preview', 'open the site', 'open the page',
+      'in the browser', 'چطور به نظر', 'پیش‌نمایش',
       'website', 'web page', 'webpage', 'www.', 'http://', 'https://',
       'login', 'log in', 'logged in', 'sign in', 'sign up', 'signup', 'checkout', 'check out the cart',
       'shopping cart', 'add to cart', 'reservation', 'book a ', 'purchase', 'new tab', 'open tab',
@@ -165,13 +172,31 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   // Standalone UI/visual artifacts (html/react/svg/markdown) with versioned manifests.
   // Without this the artifact_* tools matched no tier and were silently never shipped,
   // so the agent never knew it could make an artifact even when asked outright.
-  { members: ['artifact_'], keywords: ['artifact', 'artefact', 'آرتیفکت', 'آرتفکت', 'live', 'hot reload', 'hot-reload', 'reload'] },
+  // The UI/design intent vocabulary already existed in this file, but was attached only to the
+  // figma/canva MCP family — so `artifact_*` matched the literal word "artifact" and nothing
+  // else. "redesign the landing page", "build me a dashboard UI" and "make the homepage
+  // prettier" all lost artifact_create on the first turn, which is precisely when it is wanted.
+  { members: ['artifact_'], keywords: [
+    'artifact', 'artefact', 'live', 'hot reload', 'hot-reload', 'reload',
+    'landing page', 'dashboard', 'mockup', 'prototype', 'wireframe', 'redesign', 'restyle',
+    'ui', 'web page', 'webpage', 'homepage', 'visuali', 'chart', 'diagram', 'prettier',
+    'آرتیفکت', 'آرتفکت', 'داشبورد', 'لندینگ', 'صفحه فرود', 'رابط کاربری', 'نمودار', 'ماکاپ'] },
+  // Design platforms via MCP (Figma / Canva). Tool names are `mcp:figma:*` / `mcp:canva:*`
+  // (the `:` prefix is treated like `_` by expand()). No-op unless the user has actually
+  // added the figma/canva MCP server — then a design/website-design ask surfaces them.
+  { members: ['mcp:figma:', 'mcp:canva:'], keywords: [
+    'figma', 'canva', 'design', 'website design', 'web design', 'landing page', 'mockup',
+    'prototype', 'wireframe', 'ui design', 'design system', 'brand template',
+    'طراحی', 'فیگما', 'کانوا', 'کانواس', 'دیزاین', 'ماکاپ', 'وب‌سایت', 'وبسایت',
+    'طراحی سایت', 'طراحی وب', 'رابط کاربری', 'لندینگ', 'صفحه فرود'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {
   const out = new Set<string>();
   for (const m of members) {
-    if (m.endsWith('_')) { for (const n of allNames) if (n.startsWith(m)) out.add(n); }
+    // Trailing `_` (built-in families like docker_) or `:` (MCP names like mcp:figma:)
+    // mark a prefix pattern; otherwise it's an exact tool name.
+    if (m.endsWith('_') || m.endsWith(':')) { for (const n of allNames) if (n.startsWith(m)) out.add(n); }
     else if (allNames.includes(m)) out.add(m);
   }
   return out;
@@ -190,7 +215,15 @@ function isTrivial(signalText: string): boolean {
   const TASK_WORDS = [
     'fix', 'bug', 'error', 'refactor', 'implement', 'build', 'deploy', 'test', 'debug',
     'create', 'update', 'remove', 'add ', 'edit', 'write', 'change', 'review', 'find',
-    'open ', 'buy', 'book ', 'order ', 'log in', 'login', 'sign in', 'sign up',
+    // Short, ordinary asks that are unmistakably WORK. Without these, "commit and open a PR"
+    // (5 words, no listed verb) was judged trivial and handed CORE tools only — so the git
+    // family never reached the model on exactly the turn it was needed.
+    'commit', 'push', 'merge', 'rebase', 'pr ', ' pr', 'pull request', 'branch', 'stash',
+    'install', 'run ', 'start', 'stop', 'open', 'check', 'look', 'show', 'list',
+    'rename', 'move', 'delete', 'clean', 'format', 'lint', 'upgrade', 'bump',
+    'کامیت', 'پوش', 'مرج', 'برنچ', 'نصب', 'اجرا', 'باز کن', 'نشان', 'لیست',
+    // Jobs on a site are work too, even when short ("buy it on digikala").
+    'buy', 'book ', 'order ', 'log in', 'login', 'sign in', 'sign up',
     'باگ', 'خطا', 'اصلاح', 'بساز', 'پیدا', 'پیاده', 'اضاف', 'تست', 'دیباگ', 'ریفکتور',
     'درست', 'حذف', 'تغییر', 'بنویس', 'بررسی', 'پیدا کن', 'عوض',
     // Persian "do it on a site / on my computer" verbs ("دیجی‌کالا رو باز کن", "بخر", "رزرو کن").

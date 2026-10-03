@@ -32,6 +32,7 @@
 
 import { z } from 'zod';
 import { spawn } from 'child_process';
+import { childEnv } from '../../secrets/sanitize.js';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -202,7 +203,9 @@ export class CodeRunTool extends Tool<z.infer<typeof CodeRunArgs>> {
 
       const child = spawn(spawnCmd, spawnArgs, {
         cwd: tempDir,
-        env: { ...process.env, ...(args.env ?? {}), HOME: tempDir, TMPDIR: tempDir },
+        // Model-authored code: strip our provider credentials before handing it an
+        // environment. args.env is an explicit caller decision and is applied after.
+        env: childEnv({ ...(args.env ?? {}), HOME: tempDir, TMPDIR: tempDir }),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 

@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Provider, type CompletionRequest, type StreamEvent, type ModelInfo } from '../types.js';
-import { ProviderError } from '../../utils/errors.js';
 import type { Message } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
 
@@ -9,6 +8,69 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
   { id: 'claude-sonnet-4-6', contextWindow: 200000, maxOutput: 32000, inputCostPerMillion: 3, outputCostPerMillion: 15, supportsToolCalls: true, supportsStreaming: true },
   { id: 'claude-haiku-4-5', contextWindow: 200000, maxOutput: 16000, inputCostPerMillion: 1, outputCostPerMillion: 5, supportsToolCalls: true, supportsStreaming: true },
 ];
+
+const EPHEMERAL = { type: 'ephemeral' as const };
+
+/**
+ * Hierarchical prompt cache — place cache_control breakpoints so the SHARED, stable prefix of
+ * every iteration is served from cache (0.1× input price, ~0 latency) instead of re-billed in
+ * full each turn. Anthropic caches everything up to & including each marker, longest-prefix-wins,
+ * max 4 markers. We use three tiers:
+ *
+ *   1. last tool      → caches the whole tools block (immutable for the run).
+ *   2. system core    → with a static/volatile boundary, the STABLE core (instructions, byte-
+ *      identical across every turn) is one cached block and the per-turn injections (memory,
+ *      retrieval, dir-tree) are a second, un-cached block — so the core stays a cache HIT across
+ *      the whole session, not just within one task. Without a boundary, the whole system is one
+ *      cached block (still fine within a task).
+ *   3. last message   → ROLLING breakpoint: caches the conversation prefix so far. THIS is what
+ *      QodeX was missing — without it the growing history is re-billed at full price every
+ *      iteration (the root of the ~9× burn vs. caching agents). On the next request the prior
+ *      turn's content is a cached prefix.
+ *
+ * PURE — unit-tested by which blocks end up marked. Mutates nothing (clones what it touches).
+ */
+export function withCacheBreakpoints(
+  systemText: string,
+  messages: any[],
+  tools: any[] | undefined,
+  systemBoundary?: number,
+): { system: any; messages: any[]; tools: any[] | undefined } {
+  const system = buildSystemBlocks(systemText, systemBoundary);
+  const toolsOut = tools && tools.length > 0
+    ? tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: EPHEMERAL } : t))
+    : tools;
+  return { system, messages: markLastMessage(messages), tools: toolsOut };
+}
+
+/** Split the system into a cached static core + an un-cached volatile tail when a boundary is
+ *  given and lands strictly inside the text; otherwise cache the whole thing as one block. */
+function buildSystemBlocks(systemText: string, boundary?: number): any {
+  if (!systemText) return systemText;
+  if (typeof boundary === 'number' && boundary > 0 && boundary < systemText.length) {
+    const core = systemText.slice(0, boundary);
+    const volatileTail = systemText.slice(boundary);
+    return [
+      { type: 'text', text: core, cache_control: EPHEMERAL },
+      { type: 'text', text: volatileTail },
+    ];
+  }
+  return [{ type: 'text', text: systemText, cache_control: EPHEMERAL }];
+}
+
+/** Add a cache breakpoint to the last content block of the last message (the rolling prefix). */
+function markLastMessage(messages: any[]): any[] {
+  if (!messages.length) return messages;
+  const out = messages.slice();
+  const last = { ...out[out.length - 1] };
+  const blocks = Array.isArray(last.content)
+    ? last.content.map((b: any) => ({ ...b }))
+    : [{ type: 'text', text: String(last.content ?? '') }];
+  if (blocks.length > 0) blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: EPHEMERAL };
+  last.content = blocks;
+  out[out.length - 1] = last;
+  return out;
+}
 
 export class AnthropicProvider extends Provider {
   name = 'anthropic';
@@ -37,8 +99,9 @@ export class AnthropicProvider extends Provider {
 
   // We use a loose type for Anthropic.MessageParam because the SDK occasionally renames
   // or restructures these. The runtime shape is the contract; the SDK validates the rest.
-  private convertMessages(messages: Message[]): { system: string; messages: any[] } {
+  private convertMessages(messages: Message[]): { system: string; systemBoundary?: number; messages: any[] } {
     let system = '';
+    let systemBoundary: number | undefined;
     const out: any[] = [];
     let pendingToolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
 
@@ -56,6 +119,11 @@ export class AnthropicProvider extends Provider {
 
     for (const m of messages) {
       if (m.role === 'system') {
+        // Capture the static/volatile boundary from the FIRST system message (the main one),
+        // offset by anything already accumulated, so caching can split core vs per-turn injects.
+        if (systemBoundary === undefined && typeof m.cacheBoundary === 'number') {
+          systemBoundary = (system ? system.length + 2 : 0) + m.cacheBoundary;
+        }
         system += (system ? '\n\n' : '') + (m.content ?? '');
         continue;
       }
@@ -157,7 +225,7 @@ export class AnthropicProvider extends Provider {
       return;
     }
 
-    const { system, messages } = this.convertMessages(req.messages);
+    const { system, systemBoundary, messages } = this.convertMessages(req.messages);
 
     const tools = req.tools?.map(t => ({
       name: t.function.name,
@@ -165,34 +233,21 @@ export class AnthropicProvider extends Provider {
       input_schema: t.function.parameters as any,
     }));
 
-    // Prompt-caching: when enabled, mark the system prompt and the LAST tool definition
-    // with cache_control. Anthropic caches everything up to and including each marker.
-    // We use only 2 of the 4 allowed breakpoints — leaves headroom for future extensions
-    // (e.g. caching long static project rules).
+    // Hierarchical prompt-caching (see withCacheBreakpoints): cache the static prefix (tools +
+    // system) AND a rolling breakpoint on the conversation so far, so iterations 2..N read the
+    // shared prefix from cache instead of re-billing it. Without the message breakpoint the
+    // growing history is full-price every turn — the core of the high token burn.
     //
-    // Why mark only the *last* tool: Anthropic's caching matches on a prefix, so a single
-    // marker at the end of the tools array caches the entire tools block as one unit.
-    // Adding a marker per tool wastes breakpoints with no benefit.
-    //
-    // Typing note: cache_control is a beta-ish field that the SDK's `TextBlockParam` /
-    // `Tool` types don't always declare — depends on SDK version. We pass through as any
-    // since the wire format is what matters. The SDK call still validates everything else.
-    let systemForApi: any;
-    let toolsForApi: any;
+    // Typing note: cache_control is a beta-ish field the SDK types don't always declare; we
+    // pass through as any since the wire format is what matters.
+    let systemForApi: any = system;
+    let toolsForApi: any = tools;
+    let messagesForApi: any = messages;
     if (this.useCaching && system) {
-      systemForApi = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
-      if (tools && tools.length > 0) {
-        toolsForApi = tools.map((t, i) =>
-          i === tools.length - 1
-            ? { ...t, cache_control: { type: 'ephemeral' } }
-            : t,
-        );
-      } else {
-        toolsForApi = tools;
-      }
-    } else {
-      systemForApi = system;
-      toolsForApi = tools;
+      const prepped = withCacheBreakpoints(system, messages, tools, systemBoundary);
+      systemForApi = prepped.system;
+      messagesForApi = prepped.messages;
+      toolsForApi = prepped.tools;
     }
 
     try {
@@ -201,7 +256,7 @@ export class AnthropicProvider extends Provider {
         () => this.client!.messages.create({
           model: req.model,
           system: systemForApi as any,
-          messages,
+          messages: messagesForApi,
           tools: toolsForApi,
           max_tokens: req.maxTokens ?? 8192,
           temperature: req.temperature ?? 0.3,
@@ -212,6 +267,8 @@ export class AnthropicProvider extends Provider {
 
       let inputTokens = 0;
       let outputTokens = 0;
+      let cacheCreation = 0;
+      let cacheRead = 0;
       const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
 
       for await (const event of stream) {
@@ -225,8 +282,8 @@ export class AnthropicProvider extends Provider {
           // Capture cache metrics — present when prompt caching is in use.
           // cache_creation: tokens written to cache this call (priced at 1.25x base input)
           // cache_read:     tokens served from cache this call (priced at 0.1x base input)
-          const cacheCreation = (event.message.usage as any).cache_creation_input_tokens ?? 0;
-          const cacheRead = (event.message.usage as any).cache_read_input_tokens ?? 0;
+          cacheCreation = (event.message.usage as any).cache_creation_input_tokens ?? 0;
+          cacheRead = (event.message.usage as any).cache_read_input_tokens ?? 0;
           if (this.useCaching && (cacheCreation > 0 || cacheRead > 0)) {
             // Log it so users can confirm caching is actually hitting in production.
             // (Cost adjustment is handled by the budget tracker via these fields.)
@@ -270,7 +327,7 @@ export class AnthropicProvider extends Provider {
         }
       }
 
-      yield { type: 'usage', usage: { input: inputTokens, output: outputTokens } };
+      yield { type: 'usage', usage: { input: inputTokens, output: outputTokens, cacheRead, cacheCreation } };
       yield { type: 'done' };
     } catch (e: any) {
       yield {

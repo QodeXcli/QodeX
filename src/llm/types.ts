@@ -39,16 +39,26 @@ export interface CompletionRequest {
    *  Sent as `reasoning_effort` on the OpenAI-compatible path; servers/models that
    *  don't support it ignore the unknown field. Default: unset (model default). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Native thinking switch (Ollama `think`, plus LM Studio / vLLM equivalents).
+   * When false, the server skips the hidden reasoning pass — `/no_think` in the
+   * prompt is NOT enough once the runtime splits thinking into `message.thinking`.
+   * Unset = server default.
+   */
+  think?: boolean;
 }
 
 export interface StreamEvent {
-  type: 'text_delta' | 'tool_call_delta' | 'usage' | 'done' | 'error';
+  type: 'text_delta' | 'thinking_delta' | 'tool_call_delta' | 'usage' | 'done' | 'error';
   delta?: string;
   toolCallIndex?: number;
   toolCallId?: string;
   toolName?: string;
   toolArgsDelta?: string;
-  usage?: { input: number; output: number };
+  /** `input`/`output` are FRESH (non-cached) tokens. `cacheRead`/`cacheCreation` (Anthropic
+   *  prompt caching) are reported separately so cost can apply the 0.1×/1.25× pricing and the
+   *  UI can show a cache hit-rate. */
+  usage?: { input: number; output: number; cacheRead?: number; cacheCreation?: number };
   error?: string;
 }
 
@@ -68,6 +78,13 @@ export interface ModelInfo {
   outputCostPerMillion: number;  // USD
   supportsToolCalls: boolean;
   supportsStreaming: boolean;
+  /**
+   * Where the PRICE came from. The distinction matters: a local model genuinely costs 0, but
+   * an unpriced cloud model costs something we cannot compute — and reporting $0.00 for it
+   * makes `--budget-usd` silently unenforceable. 'unknown' means "the 0 above is a
+   * placeholder, do not trust spend figures". Absent ⇒ 'catalog' (the built-in tables).
+   */
+  pricingSource?: 'live' | 'catalog' | 'free' | 'unknown';
 }
 
 export abstract class Provider {

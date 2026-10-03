@@ -1,14 +1,24 @@
-# QodeX — the local-first autonomous agent: code, its own browser, your desktop
+# QodeX — the coding agent that stays on your side of the glass
 
-> **QodeX is an open-source LLM agent for your terminal — a local-first, agentic coding CLI.** It runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A privacy-first AI coding agent built so a model on *your* machine does real, multi-step engineering work — fully offline if you want.
+Most agent CLIs are a rented brain with a terminal skin. QodeX is the opposite: a **local-first agentic coding CLI** that treats *your* machine as the source of truth. Qwen3-Coder on Ollama / LM Studio by default. Claude / GPT / Gemini / DeepSeek only if you invite them. Your repo does not become someone else's training set.
 
-> If you're looking for an **LLM agent**, a **CLI agent**, an **AI coding agent**, or an **autonomous terminal agent** that doesn't ship your code to someone else's cloud — that's QodeX.
+It does not just *chat about* code. It reads, edits, tests, and — if you ask — ships. And when you are not at the desk, it does not get the keys to the whole Mac: **shell can run in a Docker sandbox**, and **`--profile cloud`** is one switch between "think local" and "think in the cloud, execute in a box."
 
-**Version 3.0.0** · 150+ built-in tools · English & Persian · Apache-2.0
+> Looking for an **LLM agent**, a **CLI agent**, or an **autonomous terminal agent** that can go fully offline? That's QodeX.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+qodex setup && qodex
+```
+
+**Version 3.0.0** · 150+ tools · its own browser · desktop control · background missions · self-improving · phone-driveable · English & Persian · Apache-2.0
+
+[![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
-
----
+[![CodeQL](https://github.com/QodeXcli/QodeX/actions/workflows/codeql.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/github/license/QodeXcli/QodeX?color=green)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
+[![Docs](https://img.shields.io/badge/docs-live-blue.svg)](https://qodexcli.github.io/QodeX/)
 
 ## New in 3.0 — your agent gets its own computer
 
@@ -38,6 +48,37 @@ qodex telegram setup                              # approvals + missions from Te
 
 ---
 
+---
+
+## Highlights
+
+- **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
+- **`--profile studio` / `--profile cloud`** — named overlays, not a second product. Local Qwen on the Mac Studio in one file; a cloud model + Docker-isolated shell in another. `-p` is still `--print`.
+- **Shell in a box, not on bare metal** — `runtime.backend: docker` bind-mounts the project and drops host `$HOME`, `docker.sock`, privileged mode, and host networking. File edits stay in the repo (a coding agent that cannot touch files is a chatbot). The Mac outside `/workspace` stays out of reach.
+- **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.
+- **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills, an **independent judge model** promotes them, **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. Your agent next week is measurably better than today's — and it never overwrites a skill you wrote.
+- **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord / Slack service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
+- **Remembers across sessions** — a layered, **local** memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions) with a **human-readable Markdown mirror** you can edit and git-commit, and a **budget-aware Light Memory Mode** for small context windows. The agent builds real context about *you* and *this* codebase instead of starting every session cold.
+- **Live, shareable artifacts + a project dashboard** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel. `qodex dashboard` renders a live snapshot of providers, sessions, token/cost, memory, and skills.
+- **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
+- **100+ built-in tools** — Tree-sitter code-graph, real Playwright browser automation, dev-servers, web search, vision, Docker / DB / WordPress, and any MCP server.
+- **Persian-first** — prompts, skill matching, *and* generated artifact copy follow your chat language, not a fixed default.
+- **Token-efficient** — sub-agent delegation, result-aging, compaction, and tool-gating keep the working context small on long sessions.
+
+---
+
+## Always-on, and it compounds
+
+An "autonomous 24/7 agent" is easy to *say* and hard to *mean* — most of the time it's a chatbot wrapped in a cron job. QodeX's always-on story is three systems that actually exist, that you can read in this repo, and that each have tests:
+
+- **Reachable any time** — the **transport-agnostic bot gateway** runs as a persistent service, so the agent is one message away from your phone. One turn per chat at a time (no interleaving), permission prompts as inline buttons, **deny-by-default auth**. ([Telegram / Discord / Slack](#telegram--discord--slack-bot))
+- **Improves between sessions, on its own** — capture → **independent-judge** promotion → **UCB1** version A/B → **episodic recall** → **failure-lesson** injection. The loop is gated on *objective* success signals, not the model's self-grade, and a new **code-graph "fit" signal** grounds the judge in *your* codebase. ([Self-learning skills](#self-learning-skills))
+- **Runs while you sleep — verifiably** — a built-in **cron scheduler** (launchd / crontab) runs tasks unattended and delivers the result to your phone. The headline recipe, **Autonomous Verified PR**, works on a sandbox branch, **verifies**, and opens a PR *only if it passed* — per-task **budget caps**, a **circuit breaker**, the **git sandbox**, and the guardrail gates all run too, so a 3am run **can't quietly ship broken code or melt your token budget**. ([Scheduled & autonomous](#scheduled--autonomous--the-real-247))
+
+We're not going to claim a model thinks for you around the clock. We built the parts that make *unattended, repeated, real* work trustworthy — and we'd rather show the code than the slogan.
+
+---
+
 ## What makes it different
 
 Most agentic CLIs *delegate to the model* — they hand the model tools and trust it to use them well. That works with a frontier model and falls apart with a weaker local one (loops, half-finished edits, "done" when nothing was tested).
@@ -49,6 +90,7 @@ QodeX takes the opposite stance: **protect the model.** A layer of deterministic
 - **Auto-verification** — after the model thinks it's done, QodeX detects the project type and runs the real checker (`tsc`, `eslint`, `ruff`, `pyright`, `go vet`, `cargo`, `php -l` …) on touched files and force-feeds any errors back.
 - **Interactive edit approval** — see a red/green diff and Accept / Edit / Continue / Reject before anything hits disk (or `/auto on` to skip).
 - **Git-backed sandbox** — risky work runs on a hidden branch with checkpoints; auto-snapshot (`git stash`) before destructive commands, one command to roll back.
+- **Process sandbox (Docker)** — a second, different isolation: the *shell* runs in a container so a remote-ish turn cannot `rm` your home directory. Pair it with `--profile cloud`. Not a Hub client — Hub is for approvals; this is where commands actually execute.
 - **Skill security scanner** — skills installed from GitHub are scanned for prompt injection, secret exfiltration, destructive shell, and hidden-unicode payloads *before* they touch disk.
 
 The result raises the **floor** (what a weak model is allowed to ship) without needing a bigger model.
@@ -61,7 +103,16 @@ Long agent sessions burn tokens on a growing history, not the (cached) system pr
 - **Result-aging** — stale large tool outputs are stubbed after a few turns (re-read on demand).
 - **Compaction** — history is structured-summarized as the window fills.
 - **Tool-gating** — only relevant tool schemas are sent each turn (a greeting sees ~20 tools, a real task ~50, out of 100+).
-- **Opt-in `context.efficient: true`** tightens all of the above for weak local models.
+- **Opt-in `context.efficient: true`** tightens all of the above for weak local models — a **sliding token window** that compresses large tool outputs the very next turn.
+
+### Hierarchical cache engineering
+
+Standard agent caching pins only the static system block. QodeX goes further with a **multi-tier rolling-breakpoint** cache (Anthropic, on by default), so the part that actually grows — the conversation — is cached too:
+
+- **Immutable tier** — core instructions + 70+ tool schemas, byte-identical across *every turn of the session*. A static/volatile boundary splits the system prompt so this core gets its own breakpoint and stays a cache **hit** the whole conversation — not just within one task.
+- **Ephemeral / rolling tier** — per-turn injections (memory, retrieval, dir-tree) and the conversation history, pinned with a **breakpoint that advances every turn**.
+
+In a deep agentic loop the re-sent prefix dominates each call, and it's now served at **0.1×** instead of full price — **up to ~90% off the input cost of every iteration after the first** (the `C × N` blow-up, defused) — with no loss of granular state and no shrinking of the context window. Caching the *growing history*, not just the system block, is the lever; opt out with `providers.anthropic.useCaching: false`.
 
 A live `12.4k/200k ████░░░░░░ 8%` meter in the status bar shows how full the context window is.
 
@@ -71,14 +122,15 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 
 - **Read and edit code** — `read_file`, `write_file`, `edit_text`, `edit_symbol` (AST-aware), `multi_edit` (single-file sequential), `multi_file_edit` (atomic across up to 50 files).
 - **Understand a codebase** — `ls`, `glob`, `grep`, plus a Tree-sitter code-graph: `project_overview`, `analyze_impact`, `find_callers`, `find_references`, `find_dead_code`, `safe_rename`.
-- **Run commands** — `bash`, plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
-- **Use its own browser** — a persistent, Playwright-driven Chromium with element refs, tabs, forms, downloads and a live view — to browse, shop, book and verify your own UI changes (see [docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)).
-- **Control the desktop** — macOS, Linux (X11/Wayland) and Windows: screenshots, mouse, keyboard, clipboard, apps and windows.
-- **Work in the background** — `mission_start` / `qodex mission start` runs long goals in a detached, resumable worker.
+- **Run commands** — `shell` on the host, or inside Docker when `runtime.backend: docker`; plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
+- **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes.
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
 - **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.
-- **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit**; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
+- **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit and auto‑opens in your browser** so you watch it change live; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
+- **Design integrations (Figma + Canva)** — `qodex mcp add figma` (3 ways: your logged‑in desktop Dev Mode, a personal token, or hosted OAuth) and `qodex mcp add canva` (OAuth login) let the model turn a Figma frame into code or build a Canva design — driven from the terminal over MCP.
+- **Matches your code style automatically** — QodeX infers the project's conventions (indentation, quotes, semicolons, naming) from its own source + `.editorconfig` and writes new code to match, **without you having to configure or `remember` anything**. Off via `context.styleProfile: false`.
+- **Self‑learning skills** — after a task that *objectively* succeeded (verified + honest, ≥ a few tool calls), QodeX can capture the winning approach as a **candidate** skill in quarantine. An **independent judge model** (a *different* model from the one that did the work) reviews it before it’s promoted, and a human‑authored skill is **never** overwritten. Drive it with `qodex skill candidates | curate | promote`. Off by default (`learning.enabled`).
 - **Trade‑off & business analysis** — ask it to analyze or plan (not code) and it produces **decision‑grade output**: options × weighted criteria → a scored comparison and one clear recommendation, business‑plan structure, no invented numbers.
 - **Persian‑first** — skill auto‑loading and tool selection understand Persian prompts (تحلیل، دیتابیس، آرتیفکت…), not just English keywords.
 - **Verify its own work** — `auto_fix` runs your test command in a fix→test loop with an iteration cap and same-failure-twice detection; the auto‑verify gate runs the right checker **per language** in a polyglot repo (TS *and* Python both get checked).
@@ -86,36 +138,306 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Skills** — install from a curated registry or any GitHub repo (single / multi / catalog), security-scanned on the way in; `search_skills` to find them.
 - **Sub-agents & orchestration** — `task` delegates to a separate model/window; `orchestrate` runs a DAG of sub-agents; `gather` fans out reads in parallel.
 - **MCP** — connect any MCP-compatible server; its tools join the same registry as built-ins.
+- **Live control dashboard** — `qodex dashboard` (alias `dash`) opens a **local, token-protected control panel** (127.0.0.1 only) that doesn't just *show* your QodeX — providers, sessions, token/cost, memory, skills — it **drives** it: toggle prompt caching / efficient mode / memory mode / sub-agents / learning, enable·disable·remove **scheduled tasks**, forget a memory fact, and apply MoE **offloading** — changes hit your real config and stores. Every capability is one entry in an action registry, so the panel grows to cover all of QodeX. `--static` writes the old read-only HTML snapshot.
+- **Add a provider by just asking** — tell QodeX *"add Groq with my key"* and the `add_provider` tool wires the gateway into `~/.qodex/config.yaml` (key stays in `~/.qodex/.env`, never the config); or run `qodex provider add` for a guided setup. Unknown providers are refused unless you give a base URL + key-env, so nothing is silently misconfigured.
 - **Domain tools** — Docker, databases, WordPress (`php -l` linting), media (ffmpeg), frontend/print, OpenAPI digest, and more.
+
+## Self-learning skills
+
+QodeX can **learn reusable playbooks from your successful tasks** — without the usual failure mode of an agent rubber-stamping its own work and overwriting your hand-tuned skills. The whole loop is **off by default** and gated on *objective* signals, not the model's self-grade.
+
+**How it works:**
+
+1. **Capture** — when a task finishes in the git sandbox and *objectively* succeeds (it compiled / type-checked, the completion-claim gate passed, and it took at least a few tool calls and changed a file), QodeX distills the winning approach into a `SKILL.md` and assigns it a **confidence score (0–100)** from those objective signals.
+2. **Quarantine** — the new skill is written to `~/.qodex/skills-candidates/` (a dir QodeX never auto-loads), stamped `provenance: machine`, `status: candidate`. It can't affect the model until promoted.
+3. **Independent review** — `qodex skill curate` runs an **independent judge model** (a *different* model from the one that did the work — a self-grade is refused) against a fixed rubric (reusable / correct / specific / non-redundant). The judge is **grounded in your codebase**: a Tree-sitter **code-graph "fit" signal** checks how many of the symbols a candidate references actually exist here, so a skill that name-drops APIs your project doesn't have scores lower (and the capture notice shows it: *"confidence 82/100 · codebase-fit 90%"*). Near-duplicate candidates are **merged** into one. It **never overwrites a human-authored skill**, and snapshots the skills dir (`tar.gz`) before any change so you can roll back.
+4. **Auto-evaluation** — `qodex skill eval <name>` (or `learning.autoEval` to run it right after capture) **replays the skill's original task in a throwaway git worktree** and runs the **real** verifier (`tsc`/`ruff`/…) on the code it produces, recording **pass / fail / inconclusive** into the skill. It tests whether the skill actually *works*, not just whether a judge likes it. Content-hash cached.
+5. **Learning from failures** — with `learning.failureLessons.enabled`, QodeX records tool failures and, once a mistake **recurs across tasks**, injects a deterministic "learned caution" into the prompt (e.g. *"verify a symbol exists before `edit_symbol`"*) so it stops repeating it. One-offs never teach; see `qodex skill lessons`.
+6. **Episodic memory** — with `learning.episodicMemory.enabled`, QodeX records a lean episode after each successful task and, at the start of a new one, recalls **similar past tasks on this project** and injects a one-line reminder of what worked — so it reuses its own approach instead of rediscovering it. Retrieval is **smart, not noisy**: an unrelated task recalls nothing, and the top-K are selected for **relevance *and* diversity** (MMR — so a recurring task doesn't inject K copies of itself), **grounded** against the current tree (episodes pointing at files that no longer exist are demoted, like the skill-judge's codebase-fit), with a **recency tie-break** toward your more recent solution.
+
+QodeX also **auto-matches your code style** (indentation, quotes, semicolons, naming — inferred from the project + `.editorconfig`) so generated code blends in without you having to spell it out. Off via `context.styleProfile: false`.
+
+```yaml
+# ~/.qodex/config.yaml — opt in
+learning:
+  enabled: true                     # capture candidates after successful tasks
+  minToolCalls: 5                   # how substantial a task must be to capture
+  judgeModel: llama-3.3-70b-versatile   # the INDEPENDENT judge (must differ from defaults.model)
+  autoPromoteMinConfidence: 50      # hold lower-confidence captures for human review
+  autoEval: false                   # run `skill eval` automatically after each capture
+  failureLessons:
+    enabled: true                   # learn from RECURRING tool failures
+  episodicMemory:
+    enabled: true                   # recall similar past tasks and reuse what worked
+    topK: 2                         # how many past episodes to inject
+    diversity: 0.3                  # 0–1: keep the top-K distinct, not K clones of one task
+```
+
+**A worked example.** With `learning.enabled` + an independent `judgeModel`, a typical loop:
+
+```text
+> add cursor pagination to the /orders endpoint        # you give a task
+… QodeX edits, type-checks, tests, and the sandbox merges (objective success) …
+🎓 Captured candidate skill "add-cursor-pagination" (confidence 82/100)
+🧪 Auto-eval of "add-cursor-pagination": pass            # (if learning.autoEval)
+
+$ qodex skill candidates        # review the quarantined capture
+$ qodex skill curate            # an INDEPENDENT judge promotes/merges the good ones
+$ qodex skill stats             # captured 3 · promoted 2 · promotion rate 67%
+
+# next week, a similar task:
+> add pagination to the /users endpoint
+# → QodeX recalls the past episode + loads the promoted skill automatically.
+```
+
+```bash
+qodex skill candidates          # list quarantined captures (with confidence)
+qodex skill curate              # independent judge merges + promotes the good ones
+qodex skill eval <name>         # replay the skill in a clean worktree + real verify → pass/fail
+qodex skill promote <name>      # promote one yourself (you are the independent reviewer)
+qodex skill reject <name>       # discard a candidate
+qodex skill stats               # learning metrics: captured / promoted / merged, promotion rate, avg confidence
+qodex skill lessons             # cautions learned from your recurring failures
+qodex skill snapshots           # rollback points;  qodex skill restore <archive>  to roll back
+```
+
+> Every successful task can also be exported as a **ShareGPT JSONL** corpus (`flywheel.datasetExport: true` → `~/.qodex/dataset/`) — a ready-to-use dataset for a future zero-cost local fine-tune. Strictly local; nothing is uploaded.
+
+### Skill versioning & A/B testing (UCB1)
+
+A skill keeps its whole history in **one flat directory** — `manifest.json` + `SKILL.v1.md`, `SKILL.v2.md`, … — no symlinks, identical on every OS. When a new candidate is captured for an existing skill it becomes a **challenger** to the stable **champion**, and QodeX routes traffic between them with the **UCB1 adaptive bandit** instead of a fixed split: it explores the challenger enough to get signal, then favours whichever has the higher score — and a challenger that turns out worse has its traffic driven to **zero automatically**.
+
+The score is a **composite reward**, not just win-rate: *success* dominates, but *token-* and *time-efficiency* (normalized **relative to the champion**) break ties — so between two equally-correct versions, the **cheaper, faster** one wins.
+
+```yaml
+learning:
+  versioning:
+    strategy: ucb1                 # or 'champion-only' to freeze a sensitive skill (UCB off)
+    ucbExplorationFactor: 1.41     # √2 — higher explores challengers more
+    minChallengerTrials: 5         # force a challenger ≥5 runs before judging it
+    rewardWeights: { success: 0.7, token: 0.15, time: 0.15 }
+```
+
+```text
+$ qodex skill versions git-commit-expert
+Skill "git-commit-expert"  ·  strategy: ucb1  ·  routed this turn → v2
+
+  v1  [human]   ★ champion
+      success: 88% over 40  ·  tokens: 60000  ·  1900ms/run  ·  confidence: 75
+      UCB: reward 0.838 + bonus 0.214 = 1.052
+  v2  [machine] ⚡ challenger
+      success: 92% over 12  ·  tokens: 41000  ·  1300ms/run  ·  confidence: 60
+      UCB: reward 0.921 + bonus 0.391 = 1.312     ← higher → gets this turn
+
+$ qodex skill rollback git-commit-expert v1     # snap the champion back to v1 anytime
+```
+
+## Memory & continuity
+
+Most CLI agents are amnesiac — every session starts from a blank slate and you re-explain the same things. QodeX **remembers**, across five layers that each answer a different question, so a model on *your* machine accumulates real context about you and your codebase over time:
+
+| Layer | Answers | Where it lives | Author |
+|---|---|---|---|
+| **Curated rules** | "What are the rules here?" | `QODEX.md` in the repo + `~/.qodex/QODEX.md` (global) | **you** — version-controlled, authoritative |
+| **Learned facts** | "What did I learn about this codebase / this user?" | `session_facts` in `~/.qodex/sessions.db`, scoped `project` (per-cwd) or `user` (global) | the **agent**, mid-task |
+| **Project worklog** | "What's been done here lately?" | `project_worklog` (per-cwd) | the agent + `/project log` |
+| **Episodic memory** | "How did I solve a task like this before?" | `~/.qodex/episodes/*.jsonl` | the agent, after a *verified* success |
+| **Sessions** | "Pick up exactly where we left off." | `sessions` + `messages` in `sessions.db` | every turn — `/resume <id>` |
+
+The split is **deliberate**: *your* curated rules (`QODEX.md`, git-tracked) stay separate from the *agent's* auto-learned scratchpad (the DB) — no machine write ever touches your authoritative file, and there are no merge conflicts. Facts are **scoped** — a `project` fact (a build command, a gotcha) is auto-injected only when you start in that directory; a `user` fact (*"prefers Persian comments"*, *"always run tests before saying done"*) follows you into **every** project. Recall is smart, not heavy: episodic memory injects only relevant, **de-duplicated** past tasks above a threshold (an unrelated task recalls nothing) — a one-line reminder, never a full transcript.
+
+**A Markdown mirror you can read, edit, and git-commit.** `/memory export` writes the agent's learned facts to a human-readable `MEMORY.md` (project) and `~/.qodex/memory.md` (user). Edit them by hand — fix a wrong fact, add three — and `/memory import` folds your changes back into the DB (additive). The DB stays the source of truth; the Markdown is the window into it.
+
+**Light Memory Mode for small context windows.** On a roomy model, every fact is injected (`memory.mode: full`). On a tight local model, set `memory.mode: lightweight` (or `auto`) — QodeX injects your `!important`-tagged facts plus as many recent ones as fit a token budget, and leaves the rest to load on demand. Your memory doesn't shrink; only what's *pushed into each prompt* does.
+
+**Searchable memory (FTS5).** As facts pile up, dumping the newest N isn't enough — `recall query="deploy key"` does a **relevance-ranked full-text search** (SQLite FTS5) over your facts and pulls out the specific one, so the agent finds an old gotcha instead of rediscovering it. This is the on-demand half of Light Memory Mode: lightweight mode keeps prompts small, and search retrieves anything it left out. The index stays in sync automatically and falls back to a substring scan if a build lacks FTS5.
+
+```text
+> the build here is `npm run build:prod`, not `npm run build`
+🧠 remembered (project)              # silently re-injected next time you start in this dir
+
+/memory                              # show what's stored for this project
+/memory export                       # write the human-readable MEMORY.md mirror
+/memory import                       # pull hand-edited facts from the markdown back in
+/memory forget <substring>          # drop matching facts
+/project        ·  /project log <e>  # this project's worklog (view · append)
+/sessions       ·  /resume <id>      # list past sessions · rehydrate one
+```
+
+```yaml
+# ~/.qodex/config.yaml — tune what gets pushed into each prompt (DB + mirror are unaffected)
+memory:
+  mode: auto              # full | lightweight | auto (lightweight on small context windows)
+  injectMaxTokens: 2000   # budget for facts in lightweight mode (!important always included)
+```
+
+It all lives under `~/.qodex/` — **nothing is uploaded**, the same privacy line as your code.
+
+## Two worlds, one flag
+
+You should not rebuild your life to try a cloud model for an afternoon. Drop two YAML files in `~/.qodex/profiles/` and flip them like a light switch.
+
+```yaml
+# ~/.qodex/profiles/studio.yaml  — the Mac Studio, Qwen, zero egress
+defaults:
+  provider: ollama
+  model: qwen3-coder
+runtime:
+  backend: local
+```
+
+```yaml
+# ~/.qodex/profiles/cloud.yaml  — think in the cloud, execute in a box
+defaults:
+  provider: anthropic
+  model: claude-sonnet-4-6
+runtime:
+  backend: docker
+  docker:
+    image: node:22-bookworm
+    network: none
+    memory: 2g
+```
+
+```bash
+qodex --profile studio          # local model, host shell
+qodex --profile cloud           # cloud model, Docker-isolated shell
+qodex --profile cloud bot       # same box, now from Telegram
+QODEX_PROFILE=cloud qodex
+qodex profile list
+qodex profile show studio
+```
+
+`-p` is `--print` (headless). Profiles are `--profile` / `QODEX_PROFILE` / `defaults.profile`. Merge order: built-in defaults → `~/.qodex/config.yaml` → project `.qodex/config.yaml` → **the overlay last**. A missing name is a hard error — you never silently stay on local while believing you are in the box.
+
+The Docker runtime bind-mounts the project at `/workspace`. It does **not** mount `docker.sock`, does **not** pass host `$HOME`, drops every capability, and defaults `--network none`. If Docker is not installed you get `[SANDBOX_UNAVAILABLE]`, not a quiet fall-through onto bare metal.
+
+That is the point of building the sandbox *before* another chat surface: when you are on the sofa and the agent wants to try a script, the script meets a container — not the rest of the Mac.
 
 ## Install
 
-> Requires **Node 20+**. `dist/` is built locally (not committed) — the `npm run build` step is **required**.
+Thirty seconds. Then `qodex setup`. Then type a real task in the repo you already have open. If it reads `package.json` and tells you the truth, you are in.
+
+### One line (macOS · Linux · WSL)
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+Checks for **git + Node 20+** (installs Node via your package manager if it's missing or too old), clones QodeX to `~/.qodex-src`, builds it, and puts `qodex` and `qx` on your PATH. **Idempotent** — re-run it to update. Knobs: `QODEX_SRC_DIR`, `QODEX_BRANCH`, `QODEX_NO_LINK=1`; preview without touching anything via `QODEX_DRY_RUN=1`.
+
+> Prefer to read before you pipe to `bash`? The script is [`install.sh`](install.sh) in this repo — or follow the manual steps below.
+
+### Manual
+
+**Prerequisites:** **Node 20+** (Node 22 LTS recommended) and **Git**. `dist/` is built locally (not committed), so the `npm run build` step is **required** on every platform. The build links two commands — `qodex` and the short alias `qx`.
+
+### macOS
+
+```bash
+# Node + Git via Homebrew (or use nvm). Check: node -v  →  v20+  
+brew install node git
+
 git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
 npm install
 npm run build
-npm link   # makes `qodex` and `qx` available on PATH
+npm link            # puts `qodex` and `qx` on your PATH
 ```
 
-Optional but recommended (browser automation, ~200 MB one-time):
+### Linux
+
+```bash
+# Debian/Ubuntu — get Node 20+ from NodeSource if your distro ships an older one
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs git
+# (Fedora: sudo dnf install nodejs git    ·    Arch: sudo pacman -S nodejs npm git)
+
+git clone https://github.com/QodeXcli/QodeX.git qodex && cd qodex
+npm install
+npm run build
+sudo npm link       # or plain `npm link` if your npm prefix is user-writable
+```
+
+### Windows
+
+Open **PowerShell** and install Node + Git (via [winget](https://learn.microsoft.com/windows/package-manager/), or the installers from [nodejs.org](https://nodejs.org) / [git-scm.com](https://git-scm.com)):
+
+```powershell
+winget install OpenJS.NodeJS.LTS Git.Git
+# reopen PowerShell so PATH refreshes, then:
+git clone https://github.com/QodeXcli/QodeX.git qodex; cd qodex
+npm install
+npm run build
+npm link            # `qodex` and `qx` on PATH
+```
+
+> **Windows tip:** if the native `better-sqlite3` module fails to compile, install the C/C++ build tools (`npm install --global windows-build-tools`, run PowerShell as Administrator) — or use **WSL2** and follow the **Linux** steps above (recommended for the smoothest experience).
+
+### Optional — browser automation (all platforms)
+
+Playwright-backed Chromium for the `browser_*` tools (~200 MB, one-time):
 
 ```bash
 npm install playwright
 npx playwright install chromium
 ```
 
+> Then run `qodex setup` to detect your local models and write `~/.qodex/config.yaml`.
+
+## Updating to a newer version
+
+**The easy way — one line (works no matter how you first installed):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+The installer is **idempotent**: it pulls the latest `main`, rebuilds, and re-links `qodex`/`qx`. Re-running it **replaces your old version in place** — you don't need to uninstall anything first. At the end it checks that the `qodex` your shell runs is actually the fresh build, and if an older copy is still winning on your `PATH` it prints the exact one-line fix.
+
+**From inside QodeX** (once you're on a build new enough to have it):
+
+```bash
+qodex update --check      # is a newer version available?
+qodex update              # git pull → npm install → npm run build (then restart qodex)
+```
+
+**If you cloned manually into a folder** (e.g. `~/Downloads/qodex`) and want that folder updated:
+
+```bash
+cd ~/Downloads/qodex          # your existing clone
+git pull                       # get the latest code
+npm install && npm run build   # rebuild (dist/ is not committed — this step is required)
+npm link                       # make sure `qodex` points here
+```
+
+**Coming from an old copy and just want a clean switch?** Delete the old clone and use the one-liner — it installs to `~/.qodex-src` and takes over the `qodex` command:
+
+```bash
+rm -rf ~/Downloads/qodex       # or wherever your old copy lives (safe: it's just source)
+npm uninstall -g @qodex/cli 2>/dev/null; hash -r   # drop any stale global link
+curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | bash
+```
+
+**Verify which build is active** any time:
+
+```bash
+command -v qodex     # where the command resolves
+qodex --version      # the version now running
+```
+
+> After updating, **restart QodeX** (and any running session) so the new `dist/` is loaded — the running process keeps the old build until it exits.
+
 ## Quick start
 
 ```bash
-# Setup wizard — detects local models, writes ~/.qodex/config.yaml
-qodex setup
-
-# Or just start it
-qodex
+qodex setup          # detects local models, writes ~/.qodex/config.yaml
+qodex                # or:  qx
 > read package.json and summarize what this project does
 ```
+
+Stuck between a local 32B and a cloud API? Don't rewrite config — `qodex --profile studio` vs `qodex --profile cloud`. Need the shell off the host? Put `runtime.backend: docker` in the cloud profile.
+
+## Configuration
 
 ## Configuration
 
@@ -150,6 +472,39 @@ subagents:
   mode: parallel            # off | sequential | parallel
 ```
 
+### Large (MoE) models on limited VRAM + local "turbo cache"
+
+Big Mixture-of-Experts coders (Qwen3-Coder-MoE, DeepSeek-MoE) don't have to fit entirely in VRAM — keep some layers on the GPU and the rest on the CPU via Ollama's `num_gpu`, which QodeX forwards verbatim:
+
+```yaml
+providers:
+  ollama:
+    keepAlive: 30m            # keep the model + its KV cache warm between turns — the local "turbo cache"
+    options:
+      num_gpu: 14             # layers on GPU; the rest run on CPU (lower = fits a bigger model)
+      num_ctx: 32768          # KV-cache size; QodeX already defaults this to the model's window
+```
+
+Not sure what `num_gpu` to use? Let QodeX figure it out:
+
+```bash
+qodex offload                 # auto-detects VRAM (nvidia-smi / Apple unified memory) + the
+                              # model's size & layer count from Ollama, and suggests a num_gpu
+qodex offload --apply         # …and writes it to providers.ollama.options.num_gpu
+qodex offload --vram 12       # override the VRAM budget if auto-detect is off
+```
+
+e.g. a 48 GB MoE on a 12 GB GPU → *keep ~14/64 layers on the GPU, the rest on CPU*. (The pure core is `suggestGpuLayers` in `src/llm/offload.ts`.)
+
+Two things make local fast here: **`keep_alive`** keeps the model resident so there's no cold reload, and QodeX's **byte-stable prompt prefix** (hierarchical cache work above) means the engine's **KV prefix cache hits** instead of re-prefilling the whole context every turn — the local counterpart to Anthropic prompt caching.
+
+**Run the model on another box — `qodex tunnel`.** Local-first answer to remote backends: SSH-forward to a workstation running Ollama/LM Studio and drive it from your laptop, code and execution staying local.
+
+```bash
+qodex tunnel --host workstation --user me --remote-port 11434 --local-port 11434
+# → point providers.ollama.baseUrl at http://localhost:11434; the 70B/MoE model runs over there.
+```
+
 Cloud providers are opt-in. Web-search keys are read from the environment, never the config file:
 
 ```bash
@@ -170,11 +525,10 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 | **Diagnostics** | type/lint checkers (tsc, eslint, ruff, pyright, go vet, cargo, php -l) |
 | **Git** | status, diff, log, branch, commit, create_pr, release_notes |
 | **Web** | web_search (DuckDuckGo / Tavily / Brave / Firecrawl), web_fetch, network_check |
-| **Browser** | navigate, snapshot (refs), click, type, fill_form, select, scroll, drag, upload, tabs, extract, screenshot (set-of-marks), pdf, downloads, dialog, network, evaluate, browser_agent, fill_secret |
-| **Desktop** | computer_use_screenshot/click/type/key/move/drag/scroll/clipboard/open/focus_window/locate/agent |
-| **Missions & workflows** | mission_start/status/list/cancel/milestone, workflow_record/list/show/run |
+| **Browser** | navigate, click, fill, screenshot, console, evaluate, get_text, wait_for |
 | **Dev server / jobs** | dev_server_start/stop/log, background_job_start/status/wait/cancel |
 | **Skills** | use_skill, search_skills, install_skill (security-scanned) |
+| **Memory** | remember, recall, forget (project/user-scoped, local) |
 | **Sub-agents** | task, orchestrate, gather, present_plan, todo_read/write, auto_fix |
 | **Vision** | vision_analyze |
 | **Domain** | Docker, database, WordPress, media (ffmpeg), frontend/print, OpenAPI |
@@ -192,14 +546,17 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
 /cost  /tokens     Token / cost usage
+/insights          Token / tool / latency breakdown
 /index [--force]   Build/refresh the code graph
 /mcp               List connected MCP servers
+/memory [export|import|forget <s>|clear]   Learned facts — show · mirror to MEMORY.md · import edits · drop · wipe
+/project [log <e>] This project's worklog — view, or append an entry
 /sessions  /resume <id>  /clear  /exit
-/browser  /control  /takeover  /approvals  /approve <id>  /deny <id>
-/mission <goal>  /missions  /workflows  /sentinel  /telegram  /vault  /desktop
 ```
 
 Plus any custom commands you drop in `.qodex/commands/` as markdown.
+
+From the shell: `qodex sessions list|show <id>|export <id>|search <query>`. Safe shell that should skip the approval hub: `execution.allow` in `config.yaml` (`git status`, `npm test`, …).
 
 ## End-to-end example
 
@@ -209,12 +566,158 @@ Plus any custom commands you drop in `.qodex/commands/` as markdown.
 
 QodeX will: read `Header.tsx` → add the button (shown as an approvable diff) → `dev_server_start npm run dev` → `browser_navigate` localhost → click the button → check the console for errors → screenshot → `vision_analyze` to confirm it looks right → run the type-checker on the touched file → stop the server and report. One agent loop, with the guardrails above running throughout.
 
+## Telegram / Discord / Slack / WhatsApp / Signal
+
+Drive the same agent from chat — stream tasks to QodeX from your phone. New platforms are **thin Transports** on the same gateway (and the same Operator Hub lanes). They are not a second agent, and they do not scrape unofficial clients.
+
+```bash
+# 1. put the token(s) in ~/.qodex/.env (secrets never go in config)
+echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
+#   Slack uses Socket Mode (no public URL needed) and TWO tokens:
+#   echo 'SLACK_APP_TOKEN=xapp-...' >> ~/.qodex/.env
+#   echo 'SLACK_BOT_TOKEN=xoxb-...' >> ~/.qodex/.env
+#   WhatsApp Cloud API (official Graph + webhook — not WhatsApp Web):
+#   echo 'WHATSAPP_TOKEN=...' >> ~/.qodex/.env
+#   echo 'WHATSAPP_PHONE_NUMBER_ID=...' >> ~/.qodex/.env
+#   echo 'WHATSAPP_VERIFY_TOKEN=pick-a-string' >> ~/.qodex/.env
+#   echo 'WHATSAPP_APP_SECRET=...' >> ~/.qodex/.env   # required — POST HMAC; verify token is GET-only
+#   Signal via your own signal-cli daemon (no unofficial phone clone):
+#   echo 'SIGNAL_ACCOUNT=+15551234567' >> ~/.qodex/.env
+#   # signal-cli -a +15551234567 daemon --tcp 127.0.0.1:7583
+
+# 2. enable the platform + allowlist your user id (deny-by-default) in config
+#    bot:
+#      telegram: { enabled: true, allowedUsers: ["<your-telegram-id>"] }
+#      discord:  { enabled: true, allowedUsers: ["<your-discord-id>"] }   # needs: npm i discord.js
+#      slack:    { enabled: true, allowedUsers: ["<your-slack-user-id>"] } # needs: npm i @slack/socket-mode @slack/web-api
+#      whatsapp: { enabled: true, allowedUsers: ["15551234567"] }          # digits, no +
+#      signal:   { enabled: true, allowedUsers: ["+15551234567"] }
+
+# 3. run it from the project directory you want it to work in
+#    Prefer --profile cloud + runtime.backend: docker so a sofa-command cannot rm ~
+qodex bot                 # all enabled platforms
+qodex bot --whatsapp
+qodex bot --signal
+```
+
+WhatsApp Cloud API needs a **public HTTPS webhook** (Cloudflare Tunnel / `qodex tunnel`) pointed at `http://127.0.0.1:8787` (`WHATSAPP_WEBHOOK_PORT`). Signal talks to **your** `signal-cli` over JSON-RPC — we never log in as you on a third-party server.
+
+One transport-agnostic gateway does all the work; the platform adapters are thin — **Telegram** and **WhatsApp Cloud** need zero extra npm packages, **Discord** / **Slack** are optional lazy-loaded deps, **Signal** needs a local `signal-cli` daemon. Adding a platform is one adapter implementing the same `Transport` seam, so behaviour never drifts between them.
+
+**Talk to it — voice memos.** Send a Telegram voice message and QodeX transcribes it and runs it as your turn (it echoes `🎙️ "…"` so you can see what it heard). Local-first, like web-search and vision: point `QODEX_TRANSCRIBE_CMD` at any local STT (whisper.cpp, faster-whisper, a script — `{file}` is the audio path, STDOUT is the transcript) for a fully-offline path, or set `OPENAI_API_KEY` for the cloud fallback. Neither configured ⇒ a friendly "just type" note, never a crash. The bug-classes that wreck chat-agent UIs are each solved once: **throttled, coalesced streaming** with code-fence-aware spill across messages (no edit-flood / no sheared code blocks), **one turn per chat at a time** (later messages queue — no interleaving), **permission prompts as inline buttons** (tap or reply), and **deny-by-default auth** (a coding agent runs shell on your host, so an empty allowlist admits no one; `"*"` opts into public access deliberately).
+
+**Full agent control from your phone.** Commands live in one declarative registry, so every command is also pushed to the client as a **native `/` menu** (tap-to-pick, with descriptions) — no memorizing:
+
+| Command | What it does |
+|---|---|
+| `/help` | every command, generated from the registry |
+| `/new` | fresh conversation (new session) |
+| `/stop` | abort the running task |
+| `/status` | running/queued · model · project · session · auto state |
+| `/auto on \| off` | auto-approve actions (skip the buttons) — handy on mobile, off by default |
+| `/model [id]` | show or switch the model for this conversation |
+| `/sessions` · `/resume <id>` | list past sessions and continue one (same store as the CLI) |
+| `/episodes` | past tasks solved here, from episodic memory |
+| `/impact <symbol>` · `/rename <old> <new>` | code-graph shortcuts — blast-radius of a symbol · AST-safe rename (with approval) |
+
+Adding a command is **one entry** — Telegram, Discord, Slack, WhatsApp, and Signal all gain the command and its `/help` line. Capabilities a given build doesn't support degrade to a friendly note, never a crash. WhatsApp reply-buttons (max 3) and Signal numbered replies both resolve through the same hub `answer(id)`.
+
+**Living Artifacts in chat — with an AI vision review.** Ask for a dashboard, a landing page, or a chart from your phone and QodeX doesn't dump code at you — it builds a **versioned artifact**, renders it, and (for web types) runs a **vision self-review** that actually *looks* at the result and verdicts it **LOOKS_GOOD / NEEDS_WORK / BROKEN**, listing concrete issues. You get back a compact **card**:
+
+```text
+📊  Sales dashboard  ·  html · v3
+🔎  vision review: NEEDS_WORK
+    • legend overlaps the Q4 bars
+    • contrast too low on the dark header
+[ ✅ Approve ]   [ ✏️ Edit ]   [ ❌ Reject ]   [ 🔗 Open live ]
+```
+
+Tap **Edit** and reply with the change in plain language; tap **Open live** for the hot-reloading, token-protected https link. The agent iterates create → preview → review → fix until the vision check passes — the same loop the CLI runs, now driven from chat.
+
+## Scheduled & autonomous — the real "24/7"
+
+Plenty of agents *say* "autonomous 24/7." QodeX has a plain, boring scheduler that actually does it — and, crucially, **runs every unattended job through the same guardrails as an interactive one**, so leaving it running can't quietly ship broken code.
+
+A built-in cron (5-field expressions + `@daily`/`@hourly`/… aliases) installs as a **macOS LaunchAgent** or a **Linux crontab** line, ticks every minute, and runs each due task as an **isolated headless process** (file-locked, 30-min hard cap, per-run logs under `~/.qodex/schedule-logs/`).
+
+```bash
+qodex schedule install                       # macOS launchd / Linux crontab — runs the tick every minute
+qodex schedule add --name nightly-deps \
+  --cron "@daily" \
+  --prompt "check for outdated deps and summarize what changed" \
+  --deliver telegram:<your-chat-id>          # result lands on your phone, not just a desktop ping
+qodex schedule list      ·  runs <id>  ·  enable/disable <id>  ·  rm <id>
+```
+
+**Deliver results to chat.** `--deliver telegram:<chatId>` (or `discord:<channelId>` / `slack:<channelId>`) posts each run's outcome to your phone — the scheduler talks to the platform REST API directly, so it needs no running bot. A recipe's verdict line leads the message.
+
+**Autonomous *Verified* PR — the differentiator.** `--recipe verified-pr` doesn't just run a prompt; it wraps your goal in an unattended-safe **protocol**:
+
+> work on a fresh **sandbox branch** → make the change → **run the tests + per-language verifiers** → and **open a PR only if verification actually passed**. If it fails, it opens *nothing*, claims *nothing*, and reports exactly what broke.
+
+```bash
+qodex schedule add --name nightly-flaky-fix \
+  --cron "0 3 * * *" \
+  --recipe verified-pr \
+  --prompt "find and fix flaky tests in this repo" \
+  --deliver telegram:<your-chat-id>
+# 3am: works on a branch, verifies, and either DMs you "VERIFIED-PR: opened <url>"
+#      for your morning review — or "VERIFIED-PR: blocked — <reason>". Never a false green.
+```
+
+That's the honest version of an always-on agent: it works while you sleep, but the completion gate, auto-verification, and git sandbox run too — so what reaches you is a PR you can trust, not a confident lie. See it as a one-page story: `qodex maintain-demo`.
+
+**`--recipe maintain` — a codebase that improves itself.** The self-improving loop, built on the moat. Each **scope** is a conservative, *provable* cleanup shipped through the verified-PR protocol above — opt-in, and every run lands in the dashboard's receipts panel (tagged with its scope):
+
+- **`dead-code`** (default) — code-graph finds *one* provably-unused item (`analyze_impact`/`find_references` → zero references or it blocks), removes only that.
+- **`unused-imports`** — removes import bindings referenced zero times in their file (proven via the linter / `tsc --noUnusedLocals`); never touches side-effect imports.
+- **`unused-locals`** — removes unused `const`/`let` bindings, with an extra **side-effect gate**: only when the initializer is provably side-effect-free (a literal/regex/pure expression — never a call/`await`/`new`), and **never a function parameter**.
+- **`unused-params`** — silences unused parameters by **prefixing `_`** (the convention `tsc`/eslint ignore) — never removes them (that would change the signature), and skips destructured props.
+- **`lint-fix`** — applies the project linter's **autofixable rules only** (`eslint --fix`, `ruff --fix`, …), bounded to the focus area, never a fixer that rewrites logic.
+- **`dep-bump`** — bumps **one** dependency a patch/minor (never major) and ships only if the **full test suite** passes (blocks if the project has no tests).
+
+The scope (and an optional path + `--dry-run` preview) goes in the prompt:
+
+```bash
+qodex schedule add --name nightly-tidy --cron "0 4 * * *" --recipe maintain \
+  --prompt "unused-imports src/" --deliver telegram:<your-chat-id>
+# 4am: prove-unused → remove → verify → PR for your review (or 🧾 blocked).
+qodex schedule add --name preview --cron "@weekly" --recipe maintain --prompt "dead-code --dry-run"
+# --dry-run: lists what it WOULD remove, changes nothing.
+```
+
+**Proof-carrying autonomy — every run comes with a receipt.** An unattended action is only trustworthy if you can *audit* it. Each run emits a structured **trust receipt** — what it set out to do, **which checks ran and whether they passed**, the files it touched, and the PR it opened (or why it didn't). Crucially, the hard facts are **measured by QodeX, not claimed by the model**: the `filesChanged` come from a real `git diff` and the `verification` entries from the checkers the agent loop *actually ran* — written out by QodeX itself, so the model can't fabricate a green receipt. The runner captures it, stores it, and leads the chat message with it:
+
+```text
+✅ QodeX schedule: nightly-flaky-fix
+done in 274s
+
+🧾 Receipt
+status: ✅ opened
+PR: https://github.com/you/app/pull/318
+verified: ✓ npm test · ✓ tsc
+files: src/auth/session.ts, test/auth.test.ts
+```
+
+```bash
+qodex schedule runs <id>        # each run, with its receipt verdict (🧾 opened/blocked + PR)
+qodex schedule receipt <id>     # the full receipt of the latest run
+```
+
+So "the agent did X overnight" stops being a claim and becomes a **checkable record** — the half a cron-wrapped chatbot structurally can't produce, because it never verified in the first place.
+
+**Adopting maintain on your repo?** [docs/ADOPTION.md](docs/ADOPTION.md) has the 10-minute setup, a rollout ladder from `--dry-run` to `dep-bump`, and **real merged results** from running it on this very repository ([#62](https://github.com/QodeXcli/QodeX/pull/62): 6 unused imports removed · [#64](https://github.com/QodeXcli/QodeX/pull/64): 4 consts removed, 6 safely blocked by the side-effect gate). Show your team with `qodex maintain-demo` (interactive) / `--markdown` / `--pdf`.
+
 ## Architecture notes
 
 - **One agent loop** with per-task budget caps (tokens / cost / wall-clock / iterations), a consecutive-failure circuit breaker, and auto-recovery.
 - **Capability-tiered system prompt** — frontier models get a compressed prompt; weak/local models keep the full guidance they depend on (cache-safe per session).
 - **Per-tool permissions** — read-only tools auto-approved; mutating tools ask once; "allow once / session / pattern / always" picker.
 - **Code-graph index** — Tree-sitter-backed, persists to `.qodex/codegraph.db`, incremental.
+- **Persistent memory** — sessions, messages, scoped (project/user) facts, and a per-project worklog in `~/.qodex/sessions.db`; episodic task-memory in `~/.qodex/episodes/`; curated rules in `QODEX.md`; a human-readable **Markdown mirror** (`/memory export|import`) and a budget-aware **Light Memory Mode** over the same store. All local, all under `~/.qodex/`.
+- **Chat gateway** — one transport-agnostic bot core (Telegram / Discord / Slack adapters are thin) with throttled streaming, one-turn-per-chat queueing, inline-button approvals, deny-by-default auth, and **Living Artifact cards** with vision review. Bot asks share the **Operator Hub** with the TUI on **per-conversation lanes**, so a parked Telegram approval cannot starve `[bg1]`.
+- **Named profiles** — `--profile` / `QODEX_PROFILE` last-word overlays (`~/.qodex/profiles/<name>.yaml`). Not `-p`.
+- **Execution runtime** — `runtime.backend: local | docker`. Docker is process isolation for `shell`, not a second agent. Hub stays I/O; git sandbox stays branches.
 - **Multi-provider router** — Ollama, LM Studio, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter all first-class.
 - **ESM strict** throughout; **hooks** (pre/post-tool) for guardrails or instrumentation.
 
@@ -224,6 +727,7 @@ QodeX will: read `Header.tsx` → add the button (shown as an approvable diff) �
 - **Faster iteration** — no network latency per tool call.
 - **Works offline** — `/network` tells you what's reachable.
 - **$0 to run** if you have the hardware; cloud providers are opt-in per role (e.g. sub-agents on Claude, vision on GPT).
+- **When you *do* go remote, the blast radius is a container** — not your home directory. That is the only honest way to put a coding agent on a phone.
 
 ## Status
 

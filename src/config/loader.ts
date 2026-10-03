@@ -1,10 +1,16 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import yaml from 'js-yaml';
-import { DEFAULT_CONFIG, QODEX_CONFIG_FILE, QODEX_HOME, type QodexConfig } from './defaults.js';
+import { DEFAULT_CONFIG, QODEX_CONFIG_FILE, QODEX_HOME, QODEX_PROFILES_DIR, type QodexConfig } from './defaults.js';
 import { logger } from '../utils/logger.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { withLock } from '../utils/file-lock.js';
+import {
+  getRequestedProfile,
+  loadProfileOverlay,
+  resolveProfileName,
+  setActiveProfile,
+} from './profile.js';
 
 /**
  * Deep merge two configuration objects.
@@ -78,18 +84,29 @@ function isMergeableConfig(parsed: unknown): parsed is Partial<QodexConfig> {
   return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
 }
 
-export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConfig> {
+export interface LoadConfigOpts {
+  /** `--profile` / test override. Wins over QODEX_PROFILE and defaults.profile. */
+  profile?: string;
+  /** Isolate reads from the real ~/.qodex (tests). */
+  home?: string;
+}
+
+export async function loadConfig(cwd: string = process.cwd(), opts: LoadConfigOpts = {}): Promise<QodexConfig> {
   await ensureQodexHome();
+
+  const homeRoot = opts.home ? path.join(opts.home, '.qodex') : QODEX_HOME;
+  const userConfigFile = opts.home ? path.join(homeRoot, 'config.yaml') : QODEX_CONFIG_FILE;
+  const profileDir = opts.home ? path.join(homeRoot, 'profiles') : QODEX_PROFILES_DIR;
 
   let config = { ...DEFAULT_CONFIG };
 
   // User-level config
   try {
-    const userYaml = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8');
+    const userYaml = await fs.readFile(userConfigFile, 'utf-8');
     const userCfg = yaml.load(userYaml);
     if (isMergeableConfig(userCfg)) config = deepMerge(config, userCfg);
     else if (userCfg != null) {
-      logger.warn('Ignoring user config: top-level value is not a mapping', { file: QODEX_CONFIG_FILE, got: Array.isArray(userCfg) ? 'array' : typeof userCfg });
+      logger.warn('Ignoring user config: top-level value is not a mapping', { file: userConfigFile, got: Array.isArray(userCfg) ? 'array' : typeof userCfg });
     }
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
@@ -110,6 +127,26 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<QodexConf
     if (err.code !== 'ENOENT') {
       logger.warn('Failed to load project config', { err: err.message });
     }
+  }
+
+  // Named profile — last word for the keys it sets. Missing name is a hard error
+  // so "I thought I was on cloud" never silently stays on local.
+  const profileName = resolveProfileName({
+    flag: opts.profile,
+    env: process.env.QODEX_PROFILE,
+    sticky: getRequestedProfile(),
+    configured: (config as QodexConfig).defaults?.profile,
+  });
+  if (profileName) {
+    const hit = await loadProfileOverlay(profileName, {
+      profileDir,
+      userConfigPath: userConfigFile,
+    });
+    config = deepMerge(config, hit.overlay);
+    setActiveProfile(hit);
+    logger.info('Config profile applied', { name: hit.name, source: hit.source, path: hit.path });
+  } else {
+    setActiveProfile(null);
   }
 
   return config;

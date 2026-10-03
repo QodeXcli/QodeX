@@ -26,6 +26,7 @@ import { buildSystemPrompt, detectModelFamily } from '../llm/prompts/system.js';
 import { findCustomProviderPromptConfig } from '../llm/providers/custom-config.js';
 import { filterSchemasByRelevance } from './tool-relevance.js';
 import { evaluateCompletion } from './completion-gate.js';
+import { runVisualGate, type VisualGateDecision, type VisualReviewFn, type VisualReviewOutcome } from './visual-gate.js';
 import { buildSkillsSystemBlock, suggestSkillForPrompt, getSkill, listSkills } from '../skills/registry.js';
 import { suggestUninstalledSkill } from '../skills/skill-sources.js';
 import { getBuiltinRolePrompt, builtinRoleAllowedTools, OPERATOR_ROLES } from '../llm/prompts/role-prompts.js';
@@ -38,8 +39,10 @@ import { getSessionStore } from '../session/store.js';
 import { ToolRegistry, expandToolPatterns, type ToolExecutionMode } from '../tools/registry.js';
 import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
+import { resolveRuntime } from '../runtime/exec.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import { BudgetTracker } from './budget.js';
+import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import {
   transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction,
   isGateExemptTool, isStateDependentTool, resultHash, resolveToolTimeoutSeconds,
@@ -47,15 +50,24 @@ import {
 } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
 import { getSentinel } from '../sentinel/index.js';
+import { classifyPromptClass, compileTaskBrief, formatTaskBrief, readNamedFileSnippets } from './task-brief.js';
+import { setActiveAgent, getActiveAgent } from './active.js';
+export { setActiveAgent, getActiveAgent } from './active.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
+import { applySpillGuard } from './tool-spill.js';
 import { efficiencyDefaults, resolveSetting } from './efficiency-profile.js';
+import { nextRelief } from './context-pressure.js';
 import { gatherInfraSignals, deriveAutoDisabledTools, ratchetAutoDisabled } from './tool-profile.js';
 import { decideThinking, applyThinkingDecision, countTrailingToolErrors, modelSupportsSoftSwitch } from './thinking-control.js';
 import { detectLmStudioContextWindows } from '../setup/model-detector.js';
 import { SnapshotService } from '../safety/snapshot.js';
 import { resolveRole } from '../llm/role-resolver.js';
+import { routeWithOffload, offloadOverride, toolsetIsReadOnly } from '../llm/offload-policy.js';
 import { getHooksManager, extractFilePathsFromArgs } from '../hooks/manager.js';
+import { SessionInsights, type InsightsSnapshot } from './insights.js';
+import { appendAudit } from '../security/audit-log.js';
+import { episodeVerified, recordEpisode, shouldRecordEpisode } from '../context/episodic-memory.js';
 import type { QodexConfig } from '../config/defaults.js';
 import { detectProjectInfo } from '../context/project-info.js';
 import { loadProjectRules } from '../context/claude-md.js';
@@ -65,6 +77,7 @@ import { recoverToolCallsFromText } from '../llm/text-tool-recovery.js';
 import { inspectOutput, buildCorrectionMessage } from './output-guardrail.js';
 import { compactFileReads } from './read-cache.js';
 import { ReadLedger, extractMutationPaths, extractReadPath, isGatedMutationTool, buildGateMessage } from './read-ledger.js';
+import { computeBlastRadius, isCodeFile, IMPACT_EDIT_TOOLS } from './blast-radius.js';
 import { setSyntaxGateEnabled } from '../tools/ast/syntax-check.js';
 import { needsTextToolMode, buildTextToolInstructions, withTextToolProtocol } from '../llm/text-tool-protocol.js';
 import { describeCacheReuse } from '../llm/cache-layout.js';
@@ -75,10 +88,9 @@ import type { Diagnostic } from '../tools/diagnostics/parsers.js';
 import { buildCriticPrompt, parseCriticVerdict, buildCriticRepairMessage, type DiffFile } from './critic.js';
 import { GitSandbox } from './git-sandbox.js';
 import { logger } from '../utils/logger.js';
-import { CancelledError } from '../utils/errors.js';
 
 export interface AgentEvent {
-  type: 'thinking_start' | 'text_delta' | 'thinking_done'
+  type: 'thinking_start' | 'thinking_delta' | 'text_delta' | 'thinking_done'
       | 'tool_call_start' | 'tool_call_args_delta' | 'tool_call_executing'
       | 'tool_result' | 'tool_ui'
       | 'iteration_start' | 'iteration_done'
@@ -160,6 +172,26 @@ function definedOnly<T extends object>(o: T | undefined): Partial<T> {
   return out;
 }
 
+/**
+ * Synthesize tool-result messages for tool_calls that were NEVER executed — e.g. a
+ * loop detector (read-loop / stuck-loop / error-loop) fired and skipped the batch with
+ * `continue`. The assistant message carrying those tool_calls was already appended to
+ * history, so without a matching tool result for each id the conversation is malformed:
+ * OpenAI-format providers (kimi, DeepSeek, LM Studio, …) reject the next request with
+ * "an assistant message with 'tool_calls' must be followed by tool messages responding
+ * to each 'tool_call_id'". (Anthropic tolerates it, which is why it hid until an
+ * OpenAI-compatible model was used.) Emitting a short skip-marker per id keeps the
+ * assistant→tool invariant intact so the run can continue.
+ */
+function skippedToolResults(toolCalls: ToolCall[], reason: string): Message[] {
+  return toolCalls.map(tc => ({
+    role: 'tool' as const,
+    tool_call_id: tc.id,
+    name: tc.function.name,
+    content: `[skipped] ${reason} — this tool call was not executed; do not wait on its result.`,
+  }));
+}
+
 export class AgentLoop {
   private router: ModelRouter;
   private registry: ToolRegistry;
@@ -182,14 +214,65 @@ export class AgentLoop {
    * Single-threaded JS event loop ⇒ no lock needed.
    */
   private steerQueue: string[] = [];
-  /** Session ledger of files the model has demonstrably read (read-before-write gate). */
-  private readLedger = new ReadLedger();
+  /**
+   * Per-session read ledgers. Main chat and `/background` share this AgentLoop
+   * instance; they must NOT share "I have seen this file" or a write in one
+   * session would launder staleness for the other.
+   */
+  private readLedgers = new Map<string, ReadLedger>();
+
+  private ledgerFor(sessionId: string): ReadLedger {
+    let led = this.readLedgers.get(sessionId);
+    if (!led) {
+      led = new ReadLedger();
+      this.readLedgers.set(sessionId, led);
+    }
+    return led;
+  }
   /** Skills already auto-injected this session — never inject the same one twice. */
   private autoInjectedSkills = new Set<string>();
   /** Monotonic union of tool names shipped this session. The relevance gate only ever
    *  ADDS to this — never drops — so the tools block stays a byte-stable cache prefix
    *  across turns (a sliding per-turn set would flip and invalidate the prompt cache). */
   private sessionToolNames = new Set<string>();
+  /** Where the active model is actually served from ('ollama'/'lmstudio'/'anthropic'/…) and
+   *  its LIVE context window — set each iteration, forwarded on budget_update for the UI. */
+  private lastModelSource = '';
+  private lastEffectiveCtxWindow = 0;
+  /** Calls auto-offloaded to the cheap model this session (offload.enabled) — forwarded on
+   *  budget_update so the status bar / dashboard can show the policy actually firing. */
+  private offloadedCalls = 0;
+  private totalToolCalls = 0; // running count of executed tool calls (skill-capture eligibility)
+  /** ORDERED tool names as executed (unlike sessionToolNames, which is a distinct set) —
+   *  feeds skill distillation's step outline. Capped so a marathon session stays bounded. */
+  private sessionToolSequence: string[] = [];
+  private static readonly TOOL_SEQUENCE_CAP = 2000;
+  private currentTaskKey = ''; // stable key for THIS run's task (failure-driven learning)
+  // Ground-truth verification ledger: every checker QodeX actually ran this run + its result.
+  // Feeds the trust receipt — uncounterfeitable because the WORKER measured it, not the model.
+  private verifyLedger: Array<{ command: string; passed: boolean }> = [];
+  private styleBlock: string | null = null; // inferred code-style block, computed once per session
+  /** Per-session operational insights (tokens / tools / latency). In-memory; persisted to the session row. */
+  private insightsBySession = new Map<string, SessionInsights>();
+
+  /** Record a tool failure to episodic memory (best-effort, opt-in). Only fires when
+   *  failure-driven learning is enabled; the pattern miner later decides what's worth
+   *  learning. Fire-and-forget — never blocks or throws into the loop. */
+  private recordToolFailure(tool: string, content: string): void {
+    if (!(this.config as any).learning?.failureLessons?.enabled) return;
+    if (!this.currentTaskKey) return;
+    void (async () => {
+      try {
+        const { recordFailure, normalizeFailureSignature } = await import('../skills/learning/failures.js');
+        await recordFailure({
+          task: this.currentTaskKey,
+          tool,
+          signature: normalizeFailureSignature(tool, content),
+          sample: (content || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        });
+      } catch { /* best-effort */ }
+    })();
+  }
   /** Auto tool profile: null = not yet derived this session; then a ratcheting list. */
   private autoDisabledTools: string[] | null = null;
   /** Live context windows read from LM Studio's native API, fetched once per session. */
@@ -204,10 +287,15 @@ export class AgentLoop {
   private planGateSatisfied = false;  // has the model produced a plan signal this run?
   private planGateFired = false;      // have we already nudged once this run? (one-shot, never locks)
   private completionGateFired = false; // completion-claim gate fires at most once per run
+  /** Visual gate state (reset per run): has the single corrective retry been spent? */
+  private visualGateRetried = false;
+  /** Injectable Layer-3 reviewer for the completion-time visual gate — tests mock this;
+   *  when null the loop runs the real `artifact_review` tool (browser + vision). */
+  visualReviewFn: VisualReviewFn | null = null;
   /** Auto-compact older turns when context exceeds the threshold of the model's window. Enabled by default. */
   private autoCompactEnabled = true;
   /** Fraction of the context window above which auto-compaction triggers. */
-  private autoCompactThreshold = 0.75;
+  private autoCompactThreshold = 0.80;
   /** Fallback context window (tokens) when the caller/model doesn't specify one. */
   private defaultContextWindow = 32_768;
   /** True when the user set compaction.contextWindow in config (it then wins over model-detected). */
@@ -230,21 +318,11 @@ export class AgentLoop {
     this.registry = opts.registry;
     this.permissions = opts.permissions;
     this.config = opts.config;
-    this.cwd = opts.cwd;
-    // Allow config to tune auto-compaction without touching code.
-    const compactCfg = (opts.config as any).compaction;
-    // Efficiency profile: when context.efficient is true, compact earlier — unless the
-    // user pinned an explicit threshold (explicit always wins).
-    const effOn = (opts.config as any)?.context?.efficient === true;
-    if (effOn) this.autoCompactThreshold = efficiencyDefaults(true).compactThreshold;
-    if (compactCfg) {
-      if (typeof compactCfg.enabled === 'boolean') this.autoCompactEnabled = compactCfg.enabled;
-      if (typeof compactCfg.threshold === 'number') this.autoCompactThreshold = compactCfg.threshold;
-      if (typeof compactCfg.contextWindow === 'number') {
-        this.defaultContextWindow = compactCfg.contextWindow;
-        this.contextWindowExplicit = true;
-      }
-    }
+    this.cwd = path.resolve(opts.cwd);
+    // Auto-compaction + efficiency tuning are DERIVED from config. Factored into a method so a
+    // mid-session config hot-reload (refreshMutableConfig, run at each run() start) re-derives
+    // them too — a dashboard toggle to `context.efficient` then takes effect on the next task.
+    this.applyConfigDerived();
     // Snapshot service: only instantiated when the user has explicitly enabled it in config.
     // Constructor is cheap — no I/O — but we still keep this conditional so non-users
     // aren't carrying unused state.
@@ -255,6 +333,25 @@ export class AgentLoop {
         retentionTurns: (opts.config as any).safety?.snapshotRetentionTurns ?? 50,
       });
     }
+  }
+
+  /**
+   * Rebind the working root after a session handoff / resume.
+   * Tools resolve every relative path against this, not `process.cwd()`.
+   * Clears a previously attached directory — that attachment belonged to the old root.
+   */
+  setWorkingDirectory(cwd: string): void {
+    this.cwd = path.resolve(cwd);
+    this.effectiveCwd = undefined;
+    if (this.snapshotService) {
+      this.snapshotService = new SnapshotService(this.cwd, 'pending', {
+        retentionTurns: (this.config as any).safety?.snapshotRetentionTurns ?? 50,
+      });
+    }
+  }
+
+  workingDirectory(): string {
+    return this.effectiveCwd ?? this.cwd;
   }
 
   /** Update the snapshot service's session id when a real session starts. */
@@ -278,6 +375,77 @@ export class AgentLoop {
   /** Public read accessor for slash commands to operate on snapshots. */
   getSnapshotService(): SnapshotService | undefined {
     return this.snapshotService;
+  }
+
+  private insightsFor(sessionId: string): SessionInsights {
+    let s = this.insightsBySession.get(sessionId);
+    if (!s) {
+      s = new SessionInsights(sessionId);
+      this.insightsBySession.set(sessionId, s);
+    }
+    return s;
+  }
+
+  /** Live snapshot for `/insights`. */
+  getInsights(sessionId: string): InsightsSnapshot {
+    return this.insightsFor(sessionId).snapshot();
+  }
+
+  resetInsights(sessionId: string): void {
+    this.insightsBySession.get(sessionId)?.reset();
+  }
+
+  persistInsights(sessionId: string): void {
+    const s = this.insightsBySession.get(sessionId);
+    if (!s || s.isEmpty()) return;
+    try { getSessionStore().saveInsights(sessionId, s.snapshot()); } catch { /* never stall the loop */ }
+  }
+
+  /**
+   * Write a lean episode for THIS turn so the next similar task can recall it.
+   * Must be awaited — headless `process.exit` otherwise kills the append.
+   */
+  private async maybeRecordEpisode(opts: {
+    prompt: string;
+    summary: string;
+    filesChanged: string[];
+    toolsUsed: string[];
+    toolCalls: number;
+    mode?: string;
+    aborted?: boolean;
+  }): Promise<void> {
+    if ((this.config as any).learning?.episodicMemory?.enabled === false) return;
+    if (opts.aborted) return;
+    if (opts.mode === 'plan' || opts.mode === 'subagent') return;
+    if (!shouldRecordEpisode({
+      prompt: opts.prompt,
+      filesChanged: opts.filesChanged,
+      toolCalls: opts.toolCalls,
+    })) return;
+    const files = opts.filesChanged.map(f =>
+      path.isAbsolute(f) ? path.relative(this.cwd, f) : f,
+    ).filter(Boolean);
+    try {
+      await recordEpisode(this.cwd, {
+        prompt: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 400),
+        summary: (opts.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        filesChanged: files,
+        toolsUsed: opts.toolsUsed,
+        toolCalls: opts.toolCalls,
+        verified: episodeVerified(this.verifyLedger),
+      });
+      logger.info('Episode recorded', { files, toolCalls: opts.toolCalls });
+    } catch { /* never stall the loop */ }
+  }
+
+  private noteToolInsight(
+    sessionId: string,
+    name: string,
+    result: { isError?: boolean },
+    durationMs: number,
+  ): void {
+    this.insightsFor(sessionId).recordTool({ name, ok: !result.isError, durationMs });
+    appendAudit({ type: 'tool', tool: name, ok: !result.isError, durationMs, sessionId }, this.cwd);
   }
 
   /** Allow slash commands to toggle features at runtime without restart. */
@@ -343,26 +511,58 @@ export class AgentLoop {
       // Resolve which model this sub-agent should use, applying the precedence rules:
       // explicit (opts.modelOverride) > session override > config.roles.<role> > config.roles.subagent > parent default.
       const resolved = resolveRole(role, this.config, opts.modelOverride);
-      modelUsed = `${resolved.provider}/${resolved.model}`;
+
+      // ── Token-efficiency auto-offload (opt-in, offload.enabled) ──
+      // A scout dispatch is read-only recon whose output only the PARENT consumes — the
+      // safe set for a cheap model. Only lift the model when nothing more specific chose
+      // one (source parent-default): explicit per-call overrides, session overrides and
+      // config roles always win. Non-scout roles are untouched by design (see offload-policy.ts).
+      let dispatchModel = { provider: resolved.provider, model: resolved.model };
+      if (role === 'scout' && resolved.source === 'parent-default') {
+        // The built-in scout allow-list is read-only; a user-configured
+        // roles.scout.allowedTools must PROVE read-only or the offload is skipped.
+        const cfgScoutTools = ((this.config as any).roles?.[role] as { allowedTools?: string[] } | undefined)?.allowedTools;
+        const target = offloadOverride(
+          { kind: 'scout', taskClass: 'general', mutating: cfgScoutTools ? !toolsetIsReadOnly(cfgScoutTools) : false },
+          this.config,
+        );
+        if (target) {
+          dispatchModel = { provider: target.provider, model: target.model };
+          this.offloadedCalls += 1;
+          logger.info(`Offload: scout dispatch routed to ${target.model}`, {
+            insteadOf: resolved.model,
+            source: target.source,
+            offloadedCalls: this.offloadedCalls,
+          });
+        }
+      }
+
+      modelUsed = `${dispatchModel.provider}/${dispatchModel.model}`;
       logger.info('Sub-agent model resolved', {
         role,
-        provider: resolved.provider,
-        model: resolved.model,
+        provider: dispatchModel.provider,
+        model: dispatchModel.model,
         source: resolved.source,
         sessionId: opts.sessionId,
       });
 
+      // Operator side-runs (`/background`) are full agents: isolated session, full tools
+      // (minus recursion), approvals via the hub. Model-owned `task` stays restricted.
+      const execMode = opts.executionMode ?? 'subagent';
+
       // Role-specific tool restriction (allow-list): config.roles.<role>.allowedTools wins,
       // else the built-in list for vision / scout / browser / computer, else every
       // sub-agent tool (mode=subagent already removes the recursion tools).
-      const allowedTools = this.subagentAllowedTools(role);
+      const allowedTools = execMode === 'normal' ? undefined : this.subagentAllowedTools(role);
 
-      // The sub-session needs a real `sessions` row before the first recordTurn.
+      // The child session id is fabricated by the dispatcher (`<parent>/sub-<ts>`, …) and
+      // needs a real `sessions` row before the first recordTurn (messages → sessions FK).
       getSessionStore().ensureSession(opts.sessionId, this.effectiveCwd ?? this.cwd, modelUsed);
       sessionReady = true;
 
-      // Approvals: the caller's asker (task passes ctx.askUser) > the parent run's asker >
-      // an unattended brokered asker (remote channels may answer; times out to "deny").
+      // Approvals: the caller's asker (task passes ctx.askUser; side runs pass the hub) >
+      // the parent run's asker > an unattended brokered asker (remote channels may answer;
+      // times out to "deny").
       const askUser = opts.askUser
         ?? this.lastAskUser
         ?? unattendedAskUser(`subagent:${role}`, resolveSentinelConfig(this.config).remoteApprovalTimeoutSec, opts.signal);
@@ -382,7 +582,13 @@ export class AgentLoop {
       // CRITICAL: we pass `allowedTools` so the system prompt lists ONLY the tools the
       // sub-agent can actually call. Small/quantized models will hallucinate they don't
       // have web_search if it isn't named in prose — see Sub-Agent persona fix.
-      const initialMessages = await child.buildInitialMessages(prompt, 'subagent', resolved.model, role, allowedTools);
+      const initialMessages = await child.buildInitialMessages(
+        prompt,
+        execMode,
+        dispatchModel.model,
+        execMode === 'normal' ? undefined : role,
+        allowedTools,
+      );
 
       const maxIterationsOverride = typeof opts.maxIterations === 'number' && Number.isFinite(opts.maxIterations)
         ? Math.max(0, Math.floor(opts.maxIterations))
@@ -390,14 +596,21 @@ export class AgentLoop {
 
       for await (const event of child.run(initialMessages, opts.sessionId, {
         // Nested agent tools are hidden from sub-agents (no sub-agent → agent-tool → sub-agent chains).
-        mode: { mode: 'subagent', allowedTools, blockedTools: [...NESTED_AGENT_TOOLS] },
+        mode: execMode === 'normal'
+          ? { mode: 'normal', blockedTools: ['task', 'orchestrate', ...NESTED_AGENT_TOOLS] }
+          : { mode: 'subagent', allowedTools, blockedTools: [...NESTED_AGENT_TOOLS] },
         signal: opts.signal,
         askUser,
         maxIterationsOverride,
-        modelOverride: { provider: resolved.provider, model: resolved.model },
+        modelOverride: { provider: dispatchModel.provider, model: dispatchModel.model },
         budgetOverride,
+        onToolUI: opts.onToolUI,
       })) {
-        if (event.type === 'tool_call_start') toolCallsRun += 1;
+        if (event.type === 'tool_call_start') {
+          toolCallsRun += 1;
+          const name = (event.data as { name?: string } | undefined)?.name;
+          if (name && opts.onToolUI) opts.onToolUI({ type: 'progress', message: name });
+        }
         if (event.type === 'final') {
           finalText = (event.data as any)?.content ?? '';
         }
@@ -475,7 +688,10 @@ export class AgentLoop {
     if (attachedDir) {
       try { if (fsSync.statSync(attachedDir).isDirectory()) this.effectiveCwd = attachedDir; } catch { /* not a real dir — ignore */ }
     }
-    const [projectInfo, projectRules, directoryTree, gitBranch, projectSignals, trellis] = await Promise.all([
+    const taskBrief = compileTaskBrief(userPrompt);
+    const briefBlock = formatTaskBrief(taskBrief, userPrompt);
+    const { loadIdentity } = await import('../context/identity.js');
+    const [projectInfo, projectRules, directoryTree, gitBranch, projectSignals, trellis, identity] = await Promise.all([
       detectProjectInfo(this.cwd),
       loadProjectRules(this.cwd),
       // Pass the user prompt as a hint so the tree builder can weight relevant folders.
@@ -488,8 +704,21 @@ export class AgentLoop {
       detectProjectSignals(this.cwd),
       // Trellis harness (.trellis/ spec+tasks+journals), if the project uses it.
       loadTrellisContext(this.cwd),
+      loadIdentity(this.cwd),
     ]);
-    const knowledgeFacts = getSessionStore().getFactsForCwd(this.cwd);
+    // Light Memory Mode: in 'lightweight' the prompt carries only !important facts + the newest
+    // others within a token budget (the rest stay in the DB, recall-on-demand); 'auto' switches to
+    // lightweight on a small context window; 'full' (default) injects everything.
+    const { selectInjectedFacts, resolveMemoryMode } = await import('../context/memory-select.js');
+    const memCfg = (this.config as any).memory ?? {};
+    const memMode = resolveMemoryMode(memCfg.mode, this.defaultContextWindow);
+    const allFacts = getSessionStore().getFactsForCwd(this.cwd);
+    const knowledgeFacts = selectInjectedFacts(allFacts, { mode: memMode, injectMaxTokens: memCfg.injectMaxTokens });
+    if (memMode === 'lightweight' && knowledgeFacts.length < allFacts.length) {
+      // Transparency: tell the model (and the log) that memory was injected as a budgeted subset.
+      logger.info('Light memory: injected a budgeted subset of facts', { shown: knowledgeFacts.length, total: allFacts.length });
+      knowledgeFacts.unshift(`(light memory active — ${knowledgeFacts.length} of ${allFacts.length} learned facts shown within budget; ask me to recall the rest)`);
+    }
     // Project memory: prepend a brief of what was done in this project in earlier
     // sessions, so a new/resumed session continues instead of restarting. Rides the
     // existing facts-injection path (no prompt-assembly surgery), and is skipped
@@ -532,7 +761,10 @@ export class AgentLoop {
       // role is purposefully focused. We still re-state QodeX identity AND the EXACT
       // available tools — small local models (Qwen 6-bit on LM Studio) lose identity
       // and tool awareness when relying only on the role prompt body.
-      sysPrompt = `You are **QodeX**, a local-first autonomous agent (coding, browser, desktop). When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
+      const { renderIdentitySection } = await import('../context/identity.js');
+      const idHead = renderIdentitySection(identity.block);
+      sysPrompt = (idHead ? `${idHead}\n\n` : '') +
+        `You are **QodeX**, a local-first autonomous agent (coding, browser, desktop). When asked "who are you" or "what model", answer "I am QodeX" — never identify as the underlying LLM (Claude/GPT/Qwen/DeepSeek). The role brief below tells you your CURRENT JOB:\n\n` +
         `${customSysPromptOverride}\n\n` +
         (trellis?.specBlock ? `${trellis.specBlock}\n\n` : '') +
         `Working directory: ${this.cwd}\n` +
@@ -551,12 +783,13 @@ export class AgentLoop {
         `If a task needs web data, use \`web_search\` / \`web_fetch\` (if listed above). Do not claim you lack internet access — those tools ARE your internet access.`;
     } else {
       // Classify the user's intent so the prompt can inject task-shaped reasoning.
-      const taskClass = this.classifyForPrompt([{ role: 'user', content: userPrompt }]);
+      const taskClass = taskBrief.taskClass;
       // Stack-specialist expertise: detect from the user's words + what's on disk, then
       // inject the deep how-an-expert-builds-THIS block(s). Orthogonal to task class.
       const stacks = detectStacks(userPrompt, projectSignals);
       const stackAddendum = buildStackAddendum(stacks);
       if (stacks.length > 0) logger.info('Stack specialist profiles active', { stacks });
+      if (briefBlock) logger.info('Task brief', { kind: taskBrief.taskClass, effort: taskBrief.effort, files: taskBrief.paths.length });
       sysPrompt = buildSystemPrompt({
         cwd: this.cwd,
         mode,
@@ -571,7 +804,9 @@ export class AgentLoop {
         availableToolNames: effectiveTools,
         taskClass,
         stackAddendum,
-        skillsBlock: buildSkillsSystemBlock(),
+        taskBrief: briefBlock,
+        skillsBlock: buildSkillsSystemBlock({ prompt: userPrompt }),
+        identityBlock: identity.block,
       });
     }
 
@@ -582,6 +817,14 @@ export class AgentLoop {
       sysPrompt = sysPrompt +
         `\n\n# Provider-specific guidance (${providerName})\n${providerPromptCfg.append}`;
     }
+
+    // Static/volatile split: injections are routed into two buffers so the prompt-cache
+    // boundary lands between them. `stableTail` holds session-stable guidance (code style,
+    // failure lessons) that is byte-identical across turns → folded into the CACHED core.
+    // `volatileTail` holds genuinely per-turn context (retrieval, dep-graph, episodic recall)
+    // that changes with the query → kept AFTER the boundary so it never invalidates the core.
+    let stableTail = '';
+    let volatileTail = '';
 
     // ── Auto-retrieval pre-pass (best-effort) ──
     // Embed the request and inject the most semantically-relevant files so the model
@@ -606,7 +849,7 @@ export class AgentLoop {
           });
           if (files && files.length > 0) {
             const block = formatRetrievalBlock(files);
-            if (block) sysPrompt += `\n\n${block}`;
+            if (block) volatileTail += `\n\n${block}`;
             logger.info('Auto-retrieval injected relevant files', { count: files.length });
 
             // ── Symbol-graph daemon: proactive ripple-effect meta-context ──
@@ -622,7 +865,7 @@ export class AgentLoop {
                   const deps = dependencyContextFor(graph, seeds);
                   const depBlock = renderDependencyContext(deps);
                   if (depBlock) {
-                    sysPrompt += `\n\n${depBlock}`;
+                    volatileTail += `\n\n${depBlock}`;
                     logger.debug('Symbol-graph meta-context injected', { seeds: seeds.length, withDeps: deps.length });
                   }
                 }
@@ -635,10 +878,76 @@ export class AgentLoop {
           logger.debug('Auto-retrieval pre-pass failed (ignored)', { err: e?.message });
         }
       }
+      if (taskBrief.paths.length) {
+        try {
+          const named = await readNamedFileSnippets(this.effectiveCwd ?? this.cwd, taskBrief.paths);
+          if (named) {
+            volatileTail += `\n\n${named}`;
+            logger.info('Named files injected', { count: taskBrief.paths.length });
+          }
+        } catch (e: any) {
+          logger.debug('Named-file inject skipped', { err: e?.message });
+        }
+      }
     }
 
+    // ── User-preference modeling: match the project's code style automatically ──
+    // Inferred once per session (deterministic, cached), injected so generated code blends
+    // in without the user having to `remember` their conventions. Off via context.styleProfile:false.
+    if ((this.config as any).context?.styleProfile !== false && mode !== 'plan') {
+      try {
+        if (this.styleBlock === null) {
+          const { scanProjectStyle, buildStyleBlock } = await import('../context/style-profile.js');
+          this.styleBlock = buildStyleBlock(await scanProjectStyle(this.cwd));
+        }
+        if (this.styleBlock) stableTail += `\n\n${this.styleBlock}`;
+      } catch (e: any) {
+        logger.debug('Style-profile injection skipped', { err: e?.message });
+        this.styleBlock = ''; // don't retry every turn on failure
+      }
+    }
+
+    // ── Episodic memory: recall the most SIMILAR past task on this project ──
+    // Smart retrieval (top-K above a similarity threshold), concise injection. An unrelated
+    // task injects nothing. Opt-in via learning.episodicMemory.enabled.
+    const emCfg = (this.config as any).learning?.episodicMemory;
+    if (emCfg?.enabled && mode !== 'plan') {
+      try {
+        const { loadEpisodeBlock } = await import('../context/episodic-memory.js');
+        const block = await loadEpisodeBlock(this.cwd, String(userPrompt), {
+          topK: emCfg.topK ?? 2,
+          minScore: emCfg.minSimilarity ?? 0.18,
+          diversity: emCfg.diversity ?? 0.3,
+        });
+        if (block) { volatileTail += `\n\n${block}`; logger.info('Episodic memory injected'); }
+      } catch (e: any) {
+        logger.debug('Episodic recall skipped', { err: e?.message });
+      }
+    }
+
+    // ── Failure-driven learning: inject cautions mined from RECURRING past failures ──
+    // Deterministic, bounded, opt-in. Also stamp this run's task key so failures we
+    // record below are attributable to a distinct task (the repetition gate counts tasks).
+    const flCfg = (this.config as any).learning?.failureLessons;
+    if (flCfg?.enabled) {
+      try {
+        const { loadLessonsBlock, taskKey } = await import('../skills/learning/failures.js');
+        this.currentTaskKey = taskKey(String(userPrompt));
+        const block = await loadLessonsBlock({
+          minOccurrences: flCfg.minOccurrences ?? 3,
+          minDistinctTasks: flCfg.minDistinctTasks ?? 2,
+          topK: flCfg.maxInjected ?? 5,
+        });
+        if (block) { stableTail += `\n\n${block}`; logger.info('Learned cautions injected'); }
+      } catch (e: any) {
+        logger.debug('Failure-lessons injection skipped', { err: e?.message });
+      }
+    }
+
+    // Assemble: [ cached core = base + stable guidance ] [ boundary ] [ volatile per-turn ctx ].
+    const cachedCore = sysPrompt + stableTail;
     return [
-      { role: 'system', content: sysPrompt },
+      { role: 'system', content: cachedCore + volatileTail, cacheBoundary: cachedCore.length },
       { role: 'user', content: userPrompt },
     ];
   }
@@ -707,7 +1016,7 @@ export class AgentLoop {
       // Capture the changed-file list from git BEFORE finishing (the sandbox
       // branch still has the diff). Best-effort.
       let changedFiles: string[] = [];
-      if (flywheelEnabled && reachedFinal) {
+      if ((flywheelEnabled || process.env.QODEX_RECEIPT_FILE) && reachedFinal) {
         try {
           const { git } = await import('../tools/git/git-runner.js');
           const diff = await git(['diff', '--name-only', sandbox.baseCommitRef() ?? 'HEAD'], { cwd: this.cwd, signal: options.signal });
@@ -739,6 +1048,119 @@ export class AgentLoop {
           } catch (e: any) {
             logger.debug('Flywheel record skipped', { err: e?.message });
           }
+          // ── Zero-cost distillation: export the FULL conversation as ShareGPT JSONL ──
+          // Same objective-success gate; uses the complete message history (not the
+          // truncated summary) so the dataset is training-ready. Strictly local, opt-in.
+          if ((this.config as any).flywheel?.datasetExport) {
+            try {
+              const { appendShareGptRecord } = await import('./dataset-export.js');
+              await appendShareGptRecord(this.cwd, messages);
+            } catch (e: any) {
+              logger.debug('Dataset export skipped', { err: e?.message });
+            }
+          }
+          // Episodes are recorded in run() itself — nesting them here (sandbox + flywheel)
+          // meant a normal session never wrote a single line.
+        }
+        // ── Skill-learning: capture a CANDIDATE skill (opt-in, quarantined) ──
+        // We're on the objectively-successful path: the sandbox compiled and squash-merged,
+        // having already passed the inner verify + completion gates. So capture is gated on
+        // real signals, never the model's self-grade. The candidate is written to a separate
+        // quarantine dir; it is NOT loaded and CANNOT overwrite a human skill until an
+        // independent judge promotes it (see src/skills/learning/).
+        const learningCfg = (this.config as any).learning;
+        let capturedThisRun = false;
+        if (learningCfg?.enabled) {
+          try {
+            const { captureEligible } = await import('../skills/learning/capture.js');
+            const signal = { toolCalls: this.totalToolCalls, verifyClean: true, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles };
+            const elig = captureEligible(signal, { minToolCalls: learningCfg.minToolCalls ?? 5, requireObjectiveSuccess: learningCfg.requireObjectiveSuccess !== false });
+            if (elig.eligible) {
+              const { buildCandidateSkill } = await import('../skills/learning/capture.js');
+              const { writeCandidate } = await import('../skills/learning/candidate-store.js');
+              const { scoreConfidence } = await import('../skills/learning/confidence.js');
+              const { recordLearningEvent } = await import('../skills/learning/ledger.js');
+              const confidence = scoreConfidence(signal).score;
+              // Flywheel phase 1: prefer the richer distilled DRAFT (trigger + collapsed
+              // step outline + evidence) over the minimal capture. distillDraft is pure and
+              // returns null for sessions too thin to outline — then the minimal capture
+              // runs exactly as before. Either way the result is quarantined, not promoted.
+              const { distillDraft } = await import('../skills/learning/distill.js');
+              const nowIso = new Date().toISOString();
+              const draft = distillDraft(
+                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolSequence: [...this.sessionToolSequence], filesChanged: changedFiles },
+                { nowIso, confidence },
+              );
+              const candidate = draft ?? buildCandidateSkill(
+                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles },
+                { nowIso, confidence },
+              );
+              await writeCandidate(candidate);
+              capturedThisRun = true;
+              await recordLearningEvent({ event: 'capture', name: candidate.name, confidence });
+              // Code-graph grounding: how much of this skill references symbols that really exist here.
+              let fitSuffix = '';
+              try {
+                const { getCodeGraphDB } = await import('../codegraph/tools.js');
+                const db = getCodeGraphDB();
+                if (db) {
+                  const { extractSymbolHints, codebaseFitScore } = await import('../skills/learning/codebase-fit.js');
+                  const fit = codebaseFitScore(extractSymbolHints(candidate.skillMd), n => db.findSymbolsByName(n, undefined, 1).length > 0);
+                  if (!fit.noSignal) fitSuffix = ` · codebase-fit ${Math.round(fit.score * 100)}%`;
+                }
+              } catch { /* code graph optional */ }
+              const draftSuffix = draft ? ` · ${draft.steps.length}-step draft` : '';
+              yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100${fitSuffix}${draftSuffix}) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
+
+              // Auto-Evaluation (opt-in): immediately replay the captured skill in a clean
+              // worktree and record whether it produces verified code. Costs a model call +
+              // worktree, so it's behind learning.autoEval. Best-effort — the task already
+              // succeeded; an eval failure here never affects it.
+              if (learningCfg.autoEval) {
+                try {
+                  const { evalSkillMd } = await import('../skills/learning/eval.js');
+                  const { formatEvalSection, upsertEvalSection, skillContentHash } = await import('../skills/learning/eval-record.js');
+                  const { candidatesDir } = await import('../skills/learning/candidate-store.js');
+                  const { result } = await evalSkillMd(this.cwd, candidate.skillMd, { noCache: true });
+                  if (result) {
+                    const fsmod = await import('fs');
+                    const pathmod = await import('path');
+                    const file = pathmod.join(candidatesDir(), candidate.name, 'SKILL.md');
+                    const updated = upsertEvalSection(candidate.skillMd, formatEvalSection(result, skillContentHash(candidate.skillMd)));
+                    await fsmod.promises.writeFile(file, updated, 'utf-8');
+                    await recordLearningEvent({ event: 'eval', name: candidate.name, evalStatus: result.status });
+                    yield { type: 'notice', data: { message: `🧪 Auto-eval of "${candidate.name}": ${result.status}.` } };
+                  }
+                } catch (e: any) {
+                  logger.debug('Auto-eval after capture skipped', { err: e?.message });
+                }
+              }
+            } else {
+              logger.debug('Skill capture skipped', { reason: elig.reason });
+            }
+          } catch (e: any) {
+            logger.debug('Skill capture skipped (error)', { err: e?.message });
+          }
+        }
+        // ── Code-graph skill SUGGESTION ── Whenever nothing was captured (learning off, OR on but
+        // the task wasn't capture-eligible), still nudge the user when the work looks like a REUSABLE
+        // pattern, judged from the SHAPE of the change via the code graph (focused + cohesive +
+        // multi-file). The judgment a code-graph-less agent can't make. A gentle one-liner; off via
+        // learning.suggestSkills:false; conservative (only fires for real patterns), never duplicative.
+        if (!capturedThisRun && learningCfg?.suggestSkills !== false && changedFiles.length >= 2) {
+          try {
+            const { suggestSkillFromSession, commonArea } = await import('../skills/learning/skill-suggest.js');
+            const area = commonArea(changedFiles);
+            const inArea = changedFiles.filter(f => f.split('/').slice(0, 2).join('/') === area).length;
+            const cohesion = changedFiles.length ? inArea / changedFiles.length : 0;
+            const s = suggestSkillFromSession({ prompt: String(firstUserMsg), changedFiles, cohesion });
+            if (s.worth) {
+              const how = learningCfg?.enabled
+                ? `run \`qodex skill candidates\` to capture it`
+                : `enable \`learning.enabled\` to auto-capture skills like this`;
+              yield { type: 'notice', data: { message: `💡 This looks reusable ("${s.proposedName}") — ${s.reason} ${how}.` } };
+            }
+          } catch { /* best-effort */ }
         }
       } else if (reachedFinal && !merged) {
         if (!finishResult.merged && finishResult.reason === 'empty') {
@@ -755,6 +1177,84 @@ export class AgentLoop {
       } else {
         yield { type: 'notice', data: { message: '🔒 Sandbox: task did not complete — your branch was left untouched' } };
       }
+
+      // Ground-truth trust receipt for unattended/scheduled runs. QodeX writes it from ITS OWN
+      // signals — the git diff + the checkers it actually ran — so the model can't fabricate it.
+      await this.writeRunReceipt({ reachedFinal, merged, finalContent, changedFiles, signal: options.signal });
+    }
+  }
+
+  /** Write an audit receipt to QODEX_RECEIPT_FILE (set by the scheduler) from ground-truth
+   *  signals: the git diff + the verify ledger. Status/PR come from the model's headline (a
+   *  checkable claim); the FACTS (files, checks) are what QodeX measured. Best-effort. */
+  private async writeRunReceipt(opts: { reachedFinal: boolean; merged: boolean; finalContent: string; changedFiles: string[]; signal?: AbortSignal }): Promise<void> {
+    const file = process.env.QODEX_RECEIPT_FILE;
+    if (!file) return;
+    try {
+      const { parseReceipt, buildGroundTruthReceipt } = await import('../schedule/receipt.js');
+      const headline = parseReceipt(opts.finalContent); // the model's claimed status + PR url
+      const status: 'opened' | 'blocked' | 'done' | 'failed' =
+        headline?.status === 'opened' ? 'opened'
+        : headline?.status === 'blocked' ? 'blocked'
+        : opts.merged ? 'done'
+        : opts.reachedFinal ? 'blocked'
+        : 'failed';
+      const receipt = buildGroundTruthReceipt({
+        status,
+        prUrl: headline?.prUrl,
+        reason: headline?.reason,
+        filesChanged: opts.changedFiles,
+        verification: this.verifyLedger,
+        summary: opts.finalContent.replace(/\s+/g, ' ').trim().slice(0, 200) || undefined,
+      });
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(file, JSON.stringify(receipt), 'utf-8');
+    } catch (e: any) {
+      logger.debug('run receipt not written', { err: e?.message });
+    }
+  }
+
+  /** Re-derive auto-compaction + efficiency state from the current this.config. Idempotent:
+   *  resets the two efficiency-affected fields to their base before applying, so a hot-reload
+   *  can REVERT a toggle (e.g. context.efficient turned back off) as well as apply one. */
+  private applyConfigDerived(): void {
+    this.autoCompactEnabled = true;
+    this.autoCompactThreshold = 0.80;
+    const cfg = this.config as any;
+    const compactCfg = cfg.compaction;
+    if (cfg?.context?.efficient === true) this.autoCompactThreshold = efficiencyDefaults(true).compactThreshold;
+    if (compactCfg) {
+      if (typeof compactCfg.enabled === 'boolean') this.autoCompactEnabled = compactCfg.enabled;
+      if (typeof compactCfg.threshold === 'number') this.autoCompactThreshold = compactCfg.threshold;
+      if (typeof compactCfg.contextWindow === 'number') {
+        this.defaultContextWindow = compactCfg.contextWindow;
+        this.contextWindowExplicit = true;
+      }
+    }
+  }
+
+  /** Hot-reload the user-toggleable knobs from disk at the START of a run. The dashboard writes
+   *  ~/.qodex/config.yaml in a SEPARATE process; without this, a running session kept its
+   *  startup config until restart (the "I toggled it but nothing changed" bug). We overlay ONLY
+   *  the whitelisted dashboard knobs onto this.config — CLI/session overrides and everything
+   *  else are preserved — then re-derive. Best-effort: a bad/locked file never blocks the run. */
+  private async refreshMutableConfig(): Promise<void> {
+    try {
+      const { loadConfig } = await import('../config/loader.js');
+      const { CONFIG_KNOBS, getDeep, setDeep } = await import('../cli/dashboard-control.js');
+      const fresh = await loadConfig(this.cwd);
+      const changed: string[] = [];
+      for (const k of CONFIG_KNOBS) {
+        const next = getDeep(fresh as any, k.path);
+        if (next === undefined) continue;                       // absent in file → leave current
+        if (getDeep(this.config as any, k.path) !== next) { setDeep(this.config as any, k.path, next); changed.push(k.path); }
+      }
+      if (changed.length) {
+        this.applyConfigDerived();
+        logger.info('Config hot-reloaded for this run', { knobs: changed });
+      }
+    } catch (e: any) {
+      logger.debug('Config hot-reload skipped', { err: e?.message });
     }
   }
 
@@ -763,6 +1263,7 @@ export class AgentLoop {
     sessionId: string,
     options: AgentOptions,
   ): AsyncGenerator<AgentEvent> {
+    await this.refreshMutableConfig();   // pick up dashboard toggles written since the last run
     const mode = options.mode ?? { mode: 'normal' };
     // Sub-agents spawned during (or after) this run inherit this asker.
     if (typeof options.askUser === 'function') this.lastAskUser = options.askUser;
@@ -833,6 +1334,7 @@ export class AgentLoop {
       this.planGateSatisfied = false;
       this.planGateFired = false;
       this.completionGateFired = false;
+      this.visualGateRetried = false;
     }
     // If sub-agents are disabled in config, surgically block the task tool. This is
     // cleaner than filtering inside the registry: tool stays registered (so /tools
@@ -916,6 +1418,9 @@ export class AgentLoop {
       const lu = [...messages].reverse().find(m => m.role === 'user');
       return typeof lu?.content === 'string' ? lu.content : '';
     })();
+    const runBrief = compileTaskBrief(latestUserText);
+    const runEffort = options.reasoningEffort
+      ?? (runBrief.effort === 'high' ? 'high' as const : undefined);
     const userAskedExecution = userWantsExecution(latestUserText);
     let scopeNudged = false;
 
@@ -924,16 +1429,13 @@ export class AgentLoop {
     // type-check exactly what it touched. `verifyRepairAttempts` caps consecutive
     // forced-repair rounds; `verifyGaveUp` ensures the give-up note is shown only once.
     const touchedSourceFiles = new Set<string>();
+    /** Tools executed in THIS run — session totals would leak prior turns into a "thanks" episode. */
+    const runToolNames = new Set<string>();
+    let runToolCalls = 0;
     let verifyRepairAttempts = 0;
     let verifyGaveUp = false;
     // LLM-critic rounds spent this run (semantic review after mechanical verify).
     let criticRounds = 0;
-
-    // Auto-compaction cooldown: the iteration index until which we skip the
-    // compaction check. Set after a successful compaction so we don't re-summarize
-    // for a few iterations (the summary itself is large; let real work accumulate
-    // before considering another pass). 0 = check every iteration.
-    let compactCooldownUntil = 0;
 
     // Previous turn's dispatched prompt — used to measure how much of the prompt the
     // inference server can serve from its KV cache (longest byte-stable prefix). A drop
@@ -1048,31 +1550,77 @@ export class AgentLoop {
       } catch { /* best-effort — never block the task on baseline capture */ }
     }
 
+    // Token-budget accounting is NOVEL-tokens-only. An agentic turn makes one API call per
+    // tool round, and every call re-sends the whole conversation — so counting each call's
+    // full input against the budget grows QUADRATICALLY with tool rounds (live: a 21k-context
+    // task on a local model "spent" 216k/200k within two minutes and died). The high-water
+    // mark counts every context token ONCE: consume = output + max(0, seenNow - seenBefore).
+    // Dollar cost stays full-usage per call below — bills are bills; the token budget is a
+    // runaway guard, not an invoice.
+    let promptHighWater = 0;
+
     while (true) {
       try {
         budget.incrementIteration();
         budget.checkpoint();
       } catch (e: any) {
-        let msg = e.message;
-        if (e.budgetType === 'iterations') {
-          msg += '\nTo continue without an iteration cap, type /unlimited (this session) ' +
-            'or set `defaults.maxIterations: 0` in ~/.qodex/config.yaml. ' +
-            'You can also raise it with /iterations <n>.';
-        }
-        yield { type: 'error', data: { message: msg, budgetType: e.budgetType } };
+        yield { type: 'error', data: { message: e.message, budgetType: e.budgetType } };
         return;
       }
 
-      // Warn once at ~80% of the iteration cap so a long task doesn't just stop dead.
+      // Iteration cap is a fuse, not a finish line. A working task extends and
+      // keeps going; only a detected runaway stops. Users should not need /unlimited
+      // to finish a real project.
+      // An EXPLICIT cap from the caller (a sub-agent's max_iterations, a mission step's
+      // stepMaxIterations) is a contract, not a fuse: it is never auto-extended, so the
+      // budget checkpoint ends the run when it is exceeded.
+      const explicitCap = typeof options.maxIterationsOverride === 'number' && options.maxIterationsOverride > 0;
+      if (explicitCap && budget.atIterationCap()) {
+        yield {
+          type: 'error',
+          data: { message: `Iteration budget exceeded: ${budget.getIterations()}/${budget.getMaxIterations()}`, budgetType: 'iterations' },
+        };
+        return;
+      }
+      if (!explicitCap && budget.atIterationCap()) {
+        let maxReadRepeatAtCap = 0;
+        for (const [key, n] of callCounts) {
+          if (key.startsWith('read_file|') && n > maxReadRepeatAtCap) maxReadRepeatAtCap = n;
+        }
+        const verdict = decideIterationPressure(true, {
+          stuckLoop: detectStuckLoop(recentCalls),
+          errorLoop: !!detectErrorLoop(recentErrors),
+          readAbort: readLoopAction(maxReadRepeatAtCap) === 'abort',
+          consecutiveFailures: consecutiveFailures.count,
+        });
+        if (verdict === 'extend') {
+          const next = nextIterationCap(budget.getMaxIterations());
+          budget.extendIterations(next);
+          yield {
+            type: 'notice',
+            data: {
+              message:
+                `Still making progress at step ${budget.getIterations()} — continuing ` +
+                `(fuse extended to ${next}; Esc to stop).`,
+            },
+          };
+        } else {
+          const msg =
+            `Stopped: the task is looping, not just long (${budget.getIterations()} steps). ` +
+            `The iteration fuse only fires when the same tools keep failing or repeating. ` +
+            `Narrow the task, or /unlimited if you want it to keep trying anyway.`;
+          yield { type: 'error', data: { message: msg, budgetType: 'iterations' } };
+          return;
+        }
+      }
+
       if (budget.shouldWarnIterations()) {
         const u = budget.getUsage();
         yield {
           type: 'notice',
           data: {
             message:
-              `⚠ Approaching the iteration limit (${u.iterations}/${budget.getMaxIterations()}). ` +
-              `If this task is large, type /unlimited to remove the cap for this session ` +
-              `(or /iterations <n> to raise it), then continue.`,
+              `Large task — ${u.iterations} steps so far. I'll keep going while there's progress. Esc to stop.`,
           },
         };
       }
@@ -1127,55 +1675,6 @@ export class AgentLoop {
         const merged = compactFileReads(messages.concat(newMessages), { agingOutline: readCacheAging });
         messages = merged.slice(0, split);
         newMessages = merged.slice(split);
-      }
-
-      // ── Auto-compaction ──
-      // Fire when the combined context exceeds a fraction of the model window,
-      // BEFORE routing so the routing token estimate sees the compacted size.
-      // A cooldown after each compaction prevents back-to-back summarization.
-      // compactMessages preserves the most recent turns verbatim and never
-      // splits a tool_call from its tool_result.
-      const iterNow = budget.getUsage().iterations;
-      if (this.autoCompactEnabled && iterNow >= compactCooldownUntil) {
-        const combined = messages.concat(newMessages);
-        const { shouldCompact } = await import('../utils/compaction.js');
-        // Use the ROUTED MODEL's real context window, not a fixed 32k guess.
-        // A model with a 256k window was being compacted as if it had 32k,
-        // throwing away working memory the model could still hold. We resolve
-        // the model's actual window and only fall back to the configured /
-        // default value when the router can't tell us.
-        let modelCtxWindow: number | undefined;
-        try {
-          const probe = this.router.route(
-            (mode.mode === 'plan' ? 'planning' : 'subagent') as any,
-            this.estimateTokens(combined),
-            {},
-          );
-          if (probe?.modelInfo?.contextWindow && probe.modelInfo.contextWindow > 0) {
-            modelCtxWindow = probe.modelInfo.contextWindow;
-          }
-        } catch { /* router probe failed — fall back below */ }
-        const ctxWindow = (options as any).explicitContextWindow
-          ?? (this.contextWindowExplicit ? this.defaultContextWindow : undefined)
-          ?? modelCtxWindow
-          ?? this.defaultContextWindow
-          ?? 32_768;
-        if (shouldCompact(combined, ctxWindow, this.autoCompactThreshold)) {
-          yield { type: 'progress', data: { message: '🗜  Context over threshold — summarizing older turns…' } } as any;
-          const compacted = await this.runCompaction(combined, ctxWindow, options.signal);
-          if (compacted) {
-            // Replace the whole working set with the compacted list; the summary
-            // becomes part of the base, and this run's accumulator resets.
-            messages = compacted;
-            newMessages = [];
-            compactCooldownUntil = iterNow + 3; // skip the next few iterations
-            prevDispatched = null; // prefix changed → cache canary reset
-            yield { type: 'progress', data: { message: '🗜  Compaction done — recent turns preserved.' } } as any;
-          } else {
-            // Summarization no-op'd or failed; don't retry immediately.
-            compactCooldownUntil = iterNow + 2;
-          }
-        }
       }
 
       // Classify task to pick a model
@@ -1250,36 +1749,44 @@ export class AgentLoop {
       // Only warn about a truly toolless dispatch — text-tool mode and the deliberate
       // force-summarize turn both send zero native tools on purpose.
       if (tools.length === 0 && !textToolMode && !wasForceTextOnly) {
-        logger.warn('No tools available to the model for this turn — write_file, edit_file, bash, etc. will not be reachable. Check mode/allowedTools settings.');
+        logger.warn('No tools available to the model for this turn — write_file, edit_text, bash, etc. will not be reachable. Check mode/allowedTools settings.');
       }
 
-      // Token-savings layer: replace duplicate tool results with back-pointers BEFORE
-      // pruning runs. This keeps the model focused (no repeated wall-of-text) and means
-      // pruning may not need to kick in at all on long sessions with redundant reads.
-      // See src/agent/dedup.ts for the exact semantics.
-      const { messages: dedupedRaw, replaced: dedupReplaced, bytesSaved: dedupBytes } = dedupHistory(allMessagesRaw);
-      if (dedupReplaced > 0) {
-        logger.info(`Dedup compacted ${dedupReplaced} tool result(s)`, { bytesSaved: dedupBytes });
-      }
-
-      // Aging layer: shrink LARGE, OLD, unique results (shell logs, grep walls,
-      // browser snapshots) that dedup/read-cache don't cover. Default ON; disable
-      // via context.resultAging:false. See src/agent/result-aging.ts.
-      let agedRaw = dedupedRaw;
+      // Aging layer FIRST — it truncates the MIDDLE of large, OLD (≥minAgeTurns) tool results
+      // (a safe, unambiguous shrink), so we PERSIST it back into the working set. Previously the
+      // shrink was ephemeral: thrown away and re-derived from an ever-growing FULL-size history
+      // every turn — a confirmed O(turns) token multiplier. Aging preserves array length, so a
+      // slice re-split realigns messages/newMessages. Originals stay in the session store for
+      // /undo; the model-facing copy shrinks permanently. (Mirrors compactFileReads' persist
+      // above; idempotent — an already-aged stub is < maxChars so it never re-ages.)
+      let workingRaw = allMessagesRaw;
       if ((this.config as any)?.context?.resultAging !== false) {
         const agingCfg = (this.config as any)?.context ?? {};
         const effDefaults = efficiencyDefaults(agingCfg.efficient === true);
-        const ar = ageToolResults(dedupedRaw, {
+        const ar = ageToolResults(allMessagesRaw, {
           minAgeTurns: resolveSetting(agingCfg.resultAgingMinTurns, effDefaults.agingMinTurns),
           maxChars: resolveSetting(agingCfg.resultAgingMaxChars, effDefaults.agingMaxChars),
         });
         if (ar.aged > 0) {
           logger.info(`Aged ${ar.aged} large old tool result(s)`, { bytesSaved: ar.bytesSaved });
-          agedRaw = ar.messages;
+          workingRaw = ar.messages;
+          if (workingRaw.length === allMessagesRaw.length) {   // aging preserves length → safe re-split
+            const split = messages.length;
+            messages = workingRaw.slice(0, split);
+            newMessages = workingRaw.slice(split);
+          }
         }
       }
 
-      // Prune context to fit the chosen model's window. Reserve 20% for output + tools schema.
+      // Dedup layer — replaces duplicate tool results with back-pointers. Kept EPHEMERAL (not
+      // persisted): its pointers reference OTHER messages, so a permanent rewrite could dangle
+      // after later prune/compaction. Runs on the aged copy for the outbound payload only.
+      const { messages: dedupedRaw, replaced: dedupReplaced, bytesSaved: dedupBytes } = dedupHistory(workingRaw);
+      if (dedupReplaced > 0) {
+        logger.info(`Dedup compacted ${dedupReplaced} tool result(s)`, { bytesSaved: dedupBytes });
+      }
+      const agedRaw = dedupedRaw;
+
       // ── Live context sync ── the config's contextWindow goes stale the moment the
       // user reloads the model at a different length in LM Studio (the 32k-clamp OOM
       // class of bugs). Once per session we read the GROUND TRUTH from LM Studio's
@@ -1293,28 +1800,82 @@ export class AgentLoop {
         } catch { this.liveCtxWindows = null; }
       }
       let effectiveCtxWindow = route.modelInfo.contextWindow;
+      // Where the model is actually served from, for the status bar. Provider name is the
+      // base truth (ollama/anthropic/openai/custom name); a hit in LM Studio's native model
+      // registry upgrades it to 'lmstudio' — the OpenAI-compat facade otherwise hides that.
+      let modelSource = route.provider.name;
       if (this.liveCtxWindows) {
         const id = route.model;
         const live = this.liveCtxWindows[id]
           ?? this.liveCtxWindows[Object.keys(this.liveCtxWindows).find(k => k.includes(id) || id.includes(k)) ?? ''];
-        if (typeof live === 'number' && live > 0 && live !== effectiveCtxWindow) {
-          logger.info('Context window synced from LM Studio', { model: id, config: effectiveCtxWindow, live });
-          effectiveCtxWindow = live;
+        if (typeof live === 'number' && live > 0) {
+          modelSource = 'lmstudio';
+          if (live !== effectiveCtxWindow) {
+            logger.info('Context window synced from LM Studio', { model: id, config: effectiveCtxWindow, live });
+            effectiveCtxWindow = live;
+          }
         }
       }
-      const contextBudget = Math.floor(effectiveCtxWindow * 0.75);
-      const estTokens = this.estimateTokens(agedRaw);
-      // ─── Hooks: PreCompact ───────────────────────────────────────────────────
-      // Fired right before we drop oldest turn groups. Lets users back up the conversation,
-      // ship a snapshot to remote storage, etc.
-      if (estTokens > contextBudget && hooks?.hasAny('PreCompact')) {
-        try {
-          await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
-        } catch (e: any) {
-          logger.warn('PreCompact hook dispatch failed', { err: e.message });
+      this.lastModelSource = modelSource;
+      this.lastEffectiveCtxWindow = effectiveCtxWindow;
+      const ctxWindow = (options as any).explicitContextWindow
+        ?? (this.contextWindowExplicit ? this.defaultContextWindow : undefined)
+        ?? effectiveCtxWindow
+        ?? this.defaultContextWindow
+        ?? 32_768;
+
+      // ── Context pressure ── never stop because the window is full.
+      // At 80% we compact; if still over we compact harder; only then prune.
+      // Policy lives in context-pressure.ts — this loop just executes and re-measures.
+      let relieved = agedRaw;
+      let compactPass = 0;
+      while (true) {
+        const step = nextRelief({
+          tokens: this.estimateTokens(relieved),
+          window: ctxWindow,
+          compactAt: this.autoCompactThreshold,
+          compactPass,
+          compactEnabled: this.autoCompactEnabled,
+        });
+        if (!step) break;
+        if (step.kind === 'compact') {
+          if (hooks?.hasAny('PreCompact')) {
+            try {
+              await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
+            } catch (e: any) {
+              logger.warn('PreCompact hook dispatch failed', { err: e.message });
+            }
+          }
+          yield { type: 'progress', data: { message: `🗜  ${step.reason}` } } as any;
+          const compacted = await this.runCompaction(relieved, ctxWindow, options.signal, step.keepLastTurns);
+          compactPass += 1;
+          if (compacted) {
+            relieved = compacted;
+            prevDispatched = null;
+            yield { type: 'progress', data: { message: '🗜  Compaction done — recent turns preserved.' } } as any;
+          } else {
+            // Summarizer failed / nothing to fold — skip the rest of the ladder, prune if needed.
+            compactPass = 3;
+          }
+          continue;
         }
+        // Last resort: prune oldest units to the fit budget. Never abort the run.
+        if (hooks?.hasAny('PreCompact')) {
+          try {
+            await hooks.dispatch('PreCompact', { event: 'PreCompact', sessionId, cwd: this.cwd });
+          } catch (e: any) {
+            logger.warn('PreCompact hook dispatch failed', { err: e.message });
+          }
+        }
+        relieved = this.pruneMessages(relieved, step.maxTokens);
+        break;
       }
-      let allMessages = this.pruneMessages(agedRaw, contextBudget);
+      if (relieved !== agedRaw && relieved.length) {
+        messages = relieved;
+        newMessages = [];
+      }
+      const estTokens = this.estimateTokens(relieved);
+      let allMessages = relieved;
 
       // Text-tool mode: inject the protocol + tool-list block as a separate system message
       // (after pruning, so it's never dropped, and after the main system prefix so caches
@@ -1341,16 +1902,21 @@ export class AgentLoop {
       // reasoning pass. /no_think is appended only to the OUTBOUND copy, only at
       // the tail (pure append — prefix cache stays stable); history stays clean.
       // Off via reasoning.adaptive:false. See src/agent/thinking-control.ts.
+      // ALSO send the native `think` flag — Ollama 0.9+ ignores `/no_think` in the
+      // prompt and still emits a hidden `message.thinking` pass otherwise.
       let outboundMessages = allMessages;
+      let thinkSwitch: boolean | undefined;
       if ((this.config as any)?.reasoning?.adaptive !== false && modelSupportsSoftSwitch(route.model)) {
         const decision = decideThinking({
           iteration: this.currentTurn,
-          taskComplex: this.planGateComplex,
+          taskComplex: this.planGateComplex || runBrief.effort === 'high',
           recentToolErrors: countTrailingToolErrors(allMessages),
           forceThink: this.forceThinkNext,
           rethinkEvery: (this.config as any)?.reasoning?.rethinkEvery,
+          trivial: isTrivialMessage(latestUserText),
         });
         this.forceThinkNext = false;
+        thinkSwitch = decision === 'think';
         outboundMessages = applyThinkingDecision(allMessages, decision, route.model);
         if (decision === 'no_think') {
           logger.info('Adaptive thinking: routine step — /no_think', { iteration: this.currentTurn });
@@ -1367,7 +1933,8 @@ export class AgentLoop {
         tools,
         signal: options.signal,
         ...(forceCall ? { toolChoice: 'required' as const } : {}),
-        ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+        ...(runEffort ? { reasoningEffort: runEffort } : {}),
+        ...(thinkSwitch !== undefined ? { think: thinkSwitch } : {}),
       });
 
       yield { type: 'thinking_start', data: { model: route.model } };
@@ -1375,16 +1942,32 @@ export class AgentLoop {
       const toolCalls: ToolCall[] = [];
       const toolCallBuffers = new Map<number, { id?: string; name?: string; args: string }>();
       let assistantText = '';
-      let lastUsage = { input: 0, output: 0 };
+      let lastUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
       let streamError: string | null = null;
+
+      // Turn timing. TTFT (time-to-first-token) is what the user FEELS as "how long
+      // before it answers" — on a local backend it's dominated by prompt prefill, so
+      // pairing it with the prompt-token estimate tells prefill-bound apart from a
+      // slow link or a huge generation. Logged once per turn at info level.
+      const dispatchStart = Date.now();
+      let firstTokenAt = 0;
 
       for await (const event of stream) {
         if (options.signal?.aborted) {
           streamError = 'Cancelled by user';
           break;
         }
+        if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta' || event.type === 'thinking_delta')) {
+          firstTokenAt = Date.now();
+        }
 
         switch (event.type) {
+          case 'thinking_delta':
+            // Do NOT fold thinking into assistantText — that would leak into history
+            // and the next prefill. The TUI uses this only as a live "still working" signal.
+            yield { type: 'thinking_delta', data: { delta: event.delta } };
+            break;
+
           case 'text_delta':
             assistantText += event.delta ?? '';
             yield { type: 'text_delta', data: { delta: event.delta } };
@@ -1417,7 +2000,12 @@ export class AgentLoop {
           }
 
           case 'usage':
-            lastUsage = event.usage!;
+            lastUsage = {
+              input: event.usage!.input,
+              output: event.usage!.output,
+              cacheRead: event.usage!.cacheRead ?? 0,
+              cacheCreation: event.usage!.cacheCreation ?? 0,
+            };
             break;
 
           case 'error':
@@ -1428,18 +2016,152 @@ export class AgentLoop {
 
       yield { type: 'thinking_done' };
 
-      // Stream errored
+      // Per-turn latency telemetry. ttftMs is the user-perceived "time to answer";
+      // on local backends compare it to promptTokensEst to see prefill throughput
+      // (tokens / ttft). prefillTokPerSec near the model's known prompt-eval rate ⇒
+      // prefill-bound (reduce prompt / raise LM Studio n_batch + flash attention);
+      // far below ⇒ a cold load or cache miss instead.
+      {
+        const ttftMs = firstTokenAt ? firstTokenAt - dispatchStart : 0;
+        const totalMs = Date.now() - dispatchStart;
+        logger.info('LLM turn timing', {
+          model: route.model,
+          provider: route.provider.name,
+          local: route.provider.isLocal,
+          promptTokensEst: estTokens,
+          outputTokens: lastUsage.output || undefined,
+          ttftMs,
+          totalMs,
+          prefillTokPerSec: ttftMs > 0 ? Math.round(estTokens / (ttftMs / 1000)) : undefined,
+          genTokPerSec: lastUsage.output && firstTokenAt && Date.now() > firstTokenAt
+            ? Math.round(lastUsage.output / ((Date.now() - firstTokenAt) / 1000))
+            : undefined,
+        });
+      }
+
+      // Stream errored — one automatic retry on defaults.fallbackModel when the
+      // primary died before any token (connection / 5xx). Mid-stream failures
+      // are not retried: we'd duplicate already-yielded text.
+      if (streamError) {
+        const fbId = (this.config as any)?.defaults?.fallbackModel as string | undefined;
+        const retryable = !options.signal?.aborted && !firstTokenAt && !!fbId
+          && /cannot reach|econnrefused|etimedout|fetch failed|http 5|unavailable|overloaded/i.test(streamError);
+        if (retryable && fbId) {
+          let fb: ReturnType<typeof this.router.resolveModel> | null = null;
+          try { fb = this.router.resolveModel(fbId); } catch { fb = null; }
+          if (fb && fb.resolvedId !== route.model) {
+            yield {
+              type: 'notice',
+              data: { message: `Primary model failed (${streamError.slice(0, 80)}) — retrying on ${fb.resolvedId}` },
+            };
+            streamError = null;
+            assistantText = '';
+            toolCallBuffers.clear();
+            const fbStream = fb.provider.complete({
+              model: fb.resolvedId,
+              messages: outboundMessages,
+              tools,
+              signal: options.signal,
+              ...(forceCall ? { toolChoice: 'required' as const } : {}),
+              ...(runEffort ? { reasoningEffort: runEffort } : {}),
+            });
+            for await (const event of fbStream) {
+              if (options.signal?.aborted) {
+                streamError = 'Cancelled by user';
+                break;
+              }
+              if (!firstTokenAt && (event.type === 'text_delta' || event.type === 'tool_call_delta' || event.type === 'thinking_delta')) {
+                firstTokenAt = Date.now();
+              }
+              switch (event.type) {
+                case 'thinking_delta':
+                  yield { type: 'thinking_delta', data: { delta: event.delta } };
+                  break;
+                case 'text_delta':
+                  assistantText += event.delta ?? '';
+                  yield { type: 'text_delta', data: { delta: event.delta } };
+                  break;
+                case 'tool_call_delta': {
+                  const idx = event.toolCallIndex ?? 0;
+                  let buf = toolCallBuffers.get(idx);
+                  if (!buf) {
+                    buf = { args: '' };
+                    toolCallBuffers.set(idx, buf);
+                  }
+                  if (event.toolCallId) buf.id = event.toolCallId;
+                  if (event.toolName) buf.name = event.toolName;
+                  if (event.toolArgsDelta) buf.args += event.toolArgsDelta;
+                  if (event.toolName) {
+                    yield { type: 'tool_call_start', data: { index: idx, id: buf.id, name: event.toolName } };
+                  }
+                  if (event.toolArgsDelta) {
+                    yield { type: 'tool_call_args_delta', data: { index: idx, delta: event.toolArgsDelta } };
+                  }
+                  break;
+                }
+                case 'usage':
+                  lastUsage = {
+                    input: event.usage!.input,
+                    output: event.usage!.output,
+                    cacheRead: event.usage!.cacheRead ?? 0,
+                    cacheCreation: event.usage!.cacheCreation ?? 0,
+                  };
+                  break;
+                case 'error':
+                  streamError = event.error ?? 'Unknown stream error';
+                  break;
+              }
+            }
+          }
+        }
+      }
       if (streamError) {
         yield { type: 'error', data: { message: explainStreamError(streamError) } };
         return;
       }
 
-      // Track budget
+      // Track budget — novel tokens only (see promptHighWater above): the re-sent
+      // conversation prefix is counted the FIRST time it enters the context, not on
+      // every subsequent tool round. Works for every provider, including local ones
+      // that report no cache fields at all.
       const cost = computeCost(lastUsage, route.modelInfo);
-      budget.consume({ tokens: lastUsage.input + lastUsage.output, costUsd: cost });
+      {
+        const totalMs = Date.now() - dispatchStart;
+        const ttftMs = firstTokenAt ? firstTokenAt - dispatchStart : 0;
+        this.insightsFor(sessionId).recordLlm({
+          input: lastUsage.input,
+          output: lastUsage.output,
+          cacheRead: (lastUsage as any).cacheRead ?? 0,
+          cacheCreation: (lastUsage as any).cacheCreation ?? 0,
+          costUsd: cost,
+          thinkMs: ttftMs,
+          generateMs: Math.max(0, totalMs - ttftMs),
+        });
+        this.persistInsights(sessionId);
+      }
+      const cacheRead = (lastUsage as any).cacheRead ?? 0;
+      const totalInputSeen = lastUsage.input + cacheRead;
+      const freshInput = Math.max(0, totalInputSeen - promptHighWater);
+      promptHighWater = Math.max(promptHighWater, totalInputSeen);
+      budget.consume({ tokens: freshInput + lastUsage.output, costUsd: cost });
+      // Cache hit-rate: cached reads ÷ total input the model saw (fresh + cached). Lets the
+      // status line PROVE the hierarchical cache is working (and how much it's saving).
+      const cacheHitRate = totalInputSeen > 0 ? cacheRead / totalInputSeen : 0;
       yield {
         type: 'budget_update',
-        data: { ...budget.getUsage(), lastInputTokens: lastUsage.input, lastOutputTokens: lastUsage.output, lastCostUsd: cost, contextWindow: route.modelInfo.contextWindow },
+        data: {
+          ...budget.getUsage(),
+          lastInputTokens: lastUsage.input, lastOutputTokens: lastUsage.output, lastCostUsd: cost,
+          lastCacheRead: cacheRead, lastCacheCreation: (lastUsage as any).cacheCreation ?? 0, cacheHitRate,
+          // The LIVE-synced window (LM Studio native API when available), not the static
+          // table value — plus where the model is actually served from and whether it bills.
+          contextWindow: this.lastEffectiveCtxWindow || route.modelInfo.contextWindow,
+          providerName: this.lastModelSource || route.provider.name,
+          providerIsLocal: (route.provider as any).isLocal === true || this.lastModelSource === 'lmstudio',
+          // Calls the auto-offload policy sent to the cheap model this session (0 unless
+          // offload.enabled) — lets the status bar / dashboard show the savings happening.
+          offloadedCalls: this.offloadedCalls,
+        },
       };
 
       // Build the toolCalls array from buffers
@@ -1572,7 +2294,7 @@ export class AgentLoop {
             role: 'user',
             content:
               '[SYSTEM CORRECTION] You just told the user you cannot create/modify files. ' +
-              'That is FALSE. You have the `write_file`, `edit_file`, `multi_edit`, and `bash` tools available RIGHT NOW. ' +
+              'That is FALSE. You have the `write_file`, `edit_text`, `multi_edit`, and `bash` tools available RIGHT NOW. ' +
               'Re-read the user\'s previous request and actually DO the work by calling `write_file`. ' +
               'Do not apologize, do not narrate this correction — just call the tool now. ' +
               'After it runs, summarize what you created in 1-2 sentences.',
@@ -1601,6 +2323,8 @@ export class AgentLoop {
               timeoutMs: verifyCfg.timeoutMs,
               baseline: verifyBaseline,
             });
+            // Record what QodeX actually verified (ground truth for the trust receipt).
+            if (vr.ran && vr.checker) this.verifyLedger.push({ command: vr.checker, passed: vr.errorCount === 0 });
             if (vr.ran && vr.errorCount > 0) {
               if (verifyRepairAttempts < maxRepair) {
                 verifyRepairAttempts++;
@@ -1736,6 +2460,55 @@ export class AgentLoop {
           }
         }
 
+        // ── Visual gate (completion-time Layer 3) ──
+        // If this session created/updated an artifact, render + review it before
+        // finishing — the agent LOOKS at what it shipped. LOOKS_GOOD passes;
+        // NEEDS_WORK/BROKEN is bounced back exactly ONCE with the concrete issues
+        // (the model fixes via artifact_update, the next finish attempt reviews
+        // again); still failing after that retry passes WITH a warning — bounded by
+        // design. No vision backend / no browser degrades to an "unverified" note,
+        // exactly like artifact_review itself. Off-switch: ui.visualGate: false.
+        if (mode.mode === 'normal' && !options.signal?.aborted) {
+          const reviewFn: VisualReviewFn = this.visualReviewFn
+            ?? ((id) => this.reviewArtifactForVisualGate(id, sessionId, options));
+          let vgDecision: VisualGateDecision;
+          try {
+            vgDecision = await runVisualGate({
+              messages: messages.concat(newMessages),
+              enabled: (this.config as any).ui?.visualGate !== false,
+              retriedAlready: this.visualGateRetried,
+              reviewFn,
+            });
+          } catch (e: any) {
+            // runVisualGate already degrades internally; this is the never-block backstop.
+            logger.warn('Visual gate skipped (error)', { err: e?.message });
+            vgDecision = { action: 'skip' };
+          }
+          if (vgDecision.action === 'retry') {
+            this.visualGateRetried = true;
+            const repairMsg: Message = { role: 'user', content: vgDecision.correction! };
+            newMessages.push(repairMsg);
+            sessionStore.recordTurn(sessionId, [repairMsg], { input: 0, output: 0, costUsd: 0 });
+            yield { type: 'notice', data: { message: `👁 Visual check: "${vgDecision.artifactId}" needs work — sending back to fix (1 retry)` } };
+            logger.info('Visual gate bounced the artifact for one fix round', { artifact: vgDecision.artifactId });
+            continue; // backtrack: let the model artifact_update, then re-review
+          }
+          if (vgDecision.action === 'pass' && vgDecision.verdictLine) {
+            // Stamp the verdict on the final message the user reads.
+            assistantText = assistantText ? `${assistantText}\n\n${vgDecision.verdictLine}` : vgDecision.verdictLine;
+          }
+        }
+
+        this.persistInsights(sessionId);
+        await this.maybeRecordEpisode({
+          prompt: latestUserText,
+          summary: assistantText,
+          filesChanged: [...touchedSourceFiles],
+          toolsUsed: [...runToolNames],
+          toolCalls: runToolCalls,
+          mode: mode.mode,
+          aborted: options.signal?.aborted,
+        });
         yield { type: 'final', data: { content: assistantText, usage: budget.getUsage() } };
         return;
       }
@@ -1796,6 +2569,7 @@ export class AgentLoop {
         newMessages.push(m);
         sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
         logger.warn('Aborting run: read-loop hard cap hit', { maxReadRepeat, tool: maxReadTool, model: route.model });
+        this.persistInsights(sessionId);
         yield { type: 'final', data: { content: msg, usage: budget.getUsage() } };
         return;
       }
@@ -1874,6 +2648,13 @@ export class AgentLoop {
             // One user message, never two in a row (strict providers reject that).
             (deferredNote ? `\n\n${deferredNote.content}` : ''),
         };
+        // Answer the just-emitted tool_calls before skipping execution, or the assistant's
+        // tool_calls are orphaned and OpenAI-format providers 400 on the next request.
+        if (toolCalls.length > 0) {
+          const skipped = skippedToolResults(toolCalls, 'loop guard: same error kind repeated');
+          for (const sm of skipped) newMessages.push(sm);
+          sessionStore.recordTurn(sessionId, skipped, { input: 0, output: 0, costUsd: 0 });
+        }
         newMessages.push(msg);
         sessionStore.recordTurn(sessionId, [msg], { input: 0, output: 0, costUsd: 0 });
         recentErrors.length = 0;
@@ -1881,7 +2662,13 @@ export class AgentLoop {
       }
 
       // Execute tools — read-only in parallel, mutating sequentially
-      const txn = await journal.begin(sessionId);
+      this.totalToolCalls += toolCalls.length; // task-complexity signal for skill capture
+      runToolCalls += toolCalls.length;
+      for (const tc of toolCalls) {
+        runToolNames.add(tc.function.name);
+        if (this.sessionToolSequence.length < AgentLoop.TOOL_SEQUENCE_CAP) this.sessionToolSequence.push(tc.function.name);
+      }
+      const txn = await journal.begin(sessionId, undefined, this.effectiveCwd ?? this.cwd);
       const toolMessages: Message[] = [];
 
       const readOnlyCalls: ToolCall[] = [];
@@ -1894,12 +2681,19 @@ export class AgentLoop {
       // Parallel read-only execution
       if (readOnlyCalls.length > 0) {
         const results = await Promise.all(
-          readOnlyCalls.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
+          readOnlyCalls.map(async tc => {
+            const t0 = Date.now();
+            const r = await this.executeToolCall(tc, txn, sessionId, options);
+            this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
+            return r;
+          }),
         );
+        budget.noteProgress();
         for (let i = 0; i < readOnlyCalls.length; i++) {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
-          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
+          if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           afterResult(tc, r);
           // Emit any UI events captured during execution
           for (const ev of r.uiEvents) {
@@ -1927,8 +2721,12 @@ export class AgentLoop {
         if (batch.length === 1) {
           // Single → execute as before
           const tc = batch[0]!;
+          const t0 = Date.now();
           const r = await this.executeToolCall(tc, txn, sessionId, options);
-          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+          this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
+          budget.noteProgress();
+          yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
+          if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           afterResult(tc, r);
           for (const ev of r.uiEvents) {
             yield { type: 'tool_ui', data: ev };
@@ -1943,12 +2741,19 @@ export class AgentLoop {
           // Multiple disjoint-path mutations → parallel
           logger.info('Mutating tools running in parallel (disjoint paths)', { count: batch.length, tools: batch.map(b => b.function.name) });
           const results = await Promise.all(
-            batch.map(tc => this.executeToolCall(tc, txn, sessionId, options)),
+            batch.map(async tc => {
+              const t0 = Date.now();
+              const r = await this.executeToolCall(tc, txn, sessionId, options);
+              this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
+              return r;
+            }),
           );
+          budget.noteProgress();
           for (let i = 0; i < batch.length; i++) {
             const tc = batch[i]!;
             const r = results[i]!;
-            yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError } };
+            yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
+            if (r.isError) this.recordToolFailure(tc.function.name, r.content);
             afterResult(tc, r);
             for (const ev of r.uiEvents) yield { type: 'tool_ui', data: ev };
             toolMessages.push({
@@ -2092,7 +2897,7 @@ export class AgentLoop {
     transaction: Transaction,
     sessionId: string,
     options: AgentOptions,
-  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[] }> {
+  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[]; metadata?: Record<string, unknown> }> {
     const uiEvents: ToolUIEvent[] = [];
     let args: any;
     try {
@@ -2201,6 +3006,7 @@ export class AgentLoop {
         checkpoint: (label: string) => this.activeSandbox?.checkpoint(label) ?? Promise.resolve(null),
         backtrack: () => this.activeSandbox?.backtrack() ?? Promise.resolve(null),
       } : undefined,
+      exec: (req) => resolveRuntime(this.config).exec(req),
       currentTurn: this.currentTurn,
     };
 
@@ -2280,7 +3086,7 @@ export class AgentLoop {
           let st: fsSync.Stats | null = null;
           try { st = fsSync.statSync(absP); } catch { st = null; }
           if (!st || !st.isFile()) continue; // new file (or non-file): creation is allowed
-          const verdict = this.readLedger.check(absP, st.mtimeMs);
+          const verdict = this.ledgerFor(sessionId).check(absP, st.mtimeMs);
           if (!verdict.ok) {
             const rel = path.relative(this.effectiveCwd ?? this.cwd, absP) || p;
             logger.info('Read-before-write gate refused mutation', {
@@ -2346,10 +3152,44 @@ export class AgentLoop {
         }
       }
 
-      const result = await Promise.race([
+      let result = await Promise.race([
         this.registry.execute(tc.function.name, args, ctx),
         armTimeout(),
       ]);
+
+      // ─── Universal spill guard (THE choke point for oversized results) ───
+      // Every tool result passes through here before it can become message
+      // content, so one check covers http_request, web_fetch, shell, grep,
+      // browser_*, MCP tools — everything. Oversized content is written in
+      // full to ~/.qodex/tool-spill/<sessionId>/ and replaced by
+      // head + "[N chars spilled — full output: <path>]" + tail, so the model
+      // keeps status lines and tail errors AND knows how to read the rest
+      // (read_file with offset/limit). isError and metadata pass through
+      // untouched. Runs BEFORE the read-only cache store so a cache hit can
+      // never resurrect the full-size copy. Best-effort: a failed spill must
+      // never eat the result.
+      const spillMax = this.config.tools?.maxResultChars ?? 16_000;
+      if (spillMax > 0 && typeof result.content === 'string' && result.content.length > spillMax) {
+        try {
+          const spill = await applySpillGuard(tc.function.name, sessionId, result.content, {
+            maxResultChars: spillMax,
+          });
+          if (spill.spilled) {
+            logger.info('Tool result spilled to disk', {
+              tool: tc.function.name,
+              chars: result.content.length,
+              spillPath: spill.spillPath,
+            });
+            uiEvents.push({
+              type: 'progress',
+              message: `💾 Large ${tc.function.name} output (${result.content.length.toLocaleString()} chars) spilled to disk — context keeps head+tail+path`,
+            } as any);
+            result = { ...result, content: spill.content };
+          }
+        } catch (e: any) {
+          logger.warn('Spill guard failed (result kept in full, non-fatal)', { err: e?.message });
+        }
+      }
 
       // Store successful read-only results in cache
       if (this.toolCache && tool && tool.isReadOnly && !result.isError && typeof result.content === 'string') {
@@ -2368,8 +3208,47 @@ export class AgentLoop {
           const absP = path.isAbsolute(p) ? p : path.resolve(this.effectiveCwd ?? this.cwd, p);
           try {
             const st = fsSync.statSync(absP);
-            if (st.isFile()) this.readLedger.mark(absP, st.mtimeMs);
+            if (st.isFile()) this.ledgerFor(sessionId).mark(absP, st.mtimeMs);
           } catch { /* file gone or unreadable — nothing to record */ }
+        }
+      }
+
+      // ─── Blast-radius impact note (warn-only) ───
+      // After a successful code edit, ask the code graph what the edit touches and
+      // append a compact [impact] note to the tool result: top-level symbols in the
+      // file, reference/caller counts + files, covering tests — plus a ⚠ line when
+      // caller files were never read this session (cross-checked with the read-ledger).
+      // Advisory only, never blocks; silently skipped when the graph is absent, stale,
+      // or doesn't know the file. Off-switch: discipline.impactNotes: false
+      if (!result.isError && IMPACT_EDIT_TOOLS.has(tc.function.name) &&
+          (this.config as any)?.discipline?.impactNotes !== false) {
+        try {
+          const { getCodeGraphDB } = await import('../codegraph/tools.js');
+          const graph = getCodeGraphDB();
+          if (graph) {
+            const cwd0 = this.effectiveCwd ?? this.cwd;
+            for (const p of extractMutationPaths(tc.function.name, args)) {
+              const absP = path.isAbsolute(p) ? p : path.resolve(cwd0, p);
+              if (!isCodeFile(absP)) continue;
+              const impact = await computeBlastRadius(graph, absP, {
+                cwd: cwd0,
+                wasRead: (fp) => this.ledgerFor(sessionId).has(fp),
+                signal: toolAbort.signal,
+              });
+              if (impact.note) {
+                const base = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+                result = { ...result, content: `${base}\n\n${impact.note}` };
+                if (impact.unreadCallerFiles.length > 0) {
+                  uiEvents.push({
+                    type: 'progress',
+                    message: `⚠ Impact: ${impact.unreadCallerFiles.length} caller file(s) of ${path.basename(absP)} not read this session`,
+                  } as any);
+                }
+              }
+            }
+          }
+        } catch (e: any) {
+          logger.debug('Blast-radius impact note skipped', { err: e?.message });
         }
       }
 
@@ -2395,7 +3274,7 @@ export class AgentLoop {
         }
       }
 
-      return { content: finalContent, isError: result.isError, uiEvents };
+      return { content: finalContent, isError: result.isError, uiEvents, metadata: result.metadata as Record<string, unknown> | undefined };
     } catch (e: any) {
       // Timeout or outer cancel → both surfaced as user-friendly observations.
       const timedOut = e.code === 'TOOL_TIMEOUT' || toolAbort.signal.reason === 'TOOL_TIMEOUT';
@@ -2422,6 +3301,49 @@ export class AgentLoop {
   }
 
   /**
+   * Default Layer-3 reviewer for the completion-time visual gate: run the registered
+   * `artifact_review` tool (self-sufficient — it builds the preview, screenshots it in a
+   * headless browser, asks the vision model) inside its own journal transaction, then
+   * distill the tool's metadata into the gate's outcome shape. Kept as a method so tests
+   * inject `visualReviewFn` instead and never touch a browser. Errors propagate — the
+   * gate itself degrades them to an "unverified" pass.
+   */
+  private async reviewArtifactForVisualGate(
+    artifactId: string,
+    sessionId: string,
+    options: AgentOptions,
+  ): Promise<VisualReviewOutcome> {
+    const txn = await getJournal().begin(sessionId, undefined, this.effectiveCwd ?? this.cwd);
+    let res;
+    try {
+      const ctx: ToolContext = {
+        cwd: this.effectiveCwd ?? this.cwd,
+        sessionId,
+        transaction: txn,
+        permissions: this.permissions,
+        askUser: options.askUser,
+        emit: () => { /* gate runs outside a tool turn — progress surfaces via the notice */ },
+        signal: options.signal,
+        currentTurn: this.currentTurn,
+      };
+      res = await this.registry.execute('artifact_review', { id: artifactId }, ctx);
+      await txn.commit(); // the review writes the preview page — journal it like any tool write
+    } catch (e) {
+      try { await txn.rollback(); } catch { /* best-effort */ }
+      throw e;
+    }
+    const md: any = res.metadata ?? {};
+    const verdict =
+      !res.isError && ['looks_good', 'needs_work', 'broken', 'unverified'].includes(md.verdict)
+        ? md.verdict as VisualReviewOutcome['verdict']
+        : 'unverified';
+    return {
+      verdict,
+      issues: Array.isArray(md.issues) ? md.issues.map(String) : [],
+    };
+  }
+
+  /**
    * Summarize the combined history (base messages + this run's new messages),
    * collapsing all but the most recent turns into one summary system message.
    *
@@ -2440,10 +3362,28 @@ export class AgentLoop {
     combined: Message[],
     ctxWindow: number,
     signal: AbortSignal | undefined,
+    keepLastTurns = 6,
   ): Promise<Message[] | null> {
     const { compactMessages } = await import('../utils/compaction.js');
 
-    const sumRoute = this.router.route('general', this.estimateTokens(combined), {});
+    // ── Token-efficiency auto-offload (opt-in, offload.enabled) ──
+    // Summarization is lossy by design and never user-facing — a cheap model is fine.
+    // routeWithOffload consults the policy and pins roles.offload/roles.subagent when it
+    // fires; otherwise (or when the cheap model isn't live) it's the normal 'general' route.
+    const estTokens = this.estimateTokens(combined);
+    const { route: sumRoute, offloaded } = routeWithOffload(
+      this.router, 'general', estTokens,
+      { kind: 'compaction', taskClass: 'general', estimatedTokens: estTokens, mutating: false },
+      this.config,
+    );
+    if (offloaded) {
+      this.offloadedCalls += 1;
+      logger.info(`Offload: ~${Math.round(estTokens / 1000)}k-token compaction routed to ${offloaded.model}`, {
+        provider: offloaded.provider,
+        source: offloaded.source,
+        offloadedCalls: this.offloadedCalls,
+      });
+    }
 
     const summarize = async (msgs: Message[]): Promise<string> => {
       const stream = sumRoute.provider.complete({
@@ -2460,7 +3400,7 @@ export class AgentLoop {
       return text.trim();
     };
 
-    const result = await compactMessages(combined, { keepLastTurns: 6, summarize });
+    const result = await compactMessages(combined, { keepLastTurns, summarize });
     if (result.turnsCompacted === 0) return null;
     logger.info('Auto-compaction ran', {
       turnsCompacted: result.turnsCompacted,
@@ -2470,6 +3410,42 @@ export class AgentLoop {
       ctxWindow,
     });
     return result.messages;
+  }
+
+  /**
+   * Manual `/compact`: fold older turns now, even if the auto threshold hasn't
+   * been hit. Returns the compacted list, or null when there wasn't enough
+   * history (or the summarizer failed).
+   */
+  async compactConversation(messages: Message[], signal?: AbortSignal): Promise<{ messages: Message[]; savedTokens: number; turnsCompacted: number } | null> {
+    const { compactMessages } = await import('../utils/compaction.js');
+    const estTokens = this.estimateTokens(messages);
+    const { route: sumRoute } = routeWithOffload(
+      this.router, 'general', estTokens,
+      { kind: 'compaction', taskClass: 'general', estimatedTokens: estTokens, mutating: false },
+      this.config,
+    );
+    const summarize = async (msgs: Message[]): Promise<string> => {
+      const stream = sumRoute.provider.complete({
+        model: sumRoute.model,
+        messages: msgs,
+        tools: [],
+        signal,
+      });
+      let text = '';
+      for await (const ev of stream) {
+        if (signal?.aborted) break;
+        if (ev.type === 'text_delta') text += ev.delta ?? '';
+      }
+      return text.trim();
+    };
+    const result = await compactMessages(messages, { keepLastTurns: 4, summarize });
+    if (result.turnsCompacted === 0) return null;
+    return {
+      messages: result.messages,
+      savedTokens: result.before - result.after,
+      turnsCompacted: result.turnsCompacted,
+    };
   }
 
   private classifyTask(initial: Message[], scratch: Message[]): TaskClass {
@@ -2599,17 +3575,7 @@ export class AgentLoop {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────────
-// Active-agent singleton.
-//
-// The TUI creates exactly one AgentLoop per session. Slash commands need to operate
-// on its state (toggle subagents on/off, list snapshots, etc.) without taking the
-// loop as a parameter — that would require plumbing through every slash command.
-// Pattern matches the active-config singleton in config/loader.ts.
 
-let _activeAgent: AgentLoop | null = null;
-export function setActiveAgent(agent: AgentLoop | null): void { _activeAgent = agent; }
-export function getActiveAgent(): AgentLoop | null { return _activeAgent; }
 
 /**
  * Strip standalone JSON objects from text.

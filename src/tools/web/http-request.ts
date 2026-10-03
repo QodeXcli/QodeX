@@ -32,15 +32,21 @@ const HttpRequestArgs = z.object({
   query: z.record(z.string()).optional().describe('Query parameters appended to the URL.'),
   timeout_seconds: z.number().int().min(1).max(120).optional().describe('Default 30.'),
   allow_local: z.boolean().optional().describe('Allow localhost/private-IP destinations. Required for dev API testing. Default false.'),
-  max_response_bytes: z.number().int().min(1024).max(10_000_000).optional().describe('Response body cap. Default 1048576 (1 MB).'),
+  max_response_bytes: z.number().int().min(1024).max(10_000_000).optional().describe('Response body download cap. Default 1048576 (1 MB).'),
   follow_redirects: z.boolean().optional().describe('Follow 3xx redirects. Default true.'),
+  fullBody: z.boolean().describe('Return the ENTIRE response body in the result instead of the default head+tail excerpt (~6KB). Only set true when you actually need the full body content — status/header checks never need it. Default false.').optional(),
 });
+
+/** In-result body excerpt sizes (fullBody: false, the default). Status, headers
+ *  and byte counts are ALWAYS reported in full — only the body is excerpted. */
+const BODY_EXCERPT_HEAD = 4_000;
+const BODY_EXCERPT_TAIL = 2_000;
 
 const PRIVATE_HOST_RE = /^(localhost|127\.|10\.|192\.168\.|169\.254\.|::1$|fc00::|fe80::)|\.local$/i;
 
 export class HttpRequestTool extends Tool<z.infer<typeof HttpRequestArgs>> {
   name = 'http_request';
-  description = 'Make an HTTP request to an external or local URL. For local dev APIs pass allow_local=true. Returns status, headers, and response body (up to 1MB). Destructive when method is POST/PUT/PATCH/DELETE — those mutate remote state.';
+  description = 'Make an HTTP request to an external or local URL. For local dev APIs pass allow_local=true. Returns status, headers, and a head+tail excerpt (~6KB) of the response body with the total size noted — pass fullBody=true if you genuinely need the whole body (up to 1MB). Destructive when method is POST/PUT/PATCH/DELETE — those mutate remote state.';
   isReadOnly = false; // POST/PUT/DELETE mutate
   isDestructive = true;
   argsSchema = HttpRequestArgs;
@@ -138,12 +144,25 @@ export class HttpRequestTool extends Tool<z.infer<typeof HttpRequestArgs>> {
       out.push('');
       out.push(`## Body`);
       // Pretty-print JSON
+      let bodyOut = body;
       if (!isBinary && /application\/json|\+json/.test(ct)) {
-        try { out.push(JSON.stringify(JSON.parse(body), null, 2)); }
-        catch { out.push(body); }
-      } else {
-        out.push(body);
+        try { bodyOut = JSON.stringify(JSON.parse(body), null, 2); }
+        catch { /* not valid JSON — keep raw */ }
       }
+      // Polite-at-the-source default: a status/header check ("is this URL 404?")
+      // never needs 278KB of HTML in context. Unless the model asked for
+      // fullBody, keep a head+tail excerpt (~6KB) and say how big the whole
+      // thing was. The universal spill guard remains the backstop for the
+      // fullBody path and for every other tool.
+      const excerptLimit = BODY_EXCERPT_HEAD + BODY_EXCERPT_TAIL;
+      if (!args.fullBody && bodyOut.length > excerptLimit) {
+        const omitted = bodyOut.length - excerptLimit;
+        bodyOut =
+          bodyOut.slice(0, BODY_EXCERPT_HEAD) +
+          `\n… [http_request body excerpt: ${received.toLocaleString()} bytes total, middle ${omitted.toLocaleString()} chars omitted — re-run with fullBody: true if you need the complete body] …\n` +
+          bodyOut.slice(-BODY_EXCERPT_TAIL);
+      }
+      out.push(bodyOut);
 
       return {
         content: out.join('\n'),

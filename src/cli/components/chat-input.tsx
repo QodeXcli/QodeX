@@ -7,6 +7,7 @@ import {
   isPasteBurst, pasteLabel, removeAttachmentAt,
   type Attachment,
 } from './editor-logic.js';
+import { completeSlash, suggestSlashCommands, type SlashSuggestion } from '../slash-catalog.js';
 
 interface ChatInputProps {
   value: string;
@@ -25,6 +26,8 @@ interface ChatInputProps {
   busy?: boolean;
   /** Shared list of previously submitted prompts for ↑/↓ recall. */
   historyRef: React.MutableRefObject<string[]>;
+  /** Extra slash names (skills, custom commands) mixed into Tab autocomplete. */
+  extraSlashNames?: string[];
 }
 
 /**
@@ -42,6 +45,7 @@ export function ChatInput(props: ChatInputProps): React.ReactElement {
   const {
     value, onChange, onSubmit, cwd, placeholder,
     accentColor = 'cyan', prefix, active = true, busy = false, historyRef,
+    extraSlashNames = [],
   } = props;
   const [cursor, setCursor] = useState(value.length);
   const [anchor, setAnchor] = useState<number | null>(null); // selection start, or null
@@ -93,6 +97,13 @@ export function ChatInput(props: ChatInputProps): React.ReactElement {
   useInput((input, key) => {
     if (!active) return;
     if (key.ctrl && input === 'c') return; // parent: interrupt / exit
+    // Parent owns Shift+Tab (approval-mode cycle). Plain Tab completes `/…`.
+    if (key.tab) {
+      if (key.shift) return;
+      const next = completeSlash(value, extraSlashNames);
+      if (next) apply(next, next.length);
+      return;
+    }
 
     // Esc: while busy, let the parent abort the run. While idle, clear the
     // typed text AND any paste/image chips (this is what "Esc removes the
@@ -257,6 +268,19 @@ export function ChatInput(props: ChatInputProps): React.ReactElement {
         <Text> </Text>
         {body}
       </Box>
+      <SlashHints value={value} extraNames={extraSlashNames} />
+    </Box>
+  );
+}
+
+function SlashHints(props: { value: string; extraNames: string[] }): React.ReactElement | null {
+  const items: SlashSuggestion[] = suggestSlashCommands(props.value, props.extraNames);
+  if (items.length === 0) return null;
+  return (
+    <Box>
+      <Text dimColor>
+        {items.slice(0, 6).map((s, i) => `${i === 0 ? '⇥ ' : '  '}/${s.name}${s.args ? ' ' + s.args : ''}`).join(' · ')}
+      </Text>
     </Box>
   );
 }

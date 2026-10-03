@@ -51,17 +51,17 @@ describe('headlessAnswer (pure policy)', () => {
     expect(H.headlessAnswer(['yes', 'no', 'always'], false)).toBe('no');
     expect(H.headlessAnswer(['accept', 'edit', 'continue', 'reject'], false)).toBe('reject');
     expect(H.headlessAnswer(['approve', 'deny'], false)).toBe('deny');
-    expect(H.headlessAnswer(['ok', 'fine'], false)).toBe('no');
+    expect(H.headlessAnswer(['ok', 'fine'], false)).toBe('reject'); // no deny option → a deny word, never options[0]
     expect(H.headlessAnswer([], false)).toBe('no');
     expect(H.headlessAnswer(undefined, false)).toBe('no');
   });
-  it('with --yes: the first approving option, else options[0]', () => {
+  it('with --yes: the first approving option; with none it still denies', () => {
     expect(H.headlessAnswer(['yes', 'no'], true)).toBe('yes');
     expect(H.headlessAnswer(['no', 'yes'], true)).toBe('yes');
     expect(H.headlessAnswer(['accept', 'edit', 'continue', 'reject'], true)).toBe('accept');
     expect(H.headlessAnswer(['deny', 'allow'], true)).toBe('allow');
     expect(H.headlessAnswer(['approve', 'deny'], true)).toBe('approve');
-    expect(H.headlessAnswer(['foo', 'bar'], true)).toBe('foo');
+    expect(H.headlessAnswer(['foo', 'bar'], true)).toBe('reject'); // nothing affirmative → fail safe
   });
 });
 

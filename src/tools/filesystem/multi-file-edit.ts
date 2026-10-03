@@ -21,6 +21,7 @@
 
 import { z } from 'zod';
 import { promises as fs } from 'fs';
+import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 
 const Edit = z.object({
@@ -94,14 +95,15 @@ export class MultiFileEditTool extends Tool<z.infer<typeof MultiFileEditArgs>> {
   isDestructive = false;
   argsSchema = MultiFileEditArgs;
 
-  async execute(args: z.infer<typeof MultiFileEditArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof MultiFileEditArgs>, ctx: ToolContext): Promise<ToolResult> {
     const plans: EditPlan[] = [];
     const failures: string[] = [];
 
     // PASS 1: validate every file/edit without writing
     for (const file of args.files) {
       try {
-        const plan = await planFile(file.path, file.edits);
+        const abs = path.isAbsolute(file.path) ? file.path : path.resolve(ctx.cwd, file.path);
+        const plan = await planFile(abs, file.edits);
         plans.push(plan);
       } catch (e: any) {
         failures.push(e?.message ?? String(e));
@@ -147,15 +149,15 @@ export class MultiFileEditTool extends Tool<z.infer<typeof MultiFileEditArgs>> {
       }
     }
 
-    // PASS 2: write all the files
-    // We do NOT have transaction integration here yet (that would touch the
-    // transaction journal); for v0.9.2 we do sequential writes and report any
-    // partial failure clearly. Full transaction integration in v1.0.0.
+    // PASS 2: journaled writes with OCC — each file is committed only if disk
+    // still matches the snapshot the plan was computed from. A [FILE_CHANGED]
+    // mid-batch is reported as a partial failure (prior files already landed).
     const written: string[] = [];
     for (const plan of plans) {
       try {
         if (plan.changed) {
-          await fs.writeFile(plan.path, plan.finalContent, 'utf-8');
+          const rel = path.relative(ctx.cwd, plan.path) || plan.path;
+          await ctx.transaction.write(plan.path, plan.finalContent, { base: plan.originalContent, label: rel });
           written.push(plan.path);
         }
       } catch (e: any) {

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import type { ToolContext } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import { isAlwaysYesAnswer, setApprovalMode } from '../../security/permissions.js';
+import { prepareDiffPreview } from '../../utils/ui-limits.js';
 
 /**
  * Shared interactive edit-approval flow — the "surgical assistant" gate.
@@ -26,29 +28,39 @@ export type EditDecision =
   | { kind: 'reject' }                     // hard stop
   | { kind: 'revise' };                    // soft: model should try a different edit
 
-const APPROVE_OPTIONS = ['accept', 'edit', 'continue', 'reject'];
+export const APPROVE_OPTIONS = ['accept', 'always yes', 'edit', 'continue', 'reject'];
 
-/** Map a raw answer to a decision branch. PURE (the editor side-effect lives in
- *  confirmEdit). Tolerant of full words or first letters from the Confirmation UI. */
+export { isAlwaysYesAnswer } from '../../security/permissions.js';
+
 export function interpretApprovalAnswer(answer: string): 'accept' | 'edit' | 'revise' | 'reject' {
   const a = (answer || '').trim().toLowerCase();
-  if (a === 'accept' || a === 'yes' || a === 'y' || a === 'always') return 'accept';
+  if (a === 'accept' || a === 'yes' || a === 'y' || isAlwaysYesAnswer(a)) return 'accept';
   if (a === 'edit' || a === 'e') return 'edit';
   if (a === 'continue' || a === 'c' || a === 'revise') return 'revise';
   return 'reject'; // 'no' / 'n' / 'reject' / anything unrecognized → safe default
+}
+
+/** Split `$EDITOR` / `$VISUAL` so `code --wait` is argv, not a missing binary. PURE. */
+export function splitEditorArgv(editor: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  for (const m of editor.trim().matchAll(re)) out.push(m[1] ?? m[2] ?? m[3]!);
+  return out;
 }
 
 /** Open `content` in the user's editor, return the edited text (or null on failure). */
 function editInEditor(content: string, originalPath: string): string | null {
   const editor = process.env.VISUAL || process.env.EDITOR;
   if (!editor) return null; // no editor configured → caller falls back
+  const argv = splitEditorArgv(editor);
+  if (!argv.length) return null;
   try {
     const dir = mkdtempSync(join(tmpdir(), 'qodex-edit-'));
     const ext = extname(originalPath) || '.txt';
     const tmp = join(dir, `proposal${ext}`);
     writeFileSync(tmp, content, 'utf8');
     // stdio:'inherit' hands the TTY to the editor; on exit Ink repaints.
-    execFileSync(editor, [tmp], { stdio: 'inherit' });
+    execFileSync(argv[0]!, [...argv.slice(1), tmp], { stdio: 'inherit' });
     return readFileSync(tmp, 'utf8');
   } catch (e: any) {
     // Editor flow failed (mkdtemp/write/spawn/read). Log so it's traceable —
@@ -66,11 +78,12 @@ export async function confirmEdit(
   ctx: ToolContext,
   opts: { rel: string; before: string | null; after: string; absPath: string; permReq: any; label: string },
 ): Promise<EditDecision> {
-  const { prepareDiffPreview } = await import('../../utils/ui-limits.js');
-  const preview = prepareDiffPreview(opts.rel, opts.before ?? '', opts.after);
-  ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
+  emitEditDiff(ctx, opts.rel, opts.before, opts.after);
 
   const answer = await ctx.askUser(opts.label, APPROVE_OPTIONS);
+  // Mode only — a tool-wide session grant survived Shift+Tab back to manual and
+  // kept auto-writing every file after the user thought they had left always-yes.
+  if (isAlwaysYesAnswer(answer)) setApprovalMode('always');
   const branch = interpretApprovalAnswer(answer);
 
   if (branch === 'reject') return { kind: 'reject' };
@@ -82,6 +95,17 @@ export async function confirmEdit(
     return { kind: 'accept', content: edited ?? opts.after };
   }
   return { kind: 'accept', content: opts.after };
+}
+
+/** Show the red/green diff even when approval is skipped (always yes / auto). */
+export function emitEditDiff(
+  ctx: ToolContext,
+  rel: string,
+  before: string | null,
+  after: string,
+): void {
+  const preview = prepareDiffPreview(rel, before, after);
+  ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
 }
 
 /** The standard tool-result for a soft "continue/revise" reject. */

@@ -1,5 +1,4 @@
 import * as os from 'os';
-import * as path from 'path';
 import { isStrictMode, STRICT_MODE_SYSTEM_ADDENDUM } from '../../safety/strict-mode.js';
 import { systemAddendumFor, type TaskClass } from './task-addenda.js';
 
@@ -37,6 +36,13 @@ export interface SystemPromptContext {
    *  no skills are installed. Injected after Output Style so the model sees it
    *  AFTER the core principles but BEFORE the task-class addendum. */
   skillsBlock?: string;
+  /**
+   * Short standing identity (IDENTITY.md). Lives in the STABLE prefix, capped,
+   * so it cannot bust the prompt cache or TTFT the way a long QODEX.md can.
+   */
+  identityBlock?: string;
+  /** Per-turn compiled brief (kind / effort / named files). Volatile tail. */
+  taskBrief?: string;
 }
 
 export function detectModelFamily(modelId: string): SystemPromptContext['modelFamily'] {
@@ -49,6 +55,19 @@ export function detectModelFamily(modelId: string): SystemPromptContext['modelFa
   return 'other';
 }
 
+/**
+ * Is this a HIGH-CAPACITY model by parameter count (≥ ~70B)? A frontier-class local model
+ * (e.g. qwen3-235b, llama-3.1-405b) follows terse guidance as reliably as a cloud model, so
+ * it should get the COMPRESSED prompt — the verbose, example-laden version just inflates
+ * prefill (and TTFT) for no quality gain. We read the largest `<n>b` param marker in the id;
+ * MoE active-param markers (a22b) are ignored because the total is what signals capability.
+ * Small local models (≤ ~32B) stay on the full guidance they depend on.
+ */
+export function isHighCapacityModel(modelId: string): boolean {
+  const nums = [...(modelId.toLowerCase().matchAll(/(?:^|[^a-z\d])(\d{2,4})\s*b(?![a-z])/g))].map(m => parseInt(m[1]!, 10));
+  return nums.length > 0 && Math.max(...nums) >= 70;
+}
+
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
   const sections: string[] = [];
   const isQwen = ctx.modelFamily === 'qwen' || ctx.modelFamily === 'deepseek';
@@ -56,11 +75,13 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   // compressed prompt — real token savings on turn-1 prefill and cloud input billing.
   // Weak/local families (qwen/deepseek/other) keep the FULL, example-laden guidance
   // they depend on. This is cache-safe: the model doesn't change mid-session, so the
-  // chosen prompt is a stable prefix.
-  const capable = ctx.modelFamily === 'claude' || ctx.modelFamily === 'gpt' || ctx.modelFamily === 'gemini';
+  // chosen prompt is a stable prefix. A high-capacity LOCAL model (big qwen/llama) also
+  // counts as capable — the verbose prompt only inflated its prefill/TTFT for no gain.
+  const capable = ctx.modelFamily === 'claude' || ctx.modelFamily === 'gpt' || ctx.modelFamily === 'gemini'
+    || isHighCapacityModel(ctx.modelId ?? '');
 
   const runtimeModelLine = ctx.modelId
-    ? `\n\nThe LLM currently routing this request is **${ctx.modelId}**${ctx.providerName ? ` (served via ${ctx.providerName})` : ''}. If — and only if — the user explicitly asks which underlying model/LLM powers you, you may state this exact model name. Do NOT guess, and do NOT name any other model (you are not "qwen2.5-coder" or any hardcoded default — report the real model name given here). Never identify AS the model; your identity is QodeX.`
+    ? `\n\nThe LLM currently routing this request is **${ctx.modelId}**${ctx.providerName ? ` (served via ${ctx.providerName})` : ''}. When the user asks specifically which underlying model/LLM powers you (e.g. "what model are you", "which LLM is this"), name THIS exact model — but you are still QodeX. Do NOT guess, and do NOT name any other model (you are not "qwen2.5-coder" or any hardcoded default — report the real model name given here).`
     : '';
 
   // Which "own computer" capability families this run actually has. Drives the identity
@@ -78,7 +99,13 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   sections.push(`You are QodeX, an elite autonomous agent operating from a terminal CLI. You are a senior software engineer first: the user gives you tasks in their codebase; you complete them by reading, planning, editing, running commands, and verifying results.${computerLine}
 
 # Identity
-Your name is **QodeX**. You are NOT Claude, ChatGPT, GPT, Qwen, DeepSeek, Llama, or any other assistant — those are the underlying LLMs that power you, but they are NOT your identity. When the user asks "who are you", "what's your name", "what model are you", or anything similar, the answer is always: "I am QodeX, a local-first autonomous agent (coding, browser, desktop)."${runtimeModelLine}`);
+Your name is **QodeX**. You are NOT Claude, ChatGPT, GPT, Qwen, DeepSeek, Llama, or any other assistant — those are the underlying LLMs that power you, but they are NOT your identity. When the user asks about YOUR IDENTITY ("who are you", "what's your name"), the answer is always: "I am QodeX, a local-first autonomous agent (coding, browser, desktop)." (A question about the underlying MODEL is different — see the model line below.)${runtimeModelLine}`);
+
+  if (ctx.identityBlock?.trim()) {
+    sections.push(`# Standing identity
+These constraints and preferences apply to EVERY turn. Honor them over defaults.
+${ctx.identityBlock.trim()}`);
+  }
 
   // Core Principles — terse for capable models, full (with examples) for weak ones.
   if (capable) sections.push(`# Core Principles
@@ -91,8 +118,8 @@ Your name is **QodeX**. You are NOT Claude, ChatGPT, GPT, Qwen, DeepSeek, Llama,
 7. **Stay focused.** Don't refactor or add features outside the task.
 7b. **Honor explicit constraints literally.** User limits ("only touch X", "don't use Y", "output in chat") override defaults. If you can't comply, say so in one sentence and stop.
 8. **Delegate heavy, self-contained work** via \`task\` (read-only sub-agents run in a SEPARATE context window — their reads don't bloat yours). Use \`role:"vision"\` for screenshot analysis. Don't delegate single-file or mid-edit work.
-9. **Understand before changing (non-trivial work).** Start with \`project_overview\`; run \`analyze_impact target=...\` on files you'll touch; if risk ≥ 3 call \`present_plan\` first. Use \`safe_rename\`/\`safe_delete_file\` with \`confirm=false\` to preview, then \`confirm=true\`. Review \`find_dead_code\` output before deleting.
-10. **Architect before you build.** For any new component/feature or cross-file refactor, state the plan (approach, files, key decisions) before the first edit — "quick"/"simple" doesn't waive this. Decompose multi-domain work with \`orchestrate\`. The first code change is gently blocked once until a plan exists.`);
+9. **Understand before changing (non-trivial work).** Start with \`project_overview\`; run \`analyze_impact target=...\` on files you'll touch. Use \`safe_rename\`/\`safe_delete_file\` with \`confirm=false\` to preview, then \`confirm=true\`. Review \`find_dead_code\` output before deleting.
+10. **Architect before you build.** For any new component/feature or cross-file refactor, \`present_plan\` (approach, files, key decisions) before the first edit — "quick"/"simple" doesn't waive it, and higher-risk changes especially need it. Decompose multi-domain work with \`orchestrate\`. The first code change is gently blocked once until a plan exists.`);
   if (!capable) sections.push(`# Core Principles
 1. **Structural over textual.** When editing code, prefer \`edit_symbol\` (AST-aware) over \`edit_text\`. AST edits cannot break syntax.
 2. **Read before write.** Never modify a file you haven't read. Verify the current contents with read_file or code_graph first. **IMPORTANT**: read_file's display in the UI may be truncated for screen space (you'll see "…[chars omitted — agent sees full result]"), but YOU receive the complete file content. Never re-call read_file on the same file expecting more — scroll your context for the original full result.
@@ -124,10 +151,11 @@ Your name is **QodeX**. You are NOT Claude, ChatGPT, GPT, Qwen, DeepSeek, Llama,
    - For deletes: ALWAYS \`safe_delete_file confirm=false\` to check importers, then \`confirm=true\` if clean.
    - Suspected dead code: \`find_dead_code\` produces a report — don't auto-delete from it; review and propose.
 10. **Architect before you build — no rushing.** For ANY task that creates a new component/module, builds a feature, or refactors across files, you MUST plan before the first code change. Words like "quick", "simple", or "just a small change" do NOT waive this — judge by what the change actually is, not how it's phrased. Before the first \`write_file\`/\`edit_*\`/build action:
-   - State the plan: the approach, the files/modules you'll create or change, and the key design decisions (data model, layer boundaries, interfaces). A few honest lines, or a short \`DESIGN.md\`, or a \`todo_write\` plan.
+   - State the plan: the approach, the files/modules you'll create or change, and the key design decisions (data model, layer boundaries, interfaces). A few honest lines in your reply is the usual right size; reach for a short \`DESIGN.md\` or a \`todo_write\` plan only when the work genuinely has several distinct stages worth tracking.
    - Then implement in coherent slices, verifying as you go.
    - For a genuinely multi-domain task (e.g. frontend + backend + database together), do NOT write it all linearly — decompose it with \`orchestrate\` into isolated sub-tasks.
-   - This is enforced: on a build/refactor task, the first code change is gently blocked once until a plan exists. Don't fight it — plan, then build. A senior engineer sketches on the whiteboard before touching the keyboard.`);
+   - This is enforced: on a build/refactor task, the first code change is gently blocked once until a plan exists. Don't fight it — plan, then build. A senior engineer sketches on the whiteboard before touching the keyboard.
+11. **Match the ceremony to the task.** Process tools — todo lists, plan documents, sub-agents, worklog entries — are for work whose size makes them worth it. On a one-line fix, a question, or a single-file edit they are pure overhead: they cost the user attention and buy nothing. Scale up deliberately as the work grows; don't open with the full apparatus. Judging how much process a task deserves is part of the job, not something to skip by always doing the maximum.`);
 
   // Date is COARSE (date only, not time) so the system prompt stays byte-identical
   // for the entire day. This is critical for prompt-prefix caching — Ollama, vLLM,
@@ -156,13 +184,17 @@ You are in PLAN MODE. Mutating tools (write_file, edit_symbol, edit_text, bash) 
     const toolList = ctx.availableToolNames.length > 0
       ? ctx.availableToolNames.join(', ')
       : '(no tools — answer from your own knowledge)';
+    const hasWeb = ctx.availableToolNames.includes('web_search') || ctx.availableToolNames.includes('web_fetch');
+    const webLine = hasWeb
+      ? `\n\nThe list above includes web tools (\`web_search\`/\`web_fetch\`) — use them for web data; don't claim you lack internet access.`
+      : '';
     sections.push(`## IMPORTANT — SUB-AGENT MODE
 You are **QodeX**, dispatched as a sub-agent for a specific, narrow task. You are NOT Claude, GPT, Qwen, or any other model — those are the LLMs that power you. If asked "who are you", the answer is always: "I am QodeX." Complete the task efficiently and return. Do not branch into unrelated work.
 
 **Your available tools (call them via the structured tool_calls field):**
 ${toolList}
 
-If the task needs information from the web, you DO have \`web_search\` and \`web_fetch\` — use them. Do not say "I cannot access the internet" — that's false; the tools listed above are your real capabilities for this turn. If a tool is not in the list above, then you genuinely don't have it for this sub-task and should report back what you found with what you do have.`);
+These are your ONLY tools for this turn — call ONLY names from the list above; a name not in the list isn't available, so work with what you have and report back what you found.${webLine}`);
   }
 
   if (ctx.projectInfo.framework || ctx.projectInfo.languages.length > 0) {
@@ -196,7 +228,7 @@ ${ctx.projectRules}`);
 
   sections.push(`# Memory — recording what matters
 You have a persistent memory via the \`remember\` / \`recall\` / \`forget\` tools. It survives
-across sessions and is auto-injected (see "# Memory" above) next time you work here.
+across sessions and is auto-injected as a "# Memory" section next time you work here (once facts exist).
 
 Record proactively — don't wait to be asked. When you FINISH a task or hit a notable point:
 - **Project decisions & code changes** → \`remember\` (scope:"project", the default): architectural
@@ -213,7 +245,10 @@ Record proactively — don't wait to be asked. When you FINISH a task or hit a n
 Be selective: persist things that will matter on a FUTURE session, not transient task chatter.
 If a remembered fact becomes wrong, \`forget\` it. Before big assumptions, \`recall\` to check.`);
 
-  sections.push(`# Tool Use — MANDATORY
+  // Skip the "you MUST call write_file/bash" imperatives in PLAN MODE — there they are DISABLED
+  // (see the plan-mode block), and telling the model both "disabled" and "non-negotiable, call it"
+  // is a hard contradiction that stalls the turn.
+  if (ctx.mode !== 'plan') sections.push(`# Tool Use — MANDATORY
 
 You have **real, working tools** available in this turn. You are NOT a chatbot — you are
 an agent with actual filesystem and shell access. The following rules are NON-NEGOTIABLE:
@@ -223,7 +258,7 @@ an agent with actual filesystem and shell access. The following rules are NON-NE
 - "Copy this into a file called X" is the WRONG answer. The CORRECT answer is to call \`write_file\`.
 
 **When the user asks you to modify an existing file:**
-- CALL \`edit_file\` (or \`edit_symbol\` for AST-aware edits, or \`multi_edit\` for multiple changes).
+- CALL \`edit_text\` (or \`edit_symbol\` for AST-aware edits, or \`multi_edit\` for multiple changes).
 - Do NOT print "modified" code and ask the user to apply it manually.
 
 **When the user asks you to run a command, test, or build:**
@@ -403,14 +438,18 @@ tools actually returned — not background education and not a pitch.
   top. Re-emitting the same answer wastes the user's time and tokens.
 - Never apologize for using tools. Just use them.
 - NEVER apologize multiple times in a session for the same thing. If a tool failed once, acknowledge it ONCE and try a different approach. Repeated "I apologize for the confusion" responses are a sign you're stuck — fix the cause, not the symptom.
-- **Project memory:** when you finish a meaningful piece of work in a project (a feature, fix, refactor, or a notable decision), call \`project_log\` with one concise sentence so it persists for the next session. If a "PROJECT MEMORY" brief appears in context, it lists what was already done here — continue from it, don't redo it.
+- **Session worklog vs. durable memory — don't double-log.** When you finish a meaningful piece of work, call \`project_log\` with one concise sentence: this is the ACTIVITY log ("what got done") that feeds the next session's "PROJECT MEMORY" brief — continue from that brief when it appears, don't redo work. That's distinct from \`remember\` (above), which stores durable KNOWLEDGE to recall — architectural decisions, gotchas, root causes, conventions. Rule of thumb: \`project_log\` the activity, \`remember\` the knowledge; never record the same item to both.
 - **Report only what you actually did — no inflated completion claims.** Your "what changed"
   summary must list ONLY files you truly created/edited via tool calls THIS session. Do NOT present
   a feature as "✅ completed" if you didn't write it, and don't pad the summary with capabilities you
   merely intended. If you ran out of iterations or got interrupted, say plainly what is DONE vs what
   REMAINS — an honest partial report is far more useful than a glossy list of work that doesn't exist
   on disk. The user trusts this summary to know the real state of their codebase.
-- If the user writes in Persian/Farsi, respond in Persian (but keep code/file paths in English).`);
+- **Match the user's language.** Reply in whatever language the user writes in (e.g. Persian/Farsi →
+  Persian). Author any user-FACING content you generate in that SAME language too — artifact pages
+  (\`artifact_*\`), UI copy, button/heading labels, demo text. An artifact is for the user, so its visible
+  text follows the chat language, not a fixed default. Always keep code, identifiers, file paths, and CLI
+  commands in English regardless of the chat language.`);
 
   // Skills — user-installed playbooks the model can load via use_skill. Injected
   // after Output Style so the rules above govern HOW to apply skills, not the
@@ -438,19 +477,9 @@ A "skill" is an installable playbook (any installed ones are listed under "Avail
     sections.push(STRICT_MODE_SYSTEM_ADDENDUM);
   }
 
-  // Task-class addendum — focused reasoning patterns based on what the user
-  // appears to be asking for. Cheap to inject; meaningful boost to output quality.
-  if (ctx.mode === 'normal' && ctx.taskClass && ctx.taskClass !== 'general') {
-    const addendum = systemAddendumFor(ctx.taskClass);
-    if (addendum) sections.push(addendum);
-  }
-
-  // Stack-specialist expertise (what an expert in THIS technology knows) — orthogonal to
-  // task class. A "feature" turn on a Next.js app gets both the feature loop AND the
-  // Next.js cheat-sheet. Built by the caller via stack-profiles.buildStackAddendum().
-  if (ctx.mode === 'normal' && ctx.stackAddendum && ctx.stackAddendum.trim()) {
-    sections.push(ctx.stackAddendum.trim());
-  }
+  // NB: the PROMPT-DEPENDENT addenda (task-class + stack) are pushed LAST, after the Directory
+  // Tree — see the note at the end. They change with each user message, so keeping them at the
+  // very tail means a change invalidates only the tail, not the stable prefix + tree cache.
 
   // Thinking-blocks guidance — encourages reasoning models (Qwen3, DeepSeek) to
   // use <thinking> tags for internal reasoning before producing the final
@@ -475,13 +504,29 @@ I'll check the current middleware setup first.
 Skip the thinking block for trivial requests ("what's the date", "list files").`);
   }
 
-  // Directory Tree LAST — see the perf note above. Volatile content goes at the end
-  // so the long, stable instruction prefix above stays cache-friendly across turns.
+  // Directory Tree — stable across turns (changes only when files change), so it goes above the
+  // per-message addenda below to stay cache-friendly.
   if (ctx.directoryTree) {
     sections.push(`# Directory Tree
 \`\`\`
 ${ctx.directoryTree}
 \`\`\``);
+  }
+
+  // PROMPT-DEPENDENT addenda LAST — the MOST volatile content (recomputed from each user
+  // message via classifyForPrompt/detectStacks). Placing them at the very tail means a
+  // task-class/stack change invalidates ONLY this tail, leaving the long stable instruction
+  // prefix AND the Directory Tree cached (they previously sat before the tree and re-billed it
+  // on every classifier flip). Tail placement is also better for the model (recency).
+  if (ctx.mode === 'normal' && ctx.taskClass && ctx.taskClass !== 'general') {
+    const addendum = systemAddendumFor(ctx.taskClass);
+    if (addendum) sections.push(addendum);
+  }
+  if (ctx.mode === 'normal' && ctx.stackAddendum && ctx.stackAddendum.trim()) {
+    sections.push(ctx.stackAddendum.trim());
+  }
+  if (ctx.mode === 'normal' && ctx.taskBrief?.trim()) {
+    sections.push(ctx.taskBrief.trim());
   }
 
   return sections.filter(s => s.trim()).join('\n\n');

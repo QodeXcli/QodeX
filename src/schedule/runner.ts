@@ -3,7 +3,9 @@
  * `qodex schedule tick`. For each due schedule, spawn an isolated child so a
  * hung agent can't block other schedules and so we get process-level isolation:
  *
- *   kind 'prompt'  → `qodex --print <prompt> --yes [--model m]` (headless one-shot)
+ *   kind 'prompt'  → `qodex --print <prompt> --yes [--model m]` (headless one-shot;
+ *                    a recipe such as verified-pr wraps the goal in an unattended-safe
+ *                    protocol, and the child writes a ground-truth receipt)
  *   kind 'mission' → `qodex mission start --yes --cwd <cwd> -- <prompt>`, which
  *                    returns as soon as the detached mission worker is running;
  *                    the mission then plans, runs, asks for approvals and
@@ -29,6 +31,9 @@ import { QODEX_HOME } from '../config/defaults.js';
 import { getScheduleStore, type ScheduleEntry, type ScheduleKind, type ScheduleStore } from './store.js';
 import { logger } from '../utils/logger.js';
 import { notifyDesktop } from '../utils/notify.js';
+import { buildRecipePrompt } from './recipes.js';
+import { parseDeliveryTarget, formatRunSummary, deliverRun } from './delivery.js';
+import { parseReceipt, formatReceipt, readReceiptFile } from './receipt.js';
 
 const LOCK_PATH = path.join(QODEX_HOME, 'scheduler.lock');
 const RUN_LOG_DIR = path.join(QODEX_HOME, 'schedule-logs');
@@ -64,7 +69,7 @@ export interface TickOptions {
 
 /** argv (after the CLI command) for one run of an entry. PURE. */
 export function buildScheduleRunArgs(
-  entry: Pick<ScheduleEntry, 'id' | 'prompt' | 'cwd'> & { model?: string | null; kind?: ScheduleKind | null },
+  entry: Pick<ScheduleEntry, 'id' | 'prompt' | 'cwd'> & { model?: string | null; kind?: ScheduleKind | null; recipe?: string | null },
 ): string[] {
   if (entry.kind === 'mission') {
     // `--yes` mirrors prompt routines (they run unattended with --yes); for a
@@ -77,8 +82,9 @@ export function buildScheduleRunArgs(
     return args;
   }
   // We use --yes so permission prompts auto-approve; without it the headless run
-  // would deny everything and the schedule would be useless.
-  const args = ['--print', entry.prompt, '--yes'];
+  // would deny everything and the schedule would be useless. A recipe (e.g. verified-pr)
+  // wraps the goal in an unattended-safe protocol before it's fed to the agent.
+  const args = ['--print', buildRecipePrompt(entry.recipe ?? undefined, entry.prompt), '--yes'];
   if (entry.model) args.push('--model', entry.model);
   return args;
 }
@@ -197,31 +203,57 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
   const spawnFn: SpawnFn = opts.spawnFn ?? (crossSpawn as unknown as SpawnFn);
   const hardKillMs = opts.hardKillMs ?? RUN_HARD_KILL_MS;
   const notify = opts.notify !== false;
+  // Ask a prompt run to write a ground-truth receipt here (built by QodeX from the git
+  // diff + the checkers it ran, not the model); preferred over parsing stdout.
+  const receiptFile = path.join(opts.logDir, `${entry.id}.${runId}.receipt.json`);
 
   return new Promise<void>((resolve) => {
     let settled = false;
-    const finish = (status: 'success' | 'error', exitCode: number, message: string, notifyAfter: boolean) => {
+    const finish = async (status: 'success' | 'error', exitCode: number, message: string, notifyAfter: boolean, output = '') => {
       if (settled) return;
       settled = true;
       clearTimeout(hardKill);
       store.recordRunFinish(runId, entry.id, status, exitCode, message, Date.now() - startMs);
-      if (!notifyAfter || !notify) { resolve(); return; }
+      // Proof-carrying autonomy: prefer the GROUND-TRUTH receipt QodeX wrote (git diff + the
+      // checkers it ran) over parsing the model's stdout block. Fall back to stdout if absent.
+      let receipt: Awaited<ReturnType<typeof readReceiptFile>> = null;
+      if (kind === 'prompt') {
+        try {
+          receipt = (await readReceiptFile(receiptFile)) ?? parseReceipt(output);
+          await fs.unlink(receiptFile).catch(() => {});
+          if (receipt) store.attachReceipt(runId, JSON.stringify(receipt));
+        } catch { /* a receipt is best-effort */ }
+      }
+      if (!notifyAfter) { resolve(); return; }
       // Let the user know a background task finished — they may have closed the
       // terminal. Fire-and-forget; a failed notification never affects the run.
       const secs = Math.round((Date.now() - startMs) / 1000);
-      void notifyDesktop({
-        title: status === 'success' ? `✓ QodeX: ${entry.name}` : `✗ QodeX: ${entry.name}`,
-        subtitle: status === 'success' ? `Done in ${secs}s` : `Failed (exit ${exitCode}) after ${secs}s`,
-        message: message ? message.slice(0, 180) : (status === 'success' ? 'Task completed.' : 'Task failed — check the log.'),
-        sound: true,
-      }).finally(() => resolve());
+      const desktop = notify
+        ? notifyDesktop({
+            title: status === 'success' ? `✓ QodeX: ${entry.name}` : `✗ QodeX: ${entry.name}`,
+            subtitle: status === 'success' ? `Done in ${secs}s` : `Failed (exit ${exitCode}) after ${secs}s`,
+            message: message ? message.slice(0, 180) : (status === 'success' ? 'Task completed.' : 'Task failed — check the log.'),
+            sound: true,
+          })
+        : Promise.resolve();
+      // Deliver the result to chat (Telegram/Discord) when the schedule asked for it —
+      // this is what makes the scheduler "24/7 to your phone", not just a desktop ping.
+      const target = parseDeliveryTarget(entry.deliver);
+      const summary = formatRunSummary({ name: entry.name, status, exitCode, durationSec: secs, tail: message, recipe: entry.recipe });
+      const text = receipt ? `${summary}\n\n${formatReceipt(receipt)}` : summary;
+      const deliver = target
+        ? deliverRun(target, text)
+            .then(ok => { if (ok) logger.info('schedule result delivered', { id: entry.id, to: `${target.platform}:${target.chatId}` }); })
+            .catch(() => {})
+        : Promise.resolve();
+      void Promise.allSettled([desktop, deliver]).finally(() => resolve());
     };
 
     let child: ChildProcess;
     try {
       child = spawnFn(cli.command, [...cli.prefix, ...args], {
         cwd: entry.cwd,
-        env: { ...process.env, QODEX_SCHEDULED: '1' },
+        env: { ...process.env, QODEX_SCHEDULED: '1', ...(kind === 'prompt' ? { QODEX_RECEIPT_FILE: receiptFile } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e: any) {
@@ -243,7 +275,7 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
     child.on('error', (e: any) => {
       const msg = `spawn failed: ${e.message}`;
       logStream.end('\n' + msg + '\n');
-      finish('error', 127, msg, false);
+      void finish('error', 127, msg, false);
     });
 
     child.on('close', (code, signal) => {
@@ -253,7 +285,7 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
       logStream.end(`\n# finished: ${new Date().toISOString()} exit=${exitCode} (${status})\n`);
       // A mission routine only STARTS the mission here; the mission notifies when
       // it completes, so only a failure to start is worth a notification now.
-      finish(status, exitCode, tail, kind === 'prompt' || status === 'error');
+      void finish(status, exitCode, tail, kind === 'prompt' || status === 'error', output);
     });
   });
 }

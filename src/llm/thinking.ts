@@ -34,6 +34,23 @@ export interface ThinkingExtraction {
   thinkingBlocks: string[];
 }
 
+/**
+ * Live thinking text for the TUI: closed `<thinking>` blocks plus an in-progress
+ * open tag. Does not belong in model history — display only. PURE.
+ */
+export function streamingThinking(text: string): string {
+  if (!text) return '';
+  const closed = extractThinking(text).thinkingBlocks;
+  const open = text.match(/<(thinking|think|reasoning|reflection)>([\s\S]*)$/i);
+  let openBody = '';
+  if (open) {
+    const inner = open[2] ?? '';
+    const tag = open[1] ?? 'thinking';
+    if (!new RegExp(`</${tag}>`, 'i').test(inner)) openBody = inner.trim();
+  }
+  return [...closed, openBody].filter(Boolean).join('\n\n');
+}
+
 export function extractThinking(text: string): ThinkingExtraction {
   if (!text || !text.includes('<')) return { visibleText: text, thinkingBlocks: [] };
   const blocks: string[] = [];

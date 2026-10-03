@@ -1,16 +1,16 @@
 {
   "name": "@qodex/cli",
   "version": "3.0.0",
-  "description": "QodeX \u2014 local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions (Qwen3-Coder, Claude, GPT, DeepSeek)",
+  "description": "QodeX — local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions (Qwen3-Coder, Claude, GPT, DeepSeek)",
   "license": "Apache-2.0",
-  "author": "7 SEVEN <REPLACE_WITH_YOUR_EMAIL>",
+  "author": "7 SEVEN",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex.git"
+    "url": "git+https://github.com/QodeXcli/QodeX.git"
   },
-  "homepage": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex#readme",
+  "homepage": "https://github.com/QodeXcli/QodeX#readme",
   "bugs": {
-    "url": "https://github.com/REPLACE_WITH_YOUR_GITHUB_USERNAME/qodex/issues"
+    "url": "https://github.com/QodeXcli/QodeX/issues"
   },
   "keywords": [
     "ai",
@@ -50,7 +50,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "better-sqlite3": "^11.5.0",
-    "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",
     "diff": "^8.0.3",

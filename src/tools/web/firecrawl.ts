@@ -31,8 +31,9 @@ export class FirecrawlBackend implements WebSearchBackend {
     const apiKey = process.env.FIRECRAWL_API_KEY;
     if (!apiKey) {
       throw new WebSearchError(
-        'Firecrawl backend selected but FIRECRAWL_API_KEY is not set in the environment. ' +
-        'Export FIRECRAWL_API_KEY=fc-... or switch to another backend in your config.',
+        'Firecrawl backend selected but FIRECRAWL_API_KEY is not set. ' +
+        'Get a free key at https://www.firecrawl.dev — then paste it in chat (the agent saves it via save_api_key and retries), ' +
+        'or add FIRECRAWL_API_KEY=fc-... to ~/.qodex/.env.',
         this.name,
       );
     }
@@ -65,7 +66,10 @@ export class FirecrawlBackend implements WebSearchBackend {
       if (payload.success === false) {
         throw new WebSearchError(`Firecrawl error: ${payload.error ?? 'unknown'}`, this.name);
       }
-      return mapFirecrawlResults(payload, opts.limit);
+      // Trim scraped markdown to the passages most relevant to the search query (semantic), and
+      // record how often that beat the positional fallback — surfaced in the dashboard.
+      const { recordExtract } = await import('./extract-metrics.js');
+      return mapFirecrawlResults(payload, opts.limit, { query, onExtract: (mode) => { void recordExtract(mode); } });
     } catch (e: any) {
       if (e instanceof WebSearchError) throw e;
       if (e?.name === 'AbortError') throw new WebSearchError('Request aborted (timeout or cancellation)', this.name, e);

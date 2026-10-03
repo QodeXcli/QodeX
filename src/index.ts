@@ -18,11 +18,14 @@ import { Command } from 'commander';
 import { render } from 'ink';
 import React from 'react';
 import { loadConfig, ensureQodexHome, setActiveConfig } from './config/loader.js';
+import { getActiveProfile, getRequestedProfile, setRequestedProfile } from './config/profile.js';
 import { ModelRouter } from './llm/router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { PermissionEngine } from './security/permissions.js';
+import { appendAudit } from './security/audit-log.js';
 import { App } from './cli/ui.js';
 import { runHeadless } from './cli/modes/headless.js';
+import { contractFromFlags } from './agent/autonomy-contract.js';
 import { getJournal } from './filesystem/transaction.js';
 import { getSessionStore } from './session/store.js';
 import { MCPManager, setMCPManager, getMCPManager } from './mcp/manager.js';
@@ -66,7 +69,7 @@ async function bootstrap(): Promise<{
   // Non-blocking: token counts use the calibrated heuristic until this resolves.
   void import('./utils/tokenizer.js').then(t => t.warmTokenizer()).catch((err) => logger.debug('tokenizer warm-up failed', { err }));
 
-  const config = await loadConfig(process.cwd());
+  const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
   // Import Claude Code plugins/standalone assets: agents → dispatchable roles (for the
   // `task` tool + plugin commands like /review-pr), plus plugin-declared MCP servers and
   // hooks. User config always wins on collisions. (Skills/commands are loaded separately
@@ -81,11 +84,35 @@ async function bootstrap(): Promise<{
     logger.debug('Claude Code integration skipped', { err: e?.message });
   }
   setActiveConfig(config);
+  // Browser CDP attach: if configured, the browser_* tools attach to the user's running
+  // browser instead of launching a fresh headless one. (QODEX_BROWSER_CDP_URL env wins.)
+  if ((config as any).browser?.cdpUrl) {
+    try {
+      const { setBrowserCdpUrl } = await import('./tools/browser/session.js');
+      setBrowserCdpUrl((config as any).browser.cdpUrl);
+    } catch { /* browser module optional */ }
+  }
   const router = new ModelRouter(config);
   const registry = new ToolRegistry();
+  try {
+    const { registerUserPlugins } = await import('./plugins/loader.js');
+    await registerUserPlugins(registry, process.cwd());
+  } catch (e: any) {
+    logger.warn('User plugins not loaded', { err: e?.message });
+  }
   // Resolve read-only status from the live registry (not a hardcoded list), so new
   // read-only tools are auto-allowed without having to be listed twice.
   const permissions = new PermissionEngine(config, (n) => registry.get(n));
+  permissions.onDecision = (req, decision, via) => {
+    if (decision === 'ask') return;
+    appendAudit({
+      type: 'permission',
+      tool: req.tool,
+      operation: req.operation,
+      decision,
+      via,
+    });
+  };
 
   // Code graph — project-local SQLite
   const qodexProjectDir = path.join(process.cwd(), '.qodex');
@@ -173,22 +200,46 @@ function readVersion(): string {
 }
 
 program
-  // Options written after a subcommand belong to that subcommand. Without this the
-  // root's --json/-m/-y swallowed them, so `qodex mission status <id> --json`,
-  // `qodex vault list --json` and `qodex schedule tick --json` silently printed text.
-  .enablePositionalOptions()
   .name('qodex')
   .description('QodeX — local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions')
   .version(readVersion())
   .argument('[prompt...]', 'Initial prompt (omit to launch interactive REPL)')
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
+  .option('--profile <name>', 'Named config overlay (~/.qodex/profiles/<name>.yaml or QODEX_PROFILE). Not -p — that is --print.')
   .option('--json', 'When used with --print, emit NDJSON events to stdout')
   .option('-y, --yes', 'Auto-approve all permission prompts (headless mode only)')
+  // ── Guardrailed autonomy contract (headless -p only) ──
+  .option('--budget-tokens <n>', 'Kill the run after N total (novel) tokens; triggers rollback-on-fail')
+  .option('--budget-usd <n>', 'Kill the run after $N spend; triggers rollback-on-fail')
+  .option('--max-wall <sec>', 'Stall-aware wall-clock ceiling in seconds (slow ≠ runaway; fires only when also stalled)')
+  .option('--scope <path-prefix>', 'Deny agent edits outside this path prefix (pre-write gate on journaled writes)')
+  .option('--verify <cmd>', 'Shell command run after the agent finishes; non-zero exit = failed run')
+  .option('--rollback-on-fail', "Roll back all session writes when the run fails (default ON when --verify or a budget is set). NOTE: session-scoped — with -r/--resume this also reverts earlier turns' journaled writes, not just this run's")
+  .option('--receipt <file>', 'Write a tamper-evident JSON receipt of the run (signed when QODEX_AUDIT_KEY is set); re-check it later with `qodex receipt verify <file>`')
   .option('-m, --model <id>', 'Override default model (e.g. qwen2.5-coder:32b, claude-sonnet-4-6, gpt-4o)')
   .option('-r, --resume <id>', 'Resume an existing session by id prefix')
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
   .option('--list-sessions', 'List recent sessions and exit')
+  .hook('preAction', thisCommand => {
+    const name = (thisCommand.optsWithGlobals() as { profile?: string }).profile;
+    if (typeof name === 'string' && name.trim()) setRequestedProfile(name.trim());
+  })
+  // Commander's default parsing lets the ROOT swallow -m/--model, --json, -y/--yes even
+  // when they're written after a subcommand that declares the same flag. Actions that read
+  // cmd.optsWithGlobals() already see them; this hands the value back to subcommands that
+  // read their own opts (mission/vault/workflow/telegram/...), so `qodex mission status
+  // <id> --json` prints JSON. Only flags the subcommand itself declares are copied.
+  .hook('preAction', (thisCommand, actionCommand) => {
+    if (actionCommand === thisCommand) return;
+    const rootOpts = thisCommand.opts() as Record<string, unknown>;
+    const rootKeys = new Set(thisCommand.options.map(o => o.attributeName()));
+    for (const opt of actionCommand.options) {
+      const key = opt.attributeName();
+      if (!rootKeys.has(key) || rootOpts[key] === undefined) continue;
+      if (actionCommand.getOptionValue(key) === undefined) actionCommand.setOptionValue(key, rootOpts[key]);
+    }
+  })
   .action(async (promptArgs: string[], opts: any) => {
     // First-run check: if no config exists and we're interactive, suggest the wizard
     // (don't block — user can press Ctrl+C and proceed with defaults if they want).
@@ -268,6 +319,27 @@ program
       resumeSessionId = recent[0]!.id;
     }
 
+    // Guardrailed autonomy contract — headless-only flags fused into one object.
+    // null when none of the flags were given, so plain runs stay on the exact old path.
+    const contract = contractFromFlags({
+      budgetTokens: opts.budgetTokens,
+      budgetUsd: opts.budgetUsd,
+      maxWall: opts.maxWall,
+      scope: opts.scope,
+      verify: opts.verify,
+      rollbackOnFail: opts.rollbackOnFail,
+    });
+    if (contract && !opts.print) {
+      console.error('--budget-tokens/--budget-usd/--max-wall/--scope/--verify/--rollback-on-fail require headless mode (-p/--print).');
+      process.exit(1);
+    }
+    // A receipt attests to a CONTRACT (scope, budgets, verify, verdict). Without one there
+    // is nothing to attest, so say that rather than writing a hollow document.
+    if (opts.receipt && !contract) {
+      console.error('--receipt needs a contract: add at least one of --verify / --budget-tokens / --budget-usd / --max-wall / --scope.');
+      process.exit(1);
+    }
+
     // Headless mode
     if (opts.print) {
       const code = await runHeadless({
@@ -281,6 +353,8 @@ program
         autoApproveAll: !!opts.yes,
         explicitModel: opts.model,
         resumeSessionId,
+        contract: contract ?? undefined,
+        receiptPath: opts.receipt,
       });
       process.exit(code);
     }
@@ -329,7 +403,13 @@ program
         initialPrompt,
         resumeSessionId,
         explicitModel: opts.model,
-        onSessionActive: (id: string) => { activeSessionId = id; },
+        onSessionActive: (id: string) => {
+          activeSessionId = id;
+          void import('./session/handoff.js').then(m => {
+            const loaded = getSessionStore().loadSession(id);
+            return m.writeHandoff(id, loaded?.meta.cwd ?? process.cwd());
+          });
+        },
       }),
     );
     await waitUntilExit();
@@ -355,18 +435,117 @@ program
     console.log(`Rolled back ${result.txnsRolled} transactions, restored ${result.filesRestored} files.`);
   });
 
-program
+const sessionsCmd = program
   .command('sessions')
-  .description('List recent sessions')
-  .action(async () => {
+  .description('List, show, search, or export sessions');
+
+function printSessionList(limit: number): void {
+  const sessions = getSessionStore().listRecentSessions(limit, process.cwd());
+  if (sessions.length === 0) {
+    console.log('No sessions.');
+    return;
+  }
+  for (const s of sessions) {
+    const title = s.title ?? '(untitled)';
+    console.log(
+      `  ${s.id.slice(0, 8)}  ${new Date(s.updated_at).toLocaleString()}  ${s.turn_count} turns  ` +
+      `${s.total_input_tokens.toLocaleString()} in / ${s.total_output_tokens.toLocaleString()} out  ` +
+      `$${s.total_cost_usd.toFixed(3)}  — ${title}`,
+    );
+  }
+}
+
+function resolveSessionArg(id: string) {
+  const store = getSessionStore();
+  const all = store.listRecentSessions(100);
+  const match = all.find(s => s.id === id || s.id.startsWith(id));
+  return match ? store.loadSession(match.id) : null;
+}
+
+sessionsCmd
+  .command('list', { isDefault: true })
+  .description('List recent sessions in this directory')
+  .option('-n, --limit <n>', 'How many to list', '20')
+  .action(async (opts: { limit?: string }) => {
     await bootstrap();
-    const sessions = getSessionStore().listRecentSessions(20, process.cwd());
-    if (sessions.length === 0) {
-      console.log('No sessions.');
+    const n = Math.max(1, parseInt(opts.limit ?? '20', 10) || 20);
+    printSessionList(n);
+  });
+
+sessionsCmd
+  .command('show <id>')
+  .description('Session metadata and /insights snapshot')
+  .action(async (id: string) => {
+    await bootstrap();
+    const loaded = resolveSessionArg(id);
+    if (!loaded) {
+      console.error(`No session matches '${id}'.`);
+      process.exitCode = 1;
       return;
     }
-    for (const s of sessions) {
-      console.log(`  ${s.id.slice(0, 8)}  ${new Date(s.updated_at).toLocaleString()}  ${s.turn_count} turns  $${s.total_cost_usd.toFixed(3)}`);
+    const m = loaded.meta;
+    console.log(`Session ${m.id}`);
+    console.log(`  cwd     ${m.cwd}`);
+    console.log(`  model   ${m.model}`);
+    console.log(`  turns   ${m.turn_count}  ·  ${m.status}`);
+    console.log(`  tokens  ${m.total_input_tokens.toLocaleString()} in / ${m.total_output_tokens.toLocaleString()} out`);
+    console.log(`  cost    $${m.total_cost_usd.toFixed(4)}`);
+    console.log(`  updated ${m.updated_at}`);
+    if (m.title) console.log(`  title   ${m.title}`);
+    const { parseInsightsSnapshot, formatInsights } = await import('./agent/insights.js');
+    const snap = parseInsightsSnapshot(getSessionStore().loadInsightsJson(m.id));
+    if (snap) {
+      console.log('');
+      console.log(formatInsights(snap));
+    } else {
+      console.log('\nNo insights snapshot yet. Open the session and run /insights after a turn.');
+    }
+  });
+
+sessionsCmd
+  .command('export <id>')
+  .description('Write session insights as Markdown to stdout')
+  .action(async (id: string) => {
+    await bootstrap();
+    const loaded = resolveSessionArg(id);
+    if (!loaded) {
+      console.error(`No session matches '${id}'.`);
+      process.exitCode = 1;
+      return;
+    }
+    const { parseInsightsSnapshot, formatInsightsMarkdown } = await import('./agent/insights.js');
+    const snap = parseInsightsSnapshot(getSessionStore().loadInsightsJson(loaded.meta.id));
+    if (!snap) {
+      console.error('No insights snapshot stored for this session.');
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(formatInsightsMarkdown(snap, {
+      title: loaded.meta.title,
+      model: loaded.meta.model,
+      cwd: loaded.meta.cwd,
+    }));
+  });
+
+sessionsCmd
+  .command('search <query...>')
+  .description('Search past conversation text in this directory')
+  .action(async (queryParts: string[]) => {
+    await bootstrap();
+    const q = queryParts.join(' ').trim();
+    if (!q) {
+      console.error('Usage: qodex sessions search <query>');
+      process.exitCode = 1;
+      return;
+    }
+    const hits = getSessionStore().searchConversations(q, { cwd: process.cwd(), limit: 12 });
+    if (hits.length === 0) {
+      console.log('No matches.');
+      return;
+    }
+    for (const h of hits) {
+      console.log(`  ${h.sessionId.slice(0, 8)}  ${h.role.padEnd(9)}  ${h.title || '(untitled)'}`);
+      console.log(`           ${h.snippet}`);
     }
   });
 
@@ -396,11 +575,230 @@ program
   });
 
 program
+  .command('impact <target>')
+  .description('Blast-radius analysis for a file or symbol: references, caller files, covering tests (from the code graph)')
+  .option('--json', 'Print machine-readable JSON instead of the summary line')
+  .action(async (target: string, _opts: any, cmd: any) => {
+    // optsWithGlobals(): merge local flags with root-level ones so a future global
+    // flag doesn't silently vanish here (same pattern as `mcp serve` / `provider add`).
+    const opts = cmd.optsWithGlobals() as { json?: boolean };
+    const dbPath = path.join(process.cwd(), '.qodex', 'codegraph.db');
+    if (!fsSync.existsSync(dbPath)) {
+      console.error('No code graph found at .qodex/codegraph.db — run `qodex index` first.');
+      process.exit(1);
+    }
+    const db = new CodeGraphDB(dbPath);
+    const { computeBlastRadius } = await import('./agent/blast-radius.js');
+
+    // Resolve the target: an existing file → file mode; otherwise an indexed symbol,
+    // analyzed in the file where it's defined.
+    const asFile = path.isAbsolute(target) ? target : path.resolve(process.cwd(), target);
+    let fileAbs: string;
+    let symbolFilter: string[] | undefined;
+    if (fsSync.existsSync(asFile) && fsSync.statSync(asFile).isFile()) {
+      fileAbs = asFile;
+    } else {
+      const defs = db.findSymbolsByName(target);
+      if (defs.length === 0) {
+        console.error(`"${target}" is neither an existing file nor an indexed symbol. Run \`qodex index\` to refresh the graph.`);
+        process.exit(1);
+      }
+      fileAbs = defs[0]!.file_path;
+      symbolFilter = [target];
+      if (defs.length > 1) {
+        console.log(`(symbol defined in ${defs.length} places — analyzing ${path.relative(process.cwd(), fileAbs)})`);
+      }
+    }
+    const impact = await computeBlastRadius(db, fileAbs, {
+      cwd: process.cwd(),
+      symbolFilter,
+      maxGraphAgeMs: Number.POSITIVE_INFINITY, // standalone: always answer, even from an old graph
+      maxChars: 2000, // terminal gets a roomier cap than the edit-loop note
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(impact, null, 2));
+    } else if (!impact.note) {
+      console.log(`No impact data for ${path.relative(process.cwd(), fileAbs)} — the file has no indexed top-level symbols (run \`qodex index\` to refresh).`);
+    } else {
+      console.log(impact.note);
+    }
+    process.exit(0);
+  });
+
+const receipt = program
+  .command('receipt')
+  .description('Work with run receipts — the tamper-evident record of an unattended run');
+
+receipt
+  .command('verify <file>')
+  .description('Re-check a run receipt: action-chain integrity + signature. Exits non-zero unless it verifies')
+  .option('--json', 'Print the machine-readable verdict')
+  .action(async (file: string, _o: any, cmd: any) => {
+    // optsWithGlobals(): the root command also defines --json, and commander lets the parent
+    // consume a same-named flag written after the subcommand (the c73b9a3 bug).
+    const o = cmd.optsWithGlobals() as { json?: boolean };
+    const { verifyReceipt, formatReceiptVerdict, receiptExitCode } = await import('./agent/run-receipt.js');
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fsSync.readFileSync(file, 'utf-8'));
+    } catch (e: any) {
+      console.error(`Cannot read receipt ${file}: ${e.message}`);
+      process.exit(2);
+    }
+    // No key ⇒ the chain is still checked, but the signature is reported as unverifiable
+    // rather than assumed good. verifyReceipt is explicit about that distinction.
+    const verdict = verifyReceipt(parsed, process.env.QODEX_AUDIT_KEY);
+    console.log(o.json ? JSON.stringify(verdict, null, 2) : formatReceiptVerdict(parsed, verdict));
+    process.exit(receiptExitCode(verdict));
+  });
+
+program
+  .command('eval')
+  .description('Measure the agent harness. Default suite is free, offline and deterministic — no model calls')
+  .option('--suite <name>', 'Suite to run (default: harness). Use --list to see them', 'harness')
+  .option('--list', 'List available suites and exit')
+  .option('--repeat <n>', 'Runs per task; reports variance and flags flaky tasks', '1')
+  .option('--filter <sel>', 'Comma-separated task ids or categories to keep')
+  .option('--out <file>', 'Write the run as JSON (feed it to --compare later)')
+  .option('--compare <before> [after]', 'Diff two saved runs; with one file, diff it against a fresh run')
+  .option('--label <name>', 'Label this run (shown in the A/B diff so arms are self-describing)')
+  .option('--json', 'Print machine-readable JSON instead of the report')
+  .action(async (_opts: any, cmd: any) => {
+    // optsWithGlobals(): the root command defines --json (and -m/--model), and commander
+    // lets the parent consume a same-named flag written after the subcommand — the bug
+    // fixed in c73b9a3. Read the merged view so `eval --json` reaches us.
+    const opts = cmd.optsWithGlobals() as {
+      suite?: string; list?: boolean; repeat?: string; filter?: string;
+      out?: string; compare?: string; label?: string; json?: boolean;
+    };
+    const { runSuite, getSuite, listSuites, diffRuns, formatRunReport, formatDiffReport } =
+      await import('./eval/index.js');
+
+    if (opts.list) {
+      for (const s of listSuites()) {
+        console.log(`${s.name.padEnd(10)} ${s.free ? '(free) ' : '(model)'} ${s.description}`);
+      }
+      process.exit(0);
+    }
+
+    // `--compare a.json [b.json]`: with two files, diff them. With one, diff the saved
+    // run against a fresh run of the same suite — the common "did my change help?" loop.
+    const readRun = (p: string) => JSON.parse(fsSync.readFileSync(p, 'utf-8'));
+    if (opts.compare) {
+      const extra = (cmd.args ?? []).filter((a: string) => a.endsWith('.json'));
+      const before = readRun(opts.compare);
+      const after = extra.length
+        ? readRun(extra[0])
+        : await (async () => {
+            const suite = getSuite(before.suite);
+            if (!suite) { console.error(`Unknown suite "${before.suite}" from ${opts.compare}.`); process.exit(2); }
+            return runSuite(suite!, { config: { label: opts.label ?? 'after' } });
+          })();
+      const diff = diffRuns(before, after);
+      console.log(opts.json ? JSON.stringify(diff, null, 2) : formatDiffReport(diff));
+      // Non-zero on a regression so this can gate CI.
+      process.exit(diff.regressions.length > 0 ? 1 : 0);
+    }
+
+    const suite = getSuite(opts.suite ?? 'harness');
+    if (!suite) {
+      console.error(`Unknown suite "${opts.suite}". Run \`qodex eval --list\`.`);
+      process.exit(2);
+    }
+    const sel = (opts.filter ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const ids = suite.tasks.map(t => t.id);
+    const run = await runSuite(suite, {
+      repeat: Math.max(1, Number(opts.repeat ?? 1) || 1),
+      config: { label: opts.label ?? 'run' },
+      filter: sel.length
+        ? { ids: sel.filter(s => ids.includes(s)), categories: sel.filter(s => !ids.includes(s)) }
+        : undefined,
+    });
+    if (opts.out) {
+      fsSync.writeFileSync(opts.out, JSON.stringify(run, null, 2) + '\n', 'utf-8');
+    }
+    console.log(opts.json ? JSON.stringify(run, null, 2) : formatRunReport(run));
+    // Any failure is a non-zero exit: a harness regression should break the build.
+    process.exit(run.summary.failed > 0 ? 1 : 0);
+  });
+
+program
   .command('config')
   .description('Show effective configuration')
   .action(async () => {
-    const config = await loadConfig(process.cwd());
-    console.log(JSON.stringify(config, null, 2));
+    const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
+    const active = getActiveProfile();
+    const body = active
+      ? { profile: { name: active.name, source: active.source, path: active.path }, ...config }
+      : config;
+    console.log(JSON.stringify(body, null, 2));
+  });
+
+const profileCmd = program
+  .command('profile')
+  .description('Named config overlays (qodex --profile <name> / QODEX_PROFILE)');
+
+profileCmd
+  .command('list', { isDefault: true })
+  .description('List file + inline profiles')
+  .action(async () => {
+    const { listProfiles } = await import('./config/profile.js');
+    const rows = await listProfiles();
+    if (rows.length === 0) {
+      console.log('No profiles. Add ~/.qodex/profiles/<name>.yaml or a profiles.<name> block in ~/.qodex/config.yaml.');
+      return;
+    }
+    try { await loadConfig(process.cwd(), { profile: getRequestedProfile() }); } catch { /* list even if overlay is missing */ }
+    const active = getActiveProfile()?.name ?? getRequestedProfile() ?? process.env.QODEX_PROFILE;
+    for (const r of rows) {
+      const mark = r.name === active ? ' *' : '  ';
+      console.log(`${mark}${r.name.padEnd(16)} ${r.source.padEnd(7)} ${r.path}`);
+    }
+  });
+
+profileCmd
+  .command('show <name>')
+  .description('Print one profile overlay')
+  .action(async (name: string) => {
+    const { loadProfileOverlay } = await import('./config/profile.js');
+    const hit = await loadProfileOverlay(name);
+    console.log(JSON.stringify({ name: hit.name, source: hit.source, path: hit.path, overlay: hit.overlay }, null, 2));
+  });
+
+program
+  .command('bot')
+  .description('Run the chat front-end (Telegram / Discord / Slack / WhatsApp Cloud / Signal)')
+  .option('--telegram', 'start only Telegram')
+  .option('--discord', 'start only Discord')
+  .option('--slack', 'start only Slack')
+  .option('--whatsapp', 'start only WhatsApp Cloud API')
+  .option('--signal', 'start only signal-cli')
+  .action(async (opts: { telegram?: boolean; discord?: boolean; slack?: boolean; whatsapp?: boolean; signal?: boolean }) => {
+    const { config, router, registry, permissions } = await bootstrap();
+    const { startBots } = await import('./bot/start.js');
+    await startBots({ config, router, registry, permissions, cwd: process.cwd() }, opts);
+  });
+
+program
+  .command('dashboard')
+  .alias('dash')
+  .description('Open a live CONTROL dashboard — view AND change providers, settings, memory, schedules, offloading')
+  .option('--static', 'Write a read-only HTML snapshot instead of starting the control server')
+  .action(async (opts: { static?: boolean }) => {
+    if (opts.static) {
+      const { writeStaticDashboard } = await import('./cli/dashboard.js');
+      const out = await writeStaticDashboard(process.cwd());
+      console.log(`\n📊 QodeX dashboard (read-only) → ${out}\n`);
+      process.exit(0);
+    }
+    const { runDashboard } = await import('./cli/dashboard.js');
+    const url = await runDashboard(process.cwd());
+    console.log(`\n📊 QodeX control dashboard → ${url}`);
+    console.log('   Live & local (127.0.0.1, token-protected). Toggle settings, manage schedules,');
+    console.log('   forget facts, apply offloading — changes hit your real config. Ctrl-C to stop.\n');
+    const shutdown = () => process.exit(0);
+    process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+    await new Promise<never>(() => {}); // keep the server alive
   });
 
 const mcpCmd = program
@@ -432,7 +830,14 @@ mcpCmd
   .description('Run QodeX AS an MCP server (stdio) — expose its tools to editors like Cursor/Zed/VS Code')
   .option('--tools <names>', 'Comma-separated registry tools to expose (explicit allowlist)')
   .option('--scope <scope>', "Exposure scope: 'safe' (read-only, default), 'all', or omit to use config")
-  .action(async (opts: { tools?: string; scope?: string }) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // optsWithGlobals(): the root command also defines --scope (the autonomy-contract
+    // path-prefix), and commander's default (non-positional) parsing lets the PARENT
+    // swallow `--scope safe|all` even when written after the subcommand — local opts
+    // arrive empty and exposure silently falls back to config. Under config expose
+    // 'all', a user asking for --scope safe would get write-capable tools. Same gotcha
+    // as --model/--json; see `provider add`.
+    const opts = cmd.optsWithGlobals() as { tools?: string; scope?: string };
     // IMPORTANT: stdout is the protocol channel — no console.log here, ever.
     const { config, registry } = await bootstrap();
     const { QodexMcpServer } = await import('./mcp/server/server.js');
@@ -571,7 +976,13 @@ providerCmd
   .option('--context <n>', 'Context window for the pinned model', (v) => parseInt(v, 10))
   .option('--no-tools', 'Mark the pinned model as NOT supporting tool calls')
   .option('--default', 'Also set this provider+model as the default')
-  .action(async (id: string | undefined, opts: { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean }) => {
+  .action(async (id: string | undefined, _opts: unknown, cmd: Command) => {
+    // optsWithGlobals(): the root command also defines `-m, --model`, and commander's default
+    // (non-positional) parsing lets the PARENT swallow `--model <id>` even when it's written after
+    // the subcommand — the local opts arrive empty and the value lands in program.opts() instead.
+    // Merging globals back in recovers it. Same gotcha for every subcommand flag that shadows a
+    // root global (--model, --json); see `offload`, `tokens`, `schedule add`, `schedule tick`.
+    const opts = cmd.optsWithGlobals() as { baseUrl?: string; keyEnv?: string; model?: string; context?: number; tools?: boolean; default?: boolean };
     const { findGateway, buildCustomEntry } = await import('./setup/gateways.js');
     const { addProviderToConfig } = await import('./setup/provider-writer.js');
     const { isInteractiveTTY } = await import('./setup/prompt.js');
@@ -670,6 +1081,377 @@ providerCmd
     const { writeFileAtomic } = await import('./utils/atomic-write.js');
     await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
     console.log(`✓ Removed custom provider "${name}".`);
+    process.exit(0);
+  });
+
+program
+  .command('maintain-demo')
+  .description('Open a self-contained "Maintain in action" demo page (the self-improvement loop, visually)')
+  .option('--markdown', 'emit a shareable Markdown writeup instead of opening the interactive page')
+  .option('--pdf', 'write a shareable one-page PDF instead of opening the interactive page')
+  .option('-o, --out <file>', 'with --markdown/--pdf, write to this file (PDF default: ~/.qodex/maintain-demo.pdf)')
+  .action(async (opts: { markdown?: boolean; pdf?: boolean; out?: string }) => {
+    if (opts.markdown) {
+      const { buildMaintainDemoMarkdown } = await import('./cli/maintain-demo.js');
+      const md = buildMaintainDemoMarkdown();
+      if (opts.out) { const { promises: fs } = await import('fs'); await fs.writeFile(opts.out, md); console.log(`\n📝 Maintain writeup → ${opts.out}\n`); }
+      else console.log(md);
+      process.exit(0);
+    }
+    if (opts.pdf) {
+      const { buildMaintainDemoPdfBlocks } = await import('./cli/maintain-demo.js');
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-demo.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildMaintainDemoPdfBlocks()), 'latin1'));
+      console.log(`\n📄 Maintain one-pager → ${out}\n`);
+      process.exit(0);
+    }
+    const { runMaintainDemo } = await import('./cli/maintain-demo.js');
+    const out = await runMaintainDemo();
+    console.log(`\n🎬 Maintain demo → ${out}\n   Opened in your browser.\n`);
+    process.exit(0);
+  });
+
+program
+  .command('maintain-report')
+  .description('Self-Improvement Report — real receipt-backed numbers; --markdown for PRs, --pdf for a shareable one-pager')
+  .option('--markdown', 'emit the report as Markdown (paste into a PR / issue / team chat)')
+  .option('--pdf', 'write the report as a one-page PDF (real bar chart for the 8-week trend)')
+  .option('-o, --out <file>', 'with --markdown/--pdf, write to this file (PDF default: ~/.qodex/maintain-report.pdf)')
+  .action(async (opts: { markdown?: boolean; pdf?: boolean; out?: string }) => {
+    const { getScheduleStore } = await import('./schedule/store.js');
+    const { parseMaintainScope, MAINTAIN_SCOPES } = await import('./schedule/recipes.js');
+    const { buildMaintainStats, weeklyReport, recommendNextScope, trendByWeek, projectMonthly, forecastTrend } = await import('./cli/maintain-stats.js');
+    const store = getScheduleStore();
+    const runs: import('./cli/maintain-stats.js').MaintainRun[] = [];
+    for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+      const scope = parseMaintainScope(s.prompt).scope;
+      for (const r of store.recentRuns(s.id, 100)) {
+        let status = r.status ?? 'running'; let files = 0;
+        if (r.receipt) { try { const rc = JSON.parse(r.receipt); status = rc.status ?? status; files = (rc.filesChanged ?? []).length; } catch { /* ignore */ } }
+        runs.push({ scope, status, filesChanged: files, when: '', at: r.started_at });
+      }
+    }
+    const now = Date.now();
+    const stats = buildMaintainStats(runs);
+    const wk = weeklyReport(runs, now);
+    const next = recommendNextScope(runs, stats, MAINTAIN_SCOPES);
+    const proj = projectMonthly(runs, now);
+    const fc = forecastTrend(runs, now);
+    const trend = trendByWeek(runs, now);
+
+    // Export paths: the SAME data through the PURE exporters — report can't disagree across formats.
+    if (opts.markdown || opts.pdf) {
+      const { buildMaintainReportMarkdown, buildMaintainReportPdfBlocks } = await import('./cli/maintain-report-export.js');
+      const data = {
+        generatedAt: new Date(now).toISOString().slice(0, 10),
+        project: process.cwd().split(/[\\/]/).filter(Boolean).pop(),
+        stats, weekly: wk, trend, forecast: fc, projection: proj, next,
+      };
+      if (opts.markdown) {
+        const md = buildMaintainReportMarkdown(data);
+        if (opts.out) { const { promises: fs } = await import('fs'); await fs.writeFile(opts.out, md); console.log(`\n📝 Report → ${opts.out}\n`); }
+        else console.log(md);
+        process.exit(0);
+      }
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const path = await import('path');
+      const { promises: fs } = await import('fs');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-report.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildMaintainReportPdfBlocks(data)), 'latin1'));
+      console.log(`\n📄 Report → ${out}\n`);
+      process.exit(0);
+    }
+
+    const spark = (() => { const t = trend; const max = Math.max(1, ...t); const b = '▁▂▃▄▅▆▇█'; return t.map(n => b[Math.min(7, Math.round((n / max) * 7))]).join(''); })();
+    console.log('\n🔧 QodeX Self-Improvement Report\n');
+    if (stats.totalRuns === 0) { console.log('  No maintain runs yet. `qodex schedule add --recipe maintain --prompt "unused-imports"`.\n'); process.exit(0); }
+    console.log(`  All time:   ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
+    console.log(`  This week:  ${wk.opened} PR(s) · ${wk.filesCleaned} files · ${wk.openedDelta >= 0 ? '▲' : '▼'}${Math.abs(wk.openedDelta)} vs last week`);
+    console.log(`  8-wk trend: ${spark}  (opened/week)`);
+    const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
+    console.log(`  Forecast:   ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek} cleanup(s)`);
+    console.log(`  Projected:  ~${proj.cleanupsPerMonth} cleanups/mo · ~${proj.minutesPerMonth} min/mo at the current rate`);
+    console.log(`  By scope:   ${stats.byScope.map(s => `${s.scope} ${s.opened}/${s.runs}`).join(' · ') || '—'}`);
+    if (next) console.log(`  Suggested:  qodex schedule add --recipe maintain --prompt "${next.scope}"   (${next.why})`);
+    console.log('');
+    process.exit(0);
+  });
+
+// Gather maintain runs from the local schedule store (shared by export). Returns MaintainRun[].
+async function gatherMaintainRuns(): Promise<import('./cli/maintain-stats.js').MaintainRun[]> {
+  const { getScheduleStore } = await import('./schedule/store.js');
+  const { parseMaintainScope } = await import('./schedule/recipes.js');
+  const store = getScheduleStore();
+  const runs: import('./cli/maintain-stats.js').MaintainRun[] = [];
+  for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+    const scope = parseMaintainScope(s.prompt).scope;
+    for (const r of store.recentRuns(s.id, 500)) {
+      let status = r.status ?? 'running'; let files = 0;
+      if (r.receipt) { try { const rc = JSON.parse(r.receipt); status = rc.status ?? status; files = (rc.filesChanged ?? []).length; } catch { /* ignore */ } }
+      runs.push({ scope, status, filesChanged: files, when: '', at: r.started_at });
+    }
+  }
+  return runs;
+}
+
+program
+  .command('maintain-export')
+  .description('Export the maintain history to a portable JSON snapshot; --sign adds an HMAC-signed audit head')
+  .option('-o, --out <file>', 'write to this file instead of stdout')
+  .option('--sign', 'sign the snapshot with HMAC-SHA256 using the QODEX_AUDIT_KEY env var (never stored)')
+  .action(async (opts: { out?: string; sign?: boolean }) => {
+    const { serializeMaintainHistory } = await import('./cli/maintain-history.js');
+    let key: string | undefined;
+    if (opts.sign) {
+      key = process.env.QODEX_AUDIT_KEY;
+      if (!key) { console.error('\n✗ --sign needs a key: set QODEX_AUDIT_KEY in your environment (it is never stored).\n'); process.exit(1); }
+    }
+    const runs = await gatherMaintainRuns();
+    const json = serializeMaintainHistory(runs, new Date().toISOString(), { key });
+    if (opts.out) {
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(opts.out, json);
+      console.log(`\n📦 Exported ${runs.length} maintain run(s) → ${opts.out}${key ? '  🔏 signed' : ''}\n`);
+    } else {
+      console.log(json);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('maintain-import <file>')
+  .description('Report on a maintain-history snapshot; --merge combines it with local history')
+  .option('--merge', 'merge the snapshot with local history and report the combined analytics')
+  .action(async (file: string, opts: { merge?: boolean }) => {
+    const { promises: fs } = await import('fs');
+    const { deserializeMaintainHistory, mergeRuns, verifyHistoryAudit } = await import('./cli/maintain-history.js');
+    const { buildMaintainStats, forecastTrend } = await import('./cli/maintain-stats.js');
+    let parsed;
+    try { parsed = deserializeMaintainHistory(await fs.readFile(file, 'utf-8')); }
+    catch (e: any) { console.error(`\n✗ Could not read snapshot: ${e?.message ?? e}\n`); process.exit(1); }
+    let runs = parsed!.runs;
+    // Tamper check BEFORE merging: verify the snapshot's audit head (and signature, if a key is set).
+    const audit = verifyHistoryAudit(runs, parsed!.audit, process.env.QODEX_AUDIT_KEY);
+    if (audit.present && !audit.ok) {
+      const why = audit.headMatches === false ? 'runs do not match the audit head (snapshot was altered)' : 'signature is INVALID (wrong key or forged)';
+      console.error(`\n❌ Snapshot failed its audit check: ${why}. Refusing to report on it.\n`);
+      process.exit(1);
+    }
+    let label = `snapshot (${runs.length} run(s)${parsed!.exportedAt ? `, exported ${parsed!.exportedAt.slice(0, 10)}` : ''})`;
+    if (opts.merge) {
+      const local = await gatherMaintainRuns();
+      const before = runs.length;
+      runs = mergeRuns(local, runs);
+      label = `merged: ${local.length} local + ${before} imported → ${runs.length} unique`;
+    }
+    const now = Date.now();
+    const stats = buildMaintainStats(runs);
+    const fc = forecastTrend(runs, now);
+    const arrow = fc.direction === 'rising' ? 'rising ↑' : fc.direction === 'falling' ? 'cooling ↓' : 'steady →';
+    console.log(`\n📥 Maintain history — ${label}\n`);
+    if (audit.present) {
+      const sig = !audit.signaturePresent ? 'unsigned'
+        : audit.signatureValid === undefined ? 'signed (set QODEX_AUDIT_KEY to verify)'
+        : audit.signatureValid ? '🔏 signature valid (authentic)' : 'signature INVALID';
+      console.log(`  Audit:     ✓ integrity intact · ${sig}`);
+    }
+    if (stats.totalRuns === 0) { console.log('  No runs in the snapshot.\n'); process.exit(0); }
+    console.log(`  Totals:    ${stats.opened} cleanup PR(s) · ${stats.blocked} safely blocked · ${stats.filesCleaned} files cleaned · ~${stats.estMinutesSaved} min saved`);
+    console.log(`  Forecast:  ${arrow} · avg ~${fc.weeklyAvg}/wk · next week ≈ ${fc.nextWeek}`);
+    console.log(`  By scope:  ${stats.byScope.map(s => `${s.scope} ${s.opened}/${s.runs}`).join(' · ') || '—'}`);
+    console.log(opts.merge ? '\n  (report only — local history is unchanged)\n' : '');
+    process.exit(0);
+  });
+
+// Gather AUDITABLE runs — richer than analytics runs: PR url + verification, straight from receipts.
+async function gatherAuditableRuns(): Promise<import('./cli/maintain-audit.js').AuditableRun[]> {
+  const { getScheduleStore } = await import('./schedule/store.js');
+  const { parseMaintainScope } = await import('./schedule/recipes.js');
+  const store = getScheduleStore();
+  const runs: import('./cli/maintain-audit.js').AuditableRun[] = [];
+  for (const s of store.list().filter((s: any) => s.recipe === 'maintain')) {
+    const scope = parseMaintainScope(s.prompt).scope;
+    for (const r of store.recentRuns(s.id, 500)) {
+      let status = r.status ?? 'running', files = 0, prUrl: string | undefined, verification: { command: string; passed: boolean }[] | undefined;
+      if (r.receipt) {
+        try {
+          const rc = JSON.parse(r.receipt);
+          status = rc.status ?? status;
+          files = (rc.filesChanged ?? []).length;
+          prUrl = rc.prUrl || undefined;
+          verification = Array.isArray(rc.verification) ? rc.verification.map((v: any) => ({ command: String(v.command ?? ''), passed: !!v.passed })) : undefined;
+        } catch { /* ignore */ }
+      }
+      runs.push({ at: r.started_at, scope, status, filesChanged: files, prUrl, verification });
+    }
+  }
+  return runs;
+}
+
+program
+  .command('maintain-audit')
+  .description('Export a tamper-evident audit log of maintain runs (a hash chain); --sign adds an HMAC signature; --pdf renders the auditor one-pager')
+  .option('-o, --out <file>', 'write to this file (PDF default: ~/.qodex/maintain-audit.pdf)')
+  .option('--sign', 'sign the chain head with HMAC-SHA256 using the QODEX_AUDIT_KEY env var')
+  .option('--pdf', 'render an auditor-facing PDF (verification status + the full run chain) instead of JSON')
+  .action(async (opts: { out?: string; sign?: boolean; pdf?: boolean }) => {
+    const { buildSignedAuditLog, serializeAuditLog, verifyAuditLog, buildAuditPdfBlocks } = await import('./cli/maintain-audit.js');
+    const runs = await gatherAuditableRuns();
+    let key: string | undefined;
+    if (opts.sign) {
+      key = process.env.QODEX_AUDIT_KEY;
+      if (!key) { console.error('\n✗ --sign needs a key: set QODEX_AUDIT_KEY in your environment (it is never stored).\n'); process.exit(1); }
+    }
+    const log = buildSignedAuditLog(runs, { exportedAt: new Date().toISOString(), key });
+    if (opts.pdf) {
+      const verdict = verifyAuditLog(log, key);   // self-check the freshly-built chain → status block
+      const { buildPdf } = await import('./cli/pdf-lite.js');
+      const { QODEX_HOME } = await import('./config/defaults.js');
+      const path = await import('path');
+      const { promises: fs } = await import('fs');
+      const out = opts.out ?? path.join(QODEX_HOME, 'maintain-audit.pdf');
+      await fs.mkdir(path.dirname(out), { recursive: true }).catch(() => {});
+      await fs.writeFile(out, Buffer.from(buildPdf(buildAuditPdfBlocks(log, verdict)), 'latin1'));
+      console.log(`\n📄 Audit one-pager → ${out}\n   ${log.count} entry(ies)${log.signature ? ` · 🔏 signed (key ${log.keyId})` : ' · unsigned'}\n`);
+      process.exit(0);
+    }
+    const json = serializeAuditLog(log);
+    if (opts.out) {
+      const { promises: fs } = await import('fs');
+      await fs.writeFile(opts.out, json);
+      console.log(`\n🔏 Audit log → ${opts.out}\n   ${log.count} entry(ies) · head ${log.head.slice(0, 16)}…${log.signature ? ` · signed (key ${log.keyId})` : ' · unsigned'}\n`);
+    } else {
+      console.log(json);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('maintain-audit-verify <file>')
+  .description('Verify a maintain audit log offline: chain integrity + (with QODEX_AUDIT_KEY) the signature')
+  .action(async (file: string) => {
+    const { promises: fs } = await import('fs');
+    const { verifyAuditLog } = await import('./cli/maintain-audit.js');
+    let log: any;
+    try { log = JSON.parse(await fs.readFile(file, 'utf-8')); }
+    catch (e: any) { console.error(`\n✗ Could not read audit log: ${e?.message ?? e}\n`); process.exit(1); }
+    const key = process.env.QODEX_AUDIT_KEY;
+    const v = verifyAuditLog(log, key);
+    console.log(`\n🔎 Audit verification — ${file}\n`);
+    console.log(`  entries:    ${v.count}`);
+    console.log(`  chain:      ${v.chainValid ? '✓ intact (no entry altered/reordered/dropped)' : `✗ BROKEN at #${v.brokenAt} — ${v.reason}`}`);
+    console.log(`  head:       ${v.headMatches ? '✓ matches the chain' : '✗ stored head ≠ recomputed head'}`);
+    if (!v.signaturePresent) console.log('  signature:  — none (integrity only; add --sign on export for authenticity)');
+    else if (v.signatureValid === undefined) console.log('  signature:  present, but no QODEX_AUDIT_KEY set to check it');
+    else console.log(`  signature:  ${v.signatureValid ? '✓ valid (authentic)' : '✗ INVALID (wrong key or forged)'}`);
+    console.log(`\n  ${v.ok ? '✅ PASS — this log is trustworthy.' : '❌ FAIL — do not trust this log.'}\n`);
+    process.exit(v.ok ? 0 : 1);
+  });
+
+program
+  .command('whoami')
+  .description('Show what QodeX has learned about you — stated preferences + the focus of recent tasks')
+  .action(async () => {
+    const { getSessionStore } = await import('./session/store.js');
+    const { readEpisodes } = await import('./context/episodic-memory.js');
+    const { buildUserModel, renderUserModel } = await import('./context/user-model.js');
+    const cwd = process.cwd();
+    const userFacts = (() => { try { return getSessionStore().getFactsByScope('user', cwd, 100); } catch { return []; } })();
+    const eps = await readEpisodes(cwd).catch(() => []);
+    console.log('\n' + renderUserModel(buildUserModel({ userFacts, episodes: eps.map(e => ({ prompt: e.prompt, files: e.filesChanged })) })) + '\n');
+    process.exit(0);
+  });
+
+program
+  .command('tunnel')
+  .description('SSH-tunnel to a remote model server (run the heavy model on a workstation, drive from here)')
+  .requiredOption('--host <host>', 'Remote host (workstation running Ollama / LM Studio)')
+  .option('--user <user>', 'SSH user')
+  .option('--port <n>', 'SSH port (default 22)')
+  .option('--remote-port <n>', 'Remote inference port', '11434')
+  .option('--local-port <n>', 'Local port to forward', '11434')
+  .option('--identity <file>', 'SSH private key file')
+  .action(async (opts: any) => {
+    const { openTunnel, buildTunnelArgs } = await import('./cli/ssh-tunnel.js');
+    const t = { host: opts.host, user: opts.user, port: opts.port ? Number(opts.port) : undefined,
+      localPort: Number(opts.localPort), remotePort: Number(opts.remotePort), identityFile: opts.identity };
+    console.log(`\n🔌 ssh ${buildTunnelArgs(t).join(' ')}`);
+    try {
+      await openTunnel(t);
+      console.log(`✓ Tunnel up — point providers.ollama.baseUrl at http://localhost:${t.localPort}. Ctrl-C to close.\n`);
+      process.on('SIGINT', () => process.exit(0));
+      await new Promise<never>(() => {});
+    } catch (e: any) { console.error(`✗ ${e?.message ?? e}`); process.exit(1); }
+  });
+
+program
+  .command('update')
+  .description('Self-update the QodeX git checkout (git pull → npm install → npm run build)')
+  .option('--check', 'Only check whether a newer version is available; don\'t apply it')
+  .action(async (opts: { check?: boolean }) => {
+    if (opts.check) {
+      const { checkForUpdate } = await import('./cli/self-update.js');
+      const s = await checkForUpdate();
+      console.log(`\n${s.updateAvailable ? '⬆' : s.ok ? '✓' : '✗'} ${s.message}\n`);
+      process.exit(s.ok ? 0 : 1);
+    }
+    const { selfUpdate } = await import('./cli/self-update.js');
+    console.log('\n🔄 Updating QodeX…');
+    const r = await selfUpdate(line => console.log('  ' + line));
+    for (const l of r.log) console.log('  ' + l);
+    console.log(`\n${r.ok ? '✓' : '✗'} ${r.message}\n`);
+    process.exit(r.ok ? 0 : 1);
+  });
+
+program
+  .command('offload')
+  .description('Auto-detect VRAM + model size and suggest a num_gpu for running large/MoE models locally')
+  .option('--model <id>', 'Ollama model to plan for (default: configured default model)')
+  .option('--vram <gb>', 'Override the VRAM budget in GB (skip auto-detect)')
+  .option('--apply', 'Write the suggested num_gpu into config (providers.ollama.options.num_gpu)')
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
+    const opts = cmd.optsWithGlobals() as { model?: string; vram?: string; apply?: boolean };
+    const config = await loadConfig(process.cwd(), { profile: getRequestedProfile() });
+    const baseUrl = (config as any).providers?.ollama?.baseUrl ?? 'http://localhost:11434';
+    const model = opts.model ?? (config as any).defaults?.model;
+    if (!model) { console.error('No model — pass --model <id> or set defaults.model.'); process.exit(1); }
+    const { planOffload, detectVramGB } = await import('./setup/offload-detect.js');
+    const { describeOffload } = await import('./llm/offload.js');
+    const vramBudgetGB = opts.vram ? Number(opts.vram) : undefined;
+    const sug = await planOffload({ baseUrl, model, vramBudgetGB });
+    if (!sug) {
+      const vram = vramBudgetGB ?? detectVramGB();
+      console.error(!vram
+        ? `Couldn't detect VRAM. Re-run with --vram <gb> to set a budget manually.`
+        : `Couldn't read model facts — is "${model}" pulled in Ollama at ${baseUrl}? (Ollama-only; LM Studio not supported here.)`);
+      process.exit(1);
+    }
+    console.log(`\nModel: ${model}`);
+    console.log(`  ~${sug.facts.modelSizeGB.toFixed(1)} GB · ${sug.facts.totalLayers} layers · VRAM budget ${sug.vramGB} GB`);
+    console.log(`  ${describeOffload(sug.plan, sug.facts.totalLayers)}\n`);
+    if (opts.apply) {
+      const fs = await import('fs/promises');
+      const yaml = await import('js-yaml');
+      const { QODEX_CONFIG_FILE } = await import('./config/defaults.js');
+      let raw = ''; try { raw = await fs.readFile(QODEX_CONFIG_FILE, 'utf-8'); } catch {}
+      const cfg: any = raw.trim() ? (yaml.load(raw) ?? {}) : {};
+      cfg.providers ??= {}; cfg.providers.ollama ??= {}; cfg.providers.ollama.options ??= {};
+      cfg.providers.ollama.options.num_gpu = sug.plan.numGpu;
+      const { writeFileAtomic } = await import('./utils/atomic-write.js');
+      await writeFileAtomic(QODEX_CONFIG_FILE, yaml.dump(cfg, { lineWidth: 100, noRefs: true }));
+      console.log(`✓ Wrote providers.ollama.options.num_gpu: ${sug.plan.numGpu} to ${QODEX_CONFIG_FILE}`);
+    } else {
+      console.log('Re-run with --apply to write it, or add manually:');
+      console.log(`  providers: { ollama: { options: { num_gpu: ${sug.plan.numGpu} } } }`);
+    }
     process.exit(0);
   });
 
@@ -873,7 +1655,9 @@ program
   .command('tokens [sessionId]')
   .description('Show per-turn token consumption breakdown for a session. Pure measurement, no behavior change. Defaults to the most recent session in this directory.')
   .option('-j, --json', 'Output JSON instead of a human-readable table')
-  .action(async (sessionIdArg: string | undefined, opts: { json?: boolean }) => {
+  .action(async (sessionIdArg: string | undefined, _opts: unknown, cmd: Command) => {
+    // Root --json swallows a post-subcommand --json under default parsing (see `provider add`).
+    const opts = cmd.optsWithGlobals() as { json?: boolean };
     const { registry, codeGraph, mcpManager } = await bootstrap();
     const store = getSessionStore();
 
@@ -980,7 +1764,8 @@ schedule
         ? `${new Date(e.last_run_at).toLocaleString()} (${e.last_status})`
         : 'never';
       const kind = e.kind === 'mission' ? 'mission' : 'prompt ';
-      console.log(`${flag} ${e.id.slice(0, 8)}  ${kind}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}`);
+      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : ''].filter(Boolean).join('  ');
+      console.log(`${flag} ${e.id.slice(0, 8)}  ${kind}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}${tags ? `  ${tags}` : ''}`);
     }
   });
 
@@ -994,9 +1779,21 @@ schedule
   .option('--model <id>', 'Model to use (default: configured default)')
   .option('--allow <tools>', 'Comma-separated tool allowlist (default: all)')
   .option('--mission', 'Start a background mission each run (the prompt is its goal) instead of a one-shot run')
-  .action(async (opts: any) => {
+  .option('--deliver <target>', 'Send the result to chat, e.g. "telegram:<chatId>" or "discord:<channelId>"')
+  .option('--recipe <kind>', 'Run a protocol instead of a bare prompt: "verified-pr" (sandbox branch → verify → open PR only if green)')
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
+    const opts: any = cmd.optsWithGlobals();
     const { getScheduleStore } = await import('./schedule/store.js');
+    const { isRecipe, RECIPES } = await import('./schedule/recipes.js');
+    const { parseDeliveryTarget } = await import('./schedule/delivery.js');
     try {
+      if (opts.recipe && !isRecipe(opts.recipe)) {
+        throw new Error(`Unknown recipe "${opts.recipe}". Available: ${RECIPES.join(', ')}.`);
+      }
+      if (opts.deliver && !parseDeliveryTarget(opts.deliver)) {
+        throw new Error(`Invalid --deliver "${opts.deliver}". Use "telegram:<chatId>" or "discord:<channelId>".`);
+      }
       const entry = getScheduleStore().add({
         name: opts.name,
         cron: opts.cron,
@@ -1005,8 +1802,12 @@ schedule
         model: opts.model,
         allowedTools: opts.allow ? opts.allow.split(',').map((s: string) => s.trim()).filter(Boolean) : undefined,
         kind: opts.mission ? 'mission' : 'prompt',
+        deliver: opts.deliver,
+        recipe: opts.recipe,
       });
       console.log(`✓ Scheduled "${entry.name}" (${entry.id.slice(0, 8)}).`);
+      if (entry.recipe) console.log(`  Recipe:   ${entry.recipe}`);
+      if (entry.deliver) console.log(`  Delivers: ${entry.deliver}`);
       if (entry.next_run_at) console.log(`  Next run: ${new Date(entry.next_run_at).toLocaleString()}`);
       console.log(`  Make sure the tick is installed: \`qodex schedule install\``);
     } catch (e: any) {
@@ -1055,15 +1856,34 @@ schedule
     if (runs.length === 0) { console.log('No runs yet.'); return; }
     for (const r of runs) {
       const dur = r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—';
-      console.log(`  ${r.started_at}  ${(r.status ?? 'running').padEnd(8)}  exit=${r.exit_code ?? '—'}  ${dur}  ${(r.message ?? '').slice(0, 80)}`);
+      let verdict = '';
+      if (r.receipt) { try { const rc = JSON.parse(r.receipt); verdict = `  🧾 ${rc.status}${rc.prUrl ? ` ${rc.prUrl}` : ''}`; } catch {} }
+      console.log(`  ${r.started_at}  ${(r.status ?? 'running').padEnd(8)}  exit=${r.exit_code ?? '—'}  ${dur}  ${(r.message ?? '').slice(0, 80)}${verdict}`);
     }
+  });
+
+schedule
+  .command('receipt <idOrName>')
+  .description('Show the trust receipt of the latest run (what ran, what verified, the PR)')
+  .action(async (idOrName: string) => {
+    const { getScheduleStore } = await import('./schedule/store.js');
+    const { formatReceipt } = await import('./schedule/receipt.js');
+    const store = getScheduleStore();
+    const e = store.resolve(idOrName);
+    if (!e) { console.error(`No schedule matches "${idOrName}".`); process.exit(1); }
+    const withReceipt = store.recentRuns(e.id, 20).find(r => r.receipt);
+    if (!withReceipt?.receipt) { console.log('No receipt yet (only `verified-pr`/receipt-emitting runs produce one).'); return; }
+    try { console.log(`\n${formatReceipt(JSON.parse(withReceipt.receipt))}\n  run: ${withReceipt.started_at}\n`); }
+    catch { console.log(withReceipt.receipt); }
   });
 
 schedule
   .command('tick')
   .description('Run all due schedules now (invoked by launchd/cron every minute)')
   .option('--json', 'Print result as JSON')
-  .action(async (opts: any) => {
+  .action(async (_opts: unknown, cmd: Command) => {
+    // Root --json swallows a post-subcommand --json under default parsing (see `provider add`).
+    const opts: any = cmd.optsWithGlobals();
     const { tick } = await import('./schedule/runner.js');
     const result = await tick();
     if (opts.json) console.log(JSON.stringify(result));

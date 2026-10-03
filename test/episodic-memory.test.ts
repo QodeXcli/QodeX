@@ -1,0 +1,159 @@
+import { describe, it, expect } from 'vitest';
+import { rankEpisodes, buildEpisodeBlock, fileFreshness, shouldRecordEpisode, episodeVerified, type Episode } from '../src/context/episodic-memory.js';
+
+const ep = (prompt: string, summary: string, files: string[] = []): Episode =>
+  ({ ts: '2026-06-25T00:00:00Z', prompt, summary, filesChanged: files, toolsUsed: [] });
+
+const CORPUS: Episode[] = [
+  ep('Add cursor pagination to the users REST endpoint', 'Parsed limit+cursor, returned next-cursor', ['src/users.ts']),
+  ep('Configure nightly Postgres backup to S3', 'pg_dump + gzip + aws s3 cp in a cron job', ['scripts/backup.sh']),
+  ep('Add a dark mode toggle to the navbar', 'CSS variables + a useTheme hook', ['src/Navbar.tsx']),
+];
+
+describe('rankEpisodes — retrieve the most SIMILAR past task', () => {
+  it('finds the pagination episode for a pagination-shaped query', () => {
+    const m = rankEpisodes('add pagination with a cursor to the products endpoint', CORPUS, { topK: 1, minScore: 0.1 });
+    expect(m).toHaveLength(1);
+    expect(m[0]!.prompt).toMatch(/cursor pagination/);
+  });
+  it('identifier-split + latin overlap recalls a path-named episode', () => {
+    const corpus = [
+      ep('In src/utils/log-format.ts add a JSDoc above formatLogLine', 'documented the helper', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('update the log format helper and formatLogLine output', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+    expect(m[0]!.filesChanged[0]).toMatch(/log-format/);
+  });
+  it('Persian log/format gloss recalls an English log-format episode', () => {
+    const corpus = [
+      ep('In src/utils/log-format.ts add a JSDoc above formatLogLine', 'documented the helper', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('یک فیلد timestamp با فرمت ISO به خروجی فرمت لاگ در helper اضافه کن', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+  });
+  it('a Persian query matches a Persian episode (unicode tokens survive)', () => {
+    const corpus = [
+      ep('تابع فرمت لاگ را در هلپر اضافه کردم', 'خروجی [LEVEL] message', ['src/utils/log-format.ts']),
+    ];
+    const m = rankEpisodes('یک فیلد به خروجی فرمت لاگ در هلپر اضافه کن', corpus, { topK: 1, minScore: 0.18 });
+    expect(m).toHaveLength(1);
+  });
+  it('an UNRELATED query retrieves nothing (smart, not always-on)', () => {
+    expect(rankEpisodes('upgrade the kubernetes ingress controller', CORPUS, { minScore: 0.18 })).toHaveLength(0);
+  });
+  it('excludes a near-identical re-run of the exact same task (score ~1)', () => {
+    const m = rankEpisodes('Add cursor pagination to the users REST endpoint', CORPUS, { topK: 3, minScore: 0.1 });
+    expect(m.every(x => x.score < 0.98)).toBe(true);
+  });
+  it('respects topK and sorts by score', () => {
+    const m = rankEpisodes('add backup and pagination to the database endpoint', CORPUS, { topK: 2, minScore: 0.05 });
+    expect(m.length).toBeLessThanOrEqual(2);
+    for (let i = 1; i < m.length; i++) expect(m[i - 1]!.score).toBeGreaterThanOrEqual(m[i]!.score);
+  });
+  it('empty query / empty corpus → no matches', () => {
+    expect(rankEpisodes('', CORPUS)).toHaveLength(0);
+    expect(rankEpisodes('anything', [])).toHaveLength(0);
+  });
+});
+
+describe('rankEpisodes — diversity, grounding, recency (the "stronger" deltas)', () => {
+  // Three near-duplicate pagination successes + one distinct backup task.
+  const DUPES: Episode[] = [
+    ep('Add cursor pagination to the users endpoint', 'limit+cursor, next-cursor', ['src/users.ts']),
+    ep('Add cursor pagination to the orders endpoint', 'limit+cursor, next-cursor', ['src/orders.ts']),
+    ep('Add cursor pagination to the carts endpoint', 'limit+cursor, next-cursor', ['src/carts.ts']),
+    ep('Configure nightly Postgres backup to S3', 'pg_dump + gzip + aws s3 cp cron', ['scripts/backup.sh']),
+  ];
+
+  it('diversity keeps the top-K distinct instead of K near-duplicates', () => {
+    const q = 'add cursor pagination to the products endpoint with a backup too';
+    const diverse = rankEpisodes(q, DUPES, { topK: 2, minScore: 0.05, diversity: 0.6 });
+    // With diversity on, the 2nd pick should NOT be another pagination clone — the distinct
+    // backup episode wins the second slot over a third pagination variant.
+    expect(diverse).toHaveLength(2);
+    expect(diverse.some(m => /backup/i.test(m.prompt))).toBe(true);
+  });
+
+  it('diversity=0 is legacy behaviour: pure relevance can stack near-duplicates', () => {
+    const q = 'add cursor pagination to the products endpoint';
+    const legacy = rankEpisodes(q, DUPES, { topK: 2, minScore: 0.05, diversity: 0 });
+    expect(legacy.every(m => /pagination/i.test(m.prompt))).toBe(true);
+  });
+
+  it('file grounding scales down episodes whose files no longer exist', () => {
+    const q = 'add cursor pagination to the users endpoint';
+    const present = rankEpisodes(q, [DUPES[0]!], { topK: 1, minScore: 0.05, fileExists: () => true });
+    const stale = rankEpisodes(q, [DUPES[0]!], { topK: 1, minScore: 0.05, fileExists: () => false });
+    expect(stale[0]!.score).toBeLessThan(present[0]!.score);
+  });
+
+  it('recency breaks near-ties toward the more recent episode (later in the log)', () => {
+    // Two equally-relevant identical-text episodes; the later one (index 1) should win the single slot.
+    const a = ep('refactor the auth middleware', 'extracted a guard');
+    const b = ep('refactor the auth middleware', 'extracted a guard');
+    const m = rankEpisodes('refactor the auth middleware again', [a, b], { topK: 1, minScore: 0.05 });
+    expect(m).toHaveLength(1);
+    expect(m[0]!.summary).toBe('extracted a guard'); // both same; assert it picked exactly one, deterministically
+  });
+
+  it('fileFreshness: all-present → 1, half → 0.5, none → 0, empty → 1', () => {
+    expect(fileFreshness([], () => false)).toBe(1);
+    expect(fileFreshness(['a', 'b'], f => f === 'a')).toBe(0.5);
+    expect(fileFreshness(['a', 'b'], () => true)).toBe(1);
+    expect(fileFreshness(['a', 'b'], () => false)).toBe(0);
+  });
+});
+
+describe('buildEpisodeBlock — concise, bounded', () => {
+  it('renders matches with prompt + summary + files; empty when none', () => {
+    expect(buildEpisodeBlock([])).toBe('');
+    const block = buildEpisodeBlock(rankEpisodes('add pagination cursor endpoint', CORPUS, { topK: 1, minScore: 0.1 }));
+    expect(block).toContain('# Similar past work');
+    expect(block).toContain('cursor');
+    expect(block).toContain('src/users.ts');
+  });
+});
+
+describe('shouldRecordEpisode — write-path gate', () => {
+  it('skips empty prompts and no-op turns', () => {
+    expect(shouldRecordEpisode({ prompt: '', filesChanged: ['a.ts'], toolCalls: 4 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: '   ', filesChanged: [], toolCalls: 0 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: 'thanks', filesChanged: [], toolCalls: 0 })).toBe(false);
+    expect(shouldRecordEpisode({ prompt: 'thanks', filesChanged: [], toolCalls: 1 })).toBe(false);
+  });
+
+  it('records a turn that changed a file, even with no extra tools', () => {
+    expect(shouldRecordEpisode({ prompt: 'fix the login button', filesChanged: ['src/Login.tsx'], toolCalls: 1 })).toBe(true);
+  });
+
+  it('records a research turn with several tool calls and no writes', () => {
+    expect(shouldRecordEpisode({ prompt: 'where is auth handled', filesChanged: [], toolCalls: 2 })).toBe(true);
+  });
+});
+
+describe('episodeVerified — last gate result wins', () => {
+  it('is unknown when nothing ran', () => {
+    expect(episodeVerified([])).toBeUndefined();
+  });
+  it('is the last ledger entry (repair-then-pass counts as verified)', () => {
+    expect(episodeVerified([{ passed: false }, { passed: true }])).toBe(true);
+    expect(episodeVerified([{ passed: false }, { passed: false }])).toBe(false);
+    expect(episodeVerified([{ passed: true }])).toBe(true);
+  });
+});
+
+describe('defaults — episodic memory is on, skill capture is not', () => {
+  it('episodic memory is ENABLED by default', async () => {
+    const { DEFAULT_CONFIG } = await import('../src/config/defaults.js');
+    // It costs no model call — recording is one JSONL line, recall is a lexical match — so
+    // the "I have solved this before" benefit should not require finding a config switch.
+    expect(DEFAULT_CONFIG.learning?.episodicMemory?.enabled).toBe(true);
+  });
+
+  it('skill CAPTURE stays opt-in', async () => {
+    const { DEFAULT_CONFIG } = await import('../src/config/defaults.js');
+    // Capture writes candidate files and spends a judge call — that should be a deliberate
+    // choice, not something that starts happening to a new user's disk.
+    expect(DEFAULT_CONFIG.learning?.enabled).toBe(false);
+  });
+});

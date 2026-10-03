@@ -3,7 +3,7 @@
  * Run: node --experimental-strip-types test/gateways.test.ts
  */
 import {
-  KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, mergeCustomProvider,
+  KNOWN_GATEWAYS, listGatewayIds, findGateway, buildCustomEntry, mergeCustomProvider, normalizeBaseUrl,
 } from '../src/setup/gateways.ts';
 
 let passed = 0, failed = 0;
@@ -12,9 +12,22 @@ function check(name: string, cond: boolean) {
   else { failed++; console.log(`  ✗ ${name}`); }
 }
 
+console.log('— normalizeBaseUrl (strip pasted endpoint paths) —');
+{
+  // The exact bug a user hit: pasting the NVIDIA /models URL → 404 on every request.
+  check('strips a trailing /models', normalizeBaseUrl('https://integrate.api.nvidia.com/v1/models') === 'https://integrate.api.nvidia.com/v1');
+  check('strips a trailing /chat/completions', normalizeBaseUrl('https://x.com/v1/chat/completions') === 'https://x.com/v1');
+  check('strips a trailing /completions', normalizeBaseUrl('https://x.com/v1/completions') === 'https://x.com/v1');
+  check('drops a trailing slash', normalizeBaseUrl('https://x.com/v1/') === 'https://x.com/v1');
+  check('leaves a clean /v1 untouched', normalizeBaseUrl('https://x.com/v1') === 'https://x.com/v1');
+  check('buildCustomEntry normalizes the stored baseUrl', buildCustomEntry({
+    name: 'nvidia', baseUrl: 'https://integrate.api.nvidia.com/v1/models', apiKeyEnv: 'NVIDIA_API_KEY', modelId: 'nvidia/nemotron-3-ultra-550b-a55b',
+  }).baseUrl === 'https://integrate.api.nvidia.com/v1');
+}
+
 console.log('— registry —');
 {
-  check('has openrouter, gemini, groq', !!findGateway('openrouter') && !!findGateway('gemini') && !!findGateway('groq'));
+  check('has openrouter, gemini, groq, atlascloud', !!findGateway('openrouter') && !!findGateway('gemini') && !!findGateway('groq') && !!findGateway('atlascloud'));
   check('lookup is case-insensitive', findGateway('OpenRouter')?.name === 'openrouter');
   check('unknown returns undefined', findGateway('nope') === undefined);
   check('lists several gateways', listGatewayIds().length >= 8);
@@ -25,6 +38,10 @@ console.log('— registry —');
     if (!g.name || !g.baseUrl || !g.apiKeyEnv || !/^https?:\/\//.test(g.baseUrl)) allValid = false;
   }
   check('every gateway has name/baseUrl/apiKeyEnv with valid URL', allValid);
+  check('atlascloud uses the Atlas OpenAI-compatible LLM endpoint', findGateway('atlascloud')?.baseUrl === 'https://api.atlascloud.ai/v1');
+  check('atlascloud uses ATLASCLOUD_API_KEY', findGateway('atlascloud')?.apiKeyEnv === 'ATLASCLOUD_API_KEY');
+  check('atlascloud default model is a documented chat id, not a media/qwen guess', findGateway('atlascloud')?.suggestedModel === 'deepseek-v3');
+  check('atlascloud key hint points at the real console', /console\.atlascloud\.ai/.test(findGateway('atlascloud')?.keyHint ?? ''));
 }
 
 console.log('— buildCustomEntry —');
@@ -33,6 +50,10 @@ console.log('— buildCustomEntry —');
   check('builds from spec', e.name === 'openrouter' && e.baseUrl.includes('openrouter.ai'));
   check('pins suggested model', !!e.models && e.models[0].id.includes('llama'));
   check('model has tool calls on', e.models![0].supportsToolCalls === true);
+
+  const atlas = buildCustomEntry({ spec: findGateway('atlascloud')! });
+  check('builds Atlas Cloud from spec', atlas.name === 'atlascloud' && atlas.baseUrl === 'https://api.atlascloud.ai/v1');
+  check('pins Atlas Cloud suggested model', atlas.models?.[0].id === 'deepseek-v3');
 
   // explicit override for an unlisted gateway
   const c = buildCustomEntry({ name: 'mygw', baseUrl: 'https://x.example/v1', apiKeyEnv: 'MYGW_KEY' });

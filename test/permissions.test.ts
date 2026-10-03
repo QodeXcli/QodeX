@@ -1,6 +1,17 @@
-import { describe, it, expect } from 'vitest';
-import { PermissionEngine, setAutoApproveSession } from '../src/security/permissions.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import {
+  PermissionEngine,
+  setAutoApproveSession,
+  setApprovalMode,
+  getApprovalMode,
+  cycleApprovalMode,
+  parseApprovalMode,
+  getAutoApproveSession,
+  interpretPermissionAnswer,
+} from '../src/security/permissions.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+
+afterEach(() => setApprovalMode('manual'));
 
 describe('PermissionEngine', () => {
   it('auto-approves matching patterns', () => {
@@ -22,13 +33,20 @@ describe('PermissionEngine', () => {
     expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('ask');
   });
 
-  it('remembers pattern decisions', () => {
+  it('remembers an "always" decision for THAT command only', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
     const req = { tool: 'shell', operation: 'docker compose up' };
     expect(engine.evaluate(req)).toBe('ask');
     engine.rememberDecision(req, 'allow', 'pattern');
     expect(engine.evaluate(req)).toBe('allow');
-    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose down' })).toBe('allow');
+    // This line used to expect 'allow', because a grant was built from the command's FIRST
+    // WORD — so approving `docker compose up` also approved `docker compose down`, `git
+    // status` approved `git push --force`, and `rm -rf /tmp/x` approved `rm -rf /`. A grant
+    // now binds to the exact command; a sibling is asked separately, once.
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose down' })).toBe('ask');
+    // Cosmetic variants of the SAME command are still covered — the grant is on the command,
+    // not on its formatting.
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker  compose up' })).toBe('allow');
   });
 
   it('allows read-only tools by default', () => {
@@ -52,20 +70,15 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate({ tool: 'shell', operation: 'diskutil eraseDisk' })).toBe('ask');
   });
 
-  it('FORCES a prompt for system-mutating commands even when /auto on is active', () => {
+  it('accept-edits auto still asks for sudo; always yes does not', () => {
     const engine = new PermissionEngine(DEFAULT_CONFIG);
-    setAutoApproveSession(true);
-    try {
-      // The bug that broke the user's keyboard: defaults write ran silently
-      // under auto-approve. It must now ask regardless.
-      expect(engine.evaluate({ tool: 'shell', operation: 'defaults write -g AppleLocale fa_IR' })).toBe('ask');
-      expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
-      // Non-system commands still auto-approve under /auto on.
-      expect(engine.evaluate({ tool: 'shell', operation: 'echo hello' })).toBe('allow');
-      expect(engine.evaluate({ tool: 'shell', operation: 'npm run build' })).toBe('allow');
-    } finally {
-      setAutoApproveSession(false);
-    }
+    setApprovalMode('auto');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
+    setApprovalMode('always');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'echo hello' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'npm run build' })).toBe('allow');
   });
 
   it('still hard-denies catastrophic commands (deny beats always-ask)', () => {
@@ -86,5 +99,85 @@ describe('PermissionEngine — always-ask guard for system-mutating commands', (
     expect(engine.evaluate(req)).toBe('ask');
     engine.rememberDecision(req, 'allow', 'session');
     expect(engine.evaluate(req)).toBe('allow'); // not re-nagged after explicit consent
+  });
+});
+
+describe('approval modes (manual / auto / always yes)', () => {
+  it('parses aliases used by /auto and Shift+Tab', () => {
+    expect(parseApprovalMode('manual')).toBe('manual');
+    expect(parseApprovalMode('off')).toBe('manual');
+    expect(parseApprovalMode('auto')).toBe('auto');
+    expect(parseApprovalMode('edits')).toBe('auto');
+    expect(parseApprovalMode('always')).toBe('always');
+    expect(parseApprovalMode('on')).toBe('always');
+    expect(parseApprovalMode('yes')).toBe('always');
+    expect(parseApprovalMode('nope')).toBeNull();
+  });
+
+  it('cycles manual → auto → always → manual', () => {
+    setApprovalMode('manual');
+    expect(cycleApprovalMode()).toBe('auto');
+    expect(cycleApprovalMode()).toBe('always');
+    expect(cycleApprovalMode()).toBe('manual');
+    expect(getApprovalMode()).toBe('manual');
+  });
+
+  it('manual still asks for file edits and unknown shell', () => {
+    setApprovalMode('manual');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
+  });
+
+  it('auto accepts file edits but still asks for unknown shell', () => {
+    setApprovalMode('auto');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'edit_text', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'multi_edit', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'edit_symbol', operation: 'src/a.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'npm test' })).toBe('allow');
+  });
+
+  it('always yes auto-approves edits, shell, and always-ask; irreversible still asks; hard-deny still denies', () => {
+    setApprovalMode('always');
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/index.ts' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'docker compose up' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'sudo something' })).toBe('allow');
+    expect(engine.evaluate({ tool: 'shell', operation: 'git push --force' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm --recursive --force /tmp/x' })).toBe('ask');
+    expect(engine.evaluate({ tool: 'shell', operation: 'rm -rf /' })).toBe('deny');
+  });
+
+  it('leaving always yes restores asking for writes (no leftover tool grant)', () => {
+    const engine = new PermissionEngine(DEFAULT_CONFIG);
+    setApprovalMode('always');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('allow');
+    setApprovalMode('manual');
+    expect(engine.evaluate({ tool: 'write_file', operation: 'src/a.ts' })).toBe('ask');
+  });
+
+  it('interpretPermissionAnswer is fail-safe: only explicit yes/always run', () => {
+    expect(interpretPermissionAnswer('yes')).toBe('allow');
+    expect(interpretPermissionAnswer('y')).toBe('allow');
+    expect(interpretPermissionAnswer('accept')).toBe('allow');
+    expect(interpretPermissionAnswer('بله')).toBe('allow');
+    expect(interpretPermissionAnswer('always yes')).toBe('always');
+    expect(interpretPermissionAnswer('no')).toBe('deny');
+    expect(interpretPermissionAnswer('sure')).toBe('deny');
+    expect(interpretPermissionAnswer('ok wait')).toBe('deny');
+    expect(interpretPermissionAnswer('')).toBe('deny');
+  });
+
+  it('setAutoApproveSession(true) still maps to always yes', () => {
+    setAutoApproveSession(true);
+    expect(getApprovalMode()).toBe('always');
+    expect(getAutoApproveSession()).toBe(true);
+    setAutoApproveSession(false);
+    expect(getApprovalMode()).toBe('manual');
+    expect(getAutoApproveSession()).toBe(false);
   });
 });

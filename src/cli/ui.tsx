@@ -23,18 +23,28 @@ import { parseSteerInput } from '../agent/steering.js';
 import type { ModelRouter } from '../llm/router.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { PermissionEngine } from '../security/permissions.js';
+import {
+  type ApprovalMode,
+  getApprovalMode,
+  cycleApprovalMode,
+  setApprovalMode as setApprovalModeGlobal,
+  APPROVAL_MODE_META,
+} from '../security/permissions.js';
 import type { QodexConfig } from '../config/defaults.js';
 import type { Message } from '../session/store.js';
 import { getSessionStore } from '../session/store.js';
 import { messagesToHistory } from './resume-transcript.js';
-import { stripThinkingForDisplay, stripLeakedToolTags } from '../llm/thinking.js';
+import { stripThinkingForDisplay, stripLeakedToolTags, streamingThinking } from '../llm/thinking.js';
+import { isAlwaysYesAnswer } from '../security/permissions.js';
 import { isRedundantAssistantText, dedupeSelfRepeatedText } from './modes/final-dedupe.js';
 import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
-import { AssistantMessage } from './render/assistant-message.js';
+import { ThinkingPanel } from './prompts/thinking-panel.js';
+import { AssistantMessage, StreamingView } from './render/assistant-message.js';
 import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
 import { summarizeToolResult } from './render/tool-summary.js';
 import { handleSlashCommand } from './slash-commands.js';
+import { slashAliasMap } from '../skills/registry.js';
 import { annotateImagePrompt } from '../utils/image-paths.js';
 import { Welcome } from './prompts/welcome.js';
 import { BootSplash } from './prompts/boot-splash.js';
@@ -42,19 +52,33 @@ import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
 import { forwardAgentEvent } from '../control/forward.js';
+import { getOperatorHub } from '../operator/hub.js';
+import { pickWorkingCwd } from '../session/handoff.js';
+import { getActiveProfile } from '../config/profile.js';
+import { SideRunDock } from './prompts/side-run-dock.js';
+import {
+  appendLaneLine,
+  applyRunToLanes,
+  markLanesRead,
+  type Lane,
+} from '../operator/live-lanes.js';
 
 type HistoryItem =
   | { type: 'user'; text: string; id: string }
   | { type: 'assistant'; text: string; id: string }
   | { type: 'tool'; name: string; result: string; isError?: boolean; id: string }
+  | { type: 'diff'; path: string; before: string | null; after: string; id: string }
   | { type: 'system'; text: string; id: string }
   | { type: 'error'; text: string; id: string };
+
+const EDIT_DIFF_TOOLS = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
 
 interface PendingPrompt {
   prompt: string;
   options: string[];
   resolve: (answer: string) => void;
   diff?: { path: string; before: string | null; after: string };
+  hubId?: string;
 }
 
 export interface AppProps {
@@ -110,6 +134,18 @@ export function App(props: AppProps): React.ReactElement {
   const promptHistoryRef = useRef<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [streamingText, setStreamingText] = useState('');
+  // Live reasoning: structured thinking_delta AND in-band <thinking> tags.
+  // Shown in a dim pane while the model works; not stored in the model history.
+  const [thinkingChars, setThinkingChars] = useState(0);
+  const [thinkingText, setThinkingText] = useState('');
+  const showThinking = (props.config as any).ui?.showThinking !== false;
+  const [liveShell, setLiveShell] = useState<string[]>([]);
+  const liveShellRef = useRef<string[]>([]);
+  const liveShellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lanes, setLanes] = useState<Lane[]>([]);
+  const lanesRef = useRef<Lane[]>([]);
+  const [dockOpen, setDockOpen] = useState(false);
+  const dockOpenRef = useRef(false);
   const [activeTools, setActiveTools] = useState<Array<{ id: string; name: string; partialArgs: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => {
@@ -120,6 +156,15 @@ export function App(props: AppProps): React.ReactElement {
     }
     return store.createSession(props.cwd, props.config.defaults.model);
   });
+  // Session cwd, not the host process. After --resume / switch_session / phone
+  // handoff, tools must keep editing the project the transcript belongs to.
+  const [activeCwd, setActiveCwd] = useState<string>(() => {
+    if (props.resumeSessionId) {
+      const loaded = getSessionStore().loadSession(props.resumeSessionId);
+      return pickWorkingCwd({ sessionCwd: loaded?.meta.cwd, hostCwd: props.cwd });
+    }
+    return props.cwd;
+  });
   const [messages, setMessages] = useState<Message[]>(() => {
     if (props.resumeSessionId) {
       const loaded = getSessionStore().loadSession(props.resumeSessionId);
@@ -128,11 +173,12 @@ export function App(props: AppProps): React.ReactElement {
     return [];
   });
   const [mode, setMode] = useState<'normal' | 'plan'>('normal');
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => getApprovalMode());
   // Gates the main UI behind the animated boot splash. Flips to true when the splash
   // finishes (or immediately when motion is disabled / not a TTY).
   const [booted, setBooted] = useState(false);
   const [explicitModel, setExplicitModel] = useState<string | undefined>(props.explicitModel);
-  const [budgetStatus, setBudgetStatus] = useState({ tokens: 0, costUsd: 0, contextTokens: 0, contextWindow: 0 });
+  const [budgetStatus, setBudgetStatus] = useState({ tokens: 0, costUsd: 0, contextTokens: 0, contextWindow: 0, providerName: '', providerIsLocal: true });
   // Live throughput + elapsed readout for the status bar. taskStartedAt marks when
   // the current task began (busy → true); nowTick is bumped by an interval while
   // busy so the readout refreshes; lastElapsedMs freezes the finished task's total
@@ -140,12 +186,18 @@ export function App(props: AppProps): React.ReactElement {
   const [taskStartedAt, setTaskStartedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [lastElapsedMs, setLastElapsedMs] = useState<number>(0);
+  // The ticker goes QUIET while a permission prompt is open: each tick re-renders the
+  // whole dynamic frame, and with a tall diff+confirmation on screen that 4Hz re-paint
+  // reads as violent scroll-jumping. A ref (not an effect dep) keeps the timer and the
+  // task's start time intact — the readout just freezes until the prompt resolves.
+  const pendingPromptRef = useRef<unknown>(null);
+  pendingPromptRef.current = pendingPrompt;
   useEffect(() => {
     if (!busy) return;
     const start = Date.now();
     setTaskStartedAt(start);
     setNowTick(start);
-    const iv = setInterval(() => setNowTick(Date.now()), 250);
+    const iv = setInterval(() => { if (!pendingPromptRef.current) setNowTick(Date.now()); }, 250);
     return () => {
       clearInterval(iv);
       setLastElapsedMs(Date.now() - start);
@@ -189,6 +241,35 @@ export function App(props: AppProps): React.ReactElement {
     return String(idCounterRef.current);
   }, []);
 
+  // Throttle the live streaming region: setting state on every text_delta (one per
+  // token) repaints the multi-line region dozens of times a second, which the user
+  // sees as flicker/jitter. We coalesce bursts into at most one repaint per ~50ms.
+  // The trailing pending text is intentionally discarded on clear — the FINAL text
+  // commits to <Static> separately, so nothing is lost.
+  const streamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamPendingRef = useRef<string | null>(null);
+  const flushStreaming = useCallback(() => {
+    streamTimerRef.current = null;
+    if (streamPendingRef.current !== null) {
+      setStreamingText(streamPendingRef.current);
+      streamPendingRef.current = null;
+    }
+  }, []);
+  const pushStreaming = useCallback((text: string) => {
+    streamPendingRef.current = text;
+    if (streamTimerRef.current === null) {
+      streamTimerRef.current = setTimeout(flushStreaming, 50);
+    }
+  }, [flushStreaming]);
+  const clearStreaming = useCallback(() => {
+    if (streamTimerRef.current !== null) {
+      clearTimeout(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+    streamPendingRef.current = null;
+    setStreamingText('');
+  }, []);
+
   // Initialize agent
   useEffect(() => {
     const agent = new AgentLoop({
@@ -196,7 +277,7 @@ export function App(props: AppProps): React.ReactElement {
       registry: props.registry,
       permissions: props.permissions,
       config: props.config,
-      cwd: props.cwd,
+      cwd: activeCwd,
     });
     agentRef.current = agent;
     // Publish to singletons so slash commands and the task tool can find this agent
@@ -265,6 +346,44 @@ export function App(props: AppProps): React.ReactElement {
       if (exitTimer.current) { clearTimeout(exitTimer.current); exitTimer.current = null; }
     }
 
+    // Ctrl+B toggles the side-run dock (background live stays out of the transcript).
+    if (key.ctrl && _input === 'b') {
+      setDockOpen(open => {
+        const next = !open;
+        dockOpenRef.current = next;
+        if (next) {
+          lanesRef.current = markLanesRead(lanesRef.current);
+          setLanes(lanesRef.current);
+        }
+        return next;
+      });
+      return;
+    }
+
+    // Shift+Tab cycles approval: manual → auto → always yes → manual.
+    // If a prompt is already on screen, auto-answer it when the new mode would
+    // have skipped the ask (always yes; or auto + a file-edit diff).
+    if ((key.tab && key.shift) || _input === '\u001b[Z') {
+      const next = cycleApprovalMode();
+      setApprovalMode(next);
+      const meta = APPROVAL_MODE_META[next];
+      setHistory(h => [...h, {
+        type: 'system',
+        text: `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
+        id: nextId(),
+      }]);
+      const pending = pendingPromptRef.current as PendingPrompt | null;
+      if (pending) {
+        const shouldAccept = next === 'always' || (next === 'auto' && !!pending.diff);
+        const answer = shouldAccept ? pickAutoAnswer(pending.options) : null;
+        if (answer) {
+          setPendingPrompt(null);
+          pending.resolve(answer);
+        }
+      }
+      return;
+    }
+
     // Interrupt a running turn with either Ctrl+C or Esc. Esc is what most
     // people reach for; Ctrl+C is the fallback. When idle, Ctrl+C asks first.
     if ((key.ctrl && _input === 'c') || key.escape) {
@@ -306,6 +425,81 @@ export function App(props: AppProps): React.ReactElement {
 
   // Surface the active session id so the launcher can print a resume hint on exit.
   useEffect(() => { props.onSessionActive?.(sessionId); }, [sessionId]);
+  useEffect(() => {
+    agentRef.current?.setWorkingDirectory(activeCwd);
+  }, [activeCwd]);
+  useEffect(() => {
+    void import('../session/handoff.js').then(m => m.writeHandoff(sessionId, activeCwd));
+  }, [sessionId, activeCwd]);
+
+  useEffect(() => {
+    let unsubSide = () => {};
+    void import('../agent/side-runs.js').then(m => {
+      unsubSide = m.onSideRunChange(run => {
+        lanesRef.current = applyRunToLanes(lanesRef.current, run);
+        setLanes(lanesRef.current);
+        if (run.status === 'running') return;
+        const preview = (run.result || run.error || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+        const icon = run.status === 'done' ? '✓' : run.status === 'cancelled' ? '■' : '✗';
+        setHistory(h => [...h, {
+          type: 'system',
+          text: `${icon} Side run ${run.id} ${run.status}${preview ? ` — ${preview}` : ''}`,
+          id: nextId(),
+        }]);
+      });
+    });
+    const hub = getOperatorHub();
+    const unsubHub = hub.subscribe(ev => {
+      if (ev.kind === 'approval') {
+        const diff = pendingDiffRef.current ?? undefined;
+        pendingDiffRef.current = null;
+        const tag = ev.origin && ev.origin !== 'tui' ? ev.origin : ev.source;
+        const label = tag === 'main' ? ev.prompt : `[${tag}] ${ev.prompt}`;
+        setPendingPrompt(p => {
+          // Another lane may be inflight (bot). Don't steal the TUI's open ask.
+          if (p && p.hubId && p.hubId !== ev.id) return p;
+          return {
+            prompt: label,
+            options: ev.options,
+            hubId: ev.id,
+            diff,
+            resolve: (a) => { hub.answer(ev.id, a); },
+          };
+        });
+      } else if (ev.kind === 'approval-cleared') {
+        setPendingPrompt(p => (p?.hubId === ev.id ? null : p));
+      } else if (ev.kind === 'live') {
+        if (ev.source !== 'main') {
+          lanesRef.current = appendLaneLine(
+            lanesRef.current,
+            ev.source,
+            ev.stream,
+            ev.line,
+            { bumpUnread: !dockOpenRef.current },
+          );
+          if (liveShellTimer.current === null) {
+            liveShellTimer.current = setTimeout(() => {
+              liveShellTimer.current = null;
+              setLiveShell(liveShellRef.current);
+              setLanes(lanesRef.current);
+            }, 80);
+          }
+          return;
+        }
+        const mark = ev.stream === 'err' ? '!' : ev.stream === 'progress' ? '·' : ' ';
+        const line = `${mark}${ev.line}`.slice(0, 200);
+        liveShellRef.current = [...liveShellRef.current, line].slice(-8);
+        if (liveShellTimer.current === null) {
+          liveShellTimer.current = setTimeout(() => {
+            liveShellTimer.current = null;
+            setLiveShell(liveShellRef.current);
+            setLanes(lanesRef.current);
+          }, 80);
+        }
+      }
+    });
+    return () => { unsubSide(); unsubHub(); };
+  }, [nextId]);
 
   // A human is at this terminal: Sentinel-critical actions may be approved here.
   useEffect(() => {
@@ -313,34 +507,22 @@ export function App(props: AppProps): React.ReactElement {
     return () => setInteractiveHuman(false);
   }, []);
 
-  // The terminal prompt itself. It is driven by the ApprovalBroker (below), which
-  // queues prompts FIFO — the single pendingPrompt slot used to be clobbered by
-  // concurrent askUser calls — and aborts this prompt when another channel (the
-  // control center or Telegram) answers first.
-  const localAsk = useCallback((prompt: string, options: string[], signal?: AbortSignal): Promise<string> => {
-    return new Promise<string>(resolve => {
-      const diff = pendingDiffRef.current;
-      pendingDiffRef.current = null;
-      const entry: PendingPrompt = { prompt, options, resolve, diff: diff ?? undefined };
-      setPendingPrompt(entry);
-      signal?.addEventListener('abort', () => {
-        setPendingPrompt(cur => (cur === entry ? null : cur));
-      }, { once: true });
-    });
-  }, []);
-
+  // Terminal approvals are shown by the operator hub (FIFO per lane). They also go
+  // through the ApprovalBroker, so the control center or Telegram can answer the same
+  // question — the first answer wins and the terminal prompt is withdrawn.
   const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
     return getApprovalBroker()
-      .request({ prompt, options, source: 'terminal' }, (p, o, signal) => localAsk(p, o, signal))
+      .request({ prompt, options, source: 'terminal' }, (p, o, signal) =>
+        getOperatorHub().requestApproval('main', p, o, { signal }))
       .then(r => r.answer);
-  }, [localAsk]);
+  }, []);
 
-  const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string }) => {
+  const submitPrompt = useCallback(async (prompt: string, opts?: { displayAs?: string; skipUserHistory?: boolean }) => {
     if (!agentRef.current) return;
 
     // Slash command? Only when called from user input (not from internal re-submit of rendered template)
     if (!opts?.displayAs && prompt.trim().startsWith('/')) {
-      const result = await handleSlashCommand(prompt, sessionId, props.cwd, props.config);
+      const result = await handleSlashCommand(prompt, sessionId, activeCwd, props.config);
       if (result.handled) {
         if (result.message) {
           setHistory(h => [...h, { type: 'user', text: prompt, id: nextId() }, { type: 'system', text: result.message!, id: nextId() }]);
@@ -355,6 +537,10 @@ export function App(props: AppProps): React.ReactElement {
         if (result.action?.type === 'set_mode') {
           setMode(result.action.mode);
         }
+        if (result.action?.type === 'set_approval_mode') {
+          setApprovalModeGlobal(result.action.mode);
+          setApprovalMode(result.action.mode);
+        }
         if (result.action?.type === 'set_max_iterations') {
           maxIterOverrideRef.current = result.action.value;
         }
@@ -365,6 +551,9 @@ export function App(props: AppProps): React.ReactElement {
           const loaded = getSessionStore().loadSession(result.action.sessionId);
           if (loaded) {
             setSessionId(result.action.sessionId);
+            const nextCwd = pickWorkingCwd({ sessionCwd: loaded.meta.cwd, hostCwd: props.cwd });
+            setActiveCwd(nextCwd);
+            agentRef.current?.setWorkingDirectory(nextCwd);
             setMessages(loaded.messages);
             const prior = messagesToHistory(loaded.messages) as HistoryItem[];
             setHistory([
@@ -372,6 +561,41 @@ export function App(props: AppProps): React.ReactElement {
               ...prior,
             ]);
           }
+        }
+        if (result.action?.type === 'retry') {
+          const last = getSessionStore().truncateAfterLastUser(sessionId);
+          if (!last) {
+            setHistory(h => [...h, { type: 'system', text: 'Nothing to retry — no previous user turn.', id: nextId() }]);
+            return;
+          }
+          const loaded = getSessionStore().loadSession(sessionId);
+          if (loaded) setMessages(loaded.messages);
+          setHistory(h => {
+            let lastUser = -1;
+            for (let i = 0; i < h.length; i++) if (h[i]!.type === 'user') lastUser = i;
+            return lastUser >= 0 ? h.slice(0, lastUser + 1) : h;
+          });
+          await submitPrompt(last, { displayAs: last, skipUserHistory: true });
+          return;
+        }
+        if (result.action?.type === 'compact') {
+          if (!agentRef.current) {
+            setHistory(h => [...h, { type: 'system', text: 'Agent is not ready yet.', id: nextId() }]);
+            return;
+          }
+          const compacted = await agentRef.current.compactConversation(messages);
+          if (!compacted) {
+            setHistory(h => [...h, { type: 'system', text: 'Nothing to compact — history is already short, or the summarizer returned nothing useful.', id: nextId() }]);
+            return;
+          }
+          getSessionStore().replaceMessages(sessionId, compacted.messages);
+          setMessages(compacted.messages);
+          setHistory(h => [...h, {
+            type: 'system',
+            text: `Compacted ${compacted.turnsCompacted} older turn(s), saved ~${compacted.savedTokens} tokens. Recent turns kept verbatim.`,
+            id: nextId(),
+          }]);
+          return;
         }
         if (result.action?.type === 'exit') {
           exit();
@@ -392,9 +616,14 @@ export function App(props: AppProps): React.ReactElement {
       }
     }
 
-    setHistory(h => [...h, { type: 'user', text: opts?.displayAs ?? prompt, id: nextId() }]);
+    if (!opts?.skipUserHistory) {
+      setHistory(h => [...h, { type: 'user', text: opts?.displayAs ?? prompt, id: nextId() }]);
+    }
     setBusy(true);
-    setStreamingText('');
+    clearStreaming();
+    setThinkingChars(0);
+    liveShellRef.current = [];
+    setLiveShell([]);
     setActiveTools([]);
 
     const ac = new AbortController();
@@ -410,7 +639,7 @@ export function App(props: AppProps): React.ReactElement {
 
     // Auto-detect image paths in user-typed input and nudge the agent toward
     // vision_analyze. Only for real user input (not internal template re-submits).
-    const modelPrompt = !opts?.displayAs ? annotateImagePrompt(prompt, props.cwd) : prompt;
+    const modelPrompt = !opts?.displayAs ? annotateImagePrompt(prompt, activeCwd) : prompt;
 
     // Build initial system + user message if no history yet
     let initial: Message[];
@@ -443,22 +672,41 @@ export function App(props: AppProps): React.ReactElement {
             pendingDiffRef.current = uiEvent;
           } else if (uiEvent.type === 'progress') {
             setHistory(h => [...h, { type: 'system', text: uiEvent.message, id: nextId() }]);
+          } else if (uiEvent.type === 'shell-stdout') {
+            getOperatorHub().emitLive('main', 'out', uiEvent.line);
+          } else if (uiEvent.type === 'shell-stderr') {
+            getOperatorHub().emitLive('main', 'err', uiEvent.line);
           }
         },
       })) {
         if (ac.signal.aborted) break;
         forwardAgentEvent(sessionId, event);
         switch (event.type) {
+          case 'thinking_start':
+            setThinkingChars(0);
+            setThinkingText('');
+            break;
+          case 'thinking_delta': {
+            const d = String(event.data?.delta ?? '');
+            setThinkingChars(n => n + d.length);
+            if (showThinking && d) setThinkingText(t => (t + d).slice(-8000));
+            break;
+          }
           case 'text_delta':
             accumulated += event.data.delta ?? '';
+            if (showThinking) {
+              const fromTags = streamingThinking(accumulated);
+              if (fromTags) setThinkingText(fromTags.slice(-8000));
+            }
             // Filter what we DISPLAY to user. The agent loop will run text-tool-recovery
             // on the final text anyway, but in the stream we don't want to flash raw tool
             // calls (JSON-shaped, <function=…>, or <tool_call>) or <thinking> blocks.
             // Strip all of them from the accumulated text each frame (stateless — the UI
             // re-renders the whole string).
-            setStreamingText(stripLeakedToolTags(stripThinkingForDisplay(stripLeakedToolJson(accumulated))));
+            pushStreaming(stripLeakedToolTags(stripThinkingForDisplay(stripLeakedToolJson(accumulated))));
             break;
           case 'thinking_done':
+            setThinkingChars(0);
             // Clear the live streaming region BEFORE committing the message to the
             // <Static> history. If the committed copy is appended to <Static> while
             // streamingText still holds the full text, Ink re-paints that streamed
@@ -468,7 +716,7 @@ export function App(props: AppProps): React.ReactElement {
             // then a cut-off restart). The message data is never duplicated — only
             // the terminal paint — which is why the text-level dedupe helpers can't
             // catch it. Emptying the live region first removes the offending frame.
-            setStreamingText('');
+            clearStreaming();
             if (accumulated.trim()) {
               // Same filter when committing to history display, then collapse any
               // self-repeat (model emitting its whole answer twice in one block).
@@ -507,16 +755,28 @@ export function App(props: AppProps): React.ReactElement {
             }
             break;
           }
-          case 'tool_result':
+          case 'tool_result': {
+            liveShellRef.current = [];
+            setLiveShell([]);
             setActiveTools(prev => prev.filter(t => t.id !== event.data.id));
-            setHistory(h => [...h, {
-              type: 'tool',
-              name: event.data.name,
-              result: event.data.result,
-              isError: event.data.isError,
-              id: nextId(),
-            }]);
+            const diff = EDIT_DIFF_TOOLS.has(event.data.name) ? pendingDiffRef.current : null;
+            if (diff) pendingDiffRef.current = null;
+            setHistory(h => {
+              const next: HistoryItem[] = [...h];
+              if (diff && !event.data.isError) {
+                next.push({ type: 'diff', path: diff.path, before: diff.before, after: diff.after, id: nextId() });
+              }
+              next.push({
+                type: 'tool',
+                name: event.data.name,
+                result: event.data.result,
+                isError: event.data.isError,
+                id: nextId(),
+              });
+              return next;
+            });
             break;
+          }
           case 'tool_ui': {
             // If a diff event came in, store it for upcoming permission prompt
             if (event.data.type === 'diff') {
@@ -530,6 +790,8 @@ export function App(props: AppProps): React.ReactElement {
               costUsd: event.data.costUsd,
               contextTokens: event.data.lastInputTokens ?? 0,
               contextWindow: event.data.contextWindow ?? 0,
+              providerName: event.data.providerName ?? '',
+              providerIsLocal: event.data.providerIsLocal !== false,
             });
             break;
           case 'final':
@@ -556,11 +818,13 @@ export function App(props: AppProps): React.ReactElement {
       const loaded = getSessionStore().loadSession(sessionId);
       if (loaded) setMessages(loaded.messages);
       setBusy(false);
-      setStreamingText('');
+      clearStreaming();
+      setThinkingText('');
+      setThinkingChars(0);
       setActiveTools([]);
       abortRef.current = null;
     }
-  }, [sessionId, mode, explicitModel, messages, props.cwd, props.config, exit, nextId, askUser]);
+  }, [sessionId, mode, explicitModel, messages, props.cwd, activeCwd, props.config, exit, nextId, askUser, pushStreaming, clearStreaming]);
 
   const handleSubmit = useCallback((value: string) => {
     const v = value.trim();
@@ -581,6 +845,14 @@ export function App(props: AppProps): React.ReactElement {
       agentRef.current.pushSteer(steer);
       const preview = steer.length > 56 ? steer.slice(0, 56) + '…' : steer;
       setHistory(h => [...h, { type: 'system', text: `↪ Steering note sent to the running task: ${preview}`, id: nextId() }]);
+      return;
+    }
+    // Hermes-style interrupt-and-redirect: a plain message mid-task is a course
+    // correction, not a queued next job. Slash commands still queue (or handle).
+    if (busy && agentRef.current && !v.startsWith('/')) {
+      agentRef.current.pushSteer(v);
+      const preview = v.length > 56 ? v.slice(0, 56) + '…' : v;
+      setHistory(h => [...h, { type: 'system', text: `↪ Redirected the running task: ${preview}`, id: nextId() }]);
       return;
     }
     // If a turn is in flight (or a permission prompt is open), QUEUE it instead of
@@ -640,7 +912,7 @@ export function App(props: AppProps): React.ReactElement {
             return (
               <Welcome
                 key="__welcome__"
-                cwd={props.cwd}
+                cwd={activeCwd}
                 config={props.config}
                 registry={props.registry}
                 router={props.router}
@@ -654,12 +926,29 @@ export function App(props: AppProps): React.ReactElement {
       </Static>
 
       {streamingText && (
-        <AssistantMessage text={tailForViewport(streamingText, rows, cols)} />
+        <StreamingView text={tailForViewport(streamingText, rows, cols)} />
       )}
 
-      {activeTools.map(t => (
+      {/* Tool activity hides while a permission prompt is up — the prompt IS the activity,
+          and every extra dynamic line enlarges the frame Ink re-paints. */}
+      {!pendingPrompt && showThinking && thinkingText && (
+        <ThinkingPanel text={thinkingText} width={cols} />
+      )}
+
+      {!pendingPrompt && activeTools.map(t => (
         <ToolActivityLine key={t.id} name={t.name} partialArgs={t.partialArgs} motion={motion} />
       ))}
+      {!pendingPrompt && liveShell.length > 0 && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {liveShell.map((line, i) => (
+            <Text key={i} color={line.startsWith('!') ? 'red' : undefined} dimColor={!line.startsWith('!')}>
+              {line.slice(0, Math.max(20, cols - 4))}
+            </Text>
+          ))}
+        </Box>
+      )}
+
+      <SideRunDock lanes={lanes} expanded={dockOpen} width={cols} />
 
       {pendingPrompt && (
         <Box flexDirection="column">
@@ -674,18 +963,25 @@ export function App(props: AppProps): React.ReactElement {
             prompt={pendingPrompt.prompt}
             options={pendingPrompt.options}
             onAnswer={(a) => {
+              if (isAlwaysYesAnswer(a)) {
+                setApprovalModeGlobal('always');
+                setApprovalMode('always');
+              }
               const p = pendingPrompt;
               setPendingPrompt(null);
               p.resolve(a);
             }}
           />
+          <Box paddingX={1}>
+            <Text dimColor>Shift+Tab cycles approval · now {APPROVAL_MODE_META[approvalMode].label}</Text>
+          </Box>
         </Box>
       )}
 
       {!pendingPrompt && (
         <Box flexDirection="column" marginTop={1}>
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}
-          <LiveHeader width={cols} mode={mode} busy={busy} motion={motion} />
+          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} />
           {/* Input lives in its own bordered box, visually detached from the transcript above. */}
           <Box
             width={cols}
@@ -697,13 +993,14 @@ export function App(props: AppProps): React.ReactElement {
               value={input}
               onChange={setInput}
               onSubmit={handleSubmit}
-              cwd={props.cwd}
-              placeholder={busy ? 'Type ahead — runs when the task finishes…' : 'Type a task, or /help'}
+              cwd={activeCwd}
+              placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}
               active={!pendingPrompt}
               busy={busy}
               historyRef={promptHistoryRef}
+              extraSlashNames={[...slashAliasMap().keys()]}
               prefix={busy
                 ? (motion ? <Spinner type="dots" /> : <Text color="cyan">·</Text>)
                 : <Text color={mode === 'plan' ? 'yellow' : 'cyan'}>{mode === 'plan' ? '📋' : '❯'}</Text>}
@@ -728,10 +1025,13 @@ export function App(props: AppProps): React.ReactElement {
             width={cols}
             model={explicitModel ?? props.config.defaults.model}
             mode={mode}
+            approvalMode={approvalMode}
             tokens={budgetStatus.tokens}
             costUsd={budgetStatus.costUsd}
             contextTokens={budgetStatus.contextTokens}
             contextWindow={budgetStatus.contextWindow}
+            providerName={budgetStatus.providerName}
+            providerIsLocal={budgetStatus.providerIsLocal}
             elapsedMs={busy && taskStartedAt ? Math.max(0, nowTick - taskStartedAt) : lastElapsedMs}
             busy={busy}
           />
@@ -765,16 +1065,34 @@ function ToolActivityLine(props: { name: string; partialArgs: string; motion: bo
  * running. While the agent is busy it shows a soft working hint next to the mark; idle,
  * it's just the shimmering brand. Animation is gated by `motion` (TTY + opt-in).
  */
-function LiveHeader(props: { width: number; mode: 'normal' | 'plan'; busy: boolean; motion: boolean }): React.ReactElement {
+function LiveHeader(props: {
+  width: number;
+  mode: 'normal' | 'plan';
+  approvalMode: ApprovalMode;
+  busy: boolean;
+  thinkingChars?: number;
+  motion: boolean;
+}): React.ReactElement {
   const phase = useShimmer(props.motion);
+  const approval = APPROVAL_MODE_META[props.approvalMode];
+  const thinkTok = props.thinkingChars && props.thinkingChars > 0
+    ? Math.max(1, Math.round(props.thinkingChars / 4))
+    : 0;
   return (
     <Box width={props.width} paddingX={1} marginBottom={0}>
       <GradientText text="✦ QodeX" stops={AURORA} phase={phase} bold />
       {props.busy
-        ? <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
+        ? thinkTok > 0
+          ? <Text color="yellow">  ·  thinking… {thinkTok} tok  ·  Esc to stop</Text>
+          : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
         : props.mode === 'plan'
           ? <Text color="yellow">  ·  plan mode</Text>
           : <Text dimColor>  ·  ready</Text>}
+      {props.mode !== 'plan' && (
+        <Text color={approvalColor(props.approvalMode)} dimColor={props.approvalMode === 'manual'}>
+          {'  ·  '}{approval.label}
+        </Text>
+      )}
     </Box>
   );
 }
@@ -784,20 +1102,42 @@ function LiveHeader(props: { width: number; mode: 'normal' | 'plan'; busy: boole
  * key hints on the right. "credit" reads "local · free" for on-device models (cost $0) and
  * the running dollar amount once a paid API is in play. Updates live as budget events land.
  */
+function pickAutoAnswer(options: string[]): string | null {
+  const lower = options.map(o => o.toLowerCase());
+  for (const want of ['accept', 'yes', 'y', 'always yes', 'always']) {
+    const i = lower.indexOf(want);
+    if (i !== -1) return options[i]!;
+  }
+  return null;
+}
+
+function approvalColor(mode: ApprovalMode): 'green' | 'cyan' | 'yellow' {
+  if (mode === 'always') return 'yellow';
+  if (mode === 'auto') return 'cyan';
+  return 'green';
+}
+
 function StatusBar(props: {
   width: number;
   model: string;
   mode: 'normal' | 'plan';
+  approvalMode: ApprovalMode;
   tokens: number;
   costUsd: number;
   contextTokens: number;
   contextWindow: number;
+  providerName?: string;
+  providerIsLocal?: boolean;
   elapsedMs: number;
   busy: boolean;
 }): React.ReactElement {
-  const { width, model, mode, tokens, costUsd, contextTokens, contextWindow, elapsedMs, busy } = props;
+  const { width, model, mode, approvalMode, tokens, costUsd, contextTokens, contextWindow, providerName, providerIsLocal, elapsedMs, busy } = props;
   const tok = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
-  const credit = costUsd > 0 ? `$${costUsd.toFixed(4)}` : 'local · free';
+  // WHERE the model runs, stated — not guessed from cost: 'ollama·local', 'lmstudio·local',
+  // 'anthropic·api'… A billing API at $0.0000 still shows ·api so cloud is never mistaken
+  // for free-local; the dollar figure appears the moment real cost accrues.
+  const source = providerName ? `${providerName}·${providerIsLocal ? 'local' : 'api'}` : '';
+  const credit = costUsd > 0 ? `$${costUsd.toFixed(4)}` : providerIsLocal === false ? 'api · $0.0000' : 'local · free';
   // Throughput (token-consumption rate) + elapsed time. Average over the task —
   // total tokens / elapsed — which is exactly "how fast tokens are being spent".
   const secs = elapsedMs / 1000;
@@ -814,8 +1154,22 @@ function StatusBar(props: {
     <Box width={width} paddingX={1} justifyContent="space-between">
       <Box>
         <Text dimColor>{model}</Text>
+        {getActiveProfile() && (
+          <>
+            <Text dimColor>  ·  </Text>
+            <Text color="magenta" dimColor={!busy}>{getActiveProfile()!.name}</Text>
+          </>
+        )}
+        {source !== '' && (
+          <>
+            <Text dimColor>  ·  </Text>
+            <Text color={providerIsLocal ? 'cyan' : 'magenta'} dimColor={!busy}>{source}</Text>
+          </>
+        )}
         <Text dimColor>  ·  </Text>
         <Text color={mode === 'plan' ? 'yellow' : 'green'}>{mode}</Text>
+        <Text dimColor>  ·  </Text>
+        <Text color={approvalColor(approvalMode)}>{APPROVAL_MODE_META[approvalMode].label}</Text>
         {ctxMeter !== '' && (
           <>
             <Text dimColor>  ·  </Text>
@@ -832,7 +1186,7 @@ function StatusBar(props: {
         )}
         <Text dimColor>{'  ·  '}</Text>
         <Text color={costUsd > 0 ? 'magenta' : 'green'}>{credit}</Text>
-        <Text dimColor>  ·  ⏎ send  ·  ^C exit</Text>
+        <Text dimColor>  ·  ⏎ send  ·  ⇧⇥ mode  ·  ^C exit</Text>
       </Box>
     </Box>
   );
@@ -848,6 +1202,12 @@ function HistoryItemView({ item }: { item: HistoryItem }): React.ReactElement {
       );
     case 'assistant':
       return <AssistantMessage text={item.text} />;
+    case 'diff':
+      return (
+        <Box marginLeft={1} marginY={0}>
+          <DiffViewer path={item.path} before={item.before} after={item.after} maxLines={24} />
+        </Box>
+      );
     case 'tool': {
       // Compact, Claude-Code-style display: a one-line metric + at most a short
       // preview, instead of dumping the whole file/output into the transcript.

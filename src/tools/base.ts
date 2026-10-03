@@ -24,6 +24,8 @@ export interface ToolContext {
   };
   /** Current turn number, used for snapshot retention. */
   currentTurn?: number;
+  /** Where shell commands run (local or docker). Wired by the loop from runtime config. */
+  exec?: (req: import('../runtime/types.js').ExecRequest) => Promise<import('../runtime/types.js').ExecResult>;
 }
 
 export type ToolUIEvent =
