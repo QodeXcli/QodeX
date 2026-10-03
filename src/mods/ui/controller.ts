@@ -13,7 +13,7 @@
 import type { Key } from 'ink';
 import { MOD_LIMITS, type ModElement, type ModRenderSite, type ModSurface } from '../types.js';
 import { getModsUiHost, onModsUiHostChange, type ModRenderOutput, type ModRenderRequest, type ModsUiHost, type ModUiEvent } from './host.js';
-import { collectButtons, validateModTree, type ModButtonRef } from './validate.js';
+import { cleanText, collectButtons, validateModTree, type ModButtonRef } from './validate.js';
 
 export interface ModHistoryLine { kind: 'log' | 'notice'; plugin: string; text: string }
 
@@ -42,6 +42,11 @@ export interface ModsUiSnapshot {
   focus: ModsFocus | null;
   /** Key of the focused Button inside the focused region. */
   focusedKey: string | null;
+  /**
+   * Ctrl+X was just pressed and the next key belongs to the chord (Tab focuses a pane,
+   * X closes one). The TUI keeps that key out of the prompt box while this is set.
+   */
+  chord: boolean;
 }
 
 export interface ModsUiContext {
@@ -56,7 +61,7 @@ export interface ModsUiContext {
 interface FocusButton extends ModButtonRef { plugin: string; component: ModRenderSite; requestId?: string }
 
 const EMPTY: ModsUiSnapshot = Object.freeze({
-  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null,
+  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, chord: false,
 }) as ModsUiSnapshot;
 
 const REDRAW_MS = Math.ceil(1000 / MOD_LIMITS.redrawPerSecond);
@@ -95,6 +100,9 @@ export class ModsUiController {
   private renderAgain = false;
   private lastRenderAt = 0;
   private chordUntil = 0;
+  private chordTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the last render pass drew (functions left out), to skip identical repaints. */
+  private lastViewSig = '';
   private disposed = false;
   private readonly surface: ModSurface;
   private readonly now: () => number;
@@ -129,6 +137,7 @@ export class ModsUiController {
     this.focus = null;
     this.focusedKey = null;
     this.refused.clear();
+    this.lastViewSig = '';
     if (host) {
       try {
         this.unsubBus = host.subscribe(ev => this.onBus(ev));
@@ -147,6 +156,9 @@ export class ModsUiController {
     this.host = null;
     if (this.renderTimer) clearTimeout(this.renderTimer);
     this.renderTimer = null;
+    if (this.chordTimer) clearTimeout(this.chordTimer);
+    this.chordTimer = null;
+    this.chordUntil = 0;
     for (const t of this.toastTimers.values()) clearTimeout(t);
     this.toastTimers.clear();
   }
@@ -179,6 +191,7 @@ export class ModsUiController {
       spinner: this.spinner,
       focus: this.focus,
       focusedKey: this.focusedKey,
+      chord: this.chordUntil > 0,
     };
     for (const l of [...this.listeners]) {
       try { l(); } catch { /* ignore */ }
@@ -202,7 +215,7 @@ export class ModsUiController {
         return;
       case 'log':
       case 'notice': {
-        const text = String(ev.text ?? '').trim().slice(0, MAX_LINE_CHARS);
+        const text = cleanText(String(ev.text ?? '')).trim().slice(0, MAX_LINE_CHARS);
         if (text) this.history({ kind: ev.kind, plugin: ev.plugin, text });
         return;
       }
@@ -274,6 +287,7 @@ export class ModsUiController {
     if (!pane) return;
     this.panes = this.panes.filter(p => p.id !== id);
     this.paneTrees.delete(id);
+    this.lastViewSig = '';
     if (this.activePane === id) this.activePane = this.panes.length ? this.panes[this.panes.length - 1]!.id : null;
     if (this.focus?.kind === 'pane' && this.focus.id === id) { this.focus = null; this.focusedKey = null; }
     if (byUser) {
@@ -287,6 +301,7 @@ export class ModsUiController {
     this.statuses.delete(plugin);
     for (const p of this.panes.filter(x => x.plugin === plugin)) this.removePane(p.id, false);
     this.band = this.band.filter(b => b.plugin !== plugin);
+    this.lastViewSig = '';
     for (const t of this.toasts.filter(x => x.plugin === plugin)) this.dropToast(t.id, false);
     for (const k of [...this.refused]) if (k.startsWith(`${plugin}\u0000`)) this.refused.delete(k);
     this.publish();
@@ -326,6 +341,7 @@ export class ModsUiController {
     if (!host) {
       if (this.band.length || this.spinner || this.paneTrees.size) {
         this.band = []; this.spinner = null; this.paneTrees.clear();
+        this.lastViewSig = '';
         this.publish();
       }
       return;
@@ -371,12 +387,24 @@ export class ModsUiController {
     });
 
     this.spinner = busy ? this.spinnerFrom(spinnerOut!) : null;
+    const focusBefore = `${JSON.stringify(this.focus)}\u0000${this.focusedKey}`;
     this.fixFocus();
-    this.publish();
+    // Most passes redraw the same thing (a mod invalidating on every tool result): only
+    // wake React when what is drawn changed. Button callbacks are read from this.band /
+    // this.paneTrees at press time, so a skipped publish never leaves a stale onPress.
+    const sig = viewSignature(this.band, this.paneTrees, this.spinner);
+    const focusAfter = `${JSON.stringify(this.focus)}\u0000${this.focusedKey}`;
+    if (sig !== this.lastViewSig || focusBefore !== focusAfter) {
+      this.lastViewSig = sig;
+      this.publish();
+    }
   }
 
   private spinnerFrom(out: ModRenderOutput): ModsUiSnapshot['spinner'] {
-    const suffix = typeof out.engineProps?.suffix === 'string' ? oneLine(out.engineProps.suffix, 120) : '';
+    // The suffix follows the word as given (a leading space is the mod's spacing).
+    const suffix = typeof out.engineProps?.suffix === 'string'
+      ? cleanText(out.engineProps.suffix).replace(/\s*\n\s*/g, ' ').trimEnd().slice(0, 120)
+      : '';
     const first = out.trees[0];
     if (first) {
       const tree = this.accept(first.plugin, 'Spinner', first.tree);
@@ -418,19 +446,24 @@ export class ModsUiController {
     if (this.disposed) return false;
     const now = this.now();
     if (key.ctrl && input === 'x') {
-      this.chordUntil = now + CHORD_MS;
+      this.armChord(now);
       return false;
     }
     if (this.chordUntil > now) {
-      this.chordUntil = 0;
+      this.endChord();
       if (key.tab && !key.shift) { this.cycleFocus(); return true; }
       if (!key.ctrl && !key.meta && input === 'x' && this.focus?.kind === 'pane') {
         this.removePane(this.focus.id, true);
         return true;
       }
+      this.publish(); // the chord is over: the prompt box takes keys again
+    } else if (this.chordUntil > 0) {
+      this.endChord();
+      this.publish();
     }
     const focus = this.focus;
     if (!focus) return false;
+    if (input === '\u001b[Z') return false;      // a raw Shift+Tab some terminals send
 
     if (key.escape) {
       const pane = focus.kind === 'pane' ? this.panes.find(p => p.id === focus.id) : undefined;
@@ -463,6 +496,25 @@ export class ModsUiController {
       return true;
     }
     return true; // while a pane has the keyboard nothing types into the prompt
+  }
+
+  private armChord(now: number): void {
+    this.chordUntil = now + CHORD_MS;
+    if (this.chordTimer) clearTimeout(this.chordTimer);
+    this.chordTimer = setTimeout(() => {
+      this.chordTimer = null;
+      if (this.chordUntil === 0) return;
+      this.chordUntil = 0;
+      this.publish();
+    }, CHORD_MS);
+    (this.chordTimer as { unref?: () => void }).unref?.();
+    this.publish();
+  }
+
+  private endChord(): void {
+    this.chordUntil = 0;
+    if (this.chordTimer) clearTimeout(this.chordTimer);
+    this.chordTimer = null;
   }
 
   private focusTargets(): ModsFocus[] {
@@ -535,6 +587,19 @@ export class ModsUiController {
 }
 
 function oneLine(s: string, max: number): string {
-  const t = s.replace(/\s*\n\s*/g, ' ').trim();
+  const t = cleanText(s).replace(/\s*\n\s*/g, ' ').trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+/** What a render pass draws, as a string (functions such as onPress leave no trace). */
+function viewSignature(
+  band: Array<{ plugin: string; tree: ModElement }>,
+  paneTrees: Map<string, ModElement | null>,
+  spinner: ModsUiSnapshot['spinner'],
+): string {
+  try {
+    return JSON.stringify([band, [...paneTrees], spinner]);
+  } catch {
+    return String(Math.random()); // unserializable: always redraw
+  }
 }

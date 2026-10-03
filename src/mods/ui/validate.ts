@@ -8,12 +8,22 @@
  * `ui.render (<Site>) refused: <reason>` and draws nothing for that mod.
  *
  * The result is a normalized copy: null/false/undefined children dropped, numbers in
- * Text turned into strings, children arrays always present.
+ * Text turned into strings, children arrays always present, and terminal control
+ * characters (ESC sequences, CR, bells) removed from every string so a mod's text — often
+ * data it fetched — can never move the cursor, clear the screen or write the clipboard.
  */
 
 import { MOD_LIMITS, type ModElement } from '../types.js';
 
 export type ValidateResult = { ok: true; tree: ModElement } | { ok: false; reason: string };
+
+// C0/C1 control characters except tab and newline.
+const CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+
+/** A mod's string with terminal control characters removed (tab and newline stay). */
+export function cleanText(s: string): string {
+  return s.replace(CONTROL_RE, '');
+}
 
 const MAX_DEPTH = 32;
 const MAX_NODES = 2000;
@@ -138,7 +148,7 @@ export function validateModTree(input: unknown): ValidateResult {
       if (parent !== 'Text') fail(`${parent ?? 'the site'} cannot hold a text child (wrap text in Text)`);
       const s = String(v);
       if (s.length > MOD_LIMITS.textChildChars) fail(`a Text child is longer than ${MOD_LIMITS.textChildChars} characters`);
-      return s;
+      return cleanText(s);
     }
     if (typeof v !== 'object' || Array.isArray(v)) fail(`an element is ${describe(v)}, not an element object`);
     if (++nodes > MAX_NODES) fail(`the tree has more than ${MAX_NODES} elements`);
@@ -164,7 +174,7 @@ export function validateModTree(input: unknown): ValidateResult {
       const check = allowed[name];
       if (!check) fail(`${t} prop "${name}" is not allowed`);
       if (!check(value)) fail(`${t} prop "${name}" has an invalid value`);
-      props[name] = value;
+      props[name] = typeof value === 'string' ? cleanText(value) : value;
     }
     for (const req of REQUIRED[t] ?? []) {
       if (props[req] === undefined) fail(`${t} needs a "${req}" prop`);
@@ -201,7 +211,7 @@ function checkSegments(segs: unknown[]): Array<{ label: string; value: number; c
     if (typeof seg.label !== 'string') fail(`Bar segment ${i} needs a label`);
     if (typeof seg.value !== 'number' || !Number.isFinite(seg.value) || seg.value < 0) fail(`Bar segment ${i} needs a value >= 0`);
     if (!isValidColor(seg.color)) fail(`Bar segment ${i} has an invalid color`);
-    return { label: seg.label as string, value: seg.value as number, color: seg.color as string };
+    return { label: cleanText(seg.label as string), value: seg.value as number, color: seg.color as string };
   });
 }
 

@@ -315,3 +315,69 @@ describe('keyboard focus', () => {
     expect(ctl.handleInput('a', k())).toBe(false);
   });
 });
+
+describe('chord, sanitizing and repaint economy', () => {
+  it('Ctrl+X marks a chord (the TUI keeps the next key out of the prompt) until a key or 1.5s', async () => {
+    const f = fakeHost();
+    ctl.attach(f.host);
+    ctl.handleInput('x', k({ ctrl: true }));
+    expect(ctl.getSnapshot().chord).toBe(true);
+    ctl.handleInput('q', k());
+    expect(ctl.getSnapshot().chord).toBe(false);
+    ctl.handleInput('x', k({ ctrl: true }));
+    expect(ctl.getSnapshot().chord).toBe(true);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(ctl.getSnapshot().chord).toBe(false);
+  });
+
+  it('strips terminal control characters from status, toast, log lines and trees', async () => {
+    const f = fakeHost();
+    f.sites.AbovePrompt = { trees: [{ plugin: 'a', tree: Text('hi\u001b[2Jthere\u0007', { color: 'red' }) }] };
+    ctl.attach(f.host);
+    f.emit({ kind: 'status', plugin: 'a', text: 'ok\u001b]52;c;Zm9v\u0007 now' });
+    f.emit({ kind: 'toast', plugin: 'a', text: '\rspoof' });
+    f.emit({ kind: 'log', plugin: 'a', text: 'line\u001b[1A' });
+    await flush();
+    expect(ctl.getSnapshot().statuses[0]!.text).toBe('ok]52;c;Zm9v now');
+    expect(ctl.getSnapshot().toasts[0]!.text).toBe('spoof');
+    expect(history[0]!.text).toBe('line[1A');
+    const t = ctl.getSnapshot().band[0]!.tree as Extract<ModElement, { type: 'Text' }>;
+    expect(t.children).toEqual(['hi[2Jthere']);
+  });
+
+  it('an identical render pass does not wake React, yet presses use the newest onPress', async () => {
+    const f = fakeHost();
+    let n = 0;
+    f.sites['Pane:p'] = () => {
+      const mine = ++n;
+      return { trees: [{ plugin: 'm', tree: Box([Button('go', { onPress: () => { pressedWith = mine; } })]) }] };
+    };
+    let pressedWith = 0;
+    ctl.attach(f.host);
+    f.emit({ kind: 'open', plugin: 'm', id: 'p' });
+    await flush();
+    let wakes = 0;
+    const off = ctl.subscribe(() => { wakes++; });
+    for (let i = 0; i < 5; i++) { ctl.invalidate(); await flush(); }
+    expect(wakes).toBe(0);
+    ctl.handleInput('x', k({ ctrl: true }));
+    ctl.handleInput('', k({ tab: true }));
+    ctl.handleInput('\r', k({ return: true }));
+    await flush();
+    expect(pressedWith).toBe(n - 1); // the latest drawn tree's callback (the press redrew once more)
+    off();
+  });
+
+  it('a new host that draws the same tree as the old one still shows it', async () => {
+    const a = fakeHost();
+    const b = fakeHost();
+    a.sites.AbovePrompt = b.sites.AbovePrompt = { trees: [{ plugin: 'x', tree: Text('same') }] };
+    ctl.attach(a.host);
+    await flush();
+    expect(ctl.getSnapshot().band).toHaveLength(1);
+    ctl.attach(b.host);
+    expect(ctl.getSnapshot().band).toHaveLength(0);
+    await flush();
+    expect(ctl.getSnapshot().band).toHaveLength(1);
+  });
+});

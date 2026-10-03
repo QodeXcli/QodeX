@@ -5,14 +5,36 @@
  * no mod has anything to show, so a session without mods looks exactly as before.
  */
 
-import React, { useSyncExternalStore } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
-import type { ModsUiController, ModsUiSnapshot, ModHistoryLine } from './controller.js';
+import { ModsUiController, type ModsUiContext, type ModsUiSnapshot, type ModHistoryLine } from './controller.js';
 import { ModTree, estimateRows } from './render.js';
 
 /** Subscribe a component to the controller's snapshot. */
 export function useModsUi(c: ModsUiController): ModsUiSnapshot {
   return useSyncExternalStore(c.subscribe, c.getSnapshot, c.getSnapshot);
+}
+
+export interface ModsUiBinding {
+  ctl: ModsUiController;
+  snap: ModsUiSnapshot;
+}
+
+/**
+ * Mount the mods UI in a TUI component: one controller for the component's life that
+ * follows the registered mods host, kept told of the busy state, terminal size, prompt
+ * emptiness and mode. `onHistory` receives $.ui.log / $.ui.notice lines (and refusals).
+ */
+export function useModsUiController(opts: ModsUiContext & { onHistory: (line: ModHistoryLine) => void }): ModsUiBinding {
+  const onHistory = useRef(opts.onHistory);
+  onHistory.current = opts.onHistory;
+  const [ctl] = useState(() => new ModsUiController({ onHistory: line => onHistory.current(line) }));
+  useEffect(() => ctl.start(), [ctl]);
+  const { busy, columns, rows, promptEmpty, mode } = opts;
+  useEffect(() => {
+    ctl.setContext({ busy, columns, rows, promptEmpty, ...(mode ? { mode } : {}) });
+  }, [ctl, busy, columns, rows, promptEmpty, mode]);
+  return { ctl, snap: useModsUi(ctl) };
 }
 
 /**

@@ -9,7 +9,8 @@ import { EventEmitter } from 'events';
 import { render, Text as InkText } from 'ink';
 import { validateModTree, collectButtons, isValidColor } from '../src/mods/ui/validate.js';
 import { ModTree, barCells, compactNumber, estimateRows } from '../src/mods/ui/render.js';
-import { ModsBand, ModsPanes, ModsStatusLines, ModsToasts, ModHistoryLineView, ModsSpinnerWord } from '../src/mods/ui/components.js';
+import { ModsBand, ModsPanes, ModsStatusLines, ModsToasts, ModHistoryLineView, ModsSpinnerWord, useModsUiController } from '../src/mods/ui/components.js';
+import { setModsUiHost, type ModsUiHost } from '../src/mods/ui/host.js';
 import type { ModsUiSnapshot } from '../src/mods/ui/controller.js';
 import type { ModElement } from '../src/mods/types.js';
 
@@ -33,7 +34,7 @@ const Box = (children: ModElement[], props: Record<string, unknown> = {}): ModEl
 const Button = (props: Record<string, unknown>): ModElement => ({ type: 'Button', props, children: [] } as unknown as ModElement);
 
 const snap = (over: Partial<ModsUiSnapshot>): ModsUiSnapshot => ({
-  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, ...over,
+  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, chord: false, ...over,
 });
 
 describe('validateModTree', () => {
@@ -82,6 +83,20 @@ describe('validateModTree', () => {
     expect(validateModTree(deep)).toMatchObject({ ok: false });
     const wide = Box(Array.from({ length: 2500 }, () => Text(['x'])));
     expect(validateModTree(wide)).toMatchObject({ ok: false, reason: expect.stringContaining('more than') });
+  });
+
+  it('removes terminal control characters from every string', () => {
+    const r = validateModTree(Box([
+      Text(['a\u001b[31mb\r\tc\nd']),
+      Button({ key: 'k', label: 'x\u0007y' }),
+      { type: 'Bar', props: { segments: [{ label: 's\u001bt', value: 1, color: 'red' }] }, children: [] } as ModElement,
+    ]));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const [t, b, bar] = (r.tree as Extract<ModElement, { type: 'Box' }>).children as any[];
+    expect(t.children).toEqual(['a[31mb\tc\nd']);
+    expect(b.props.label).toBe('xy');
+    expect(bar.props.segments[0].label).toBe('st');
   });
 
   it('keeps engine references and accepts theme colors', () => {
@@ -204,5 +219,45 @@ describe('mods UI components', () => {
     expect(renderToString(React.createElement(ModsSpinnerWord, { spinner: null, word: 'crafting', width: 40 }))).toBe('crafting…');
     const tree = Box([{ type: 'engine', ref: 'Spinner' } as ModElement, Text([' (mod)'])], { flexDirection: 'row' });
     expect(renderToString(React.createElement(ModsSpinnerWord, { spinner: { tree }, word: 'crafting', width: 40 }))).toBe('crafting… (mod)');
+  });
+});
+
+describe('useModsUiController', () => {
+  it('follows the registered host, draws the band and passes history lines out', async () => {
+    const stdout = new EventEmitter() as unknown as NodeJS.WriteStream & { columns: number; rows: number };
+    const frames: string[] = [];
+    Object.assign(stdout, { columns: 60, rows: 30, isTTY: false, write: (s: string) => { frames.push(s); return true; } });
+    const lines: string[] = [];
+    let busySeen: unknown = null;
+    let emit: (ev: any) => void = () => {};
+    const host: ModsUiHost = {
+      subscribe(l) { emit = l; return () => { emit = () => {}; }; },
+      async renderSite(req) {
+        if (req.component !== 'AbovePrompt') return { trees: [] };
+        busySeen = req.props.isWorking;
+        return { trees: [{ plugin: 'ctx', tree: Text(['band from a mod']) }] };
+      },
+      async press() {},
+      list: () => [],
+    };
+    function Probe(): React.ReactElement {
+      const { snap } = useModsUiController({
+        busy: true, columns: 60, rows: 30, promptEmpty: true,
+        onHistory: l => { lines.push(`${l.kind}:${l.plugin}:${l.text}`); },
+      });
+      return React.createElement(ModsBand, { snap, width: 60, maxRows: 5 });
+    }
+    const inst = render(React.createElement(Probe), { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
+    try {
+      setModsUiHost(host);
+      await new Promise(r => setTimeout(r, 150));
+      emit({ kind: 'notice', plugin: 'ysk', text: 'heads-up' });
+      expect(frames.join('')).toContain('band from a mod');
+      expect(busySeen).toBe(true);
+      expect(lines).toEqual(['notice:ysk:heads-up']);
+    } finally {
+      inst.unmount();
+      setModsUiHost(null);
+    }
   });
 });
