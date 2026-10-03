@@ -30,8 +30,10 @@
 import { z } from 'zod';
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
+import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import { confirmShellCommand } from '../shell/confirm.js';
 
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -190,11 +192,21 @@ export class BackgroundJobStartTool extends Tool<z.infer<typeof StartArgs>> {
   isDestructive = false;
   argsSchema = StartArgs;
 
-  async execute(args: z.infer<typeof StartArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof StartArgs>, ctx: ToolContext): Promise<ToolResult> {
     let job: Job;
     if (args.kind === 'bash') {
       if (!args.command) return { content: '[BG_JOB_ERROR] kind=bash requires `command`', isError: true };
-      job = startBash(args.description, args.command, args.cwd, args.env);
+      // Same permission step as the shell tool: this runs `spawn(command, {shell:true})`,
+      // and used to skip every check in every mode. The command runs where the policy
+      // looked: `cwd` (relative to the session cwd) or the session cwd itself.
+      const runCwd = ctx?.cwd ? path.resolve(ctx.cwd, args.cwd ?? '.') : args.cwd;
+      if (ctx?.permissions) {
+        const refused = await confirmShellCommand({ ...ctx, cwd: runCwd ?? ctx.cwd }, {
+          tool: 'background_job_start', command: args.command, description: args.description,
+        });
+        if (refused) return refused;
+      }
+      job = startBash(args.description, args.command, runCwd, args.env);
     } else if (args.kind === 'subagent') {
       if (!args.prompt) return { content: '[BG_JOB_ERROR] kind=subagent requires `prompt`', isError: true };
       job = startSubagent(args.description, args.prompt, args.model, args.role, { maxIterations: args.max_iterations });

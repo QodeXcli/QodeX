@@ -97,9 +97,23 @@ const USER_ONLY_KEYS: ReadonlyArray<readonly [section: string, key: string]> = [
   ['control', 'host'],
 ];
 
-/** `projCfg` without USER_ONLY_KEYS (warns per dropped key). Doesn't mutate its input. */
+/**
+ * Whole sections honored only from ~/.qodex/config.yaml. `approval` (defaultMode,
+ * extraRoots): an untrusted repo must not switch the user into autonomous mode, nor widen
+ * what auto mode treats as "the project" (extraRoots: ['/'] would make every delete local).
+ */
+const USER_ONLY_SECTIONS: readonly string[] = ['approval'];
+
+/** `projCfg` without USER_ONLY_KEYS / USER_ONLY_SECTIONS (warns per dropped key). Doesn't mutate its input. */
 function withoutUserOnlyKeys(projCfg: Record<string, any>, file: string): Record<string, any> {
   let out = projCfg;
+  for (const section of USER_ONLY_SECTIONS) {
+    if (!(section in out)) continue;
+    const { [section]: dropped, ...rest } = out;
+    out = rest;
+    const keys = dropped && typeof dropped === 'object' && !Array.isArray(dropped) ? Object.keys(dropped) : [];
+    logger.warn(`Ignoring ${section}${keys.length ? `.{${keys.join(',')}}` : ''} from the project config — only ~/.qodex/config.yaml may set it`, { file });
+  }
   for (const [section, key] of USER_ONLY_KEYS) {
     const sec = out[section];
     if (!sec || typeof sec !== 'object' || Array.isArray(sec) || !(key in sec)) continue;

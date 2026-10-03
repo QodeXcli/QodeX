@@ -28,6 +28,7 @@
 
 import { spawnSync } from 'child_process';
 import { logger } from '../utils/logger.js';
+import { localDestructiveReason, workspaceRoots } from '../security/autonomy.js';
 
 export interface SnapshotRecord {
   /** Index in `git stash list` at the time of creation. May drift if user runs stash manually. */
@@ -59,12 +60,27 @@ const DESTRUCTIVE_BASH_PATTERNS: Array<{ regex: RegExp; label: string }> = [
   { regex: /\bdd\s+if=/, label: 'dd' },
   { regex: />\s*\/dev\/sd[a-z]/, label: 'redirect to block device' },
   { regex: /\bmkfs\b/, label: 'mkfs' },
+  { regex: /\bgit\s+checkout\s+(\S+\s+)?--\s+\S/, label: 'git checkout -- <path>' },
+  { regex: /\bgit\s+checkout\s+\.(\s|$)/, label: 'git checkout .' },
+  { regex: /\bgit\s+restore\s+(?!--staged\b)\S/, label: 'git restore' },
+  { regex: /\bgit\s+stash\s+(drop|clear)\b/, label: 'git stash drop' },
+  { regex: /\bfind\b.*\s-delete\b/, label: 'find -delete' },
 ];
 
-/** Whether a given bash command warrants a pre-snapshot. */
-export function isDestructiveBash(command: string): { destructive: boolean; label?: string } {
+/**
+ * Whether a given bash command warrants a pre-snapshot. With `opts.cwd` (auto mode, where
+ * nobody confirmed the command) the auto policy's own parse also counts: any in-project
+ * irreversible command in any segment (`npm test && rm -rf build`, `cd x && git reset --hard`).
+ */
+export function isDestructiveBash(command: string, opts?: { cwd: string }): { destructive: boolean; label?: string } {
   for (const p of DESTRUCTIVE_BASH_PATTERNS) {
     if (p.regex.test(command)) return { destructive: true, label: p.label };
+  }
+  if (opts?.cwd) {
+    try {
+      const reason = localDestructiveReason(command, { cwd: opts.cwd, roots: workspaceRoots(opts.cwd) });
+      if (reason) return { destructive: true, label: reason };
+    } catch { /* best-effort */ }
   }
   return { destructive: false };
 }

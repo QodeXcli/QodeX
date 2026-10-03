@@ -7,6 +7,7 @@ import { emitEditDiff } from '../filesystem/edit-approval.js';
 import { detectLanguage, getParser, findSyntaxErrors, type FoundSymbol } from './parser.js';
 import { logger } from '../../utils/logger.js';
 import { interpretPermissionAnswer, setApprovalMode } from '../../security/permissions.js';
+import { askHumanForAutoMode, explainRequest, unansweredMessage } from '../../security/human-approval.js';
 
 const ArgsSchema = z.object({
   path: z.string().describe('Path to source file'),
@@ -272,13 +273,26 @@ export class EditSymbolTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
 
     // Permission check
-    const permReq = { tool: 'edit_symbol', operation: rel, description: `Edit ${args.symbol_kind} ${args.symbol_name} in ${rel}` };
+    const permReq = { tool: 'edit_symbol', operation: rel, description: `Edit ${args.symbol_kind} ${args.symbol_name} in ${rel}`, cwd: ctx.cwd };
     const decision = ctx.permissions.evaluate(permReq);
     if (decision === 'deny') return { content: `[PERMISSION_DENIED]`, isError: true };
     if (decision === 'ask') {
       const preview = prepareDiffPreview(rel, source, updated);
       ctx.emit({ type: 'diff', path: preview.path, before: preview.before, after: preview.after });
-      const answer = await ctx.askUser(`Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?`, ['yes', 'no', 'always yes']);
+      // Say WHY, and offer "always yes" (= auto mode) only when auto mode would not ask too.
+      const ex = explainRequest(ctx.permissions as any, permReq);
+      const prompt = `Replace ${args.symbol_kind} ${args.symbol_name} in ${rel}?${ex.reason ? `\n  Why: ${ex.reason}` : ''}`;
+      const options = ex.canAlways ? ['yes', 'no', 'always yes'] : ['yes', 'no'];
+      let answer: string;
+      if (ex.autoPolicy) {
+        const r = await askHumanForAutoMode(ctx, prompt, options, { source: 'edit_symbol', reason: ex.reason });
+        if (!r || r.by === 'timeout' || r.by === 'fallback') {
+          return { content: unansweredMessage(`edit ${rel}`, ex.reason, r?.by ?? null), isError: true };
+        }
+        answer = r.answer;
+      } else {
+        answer = await ctx.askUser(prompt, options);
+      }
       const verdict = interpretPermissionAnswer(answer);
       if (verdict === 'deny') return { content: `[USER_REJECTED]`, isError: true };
       if (verdict === 'always') {
