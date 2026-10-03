@@ -53,9 +53,10 @@ export function esc(s: unknown, max = 500): string {
 
 /** Convert our HTML back to plain text (fallback when Telegram rejects the markup). */
 export function htmlToPlain(html: string): string {
-  return String(html ?? '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  let text = String(html ?? '').replace(/<br\s*\/?>/gi, '\n');
+  // Repeat until stable: removing one tag must not splice a new one together ("<<b>b>").
+  for (let prev = ''; prev !== text;) { prev = text; text = text.replace(/<[^<>]*>/g, ''); }
+  return text
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')

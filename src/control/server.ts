@@ -926,7 +926,8 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
     handleRequest(rt, req, res).catch(err => {
       logger.warn('Control center request failed', { err: errMessage(err), path: splitUrl(req.url ?? '/').path });
-      if (!res.headersSent) sendError(res, 500, `[INTERNAL_ERROR] ${errMessage(err)}`);
+      // The detail goes to the log only: an unexpected error's text can carry internals.
+      if (!res.headersSent) sendError(res, 500, '[INTERNAL_ERROR] The control center hit an internal error (details in the QodeX log).');
       else { try { res.end(); } catch { /* ignore */ } }
     });
   });

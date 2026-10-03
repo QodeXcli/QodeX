@@ -74,15 +74,13 @@ export async function profileLockInfo(dir: string): Promise<ProfileLock> {
     return alive ? { locked: true, pid, host } : { locked: false, pid, host, stale: true };
   } catch { /* no SingletonLock symlink */ }
   if (process.platform === 'win32') {
-    const lock = path.join(dir, 'lockfile');
-    if (fsSync.existsSync(lock)) {
-      try {
-        const fh = await fs.open(lock, 'r+');
-        await fh.close();
-        return { locked: false };
-      } catch (e: any) {
-        if (e?.code === 'EBUSY' || e?.code === 'EPERM' || e?.code === 'EACCES') return { locked: true };
-      }
+    // Chromium holds `lockfile` open exclusively while running; opening it is the probe.
+    try {
+      const fh = await fs.open(path.join(dir, 'lockfile'), 'r+');
+      await fh.close();
+      return { locked: false };
+    } catch (e: any) {
+      if (e?.code === 'EBUSY' || e?.code === 'EPERM' || e?.code === 'EACCES') return { locked: true };
     }
   }
   return { locked: false };

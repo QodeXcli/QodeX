@@ -693,23 +693,31 @@ async function printLog(store: MissionStore, missionId: string, file: string, op
     if (!opts.follow) return;
   }
   let pos = 0;
-  if (fs.existsSync(file)) {
-    const text = fs.readFileSync(file, 'utf8');
-    const lines = text.split('\n');
+  /** New bytes of the log since `from` — size and data come from ONE open descriptor. */
+  const readFrom = (from: number): Buffer | null => {
+    let fd: number;
+    try { fd = fs.openSync(file, 'r'); } catch { return null; }
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (size <= from) return Buffer.alloc(0);
+      const buf = Buffer.alloc(size - from);
+      const n = fs.readSync(fd, buf, 0, buf.length, from);
+      return buf.subarray(0, n);
+    } finally { fs.closeSync(fd); }
+  };
+  const initial = readFrom(0);
+  if (initial) {
+    const lines = initial.toString('utf8').split('\n');
     process.stdout.write(lines.slice(-opts.lines - 1).join('\n'));
-    pos = Buffer.byteLength(text);
+    pos = initial.length;
   }
   if (!opts.follow) { process.stdout.write('\n'); return; }
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
       try {
-        const st = fs.existsSync(file) ? fs.statSync(file) : null;
-        if (st && st.size > pos) {
-          const fd = fs.openSync(file, 'r');
-          const buf = Buffer.alloc(st.size - pos);
-          fs.readSync(fd, buf, 0, buf.length, pos);
-          fs.closeSync(fd);
-          pos = st.size;
+        const buf = readFrom(pos);
+        if (buf && buf.length) {
+          pos += buf.length;
           process.stdout.write(buf.toString('utf8'));
         }
         const m = store.reconcile(missionId);

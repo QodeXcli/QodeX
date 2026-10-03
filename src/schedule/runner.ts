@@ -132,7 +132,18 @@ async function acquireLock(lockPath: string, staleMs: number): Promise<fsSync.pr
   const holder = await readLockPid(lockPath);
   const holderDead = holder !== null && holder !== process.pid && !pidAlive(holder);
   if (!holderDead && ageMs < staleMs) return null;
-  try { await fs.unlink(lockPath); } catch { /* raced */ }
+  // Steal by atomic rename, then make sure what we moved is the lock we judged stale:
+  // two ticks stealing at once must not unlink the lock the faster one just created.
+  const moved = `${lockPath}.${process.pid}.${Date.now().toString(36)}.stale`;
+  try { await fs.rename(lockPath, moved); } catch { return null; /* another tick stole it first */ }
+  const movedStat = await fs.stat(moved).catch(() => null);
+  if (stat && movedStat && movedStat.ino !== stat.ino) {
+    // A fresh lock: put it back (link fails if yet another one appeared meanwhile).
+    await fs.link(moved, lockPath).catch(() => {});
+    await fs.unlink(moved).catch(() => {});
+    return null;
+  }
+  await fs.unlink(moved).catch(() => {});
   return fs.open(lockPath, 'wx').catch(() => null);
 }
 
