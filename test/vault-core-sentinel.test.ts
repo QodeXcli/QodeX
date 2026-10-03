@@ -151,4 +151,24 @@ describe('guard behaviour', () => {
       expect(r?.content).toMatch(/^\[SENTINEL_DENIED\]/);
     }
   });
+
+  it('vault_generate_and_fill is judged on the open page and its target field', async () => {
+    setApprovalMode('manual');
+    const described: string[] = [];
+    const s = new Sentinel({
+      config: () => ({ ...DEFAULT_SENTINEL_CONFIG, audit: false }), audit: null, broker: () => broker, interactive: () => true,
+      browser: () => ({
+        isRunning: () => true, activeUrl: () => 'https://shop.example.com/register',
+        describeRef: async (ref: string) => { described.push(ref); return { ref, role: 'textbox', name: 'Choose a password', tag: 'input' }; },
+        describeSelector: async () => null,
+      } as any),
+      workflowsDir: path.join(tmp, 'wf'),
+    });
+    const prompts: string[] = [];
+    const m = makeCtx('no');
+    m.ctx.askUser = async (p: string) => { prompts.push(String(p)); return 'no'; };
+    await s.beforeTool('vault_generate_and_fill', { ref: 'e7' }, m.ctx);
+    expect(described).toEqual(['e7']);
+    expect(prompts.join('\n')).toMatch(/Choose a password.*shop\.example\.com/s);
+  });
 });
