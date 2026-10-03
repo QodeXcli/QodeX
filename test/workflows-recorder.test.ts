@@ -245,6 +245,19 @@ describe('selectRecords (sources + de-duplication)', () => {
     expect(workflow.steps.filter(s => s.kind === 'click')).toHaveLength(2);
   });
 
+  it('a missed echo never pins a human Back (followed by human typing) on a later agent Enter', () => {
+    // The page capture can miss the agent's own Enter when the submit unloads the page
+    // first (slow CI). The human went Back and typed BEFORE the agent pressed Enter.
+    const base = t + 10_000;
+    const back: RawRecord = { origin: 'nav', tool: 'navigate', args: { url: 'https://shop.example/' }, url: 'https://shop.example/', actor: 'human', ts: base };
+    const typed = cap('fill', { value: 'mate' }, search, { ts: base + 600 });
+    const results: RawRecord = { origin: 'nav', tool: 'navigate', args: { url: 'https://shop.example/results?q=mate' }, url: 'https://shop.example/results?q=mate', actor: 'human', ts: base + 1400 };
+    const enter = act('browser_press', { key: 'Enter' }, search, { ts: base + 1500 });
+    const kept = selectRecords([back, typed, results, enter], 'mixed');
+    expect(kept).toContain(back);          // the human's Back stays
+    expect(kept).not.toContain(results);   // the load the agent's Enter caused is still dropped
+  });
+
   it('drops address-bar navigations caused by a recorded click, keeps typed URLs', () => {
     const click = cap('click', {}, go);
     const caused: RawRecord = { origin: 'nav', tool: 'navigate', args: { url: 'https://shop.example/results' }, url: 'https://shop.example/results', actor: 'human', ts: click.ts + 800 };

@@ -539,7 +539,12 @@ export function selectRecords(records: RawRecord[], source: WorkflowSource): Raw
       if (r.origin === 'action' && r.actor === 'agent') {
         const at = actedAt.get(r);
         if (at !== undefined) return n.ts >= at && n.ts - at <= NAV_WINDOW_MS && n.ts <= r.ts;
-        return dt <= 0 && dt >= -NAV_WINDOW_MS;
+        // No echo pins when it acted (the capture can miss an Enter whose submit unloads
+        // the page first): a load just before its record is its doing only if nothing
+        // else was recorded in between — a human's Back then typing then the agent's
+        // Enter must keep the Back.
+        if (!(dt <= 0 && dt >= -NAV_WINDOW_MS)) return false;
+        return !kept.some(o => o !== r && o !== n && !drop.has(o) && o.origin !== 'nav' && o.origin !== 'start' && o.ts > n.ts && o.ts < r.ts);
       }
       return dt >= 0 && dt <= NAV_WINDOW_MS;
     });

@@ -401,7 +401,8 @@ describe.skipIf(!chromium)('QodeX browser review (real Chromium)', () => {
     } finally {
       await second.close();
     }
-    for (let i = 0; i < 20; i++) {
+    // close() already waits for the removal; allow a slow CI box a little more.
+    for (let i = 0; i < 50; i++) {
       try { await fs.access(dir); } catch { break; }
       await new Promise(r => setTimeout(r, 100));
     }

@@ -398,6 +398,19 @@ export function redactTypedArgs(args: Record<string, unknown>, el: ElementInfo |
   return out;
 }
 
+/**
+ * Delete a directory and make sure it stays deleted: Chromium's helper processes can
+ * still write into a profile for a moment after the browser exits, recreating it.
+ * Best effort — stale throwaways are also pruned at the next launch.
+ */
+async function removeUntilGone(dir: string, attempts = 10): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
+    try { await fs.access(dir); } catch { return; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
 /** File inside a `<profile>-<pid>` throwaway profile (written by QodeX). */
 const FALLBACK_MARKER = '.qodex-fallback-profile';
 
@@ -776,9 +789,7 @@ export class QodexBrowserManager implements BrowserManager {
       // user's). Chromium may still flush a file or two while exiting, hence retries.
       const dir = this.fallbackProfileDir;
       this.fallbackProfileDir = null;
-      this.fallbackCleanup = fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-        .catch(() => {})
-        .finally(() => { this.fallbackCleanup = null; });
+      this.fallbackCleanup = removeUntilGone(dir).finally(() => { this.fallbackCleanup = null; });
     }
     if (wasRunning) getBus().publish({ kind: 'browser', type: 'closed', data: { profile: this.profileInUse } });
   }
