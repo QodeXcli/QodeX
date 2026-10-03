@@ -56,7 +56,9 @@ export function htmlToPlain(html: string): string {
   let text = String(html ?? '').replace(/<br\s*\/?>/gi, '\n');
   // Repeat until stable: removing one tag must not splice a new one together ("<<b>b>").
   for (let prev = ''; prev !== text;) { prev = text; text = text.replace(/<[^<>]*>/g, ''); }
+  // Our markup escapes every literal < and >, so any left over is a stray tag fragment.
   return text
+    .replace(/[<>]/g, '')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')

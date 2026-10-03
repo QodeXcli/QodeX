@@ -110,16 +110,6 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
 }
 
-async function readLockPid(lockPath: string): Promise<number | null> {
-  try {
-    const text = await fs.readFile(lockPath, 'utf8');
-    const m = /pid=(\d+)/.exec(text);
-    return m ? Number(m[1]) : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Take the tick lock, stealing it only from a dead or long-silent holder. */
 async function acquireLock(lockPath: string, staleMs: number): Promise<fsSync.promises.FileHandle | null> {
   try {
@@ -127,9 +117,19 @@ async function acquireLock(lockPath: string, staleMs: number): Promise<fsSync.pr
   } catch (e: any) {
     if (e?.code !== 'EEXIST') return null;
   }
-  const stat = await fs.stat(lockPath).catch(() => null);
+  // Inspect the existing lock through one descriptor (age, inode and holder pid together).
+  let stat: fsSync.Stats | null = null;
+  let holder: number | null = null;
+  const existing = await fs.open(lockPath, 'r').catch(() => null);
+  if (!existing) return fs.open(lockPath, 'wx').catch(() => null); // released meanwhile
+  {
+    try {
+      stat = await existing.stat();
+      const m = /pid=(\d+)/.exec(await existing.readFile('utf8'));
+      holder = m ? Number(m[1]) : null;
+    } catch { /* unreadable: judged by age alone */ } finally { await existing.close().catch(() => {}); }
+  }
   const ageMs = stat ? Date.now() - stat.mtimeMs : Infinity;
-  const holder = await readLockPid(lockPath);
   const holderDead = holder !== null && holder !== process.pid && !pidAlive(holder);
   if (!holderDead && ageMs < staleMs) return null;
   // Steal by atomic rename, then make sure what we moved is the lock we judged stale:

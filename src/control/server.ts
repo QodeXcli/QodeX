@@ -799,7 +799,8 @@ function installExitHook(): void {
 }
 
 function errMessage(e: unknown): string {
-  const m = e instanceof Error ? e.message : String(e);
+  // Only an Error's message: a thrown non-Error is never stringified into a response.
+  const m = e instanceof Error ? e.message : 'unexpected error';
   return m.length > 500 ? m.slice(0, 500) + '…' : m;
 }
 

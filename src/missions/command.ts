@@ -688,10 +688,6 @@ export async function attachToMission(
 
 async function printLog(store: MissionStore, missionId: string, file: string, opts: { follow: boolean; lines: number }): Promise<void> {
   const { isActiveStatus } = await import('./store.js');
-  if (!fs.existsSync(file)) {
-    console.log(`(no log yet at ${file})`);
-    if (!opts.follow) return;
-  }
   let pos = 0;
   /** New bytes of the log since `from` — size and data come from ONE open descriptor. */
   const readFrom = (from: number): Buffer | null => {
@@ -710,6 +706,9 @@ async function printLog(store: MissionStore, missionId: string, file: string, op
     const lines = initial.toString('utf8').split('\n');
     process.stdout.write(lines.slice(-opts.lines - 1).join('\n'));
     pos = initial.length;
+  } else {
+    console.log(`(no log yet at ${file})`);
+    if (!opts.follow) return;
   }
   if (!opts.follow) { process.stdout.write('\n'); return; }
   await new Promise<void>((resolve) => {

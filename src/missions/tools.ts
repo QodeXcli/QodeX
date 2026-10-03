@@ -226,7 +226,7 @@ function err(content: string): ToolResult {
 async function confirmMissionStart(goal: string, cwd: string, detach: boolean, ctx: ToolContext): Promise<ToolResult | null> {
   const operation = `mission_start ${oneLine(goal, 400)}`;
   const description = detach ? 'start a background mission' : 'run a mission in this session';
-  let decision: 'allow' | 'ask' | 'deny' = 'ask';
+  let decision: 'allow' | 'ask' | 'deny';
   try {
     decision = ctx.permissions ? ctx.permissions.evaluate({ tool: 'mission_start', operation, description }) : 'ask';
   } catch {
@@ -238,7 +238,7 @@ async function confirmMissionStart(goal: string, cwd: string, detach: boolean, c
   }
   try { ctx.emit({ type: 'permission-request', tool: 'mission_start', operation, description }); } catch { /* UI only */ }
   const options = ['yes', 'no'];
-  let answer = 'no';
+  let answer: string;
   try {
     answer = await ctx.askUser(
       `Start a ${detach ? 'background ' : ''}mission?\n  Goal: ${oneLine(goal, 400)}\n  Dir: ${cwd}` +
