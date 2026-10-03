@@ -132,7 +132,9 @@ export function handoffForPrompt(prompt: string, options: string[], broker: Appr
   for (const p of broker.pending()) {
     const h = handoffMetaOf(p.meta);
     if (!h) continue;
-    if (p.prompt === prompt && p.options.length === options.length && p.options.every((o, i) => o === options[i])) return { approval: p, handoff: h };
+    // (the terminal may prefix the prompt with its lane tag: "[bg1] …")
+    const same = p.prompt === prompt || (p.prompt.length > 0 && prompt.endsWith(`] ${p.prompt}`));
+    if (same && p.options.length === options.length && p.options.every((o, i) => o === options[i])) return { approval: p, handoff: h };
   }
   return null;
 }

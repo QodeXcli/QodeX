@@ -53,6 +53,7 @@ import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
+import { handoffForPrompt, handoffTerminalHint } from '../control/handoff.js';
 import type { AskMeta } from '../agent/ask-meta.js';
 import { isSentinelPrompt } from '../sentinel/guard.js';
 import { autoAnswerForMode, autoAnsweredLine, autoModeBannerOnce, modeBadge } from './approval-ui.js';
@@ -1051,6 +1052,7 @@ export function App(props: AppProps): React.ReactElement {
           <Confirmation
             prompt={pendingPrompt.prompt}
             options={pendingPrompt.options}
+            hint={terminalHandoffHint(pendingPrompt.prompt, pendingPrompt.options)}
             onAnswer={(a) => {
               // "always yes" switches this session to auto mode (its policy: critical and
               // outside-project destructive actions still ask). A Sentinel "always" keeps
@@ -1373,4 +1375,19 @@ function stripLeakedToolJson(text: string): string {
     }
   }
   return result.replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * A hand-off prompt (a CAPTCHA / bot check waiting for the human) gets its own hint:
+ * where to solve it, the local control-center URL, and that QodeX continues by
+ * itself (Esc stops the task; the hand-off listens to the run's signal).
+ */
+function terminalHandoffHint(prompt: string, options: string[]): string[] | undefined {
+  try {
+    const found = handoffForPrompt(prompt, options);
+    if (!found) return undefined;
+    return handoffTerminalHint(found.handoff, /^fa/i.test(process.env.LANG ?? '') ? 'fa' : 'en');
+  } catch {
+    return undefined;
+  }
 }
