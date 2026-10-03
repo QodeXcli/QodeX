@@ -47,11 +47,19 @@ export function escapeHtml(s: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
-/** Truncate to `max` chars with an ellipsis (counts UTF-16 units, like Telegram). */
+/**
+ * Truncate to `max` chars with an ellipsis (counts UTF-16 units, like
+ * Telegram). Never splits a surrogate pair: half an emoji is invalid UTF-8 and
+ * Telegram would reject the WHOLE message — for an approval card that means the
+ * human never sees it.
+ */
 export function truncate(s: unknown, max: number): string {
   const t = String(s ?? '');
   if (t.length <= max) return t;
-  return t.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
+  let cut = Math.max(0, max - 1);
+  const c = t.charCodeAt(cut - 1);
+  if (cut > 0 && c >= 0xd800 && c <= 0xdbff) cut--;
+  return t.slice(0, cut).trimEnd() + '…';
 }
 
 /** Escape + truncate in one step (truncate first so we never cut an entity). */
