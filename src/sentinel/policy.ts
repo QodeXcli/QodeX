@@ -57,6 +57,8 @@ import {
   QODEX_BROWSER_PROFILES_DIR, QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE,
 } from '../config/paths.js';
 import type { ElementInfo } from '../tools/browser/types.js';
+import { QODEX_GRANTS_FILE, QODEX_MAIL_ACCOUNTS_FILE, QODEX_MAIL_AUTO_DIR } from '../grants/paths.js';
+import type { MailSendResolution } from '../grants/mail-scope.js';
 import type { ActionClassification, RiskLevel } from './types.js';
 
 // ── public types ────────────────────────────────────────────────────────────
@@ -123,6 +125,11 @@ export interface PolicyContext {
   workflow?: WorkflowLike | null;
   /** Override the protected-path set (tests). */
   protectedPaths?: ProtectedPaths;
+  /**
+   * mail_send: what it would send (resolved by the guard from the draft / arguments,
+   * src/grants/mail-scope.ts). undefined = not resolved; null = could not be read.
+   */
+  mail?: MailSendResolution | null;
 }
 
 export interface PolicyClassification extends ActionClassification {
@@ -133,6 +140,8 @@ export interface PolicyClassification extends ActionClassification {
    * always a fresh human answer — `sentinel.autoApprove` does not apply.
    */
   integrity?: boolean;
+  /** Extra lines for the approval prompt (mail_send: recipients, subject, body preview). */
+  details?: string[];
 }
 
 // ── text normalization ──────────────────────────────────────────────────────
@@ -666,9 +675,15 @@ function markerFor(p: string): string {
 }
 
 export const DEFAULT_PROTECTED_PATHS: ProtectedPaths = {
-  files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE],
-  dirs: [QODEX_BROWSER_PROFILES_DIR],
-  markers: [markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR)],
+  // Standing grants, the mail automation state (rules = trusted instructions, the
+  // received-mail index that scopes auto-replies) and the mail account secrets: the
+  // agent may neither read nor write them — only the human surfaces change them.
+  files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE, QODEX_GRANTS_FILE, QODEX_MAIL_ACCOUNTS_FILE],
+  dirs: [QODEX_BROWSER_PROFILES_DIR, QODEX_MAIL_AUTO_DIR],
+  markers: [
+    markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR),
+    markerFor(QODEX_GRANTS_FILE), markerFor(QODEX_MAIL_ACCOUNTS_FILE), markerFor(QODEX_MAIL_AUTO_DIR),
+  ],
   // .env holds the provider keys + the Telegram bot token; sessions.db holds the
   // mission approval queue; channels/ holds the Telegram pairing (who may approve).
   configFiles: [QODEX_CONFIG_FILE, path.join(QODEX_HOME, '.env'), QODEX_SESSION_DB],
@@ -688,7 +703,7 @@ const QODEX_ENTRY = String.raw`(?:(?:(?:tsx|ts-node|bun)\s+)?(?:\S*[/\\])?(?:ind
  * Root options before the subcommand (`qodex --json -m x mission approve …`). An option's
  * value never swallows a subcommand word, which also keeps the match linear.
  */
-const ROOT_OPTS = String.raw`(?:\s+-\S+(?:\s+(?!(?:missions?|vault|setup|config|control|telegram|browser)\b)[^\s-]\S*)?)*`;
+const ROOT_OPTS = String.raw`(?:\s+-\S+(?:\s+(?!(?:missions?|vault|setup|config|control|telegram|browser|grant|mail)\b)[^\s-]\S*)?)*`;
 /** `--yes` / `-y` anywhere in the same command (before or after the subcommand). */
 const YES_AHEAD = String.raw`(?=[^|;&\n]*\s(?:--yes|-y)(?![\w-]))`;
 /** Answering or steering a mission (a steering note carries the user's authority). */
@@ -717,6 +732,9 @@ const QODEX_SELF_CHANGE_RE = new RegExp([
   String.raw`|telegram\s+(?:setup|pair|unpair)`,
   String.raw`|${MISSION_ANSWER}`,
   String.raw`|browser\s+reset-profile`,
+  // Standing grants and mail rules: a grant lets email go out unasked, a rule's task is a trusted instruction.
+  String.raw`|grant\s+(?:add|revoke|rm|remove)\b`,
+  String.raw`|mail\s+(?:rules?\s+(?:add|rm|remove|delete)\b|reply-all\b)`,
   String.raw`)`,
   String.raw`|${QODEX_BIN}${YES_AHEAD}${ROOT_OPTS}\s+${MISSION_AUTO}`,
   String.raw`|${QODEX_ENTRY}${ROOT_OPTS}\s+${MISSION_ANSWER}`,
@@ -1251,7 +1269,7 @@ const DESKTOP_GUARDED = new Set([
   'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_move', 'computer_use_drag',
   'computer_use_scroll', 'computer_use_clipboard', 'computer_use_open', 'computer_use_focus_window',
 ]);
-const OTHER_GUARDED = new Set(['http_request', 'workflow_run']);
+const OTHER_GUARDED = new Set(['http_request', 'workflow_run', 'mail_send']);
 
 /** Literal name fragments that make any tool (MCP or not) a guarded action. */
 const NAME_KEYWORD_RE = /send_email|send_message|post_|create_payment|transfer|purchase|delete/i;
@@ -1686,10 +1704,70 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
     case 'workflow_run':
       return classifyWorkflow(a, ctx);
+    case 'mail_send':
+      return classifyMailSend(a, ctx);
   }
 
   if (MCP_PREFIX_RE.test(toolName) || NAME_KEYWORD_RE.test(toolName)) return classifyByName(toolName, a, cfg);
   return none(toolName);
+}
+
+// ── email (mail_send) ───────────────────────────────────────────────────────
+
+function addrList(v: unknown): string[] {
+  if (Array.isArray(v)) return v.flatMap(addrList);
+  const s = str(v).trim();
+  return s ? s.split(/[,;]\s*(?![^<]*>)/).map(x => x.trim()).filter(Boolean) : [];
+}
+
+function bareAddr(s: string): string {
+  const m = /<([^<>]+)>\s*$/.exec(s);
+  return (m ? m[1] : s).replace(/^mailto:/i, '').trim().toLowerCase();
+}
+
+/**
+ * mail_send — sending email is the 'send' category (critical by default: always a
+ * human, unless a standing mail-reply grant covers it — decided by the guard). The
+ * summary and prompt lines show what goes out: recipients (to / cc / bcc), reply vs
+ * new thread, attachments, subject and a body preview. Text that looks like a secret
+ * makes it a credential action. PURE (the guard resolves a draft into `ctx.mail`).
+ */
+function classifyMailSend(a: Record<string, unknown>, ctx: PolicyContext): PolicyClassification {
+  const cfg = ctx.config;
+  const send = ctx.mail?.send;
+  const to = send ? send.to : addrList(a.to);
+  const cc = send ? send.cc : addrList(a.cc);
+  const bcc = send ? send.bcc : addrList(a.bcc);
+  const subject = send ? str(send.subject) : str(a.subject);
+  const body = send ? str(send.body) : str(a.body ?? a.text);
+  const attachments = send ? send.attachments.map(x => x.name) : (Array.isArray(a.attachments) ? a.attachments : a.attachments ? [a.attachments] : []).map(x => typeof x === 'string' ? x : str((x as any)?.name ?? (x as any)?.path));
+  const reply = send ? !!send.inReplyTo : !!str(a.in_reply_to ?? a.reply_to_id).trim();
+  const draft = str(a.draft_id ?? a.draftId).trim();
+  const clean = (x: string, n: number) => oneLine(maskControlTokens(maskSecrets(x)), n);
+  const who = to.length ? to.slice(0, 3).map(x => clean(bareAddr(x), 80)).join(', ') + (to.length > 3 ? ` +${to.length - 3}` : '') : '';
+  const summary = who
+    ? `send email to ${who}${cc.length ? ` (+${cc.length} cc)` : ''}${bcc.length ? ` (+${bcc.length} bcc)` : ''}${subject ? ` "${clean(subject, 80)}"` : ''}${reply ? ' (reply)' : ''}`
+    : draft ? `send email draft ${clean(draft, 60)} (its contents could not be read)` : 'send an email';
+  const extras = [
+    reply ? 'a reply in an existing thread' : 'a NEW email (not a reply)',
+    cc.length ? `${cc.length} cc` : '',
+    bcc.length ? `${bcc.length} bcc (hidden recipients)` : '',
+    attachments.length ? `${attachments.length} attachment(s)` : '',
+  ].filter(Boolean).join(', ');
+  const details = [
+    `To: ${to.length ? to.map(x => clean(x, 120)).join(', ') : '(unknown)'}`,
+    cc.length ? `Cc: ${cc.map(x => clean(x, 120)).join(', ')}` : '',
+    bcc.length ? `Bcc: ${bcc.map(x => clean(x, 120)).join(', ')}` : '',
+    `Subject: ${subject ? clean(subject, 200) : '(none)'}`,
+    attachments.length ? `Attachments: ${attachments.map(x => clean(x, 80)).join(', ')}` : '',
+    body ? `Body: ${clean(body, 300)}` : '',
+  ].filter(Boolean);
+  const domain = to.length ? (bareAddr(to[0]).split('@')[1] || undefined) : undefined;
+  const secrets = detectSecrets(`${subject}\n${body}`);
+  if (secrets.length) {
+    return { ...make('credential', riskFor('credential', cfg), summary, `the email would send ${describeSecret(secrets[0].kind)} (${extras})`, domain), details };
+  }
+  return { ...make('send', riskFor('send', cfg), summary, `sending an email: ${extras}`, domain), details };
 }
 
 // ── workflows ───────────────────────────────────────────────────────────────

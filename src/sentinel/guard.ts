@@ -62,6 +62,10 @@ import type { ActionClassification, SentinelDecision, SentinelGuard } from './ty
 import {
   AUTO_MODE_ASKS, autoModeAskReason, clearSentinelApproval, isAutonomousContext, recordSentinelApproval, rootsFor,
 } from './auto-mode.js';
+import { getGrantStore, bareAddress, type GrantStore } from '../grants/store.js';
+import { getReceivedIndex, type ReceivedIndex } from '../grants/received.js';
+import { MAIL_SEND_TOOL, checkMailReplyScope, factsFromArgs, resolveMailSend, type MailSendResolution } from '../grants/mail-scope.js';
+import { publishMailEvent } from '../grants/mail-events.js';
 
 export interface SentinelOptions {
   /** Config source (default: resolveSentinelConfig(getActiveConfig())). */
@@ -83,6 +87,10 @@ export interface SentinelOptions {
    * getControlCenter(), loaded lazily). Its port and token are off-limits to the agent.
    */
   controlCenter?: () => { port?: number; token?: string; url?: string; urls?: string[]; tunnelUrl?: string } | null;
+  /** Standing grants (default: ~/.qodex/grants.json). */
+  grants?: () => GrantStore;
+  /** Received-mail index used to scope mail-reply grants (default: ~/.qodex/mail-auto/received.json). */
+  receivedIndex?: () => ReceivedIndex;
 }
 
 /** Outcome of a review, before any prompting. */
@@ -96,6 +104,38 @@ export interface SentinelVerdict {
 
 const CRITICAL_OPTIONS = ['yes', 'no'];
 const ASK_OPTIONS = ['yes', 'no', 'always'];
+
+/**
+ * Extra option on a mail_send prompt that is a plain same-thread reply to the original
+ * sender: a human picking it creates a standing mail-reply grant for that account +
+ * sender (src/grants) — the only way an approval prompt creates a grant.
+ */
+export const ALWAYS_REPLIES_OPTION = 'always allow replies like this';
+
+/** Channels whose answer is not a human's (the safe option they return never picks the grant option, but be explicit). */
+const NON_HUMAN_BY = new Set(['timeout', 'abort', 'fallback', 'local-error', 'reset', 'cancel', 'error']);
+
+interface ReplyOffer { account: string; from: string }
+
+type MailGrantCheck =
+  | { allowed: true; grantId: string; used: number; cap: number; recipient: string; account: string; subject: string }
+  | { allowed: false; offer: ReplyOffer | null; note?: string };
+
+/** Insert lines just above the closing question of a Sentinel prompt. */
+function beforeQuestion(prompt: string, lines: string[]): string {
+  const add = lines.filter(Boolean);
+  if (!add.length) return prompt;
+  const q = '\nAllow this action?';
+  return prompt.endsWith(q) ? `${prompt.slice(0, -q.length)}\n${add.join('\n')}${q}` : `${prompt}\n${add.join('\n')}`;
+}
+
+/** Key that ties a mail_send review to its execution (preflight sees raw args, afterTool parsed ones). */
+function mailSendKey(args: Record<string, unknown>): string {
+  const draft = str(args?.draft_id ?? args?.draftId).trim();
+  if (draft) return `d:${draft}`;
+  const f = factsFromArgs(args ?? {});
+  return f ? `f:${f.to.map(bareAddress).sort().join(',')}|${f.inReplyTo ?? ''}` : '';
+}
 
 /** First line of every Sentinel approval prompt. */
 export const SENTINEL_PROMPT_TITLE = '🛡 Sentinel — approval needed · نیاز به تأیید شما';
@@ -187,6 +227,8 @@ export class Sentinel implements SentinelGuard {
    */
   private readonly passes = new WeakMap<object, Map<string, number>>();
   private auditWriter: SentinelAudit | null | undefined;
+  /** mail_send calls a standing grant let through, waiting for their result (→ "Auto-replied to …" notice). */
+  private readonly autoReplies = new Map<string, { at: number; account: string; to: string; subject: string; grantId: string; used: number; cap: number }>();
 
   constructor(private readonly opts: SentinelOptions = {}) {
     this.auditWriter = opts.audit;
@@ -347,11 +389,68 @@ export class Sentinel implements SentinelGuard {
     return null;
   }
 
-  /** Gather context and classify a call (no prompting). */
-  async review(toolName: string, args: Record<string, unknown>, ctx: ToolContext): Promise<PolicyClassification> {
+  /** Gather context and classify a call (no prompting). `known` = context the caller already resolved (mail_send facts). */
+  async review(toolName: string, args: Record<string, unknown>, ctx: ToolContext, known?: Pick<PolicyContext, 'mail'>): Promise<PolicyClassification> {
     const cfg = this.config();
     const extra = await this.gather(toolName, args ?? {}, ctx);
-    return classifyAction(toolName, args ?? {}, { ...extra, config: cfg });
+    return classifyAction(toolName, args ?? {}, { ...extra, ...(known ?? {}), config: cfg });
+  }
+
+  private grants(): GrantStore {
+    return this.opts.grants ? this.opts.grants() : getGrantStore();
+  }
+
+  /** What a mail_send would send + the trusted facts about the message it replies to (null = unknown). */
+  private async resolveMail(args: Record<string, unknown>, ctx: ToolContext): Promise<MailSendResolution | null> {
+    try {
+      const index = this.opts.receivedIndex ? this.opts.receivedIndex() : getReceivedIndex();
+      return await resolveMailSend(args, { cwd: ctx?.cwd, sessionId: ctx?.sessionId }, { index });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Standing mail-reply grants (src/grants): a mail_send inside a grant's exact scope is
+   * allowed without a prompt (the daily cap is counted here); otherwise say why, and
+   * offer "always allow replies like this" when it is a plain same-thread reply.
+   * A user deny rule for the operation always wins. Fails closed (no grant).
+   */
+  private async standingMailGrant(toolName: string, ctx: ToolContext, cls: PolicyClassification, mail: MailSendResolution | null): Promise<MailGrantCheck> {
+    try {
+      if (!mail) return { allowed: false, offer: null };
+      let perm: 'allow' | 'ask' | 'deny' = 'ask';
+      try { perm = ctx?.permissions ? ctx.permissions.evaluate({ tool: toolName, operation: this.operation(toolName, cls), description: cls.reason }) : 'ask'; } catch { perm = 'ask'; }
+      if (perm === 'deny') return { allowed: false, offer: null };
+      const store = this.grants();
+      const rows = await store.listWithUsage();
+      const used = new Map(rows.map(r => [r.grant.id, r.usedToday]));
+      const v = checkMailReplyScope(mail.send, mail.source, rows.map(r => r.grant), { usedToday: id => used.get(id) ?? 0 });
+      if (v.ok) {
+        const c = await store.consume(v.grant.id);
+        if (c.ok) return { allowed: true, grantId: v.grant.id, used: c.used, cap: c.cap, recipient: v.recipient, account: mail.send.account, subject: str(mail.send.subject) };
+        return { allowed: false, offer: null, note: `Not covered by standing grant ${v.grant.id}: ${c.reason}.` };
+      }
+      const hasGrants = rows.some(r => r.grant.kind === 'mail-reply');
+      const note = hasGrants || v.blockedByCap ? `Not covered by your standing reply grant: ${v.reasons.slice(0, 3).join('; ')}.` : undefined;
+      const offer = v.replyShaped && !v.blockedByCap && v.recipient && mail.send.account ? { account: mail.send.account, from: v.recipient } : null;
+      return { allowed: false, offer, note };
+    } catch {
+      return { allowed: false, offer: null };
+    }
+  }
+
+  /** A grant-allowed mail_send finished: tell the user ("Auto-replied to X: subject"). */
+  private settleAutoReply(args: Record<string, unknown>, result: ToolResult): void {
+    const key = mailSendKey(args);
+    const now = Date.now();
+    for (const [k, v] of this.autoReplies) if (now - v.at > 30 * 60_000) this.autoReplies.delete(k);
+    const pending = key ? this.autoReplies.get(key) : undefined;
+    if (!pending) return;
+    this.autoReplies.delete(key);
+    const data = { account: pending.account, to: pending.to, subject: pending.subject, grantId: pending.grantId, used: pending.used, cap: pending.cap };
+    if (result?.isError) void publishMailEvent('auto-reply-failed', { ...data, error: String(result.content ?? '').split('\n')[0] });
+    else void publishMailEvent('auto-reply', data);
   }
 
   // ── decisions ───────────────────────────────────────────────────────────
@@ -450,6 +549,7 @@ export class Sentinel implements SentinelGuard {
       `Category: ${cls.category} · risk: ${cls.risk}`,
       `Why: ${cls.reason}`,
       `Tool: ${toolName}`,
+      ...(cls.details ?? []),
     ];
     if (critical) {
       lines.push('Critical actions always need your explicit answer (/auto and --yes do not apply).');
@@ -506,22 +606,46 @@ export class Sentinel implements SentinelGuard {
 
     let cls: PolicyClassification | null = null;
     try {
-      cls = await this.review(toolName, a, ctx);
+      // mail_send: what would actually go out (a draft's contents) — for the prompt and standing grants.
+      const mail = toolName === MAIL_SEND_TOOL ? await this.resolveMail(a, ctx) : undefined;
+      cls = await this.review(toolName, a, ctx, mail === undefined ? undefined : { mail });
       clearSentinelApproval(ctx, toolName);
       const verdict = this.decide(toolName, cls, ctx, cfg, a);
-      const d = verdict.decision;
+      let d = verdict.decision;
       if (d.action === 'allow') {
         this.report(cfg, toolName, a, ctx, cls, 'allow', verdict.via);
         // The human's earlier "always" for this category + domain answers for this call too.
         if (verdict.via === 'session') recordSentinelApproval(ctx, toolName);
         return this.allow(ctx, toolName, grant);
       }
+      // A standing mail-reply grant the human created answers for an in-scope reply (also
+      // when no human is around — that is what it is for). Never past a policy block or a deny rule.
+      let criticalOptions = CRITICAL_OPTIONS;
+      let replyOffer: ReplyOffer | null = null;
+      if (toolName === MAIL_SEND_TOOL && !cls.block && cls.category === 'send' && verdict.via !== 'permission') {
+        const g = await this.standingMailGrant(toolName, ctx, cls, mail ?? null);
+        if (g.allowed) {
+          this.report(cfg, toolName, a, ctx, cls, 'allow', 'grant', `grant:${g.grantId} (${g.used}/${g.cap} today)`, 'standing-grant');
+          const key = mailSendKey(a);
+          if (key) this.autoReplies.set(key, { at: Date.now(), account: g.account, to: g.recipient, subject: g.subject, grantId: g.grantId, used: g.used, cap: g.cap });
+          return this.allow(ctx, toolName, grant);
+        }
+        if (d.action === 'ask') {
+          const lines = [g.note ?? ''];
+          if (g.offer && verdict.via === 'needs-human') {
+            replyOffer = g.offer;
+            criticalOptions = [...CRITICAL_OPTIONS, ALWAYS_REPLIES_OPTION];
+            lines.push(`"${ALWAYS_REPLIES_OPTION}" = send this, and from now on send same-thread replies to ${g.offer.from} from ${g.offer.account} without asking (no cc/bcc/attachments, max 50/day; revoke with /allow revoke).`);
+          }
+          d = { ...d, prompt: beforeQuestion(d.prompt, lines) };
+        }
+      }
       if (d.action === 'deny') {
         this.report(cfg, toolName, a, ctx, cls, 'deny', verdict.via);
         return this.denied(d.message, cls, verdict.via);
       }
       const r = verdict.via === 'needs-human'
-        ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, CRITICAL_OPTIONS, verdict.autoReason)
+        ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, criticalOptions, verdict.autoReason, replyOffer)
         : verdict.via === 'auto-asks'
           ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, ASK_OPTIONS, verdict.autoReason)
           : await this.askPermission(toolName, a, ctx, cls, d.prompt, cfg);
@@ -542,7 +666,7 @@ export class Sentinel implements SentinelGuard {
    */
   private async askHuman(
     toolName: string, args: Record<string, unknown>, ctx: ToolContext, cls: PolicyClassification, prompt: string, cfg: SentinelConfig,
-    options: string[] = CRITICAL_OPTIONS, autoReason?: string,
+    options: string[] = CRITICAL_OPTIONS, autoReason?: string, replyOffer?: ReplyOffer | null,
   ): Promise<ToolResult | null> {
     this.progress(ctx, `🛡 Sentinel: waiting for a human to approve — ${cls.summary}`);
     let answer: string;
@@ -560,6 +684,17 @@ export class Sentinel implements SentinelGuard {
       by = r.by;
     }
     const picked = normalizeAnswer(answer, options) ?? answer;
+    if (replyOffer && options.includes(ALWAYS_REPLIES_OPTION) && picked === ALWAYS_REPLIES_OPTION && !NON_HUMAN_BY.has(by)) {
+      // A human clicked "Always allow replies like this": the one approval answer that creates a grant.
+      try {
+        const store = this.grants();
+        const { grant } = await store.add({ kind: 'mail-reply', account: replyOffer.account, from: [replyOffer.from] }, 'approval', by);
+        await store.consume(grant.id);
+        void publishMailEvent('grant-created', { grantId: grant.id, by: `approval:${by}`, account: replyOffer.account, summary: `mail replies · account ${replyOffer.account} · from ${replyOffer.from}` });
+      } catch { /* the send itself was still approved */ }
+      this.report(cfg, toolName, args, ctx, cls, 'allow', 'human', picked, by);
+      return null;
+    }
     if (cls.risk !== 'critical' && options.includes('always') && picked === 'always') {
       this.approvals.add(this.approvalKey(cls));
       this.report(cfg, toolName, args, ctx, cls, 'allow', 'human', picked, by);
@@ -639,7 +774,7 @@ export class Sentinel implements SentinelGuard {
     }
     const audit = this.audit(cfg);
     if (audit) {
-      const hideTyped = cls.category === 'credential' || cls.category === 'payment' || toolName === 'computer_use_type';
+      const hideTyped = cls.category === 'credential' || cls.category === 'payment' || toolName === 'computer_use_type' || toolName === MAIL_SEND_TOOL;
       audit.record({
         type: 'decision', ...data, sessionId: ctx?.sessionId,
         args: redactForAudit(args, { hideTyped }),
@@ -649,6 +784,7 @@ export class Sentinel implements SentinelGuard {
 
   afterTool(toolName: string, args: Record<string, unknown>, result: ToolResult, meta: { untrustedOutput?: boolean } = {}): ToolResult {
     try {
+      if (toolName === MAIL_SEND_TOOL && this.autoReplies.size) this.settleAutoReply(args ?? {}, result);
       if (!result || typeof result.content !== 'string') return result;
       const cfg = this.config();
       if (!cfg.enabled) return result;
