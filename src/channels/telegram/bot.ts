@@ -546,12 +546,25 @@ export class TelegramBot {
       this.bus.publish({ kind: 'notice', level: 'info', message: `Telegram: chat ${describeChat(res.chat)} paired` });
       this.log('info', `Telegram: paired chat ${describeChat(res.chat)}`);
       await this.refreshChannel();
+      if (!res.alreadyPaired) await this.alertOtherChats(res.chat);
       return;
     }
     if (res.reason === 'locked') await this.hint(chatId, S.pairLocked);
     else if (res.reason === 'malformed') await this.replyUnpaired(chatId, S.pairUsage);
     else await this.replyUnpaired(chatId, S.pairInvalid);
     this.log('warn', `Telegram: rejected pairing attempt from chat ${chatId} (${res.reason})`);
+  }
+
+  /**
+   * A paired chat can approve purchases and see the browser, so every OTHER
+   * paired chat hears about a new one at once — a leaked code is noticed and
+   * revoked instead of silently gaining control.
+   */
+  private async alertOtherChats(paired: PairedChat): Promise<void> {
+    let others: PairedChat[] = [];
+    try { others = (await this.pairing.listChats()).filter((c) => c.chatId !== paired.chatId); } catch { return; }
+    const who = paired.username ? `@${paired.username} (${paired.chatId})` : `${paired.firstName ?? ''} (${paired.chatId})`.trim();
+    for (const c of others) await this.send(c.chatId, F.strings(F.langOf(c.lang)).newChatPaired(who, paired.chatId));
   }
 
   /** At most one "you're not paired" hint per chat per 10 minutes (no spam amplification). */

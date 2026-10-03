@@ -207,6 +207,9 @@ const EN = {
   approvalRetry: 'Could not record your answer — please try again.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'en'), 60)}`,
   notAuthorized: 'Not authorized.',
+  newChatPaired: (who: string, chatId: number) =>
+    `🔔 A new chat was just paired with this QodeX: <b>${esc(who, 80)}</b>.\n` +
+    `If that wasn't you, run <code>qodex telegram unpair ${chatId}</code> on your computer now.`,
   outcomeApproved: 'Approved',
   outcomeDenied: 'Denied',
   outcomeAnswered: 'Answered',
@@ -294,6 +297,9 @@ const FA: Catalog = {
   approvalRetry: 'ثبت پاسخ شما ممکن نشد — لطفاً دوباره امتحان کنید.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'fa'), 60)}`,
   notAuthorized: 'اجازهٔ دسترسی ندارید.',
+  newChatPaired: (who: string, chatId: number) =>
+    `🔔 یک گفتگوی تازه همین حالا به این QodeX متصل شد: <b>${esc(who, 80)}</b>.\n` +
+    `اگر کار شما نبود، همین الان روی کامپیوترتان <code>qodex telegram unpair ${chatId}</code> را اجرا کنید.`,
   outcomeApproved: 'تأیید شد',
   outcomeDenied: 'رد شد',
   outcomeAnswered: 'پاسخ داده شد',
