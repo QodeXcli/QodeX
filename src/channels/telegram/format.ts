@@ -667,14 +667,17 @@ export function formatMissionNotice(missionId: string, type: string, data: unkno
 export function formatSentinelNotice(type: string, data: unknown, lang: Lang): NoticeView | null {
   const S = strings(lang);
   const d = (data && typeof data === 'object' ? data : {}) as Record<string, any>;
-  const action = String(d.action ?? d.decision ?? '').toLowerCase();
+  // Tolerate both flat payloads ({action, classification}) and a SentinelDecision nested under `decision`.
+  const dec = (d.decision && typeof d.decision === 'object' ? d.decision : {}) as Record<string, any>;
+  const action = String(d.action ?? dec.action ?? (typeof d.decision === 'string' ? d.decision : '')).toLowerCase();
   const t = String(type ?? '').toLowerCase();
   const blocked = t === 'blocked' || t === 'deny' || t === 'denied'
     || (t === 'decision' && (action === 'deny' || action === 'blocked' || action === 'denied'));
   if (!blocked) return null;
+  const classification = d.classification ?? dec.classification;
   const summary = pickStr(d, 'summary', 'message', 'reason')
-    ?? pickStr(d.classification, 'summary', 'reason') ?? '';
-  const category = pickStr(d, 'category') ?? pickStr(d.classification, 'category');
+    ?? pickStr(classification, 'summary', 'reason') ?? pickStr(dec, 'message') ?? '';
+  const category = pickStr(d, 'category') ?? pickStr(classification, 'category');
   const tool = pickStr(d, 'tool', 'toolName');
   const head = `🛡 <b>${S.sentinelBlocked}</b>${category ? ` · <i>${esc(categoryLabel(category, lang), 40)}</i>` : ''}`;
   const lines = [head];
