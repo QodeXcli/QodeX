@@ -233,6 +233,9 @@ describe('salvage: format', () => {
     expect(escapeHtml('broken \ud83d title')).not.toMatch(LONE_SURROGATE);
     expect(escapeHtml('tail \ude00')).not.toMatch(LONE_SURROGATE);
     expect(escapeHtml('ok 😀 <b>')).toBe('ok 😀 &lt;b&gt;');
+    // The plain-text fallback (bot send/edit) is well-formed too, at the same length.
+    expect(htmlToPlain('<b>x</b> \ud83d y')).not.toMatch(LONE_SURROGATE);
+    expect(htmlToPlain('<b>x</b> \ud83d y')).toHaveLength(5);
   });
 
   it('F2: truncate never cuts a surrogate pair', () => {
