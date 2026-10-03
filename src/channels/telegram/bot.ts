@@ -307,6 +307,7 @@ export class TelegramBot {
     if (this.running || this.controller) throw new Error('[TELEGRAM_ALREADY_RUNNING] This bot is already running.');
     const ac = new AbortController();
     this.controller = ac;
+    this.loopDone = null; // a previous run's settled promise must not stand in for this one
     if (signal) {
       // Removed again in cleanup(): a long-lived caller signal must not collect one listener per start.
       const onCallerAbort = () => ac.abort();
@@ -314,25 +315,36 @@ export class TelegramBot {
       else signal.addEventListener('abort', onCallerAbort, { once: true });
       this.detachCallerSignal = () => signal.removeEventListener('abort', onCallerAbort);
     }
+    let me: TgUser;
     try {
-      this.me = await this.api.getMe(ac.signal);
+      me = await this.api.getMe(ac.signal);
+      if (ac.signal.aborted) throw new TelegramAbortError('start');
     } catch (err) {
       this.detachCallerSignal?.(); this.detachCallerSignal = null;
       this.controller = null;
       throw err;
     }
+    this.me = me;
     // Message dates are Telegram's clock: measure staleness against it (from the
     // HTTP Date header), so a local clock running ahead doesn't drop fresh commands.
     this.startedAt = this.api.serverNow() ?? this.now();
     this.running = true;
     this.busUnsub = this.bus.subscribe((ev) => this.onBusEvent(ev));
-    await this.tick();
-    this.tickTimer = setInterval(() => { void this.tick(); }, this.tickMs);
-    this.tickTimer.unref?.();
-    this.loopDone = this.pollLoop(ac.signal).finally(() => this.cleanup());
+    // The whole lifecycle (first tick → polling → cleanup) is ONE promise, set
+    // before anything awaits, so stop() at any point waits for a full detach.
+    let firstTick: Promise<void> = Promise.resolve();
+    this.loopDone = (async () => {
+      firstTick = this.tick();
+      await firstTick;
+      if (ac.signal.aborted) return;
+      this.tickTimer = setInterval(() => { void this.tick(); }, this.tickMs);
+      this.tickTimer.unref?.();
+      this.log('info', `Telegram bot @${me.username ?? me.id} started`);
+      await this.pollLoop(ac.signal);
+    })().finally(() => this.cleanup());
     this.loopDone.catch(() => { /* surfaced via done() */ });
-    this.log('info', `Telegram bot @${this.me.username ?? this.me.id} started`);
-    return this.me;
+    await firstTick;
+    return me;
   }
 
   /** Settles when polling stops. Rejects on fatal errors (e.g. revoked token). */
