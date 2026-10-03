@@ -523,10 +523,12 @@ export class TelegramBot {
       lang: from?.language_code,
     });
     if (res.ok) {
+      // Register the approval channel BEFORE confirming: an approval raised right after
+      // the user sees "Paired" must already reach this chat.
+      await this.refreshChannel();
       await this.send(chatId, `${S.pairOk}\n\n${S.help}`);
       this.bus.publish({ kind: 'notice', level: 'info', message: `Telegram: chat ${describeChat(res.chat)} paired` });
       this.log('info', `Telegram: paired chat ${describeChat(res.chat)}`);
-      await this.refreshChannel();
       return;
     }
     if (res.reason === 'locked') await this.hint(chatId, S.pairLocked);
