@@ -14,8 +14,16 @@
  */
 
 export interface BrowserConfig {
-  /** Run headless. Default true; QODEX_BROWSER_HEADED=1 or `qodex browser open` flips it. */
+  /**
+   * Run headless — resolved from `headlessMode`. `browser.headless: auto` (the default)
+   * is a visible window when a display exists AND a human is at the terminal (the TUI),
+   * headless for --print, missions, schedules and display-less machines. A real visible
+   * browser is challenged far less often than a headless one. QODEX_BROWSER_HEADLESS=1
+   * forces headless, QODEX_BROWSER_HEADED=1 a window; `qodex browser open` opens one.
+   */
   headless: boolean;
+  /** What was configured: 'auto' (default), 'headless' (headless: true) or 'headed' (headless: false). */
+  headlessMode: 'auto' | 'headless' | 'headed';
   /** Named persistent profile (cookies, logins, localStorage survive restarts). */
   profile: string;
   /** Explicit Chromium/Chrome executable. Empty = auto-discover. */
@@ -30,7 +38,7 @@ export interface BrowserConfig {
   /** Locale / timezone presented to sites. Empty = system default. */
   locale: string;
   timezone: string;
-  /** Reduce automation fingerprints (navigator.webdriver etc). Default true. */
+  /** Off — QodeX does not hide that it is automated. Only an explicit user setting turns it on. */
   stealth: boolean;
   /** Default action timeout in ms for click/type/etc. */
   actionTimeoutMs: number;
@@ -42,6 +50,25 @@ export interface BrowserConfig {
   dialogPolicy: 'accept' | 'dismiss' | 'ask';
   /** Upper bound of steps for the autonomous browser_agent sub-agent. */
   agentMaxSteps: number;
+  /**
+   * A CAPTCHA / bot check that clears by itself (Cloudflare's "Just a moment…", an
+   * Akamai / DataDome / AWS WAF interstitial) is waited out for up to this many seconds
+   * after a navigation or action, without model calls. 0 = report it at once.
+   */
+  challengeAutoWaitSec: number;
+  /**
+   * What happens with a challenge that needs a person. 'auto': the result says
+   * [CHALLENGE] and the agent hands the browser to the human (browser_request_human),
+   * resuming by itself when it is gone. 'report': only reported — the agent tells the
+   * user. 'off': no detection. QodeX never solves challenges in any mode.
+   */
+  challengeHandoff: 'auto' | 'report' | 'off';
+  /** How long a hand-off waits for the human (s). Default sentinel.remoteApprovalTimeoutSec (600). */
+  handoffTimeoutSec: number;
+  /** Lifetime of a hand-off's one-time control-center link (s); never longer than handoffTimeoutSec. */
+  handoffLinkTtlSec: number;
+  /** Minimum gap between agent navigations / actions on the same public host (ms, ≤1000). Loopback / LAN hosts are never paced. */
+  hostPacingMs: number;
 }
 
 export interface DesktopConfig {
@@ -139,6 +166,7 @@ export interface AgentPlatformConfig {
 
 export const DEFAULT_BROWSER_CONFIG: BrowserConfig = {
   headless: true,
+  headlessMode: 'auto',
   profile: 'default',
   executablePath: '',
   channel: '',
@@ -147,12 +175,17 @@ export const DEFAULT_BROWSER_CONFIG: BrowserConfig = {
   userAgent: '',
   locale: '',
   timezone: '',
-  stealth: true,
+  stealth: false,
   actionTimeoutMs: 8000,
   snapshotMaxChars: 12000,
   snapshotAfterAction: true,
   dialogPolicy: 'accept',
   agentMaxSteps: 40,
+  challengeAutoWaitSec: 20,
+  challengeHandoff: 'auto',
+  handoffTimeoutSec: 600,
+  handoffLinkTtlSec: 600,
+  hostPacingMs: 500,
 };
 
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
@@ -240,15 +273,44 @@ function section(cfg: unknown, key: string): Record<string, unknown> {
 
 // ── resolvers ────────────────────────────────────────────────────────────────
 
-export function resolveBrowserConfig(cfg: unknown, env: NodeJS.ProcessEnv = process.env): BrowserConfig {
+/**
+ * Can a visible window be shown to someone here? False for opt-out env vars, CI, SSH
+ * sessions without a forwarded display, and Linux/BSD without DISPLAY / WAYLAND_DISPLAY.
+ * (Same rules as src/artifacts/open-browser.ts canOpenBrowser, kept local: config must
+ * not import UI helpers.) PURE.
+ */
+export function hasDisplay(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): boolean {
+  if (env.QODEX_NO_BROWSER || env.QODEX_NO_OPEN || env.NO_BROWSER) return false;
+  if (env.CI) return false;
+  const display = !!(env.DISPLAY || env.WAYLAND_DISPLAY);
+  if (platform === 'linux' || platform === 'freebsd' || platform === 'openbsd') return display;
+  if ((env.SSH_CONNECTION || env.SSH_TTY) && !display) return false;
+  return true;
+}
+
+/** Runtime facts for `browser.headless: auto` (the browser manager passes them at launch). */
+export interface BrowserRuntime {
+  /** A human sits at this process's terminal (the interactive TUI). */
+  interactive?: boolean;
+  platform?: string;
+}
+
+export function resolveBrowserConfig(cfg: unknown, env: NodeJS.ProcessEnv = process.env, runtime: BrowserRuntime = {}): BrowserConfig {
   const s = section(cfg, 'browser');
   const d = DEFAULT_BROWSER_CONFIG;
   const vp = isObj(s.viewport) ? s.viewport : {};
-  let headless = bool(s.headless, d.headless);
-  if (env.QODEX_BROWSER_HEADED === '1') headless = false;
-  if (env.QODEX_BROWSER_HEADLESS === '1') headless = true;
+  let headlessMode: BrowserConfig['headlessMode'] =
+    s.headless === undefined || s.headless === null || s.headless === 'auto' ? 'auto' : bool(s.headless, true) ? 'headless' : 'headed';
+  if (env.QODEX_BROWSER_HEADED === '1') headlessMode = 'headed';
+  if (env.QODEX_BROWSER_HEADLESS === '1') headlessMode = 'headless';
+  const headless = headlessMode === 'auto'
+    ? !(runtime.interactive === true && hasDisplay(env, runtime.platform ?? process.platform))
+    : headlessMode === 'headless';
+  const sentinelTimeout = num(section(cfg, 'sentinel').remoteApprovalTimeoutSec, DEFAULT_SENTINEL_CONFIG.remoteApprovalTimeoutSec, 5, 86_400);
+  const handoffTimeoutSec = num(s.handoffTimeoutSec, sentinelTimeout, 30, 86_400);
   return {
     headless,
+    headlessMode,
     profile: str(env.QODEX_BROWSER_PROFILE || s.profile, d.profile) || d.profile,
     executablePath: str(env.QODEX_BROWSER_EXECUTABLE || s.executablePath, d.executablePath),
     channel: str(s.channel, d.channel),
@@ -266,6 +328,11 @@ export function resolveBrowserConfig(cfg: unknown, env: NodeJS.ProcessEnv = proc
     snapshotAfterAction: bool(s.snapshotAfterAction, d.snapshotAfterAction),
     dialogPolicy: oneOf(s.dialogPolicy, ['accept', 'dismiss', 'ask'] as const, d.dialogPolicy),
     agentMaxSteps: num(s.agentMaxSteps, d.agentMaxSteps, 1, 500),
+    challengeAutoWaitSec: num(s.challengeAutoWaitSec, d.challengeAutoWaitSec, 0, 120),
+    challengeHandoff: oneOf(s.challengeHandoff, ['auto', 'report', 'off'] as const, d.challengeHandoff),
+    handoffTimeoutSec,
+    handoffLinkTtlSec: Math.min(handoffTimeoutSec, num(s.handoffLinkTtlSec, Math.min(d.handoffLinkTtlSec, handoffTimeoutSec), 60, 86_400)),
+    hostPacingMs: num(s.hostPacingMs, d.hostPacingMs, 0, 1000),
   };
 }
 

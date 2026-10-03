@@ -43,7 +43,16 @@ import {
 } from '../../config/paths.js';
 import { QODEX_HOME } from '../../config/defaults.js';
 import { getBus } from '../../control/bus.js';
+import { isInteractiveHuman } from '../../control/approvals.js';
 import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
+import {
+  detectChallenge,
+  pickChallengeHeaders,
+  sameChallenge,
+  stripQuery,
+  challengeLabel,
+  type ChallengeInfo,
+} from './challenge.js';
 import {
   takeSnapshotDetailed,
   snapshotWithBoxes,
@@ -118,6 +127,24 @@ interface TabState {
   pendingDialog: { entry: DialogEntry; dialog: any; timer: NodeJS.Timeout } | null;
   /** Serializes guardProtectedPage runs (navigation event + tool call racing). */
   guardChain?: Promise<void>;
+  /** CAPTCHA / bot check currently on this tab (challenge.ts), or null. */
+  challenge: ChallengeInfo | null;
+  /** Main-document response of the latest navigation: status + detection headers only (no query, no cookies). */
+  doc?: { url: string; status?: number; headers: Record<string, string> };
+  /** Debounced re-detection after frame / load events. */
+  challengeTimer?: NodeJS.Timeout | null;
+  /** 1.5 s heartbeat while a challenge is on the tab. */
+  challengeBeat?: NodeJS.Timeout | null;
+  /** In-flight detection (coalesced). */
+  challengeRun?: Promise<ChallengeInfo | null | 'unknown'> | null;
+}
+
+/** Bus / listener payload when a tab's challenge appears, changes or clears. */
+export interface ChallengeChange {
+  tab: string;
+  index: number;
+  challenge: ChallengeInfo | null;
+  previous: ChallengeInfo | null;
 }
 
 interface CastSub {
@@ -550,6 +577,8 @@ export interface QodexBrowserStatus extends BrowserStatus {
   notice?: string;
   downloads: number;
   pendingDialog?: { type: string; message: string };
+  /** A CAPTCHA / bot check on a tab (the active one first): host only, no URL. */
+  challenge?: { tab: number; vendor: string; state: string; host: string };
 }
 
 export class QodexBrowserManager implements BrowserManager {
@@ -603,7 +632,8 @@ export class QodexBrowserManager implements BrowserManager {
 
   /** Effective config right now (active QodeX config + constructor overrides). */
   currentConfig(): BrowserConfig {
-    const base = resolveBrowserConfig(getActiveConfig());
+    // `headless: auto` = a window when a human sits at the TUI and a display exists.
+    const base = resolveBrowserConfig(getActiveConfig(), process.env, { interactive: isInteractiveHuman() });
     const o = this.opts.config;
     if (!o) return base;
     return { ...base, ...o, viewport: { ...base.viewport, ...(o.viewport ?? {}) } };
@@ -776,6 +806,7 @@ export class QodexBrowserManager implements BrowserManager {
     const wasRunning = this.ctx !== null;
     for (const st of this.tabList) {
       if (st.pendingDialog) clearTimeout(st.pendingDialog.timer);
+      this.stopChallengeTimers(st);
     }
     for (const sub of this.casts) { sub.session = null; sub.page = null; }
     this.ctx = null;
@@ -827,7 +858,7 @@ export class QodexBrowserManager implements BrowserManager {
   private attachPage(page: Page, opts: { initial?: boolean } = {}): TabState {
     const existing = this.tabList.find(t => t.page === page);
     if (existing) return existing;
-    const st: TabState = { id: `t${++this.tabSeq}`, page, title: '', console: [], errors: [], requests: [], refMode: null, pendingDialog: null };
+    const st: TabState = { id: `t${++this.tabSeq}`, page, title: '', console: [], errors: [], requests: [], refMode: null, pendingDialog: null, challenge: null };
     this.tabList.push(st);
 
     page.on('console', (msg: any) => {
@@ -840,9 +871,15 @@ export class QodexBrowserManager implements BrowserManager {
     });
     page.on('requestfinished', (req: any) => {
       const base = { url: String(req.url()), method: String(req.method()), resourceType: safe(() => req.resourceType()), ts: Date.now() };
+      // The main document's response headers carry the most reliable bot-check signals
+      // (cf-mitigated, x-amzn-waf-action, x-datadome …) — also for click-triggered navigations.
+      const mainDoc = base.resourceType === 'document' && safe(() => req.frame() === page.mainFrame()) === true;
       Promise.resolve()
         .then(() => req.response())
-        .then((resp: any) => pushCapped(st.requests, { ...base, status: resp?.status(), ok: resp?.ok() }, REQUEST_CAP))
+        .then((resp: any) => {
+          pushCapped(st.requests, { ...base, status: resp?.status(), ok: resp?.ok() }, REQUEST_CAP);
+          if (mainDoc && resp) this.noteDocument(page, resp);
+        })
         .catch(() => pushCapped(st.requests, base, REQUEST_CAP));
     });
     page.on('requestfailed', (req: any) => {
@@ -859,14 +896,17 @@ export class QodexBrowserManager implements BrowserManager {
       if (/^(view-source:)?file:/i.test(safe(() => String(frame.url())) ?? '')) {
         void this.guardProtectedPage(st).catch(() => {});
       }
+      this.scheduleChallengeCheck(st);
       try {
         if (frame !== page.mainFrame()) return;
       } catch { return; }
       st.refMode = null;
       getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
     });
+    page.on('frameattached', () => { this.scheduleChallengeCheck(st); });
+    page.on('framedetached', () => { this.scheduleChallengeCheck(st); });
     page.on('domcontentloaded', () => { void this.refreshTitle(st); });
-    page.on('load', () => { void this.refreshTitle(st); });
+    page.on('load', () => { void this.refreshTitle(st); this.scheduleChallengeCheck(st, 100); });
 
     if (!opts.initial) {
       // Popup / target=_blank from the active tab → becomes the active tab.
@@ -888,6 +928,13 @@ export class QodexBrowserManager implements BrowserManager {
     const idx = this.tabList.indexOf(st);
     if (idx < 0) return;
     if (st.pendingDialog) { clearTimeout(st.pendingDialog.timer); st.pendingDialog = null; }
+    this.stopChallengeTimers(st);
+    if (st.challenge) {
+      const previous = st.challenge;
+      st.challenge = null;
+      getBus().publish({ kind: 'browser', type: 'challenge-cleared', data: { tab: st.id, index: idx, host: previous.host, vendor: previous.vendor, reason: 'tab-closed' } });
+      this.events.emit('challenge', { tab: st.id, index: idx, challenge: null, previous } satisfies ChallengeChange);
+    }
     this.tabList.splice(idx, 1);
     if (this.activeTab === st) {
       this.activeTab = null;
@@ -1013,6 +1060,8 @@ export class QodexBrowserManager implements BrowserManager {
   status(): QodexBrowserStatus {
     const cfg = this.launchedCfg ?? this.currentConfig();
     const pending = this.activeTab?.pendingDialog?.entry;
+    const chTab = this.activeTab?.challenge ? this.activeTab : this.tabList.find(t => t.challenge);
+    const ch = chTab?.challenge;
     return {
       running: this.ctx !== null,
       mode: this.mode,
@@ -1030,6 +1079,7 @@ export class QodexBrowserManager implements BrowserManager {
       notice: this.profileNotice,
       downloads: this.downloadList.length,
       pendingDialog: pending ? { type: pending.type, message: pending.message } : undefined,
+      challenge: ch && chTab ? { tab: this.tabList.indexOf(chTab), vendor: ch.vendor, state: ch.state, host: ch.host } : undefined,
     };
   }
 
@@ -1076,6 +1126,123 @@ export class QodexBrowserManager implements BrowserManager {
   /** The active tab's title (cached). */
   activeTitle(): string {
     return this.activeTab?.title ?? '';
+  }
+
+  // ── CAPTCHA / bot-check state (challenge.ts) ─────────────────────────────
+
+  private tabOf(page?: Page | string): TabState | null {
+    if (page === undefined || page === null) return this.activeTab;
+    if (typeof page === 'string') return this.tabList.find(t => t.id === page) ?? null;
+    return this.tabList.find(t => t.page === page) ?? null;
+  }
+
+  /** Remember the main document's response (status + detection headers only). */
+  noteDocument(page: Page, resp: any): void {
+    const st = this.tabOf(page);
+    if (!st || !resp) return;
+    let headers: Record<string, string> = {};
+    try { headers = pickChallengeHeaders(resp.headers?.() ?? {}); } catch { headers = {}; }
+    st.doc = { url: stripQuery(safe(() => String(resp.url())) ?? ''), status: safe(() => resp.status()), headers };
+  }
+
+  /** Status + detection headers of the tab's latest main-document response. */
+  documentInfo(page?: Page | string): { status?: number; headers: Record<string, string> } {
+    const st = this.tabOf(page);
+    return st?.doc ? { status: st.doc.status, headers: { ...st.doc.headers } } : { headers: {} };
+  }
+
+  private stopChallengeTimers(st: TabState): void {
+    if (st.challengeTimer) { clearTimeout(st.challengeTimer); st.challengeTimer = null; }
+    if (st.challengeBeat) { clearInterval(st.challengeBeat); st.challengeBeat = null; }
+  }
+
+  private currentConfigSafe(): BrowserConfig | null {
+    try { return this.launchedCfg ?? this.currentConfig(); } catch { return null; }
+  }
+
+  /** Debounced passive re-detection (frame attach / detach / navigation / load). */
+  private scheduleChallengeCheck(st: TabState, delayMs = 350): void {
+    if (!this.tabList.includes(st)) return;
+    if (this.currentConfigSafe()?.challengeHandoff === 'off') return;
+    if (st.challengeTimer) clearTimeout(st.challengeTimer);
+    st.challengeTimer = setTimeout(() => {
+      st.challengeTimer = null;
+      void this.runChallengeCheck(st).catch(() => {});
+    }, delayMs);
+    (st.challengeTimer as any).unref?.();
+  }
+
+  /** One detection on a tab (coalesced; never while a JS dialog blocks the page). */
+  private runChallengeCheck(st: TabState): Promise<ChallengeInfo | null | 'unknown'> {
+    if (st.challengeRun) return st.challengeRun;
+    if (!this.tabList.includes(st) || st.pendingDialog || safe(() => st.page.isClosed()) === true) return Promise.resolve('unknown');
+    const run = (async () => {
+      const doc = st.doc;
+      const r = await detectChallenge(st.page, { status: doc?.status, headers: doc?.headers });
+      if (r !== 'unknown' && this.tabList.includes(st)) this.setChallenge(st, r);
+      return r;
+    })().finally(() => { st.challengeRun = null; });
+    st.challengeRun = run;
+    return run;
+  }
+
+  private setChallenge(st: TabState, next: ChallengeInfo | null): void {
+    const previous = st.challenge;
+    st.challenge = next;
+    if (next && !st.challengeBeat) {
+      st.challengeBeat = setInterval(() => { void this.runChallengeCheck(st).catch(() => {}); }, 1500);
+      (st.challengeBeat as any).unref?.();
+    } else if (!next && st.challengeBeat) {
+      clearInterval(st.challengeBeat);
+      st.challengeBeat = null;
+    }
+    if (sameChallenge(previous, next)) return;
+    const index = this.tabList.indexOf(st);
+    // Host, vendor and state only: never a URL, query string or token.
+    if (next) {
+      getBus().publish({ kind: 'browser', type: 'challenge', data: { tab: st.id, index, host: next.host, vendor: next.vendor, state: next.state } });
+      if (st !== this.activeTab && !previous) this.notice(`A ${challengeLabel(next.vendor)} appeared on tab ${index}${next.host ? ` (${next.host})` : ''}.`);
+    } else if (previous) {
+      getBus().publish({ kind: 'browser', type: 'challenge-cleared', data: { tab: st.id, index, host: previous.host, vendor: previous.vendor } });
+    }
+    this.events.emit('challenge', { tab: st.id, index, challenge: next, previous } satisfies ChallengeChange);
+  }
+
+  /** The challenge last seen on a tab (default: the active tab). Cached; no page round-trip. */
+  challengeOf(page?: Page | string): ChallengeInfo | null {
+    return this.tabOf(page)?.challenge ?? null;
+  }
+
+  /** Detect now on a tab (default: active) and update its state. 'unknown' keeps the previous verdict. */
+  async detectChallengeNow(page?: Page | string): Promise<ChallengeInfo | null> {
+    if (this.currentConfigSafe()?.challengeHandoff === 'off') return null;
+    const st = this.tabOf(page);
+    if (!st) return null;
+    const r = await this.runChallengeCheck(st);
+    return r === 'unknown' ? st.challenge : r;
+  }
+
+  /** Tabs that currently show a challenge (index order). */
+  challengeTabs(): Array<{ index: number; tab: string; challenge: ChallengeInfo }> {
+    return this.tabList
+      .map((t, index) => ({ index, tab: t.id, challenge: t.challenge }))
+      .filter((x): x is { index: number; tab: string; challenge: ChallengeInfo } => x.challenge !== null);
+  }
+
+  /** Subscribe to challenge appear / change / clear events. Returns unsubscribe. */
+  onChallengeChange(listener: (c: ChallengeChange) => void): () => void {
+    this.events.on('challenge', listener);
+    return () => { this.events.off('challenge', listener); };
+  }
+
+  /** The Playwright page of a tab index (null when out of range). */
+  pageAt(index: number): Page | null {
+    return this.tabList[index]?.page ?? null;
+  }
+
+  /** Index of the tab showing `page` (-1 when unknown). */
+  indexOfPage(page: Page): number {
+    return this.tabList.findIndex(t => t.page === page);
   }
 
   // ── snapshots / refs ──────────────────────────────────────────────────────
