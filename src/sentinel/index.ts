@@ -25,3 +25,7 @@ export {
   type ScoredFinding,
 } from './injection.js';
 export { SentinelAudit, redactForAudit, type AuditRecord } from './audit.js';
+export {
+  AUTO_MODE_ASKS, isAutoModeAskPrompt, isAutonomousContext, markAutonomousPermissions, autoModeAskReason,
+  takeSentinelApproval,
+} from './auto-mode.js';

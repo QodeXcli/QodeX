@@ -205,13 +205,18 @@ describe('Sentinel.beforeTool decisions', () => {
     expect(s.sessionApprovals()).toEqual([]);
   });
 
-  it('/auto on allows high/medium actions without a prompt', async () => {
+  it('auto mode allows high/medium actions without a prompt — but a remote delete still asks, with the reason', async () => {
     setAutoApproveSession(true);
     const s = makeSentinel({ browser: () => placeOrder.mgr });
     const { ctx, asked } = makeCtx('no');
-    expect(await s.beforeTool('browser_click', { ref: 'e7' }, ctx)).toBeNull();
     expect(await s.beforeTool('computer_use_click', { x: 1, y: 2 }, ctx)).toBeNull();
+    expect(await s.beforeTool('http_request', { method: 'POST', url: 'https://api.example.com/items' }, ctx)).toBeNull();
     expect(asked).toHaveLength(0);
+    // 'Delete' on shop.example.com deletes data on a server: auto mode still asks.
+    const r = await s.beforeTool('browser_click', { ref: 'e7' }, ctx);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].prompt).toContain('Auto mode still asks: it deletes data on shop.example.com');
+    expect(r?.content).toMatch(/^\[SENTINEL_DENIED\]/);
   });
 
   it('autoReject rules deny with [PERMISSION_DENIED]', async () => {
