@@ -72,7 +72,7 @@ export function ModsToasts(props: { snap: ModsUiSnapshot; width: number }): Reac
 
 /** The AbovePrompt band: every mod's tree stacked, in load order. */
 export function ModsBand(props: { snap: ModsUiSnapshot; width: number; maxRows: number }): React.ReactElement | null {
-  const { band, focus, focusedKey } = props.snap;
+  const { band, focus, focusedKey, focusedPlugin } = props.snap;
   if (band.length === 0) return null;
   const focused = focus?.kind === 'band';
   const inner = Math.max(10, props.width - 2);
@@ -82,7 +82,8 @@ export function ModsBand(props: { snap: ModsUiSnapshot; width: number; maxRows: 
       <Box flexDirection="column" {...cap(est, props.maxRows)}>
         {band.map(b => (
           <Box key={b.plugin} flexDirection="column" flexShrink={0}>
-            <ModTree el={b.tree} ctx={{ width: inner, focusedKey: focused ? focusedKey : null }} />
+            {/* Two mods' buttons may share a key: only the focused mod's tree highlights it. */}
+            <ModTree el={b.tree} ctx={{ width: inner, focusedKey: focused && b.plugin === focusedPlugin ? focusedKey : null }} />
           </Box>
         ))}
       </Box>

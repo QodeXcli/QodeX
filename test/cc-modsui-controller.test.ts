@@ -308,6 +308,28 @@ describe('keyboard focus', () => {
     expect(history.at(-1)).toEqual({ kind: 'log', plugin: 'bandmod', text: 'button "go" failed: nope' });
   });
 
+  it('band buttons of two mods that share a key are both reachable, and Enter presses the focused one', async () => {
+    const f = fakeHost();
+    const pressed: string[] = [];
+    f.sites.AbovePrompt = { trees: [
+      { plugin: 'one', tree: Box([Button('refresh', { onPress: () => { pressed.push('one'); } })]) },
+      { plugin: 'two', tree: Box([Button('refresh', { onPress: () => { pressed.push('two'); } })]) },
+    ] };
+    ctl.attach(f.host);
+    await flush();
+    ctl.handleInput('x', k({ ctrl: true }));
+    ctl.handleInput('', k({ tab: true }));
+    expect(ctl.getSnapshot()).toMatchObject({ focus: { kind: 'band' }, focusedKey: 'refresh', focusedPlugin: 'one' });
+    ctl.handleInput('', k({ tab: true }));
+    expect(ctl.getSnapshot()).toMatchObject({ focusedKey: 'refresh', focusedPlugin: 'two' });
+    ctl.handleInput('\r', k({ return: true }));
+    await flush();
+    expect(pressed).toEqual(['two']);
+    expect(f.presses).toEqual([{ plugin: 'two', key: 'refresh', component: 'AbovePrompt' }]);
+    ctl.handleInput('', k({ downArrow: true }));
+    expect(ctl.getSnapshot().focusedPlugin).toBe('one');
+  });
+
   it('without a host nothing is focusable and keys pass through', () => {
     expect(ctl.handleInput('x', k({ ctrl: true }))).toBe(false);
     expect(ctl.handleInput('', k({ tab: true }))).toBe(true); // the chord toasts "nothing to focus"

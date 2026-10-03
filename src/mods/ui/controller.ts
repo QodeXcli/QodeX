@@ -42,6 +42,8 @@ export interface ModsUiSnapshot {
   focus: ModsFocus | null;
   /** Key of the focused Button inside the focused region. */
   focusedKey: string | null;
+  /** The mod that drew the focused Button (band buttons of two mods may share a key). */
+  focusedPlugin: string | null;
   /**
    * Ctrl+X was just pressed and the next key belongs to the chord (Tab focuses a pane,
    * X closes one). The TUI keeps that key out of the prompt box while this is set.
@@ -61,7 +63,7 @@ export interface ModsUiContext {
 interface FocusButton extends ModButtonRef { plugin: string; component: ModRenderSite; requestId?: string }
 
 const EMPTY: ModsUiSnapshot = Object.freeze({
-  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, chord: false,
+  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, focusedPlugin: null, chord: false,
 }) as ModsUiSnapshot;
 
 const REDRAW_MS = Math.ceil(1000 / MOD_LIMITS.redrawPerSecond);
@@ -96,6 +98,7 @@ export class ModsUiController {
   private activePane: string | null = null;
   private focus: ModsFocus | null = null;
   private focusedKey: string | null = null;
+  private focusedPlugin: string | null = null;
   private readonly refused = new Set<string>();
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
   private rendering = false;
@@ -137,7 +140,7 @@ export class ModsUiController {
     this.spinner = null;
     this.activePane = null;
     this.focus = null;
-    this.focusedKey = null;
+    this.setFocused(null);
     this.refused.clear();
     this.lastViewSig = '';
     if (host) {
@@ -193,6 +196,7 @@ export class ModsUiController {
       spinner: this.spinner,
       focus: this.focus,
       focusedKey: this.focusedKey,
+      focusedPlugin: this.focusedPlugin,
       chord: this.chordUntil > 0,
     };
     for (const l of [...this.listeners]) {
@@ -287,7 +291,7 @@ export class ModsUiController {
     // Take the keyboard only when asked, the prompt is empty and nothing else has it.
     if (ev.focus === true && this.ctx.promptEmpty && !this.focus) {
       this.focus = { kind: 'pane', id: ev.id };
-      this.focusedKey = null;
+      this.setFocused(null);
     }
     this.publish();
     this.invalidate();
@@ -300,7 +304,7 @@ export class ModsUiController {
     this.paneTrees.delete(id);
     this.lastViewSig = '';
     if (this.activePane === id) this.activePane = this.panes.length ? this.panes[this.panes.length - 1]!.id : null;
-    if (this.focus?.kind === 'pane' && this.focus.id === id) { this.focus = null; this.focusedKey = null; }
+    if (this.focus?.kind === 'pane' && this.focus.id === id) { this.focus = null; this.setFocused(null); }
     if (byUser) {
       try { this.host?.paneClosed?.({ plugin: pane.plugin, id }); } catch { /* ignore */ }
     }
@@ -398,13 +402,13 @@ export class ModsUiController {
     });
 
     this.spinner = busy ? this.spinnerFrom(spinnerOut!) : null;
-    const focusBefore = `${JSON.stringify(this.focus)}\u0000${this.focusedKey}`;
+    const focusBefore = `${JSON.stringify(this.focus)}\u0000${this.focusedPlugin}\u0000${this.focusedKey}`;
     this.fixFocus();
     // Most passes redraw the same thing (a mod invalidating on every tool result): only
     // wake React when what is drawn changed. Button callbacks are read from this.band /
     // this.paneTrees at press time, so a skipped publish never leaves a stale onPress.
     const sig = viewSignature(this.band, this.paneTrees, this.spinner);
-    const focusAfter = `${JSON.stringify(this.focus)}\u0000${this.focusedKey}`;
+    const focusAfter = `${JSON.stringify(this.focus)}\u0000${this.focusedPlugin}\u0000${this.focusedKey}`;
     if (sig !== this.lastViewSig || focusBefore !== focusAfter) {
       this.lastViewSig = sig;
       this.publish();
@@ -480,7 +484,7 @@ export class ModsUiController {
     if (key.escape) {
       const pane = focus.kind === 'pane' ? this.panes.find(p => p.id === focus.id) : undefined;
       this.focus = null;
-      this.focusedKey = null;
+      this.setFocused(null);
       if (pane?.closeOnEscape) this.removePane(pane.id, true);
       else this.publish();
       return true;
@@ -489,7 +493,7 @@ export class ModsUiController {
     if (key.tab && key.shift) return false;     // Shift+Tab cycles the approval mode
 
     const buttons = this.focusButtons();
-    const at = buttons.findIndex(b => b.key === this.focusedKey);
+    const at = buttons.findIndex(b => this.isFocused(b));
     if (key.tab || key.downArrow || key.rightArrow) { this.moveFocus(buttons, at, +1); return true; }
     if (key.upArrow || key.leftArrow) { this.moveFocus(buttons, at, -1); return true; }
     if (key.return) {
@@ -501,7 +505,7 @@ export class ModsUiController {
       // When two buttons share a hotkey, the later one gets it (as in Claude Code).
       const hit = [...buttons].reverse().find(b => b.hotkey === input);
       if (hit) {
-        this.focusedKey = hit.key;
+        this.setFocused(hit);
         this.publish();
         void this.press(hit);
       }
@@ -546,7 +550,7 @@ export class ModsUiController {
     const i = cur ? targets.findIndex(t => t.kind === cur.kind && (t.kind === 'band' || (cur.kind === 'pane' && t.id === cur.id))) : -1;
     const next = i + 1 < targets.length ? targets[i + 1]! : null;
     this.focus = next;
-    this.focusedKey = null;
+    this.setFocused(null);
     if (next?.kind === 'pane') this.activePane = next.id;
     this.fixFocus();
     this.publish();
@@ -567,7 +571,7 @@ export class ModsUiController {
   private moveFocus(buttons: FocusButton[], at: number, step: number): void {
     if (buttons.length === 0) return;
     const next = at < 0 ? (step > 0 ? 0 : buttons.length - 1) : (at + step + buttons.length) % buttons.length;
-    this.focusedKey = buttons[next]!.key;
+    this.setFocused(buttons[next]!);
     this.publish();
   }
 
@@ -575,12 +579,22 @@ export class ModsUiController {
   private fixFocus(): void {
     const f = this.focus;
     if (!f) return;
-    if (f.kind === 'pane' && !this.panes.some(p => p.id === f.id)) { this.focus = null; this.focusedKey = null; return; }
+    if (f.kind === 'pane' && !this.panes.some(p => p.id === f.id)) { this.focus = null; this.setFocused(null); return; }
     const buttons = this.focusButtons();
-    if (f.kind === 'band' && buttons.length === 0) { this.focus = null; this.focusedKey = null; return; }
-    if (!buttons.some(b => b.key === this.focusedKey)) {
-      this.focusedKey = (buttons.find(b => b.autoFocus) ?? buttons[0])?.key ?? null;
+    if (f.kind === 'band' && buttons.length === 0) { this.focus = null; this.setFocused(null); return; }
+    if (!buttons.some(b => this.isFocused(b))) {
+      this.setFocused(buttons.find(b => b.autoFocus) ?? buttons[0] ?? null);
     }
+  }
+
+  /** The focused Button is named by its mod and key together. */
+  private isFocused(b: FocusButton): boolean {
+    return b.key === this.focusedKey && b.plugin === this.focusedPlugin;
+  }
+
+  private setFocused(b: FocusButton | null): void {
+    this.focusedKey = b?.key ?? null;
+    this.focusedPlugin = b?.plugin ?? null;
   }
 
   private async press(b: FocusButton): Promise<void> {
