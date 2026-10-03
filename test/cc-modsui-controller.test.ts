@@ -290,6 +290,27 @@ describe('keyboard focus', () => {
     expect(f.paneClosed).toHaveBeenCalledWith({ plugin: 'm1', id: 'p1' });
   });
 
+  it("Ctrl+X X with the band focused is the chord, not the band's x hotkey", async () => {
+    const f = fakeHost();
+    const pressed: string[] = [];
+    f.sites.AbovePrompt = { trees: [{ plugin: 'b', tree: Box([Button('del', { hotkey: 'x', onPress: () => { pressed.push('del'); } })]) }] };
+    ctl.attach(f.host);
+    await flush();
+    ctl.handleInput('x', k({ ctrl: true }));
+    ctl.handleInput('', k({ tab: true }));
+    expect(ctl.getSnapshot().focus).toEqual({ kind: 'band' });
+    ctl.handleInput('x', k({ ctrl: true }));
+    expect(ctl.handleInput('x', k())).toBe(true);
+    await flush();
+    expect(pressed).toEqual([]);
+    expect(f.presses).toEqual([]);
+    expect(ctl.getSnapshot()).toMatchObject({ focus: { kind: 'band' }, chord: false });
+    // Without the chord, x is the hotkey.
+    ctl.handleInput('x', k());
+    await flush();
+    expect(pressed).toEqual(['del']);
+  });
+
   it('a mod closing the focused pane gives the keyboard back', async () => {
     const { f } = await twoPanes();
     ctl.handleInput('x', k({ ctrl: true }));

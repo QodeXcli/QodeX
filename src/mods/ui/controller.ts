@@ -491,8 +491,11 @@ export class ModsUiController {
     if (this.chordUntil > now) {
       this.endChord();
       if (key.tab && !key.shift) { this.cycleFocus(); return true; }
-      if (!key.ctrl && !key.meta && input === 'x' && this.focus?.kind === 'pane') {
-        this.removePane(this.focus.id, true);
+      if (!key.ctrl && !key.meta && input === 'x') {
+        // Ctrl+X X closes the focused pane. It is the chord's key, never a hotkey: with
+        // the band focused it must not press a band Button whose hotkey is x.
+        if (this.focus?.kind === 'pane') this.removePane(this.focus.id, true);
+        else this.publish();
         return true;
       }
       this.publish(); // the chord is over: the prompt box takes keys again
