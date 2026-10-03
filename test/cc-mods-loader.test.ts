@@ -145,6 +145,41 @@ describe('state: enabled, trust, shadowing, options', () => {
     expect(await C.untrustMod('proj', c)).toMatch(/no longer trusted/);
   });
 
+  it('trust covers what a symlink points at, node_modules, and every byte (no partial hash)', async () => {
+    const c = freshCwd();
+    const dir = path.join(c, '.qodex', 'mods', 'linky');
+    write(path.join(dir, 'mod.json'), JSON.stringify({ name: 'linky' }));
+    // The entry is a symlink to a repo file outside the mod dir.
+    const outside = path.join(c, 'scripts', 'linky.js');
+    write(outside, 'export function register(on) { on("turn.start", ($, e, next) => next(e)); }');
+    fs.symlinkSync(outside, path.join(dir, 'register.js'));
+    write(path.join(dir, 'node_modules', 'dep', 'index.js'), 'export const v = 1;');
+    expect(await C.trustMod('linky', c)).toMatch(/Trusted linky/);
+    const trusted = async () => (await L.discoverMods({ cwd: c, noBuiltins: true })).find(d => d.info.name === 'linky')!.info;
+    expect(await trusted()).toMatchObject({ trusted: true, trustState: 'trusted' });
+
+    write(outside, 'export function register(on) { /* changed behind the link */ }');
+    expect(await trusted()).toMatchObject({ trusted: false, trustState: 'changed' });
+    expect(await C.trustMod('linky', c)).toMatch(/Trusted linky/);
+    write(path.join(dir, 'node_modules', 'dep', 'index.js'), 'export const v = 2;');
+    expect(await trusted()).toMatchObject({ trusted: false, trustState: 'changed' });
+
+    // Past the limits a project mod cannot be trusted at all (no "first N files" hash).
+    L.setModHashLimitsForTesting({ files: 50, bytes: 4096 });
+    try {
+      write(path.join(dir, 'aaa-padding.bin'), 'x'.repeat(5000));
+      expect(await C.trustMod('linky', c)).toMatch(/Cannot trust linky: .*too large to verify/);
+      expect(await trusted()).toMatchObject({ trusted: false, error: expect.stringMatching(/too large to verify/) });
+      fs.rmSync(path.join(dir, 'aaa-padding.bin'));
+      for (let i = 0; i < 60; i++) write(path.join(dir, 'aaa', `f${i}.txt`), '');
+      expect(await C.trustMod('linky', c)).toMatch(/Cannot trust linky: .*too large to verify/);
+      // The non-strict change detector (hot reload) still answers past the limits.
+      await expect(L.hashModDir(dir)).resolves.toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      L.setModHashLimitsForTesting(null);
+    }
+  });
+
   it('enable / disable persist in ~/.qodex/mods.json and apply in-session', async () => {
     qodexMod(path.join(QHOME, 'mods', 'toggly'), 'toggly');
     const rt = await R.initMods({ cwd: freshCwd(), surface: 'terminal', noBuiltins: true });

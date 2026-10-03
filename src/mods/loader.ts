@@ -204,36 +204,98 @@ export function resolveModOptions(manifest: ModManifest | null, saved: Record<st
 
 // ── content hash ─────────────────────────────────────────────────────────────
 
-const HASH_MAX_FILES = 2_000;
-const HASH_MAX_BYTES = 32 * 1024 * 1024;
+const HASH_LIMITS = { files: 5_000, bytes: 64 * 1024 * 1024 };
 
-/** sha256 over every file of a mod dir (paths + contents; node_modules / .git skipped). */
-export async function hashModDir(dir: string): Promise<string> {
-  const files: string[] = [];
-  const walk = async (d: string): Promise<void> => {
+/** Tests only: lower the limits of a trust hash (null restores them). */
+export function setModHashLimitsForTesting(limits: { files: number; bytes: number } | null): void {
+  Object.assign(HASH_LIMITS, limits ?? { files: 5_000, bytes: 64 * 1024 * 1024 });
+}
+
+/** A project mod too large to verify: it cannot be trusted (every byte must count). */
+export class ModHashLimitError extends Error {}
+
+export interface HashModDirOptions {
+  /**
+   * The trust hash of a project mod: EVERY file counts — node_modules included, symlinks
+   * followed (the link and what it points at, even outside the dir), no byte or file
+   * shortcut — and a mod past the limits throws ModHashLimitError instead of hashing part
+   * of itself. Without it the hash is a change detector for hot reload (node_modules
+   * skipped, sizes only past the byte limit).
+   */
+  strict?: boolean;
+}
+
+/**
+ * sha256 over every file of a mod dir: relative paths, symlink targets and contents
+ * (.git skipped; node_modules too unless `strict`).
+ */
+export async function hashModDir(dir: string, opts: HashModDirOptions = {}): Promise<string> {
+  const strict = opts.strict === true;
+  const tooLarge = () => new ModHashLimitError(
+    `${dir} is too large to verify for trust (more than ${HASH_LIMITS.files} files or ${Math.round(HASH_LIMITS.bytes / 1024 / 1024)} MiB) — keep a project mod small`,
+  );
+  const files: Array<{ rel: string; abs: string; link?: string; dir?: boolean }> = [];
+  const visited = new Set<string>();
+  let truncated = false;
+  const walk = async (d: string, relBase: string): Promise<void> => {
+    try {
+      const real = await fs.realpath(d);
+      if (visited.has(real)) return; // a symlink loop
+      visited.add(real);
+    } catch { return; }
     let entries: import('fs').Dirent[];
     try { entries = await fs.readdir(d, { withFileTypes: true }); } catch { return; }
     for (const ent of entries) {
-      if (files.length >= HASH_MAX_FILES) return;
-      if (ent.name === 'node_modules' || ent.name === '.git') continue;
+      if (files.length >= HASH_LIMITS.files) {
+        if (strict) throw tooLarge();
+        truncated = true;
+        return;
+      }
+      if (ent.name === '.git' || (!strict && ent.name === 'node_modules')) continue;
       const p = path.join(d, ent.name);
-      if (ent.isDirectory()) await walk(p);
-      else if (ent.isFile()) files.push(p);
+      const rel = relBase ? `${relBase}/${ent.name}` : ent.name;
+      if (ent.isSymbolicLink()) {
+        // What the link points at runs as the mod's code: hash the link AND its target.
+        let link = '';
+        try { link = await fs.readlink(p); } catch { /* */ }
+        let st: import('fs').Stats | null = null;
+        try { st = await fs.stat(p); } catch { /* dangling */ }
+        if (st?.isDirectory()) {
+          files.push({ rel, abs: p, link, dir: true });
+          await walk(p, rel);
+        } else {
+          files.push({ rel, abs: p, link });
+        }
+      } else if (ent.isDirectory()) {
+        await walk(p, rel);
+      } else if (ent.isFile()) {
+        files.push({ rel, abs: p });
+      }
     }
   };
-  await walk(dir);
-  files.sort();
+  await walk(dir, '');
+  files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   const h = createHash('sha256');
+  if (truncated) h.update(`truncated:${files.length}\0`);
   let bytes = 0;
   for (const f of files) {
-    h.update(path.relative(dir, f).split(path.sep).join('/'));
+    h.update(f.rel);
     h.update('\0');
+    if (f.link !== undefined) { h.update(`link:${f.link}`); h.update('\0'); }
+    if (f.dir) continue;
     try {
-      const buf = await fs.readFile(f);
+      const buf = await fs.readFile(f.abs);
       bytes += buf.length;
-      if (bytes > HASH_MAX_BYTES) { h.update(`size:${buf.length}`); continue; }
-      h.update(buf);
-    } catch { h.update('unreadable'); }
+      if (bytes > HASH_LIMITS.bytes) {
+        if (strict) throw tooLarge();
+        h.update(`size:${buf.length}`);
+      } else {
+        h.update(buf);
+      }
+    } catch (e) {
+      if (e instanceof ModHashLimitError) throw e;
+      h.update('unreadable');
+    }
     h.update('\0');
   }
   return h.digest('hex');
@@ -323,10 +385,15 @@ export async function discoverMods(opts: DiscoverOptions): Promise<DiscoveredMod
     else if (state.enabled.includes(name)) info.enabled = true;
     else info.enabled = c.scope === 'builtin' ? manifestDefaultEnabled(d.manifest) : true;
     if (c.scope === 'project') {
-      d.hash = await hashModDir(c.dir);
       const t = state.trusted[path.resolve(c.dir)];
-      info.trusted = !!t && t.hash === d.hash;
-      info.trustState = !t ? 'untrusted' : t.hash === d.hash ? 'trusted' : 'changed';
+      try {
+        d.hash = await hashModDir(c.dir, { strict: true });
+      } catch (e: any) {
+        // Too large to verify: it never loads (a partial hash would let unhashed files change).
+        info.error = e?.message ?? String(e);
+      }
+      info.trusted = !!t && !!d.hash && t.hash === d.hash;
+      info.trustState = !t ? 'untrusted' : info.trusted ? 'trusted' : 'changed';
     } else {
       info.trustState = 'not-needed';
     }

@@ -113,7 +113,12 @@ export async function trustMod(name: string, cwd: string): Promise<string> {
     if (d && d.info.scope !== 'project') return `${name} is a ${d.info.scope} mod — only project mods (${projectModsDir(cwd)}) need trust.`;
     return `No project mod "${name}" in ${projectModsDir(cwd)}${m.error ? ` (${m.error})` : ''}.`;
   }
-  const hash = await hashModDir(dir);
+  let hash: string;
+  try {
+    hash = await hashModDir(dir, { strict: true });
+  } catch (e: any) {
+    return `Cannot trust ${m.manifest.name}: ${e?.message ?? e}`;
+  }
   await trustModDir(dir, m.manifest.name, hash);
   const rt = getModsRuntime();
   const lines = [`Trusted ${m.manifest.name} (${dir}). It loads from now on; any change to its files needs a new trust.`];
