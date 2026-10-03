@@ -28,6 +28,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as fsSync from 'fs';
 import { QODEX_HOME } from '../config/defaults.js';
+import { continuityPrompt, decideChange, keepForContinuity } from './continuity.js';
 import { getScheduleStore, type ScheduleEntry, type ScheduleKind, type ScheduleStore } from './store.js';
 import { logger } from '../utils/logger.js';
 import { notifyDesktop } from '../utils/notify.js';
@@ -210,7 +211,11 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
     return;
   }
 
-  const args = buildScheduleRunArgs({ ...entry, kind });
+  // Continuity: a prompt run sees the previous run's answer and reports what changed.
+  const runEntry = kind === 'prompt' && entry.continuity === 1
+    ? { ...entry, prompt: continuityPrompt(entry.prompt, entry.last_output) }
+    : entry;
+  const args = buildScheduleRunArgs({ ...runEntry, kind });
   const cli = opts.cli ?? resolveCliCommand();
   const spawnFn: SpawnFn = opts.spawnFn ?? (crossSpawn as unknown as SpawnFn);
   const hardKillMs = opts.hardKillMs ?? RUN_HARD_KILL_MS;
@@ -277,7 +282,8 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
     }
 
     let output = '';
-    child.stdout?.on('data', (d: Buffer) => { const s = d.toString(); output += s; logStream.write(s); });
+    let answer = '';   // stdout only — the run's answer, for continuity / change detection
+    child.stdout?.on('data', (d: Buffer) => { const s = d.toString(); output += s; answer += s; logStream.write(s); });
     child.stderr?.on('data', (d: Buffer) => { const s = d.toString(); output += s; logStream.write(s); });
 
     const hardKill = setTimeout(() => {
@@ -294,10 +300,20 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
       const exitCode = code ?? (signal ? 128 : 1);
       const status: 'success' | 'error' = exitCode === 0 ? 'success' : 'error';
       const tail = output.slice(-500).trim().replace(/\s+/g, ' ');
-      logStream.end(`\n# finished: ${new Date().toISOString()} exit=${exitCode} (${status})\n`);
       // A mission routine only STARTS the mission here; the mission notifies when
       // it completes, so only a failure to start is worth a notification now.
-      void finish(status, exitCode, tail, kind === 'prompt' || status === 'error', output);
+      let notifyAfter = kind === 'prompt' || status === 'error';
+      let skipNote = '';
+      if (kind === 'prompt' && status === 'success') {
+        const change = decideChange(answer, entry.last_output_hash, entry.notify_on === 'change');
+        try { store.setLastOutput(entry.id, keepForContinuity(answer), change.fingerprint); } catch { /* best-effort */ }
+        if (!change.notify) {
+          notifyAfter = false;
+          skipNote = `# not notifying: ${change.skippedBecause}\n`;
+        }
+      }
+      logStream.end(`${skipNote}\n# finished: ${new Date().toISOString()} exit=${exitCode} (${status})\n`);
+      void finish(status, exitCode, tail, notifyAfter, output);
     });
   });
 }

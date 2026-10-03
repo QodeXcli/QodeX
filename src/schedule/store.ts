@@ -43,6 +43,13 @@ export interface ScheduleEntry {
   run_count: number;
   deliver?: string;           // chat target, e.g. "telegram:<chatId>" — null = desktop only
   recipe?: string;            // a recipe kind, e.g. "verified-pr" — null = run prompt as-is
+  /** 1 = each run gets the previous run's answer (monitors report what changed). */
+  continuity?: 1 | 0;
+  /** 'change' = notify/deliver only when the answer differs from the previous run. */
+  notify_on?: string | null;
+  /** Previous run's answer (tail) for continuity, and its fingerprint for change detection. */
+  last_output?: string | null;
+  last_output_hash?: string | null;
 }
 
 const SCHEMA = `
@@ -101,7 +108,7 @@ export class ScheduleStore {
     this.db.exec(SCHEMA);
     // Migrate DBs created before deliver/recipe existed. ADD COLUMN throws on an existing
     // column, so each is guarded — idempotent and safe to run every startup.
-    for (const col of ['deliver TEXT', 'recipe TEXT']) {
+    for (const col of ['deliver TEXT', 'recipe TEXT', 'continuity INTEGER DEFAULT 0', 'notify_on TEXT', 'last_output TEXT', 'last_output_hash TEXT']) {
       try { this.db.exec(`ALTER TABLE schedules ADD COLUMN ${col}`); } catch { /* already present */ }
     }
     try { this.db.exec(`ALTER TABLE schedule_runs ADD COLUMN receipt TEXT`); } catch { /* already present */ }
@@ -132,6 +139,10 @@ export class ScheduleStore {
     kind?: ScheduleKind;
     deliver?: string;
     recipe?: string;
+    /** Carry the previous run's answer into the next run. */
+    continuity?: boolean;
+    /** Notify / deliver only when the answer changed. */
+    notifyOnChange?: boolean;
   }): ScheduleEntry {
     const parsed = parseCron(input.cron); // throws on invalid
     const next = nextAfter(parsed, new Date());
@@ -139,11 +150,16 @@ export class ScheduleStore {
     const allowed = input.allowedTools && input.allowedTools.length > 0 ? JSON.stringify(input.allowedTools) : null;
     const kind: ScheduleKind = input.kind === 'mission' ? 'mission' : 'prompt';
     this.db.prepare(`
-      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind, deliver, recipe)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO schedules (id, name, cron, prompt, cwd, model, allowed_tools, next_run_at, kind, deliver, recipe, continuity, notify_on)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, input.name, input.cron, input.prompt, input.cwd, input.model ?? null, allowed, next?.toISOString() ?? null,
-           kind, input.deliver ?? null, input.recipe ?? null);
+           kind, input.deliver ?? null, input.recipe ?? null, input.continuity ? 1 : 0, input.notifyOnChange ? 'change' : null);
     return this.get(id)!;
+  }
+
+  /** Remember a finished run's answer for continuity / change detection. */
+  setLastOutput(id: string, output: string, fingerprint: string): void {
+    this.db.prepare(`UPDATE schedules SET last_output = ?, last_output_hash = ? WHERE id = ?`).run(output, fingerprint, id);
   }
 
   remove(idOrName: string): boolean {
