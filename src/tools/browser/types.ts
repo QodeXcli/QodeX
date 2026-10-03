@@ -78,6 +78,13 @@ export type HumanInputEvent =
   /** Coordinates are in screencast-frame pixels; frameWidth/Height let the manager rescale to the viewport. */
   | { type: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clickCount?: number; frameWidth?: number; frameHeight?: number }
   | { type: 'move'; x: number; y: number; frameWidth?: number; frameHeight?: number }
+  /**
+   * The human's own press-and-hold / drag, relayed from a phone or mouse in the live
+   * view ('down' → 'move'… → 'up'). Never synthesized: each event is one the person
+   * made. The manager releases a button held longer than HUMAN_HOLD_MAX_MS by itself.
+   */
+  | { type: 'down'; x: number; y: number; button?: 'left' | 'right' | 'middle'; frameWidth?: number; frameHeight?: number }
+  | { type: 'up'; x?: number; y?: number; button?: 'left' | 'right' | 'middle'; frameWidth?: number; frameHeight?: number }
   | { type: 'type'; text: string }
   | { type: 'key'; key: string }
   | { type: 'scroll'; dx: number; dy: number; x?: number; y?: number; frameWidth?: number; frameHeight?: number }
@@ -85,6 +92,17 @@ export type HumanInputEvent =
   | { type: 'back' }
   | { type: 'forward' }
   | { type: 'reload' };
+
+/** A rectangle of the viewport in CSS pixels. */
+export interface ScreenshotClip {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A human press-and-hold is released by the manager after this long (a lost 'up'). */
+export const HUMAN_HOLD_MAX_MS = 20_000;
 
 export interface LaunchOverrides {
   headless?: boolean;
@@ -112,8 +130,11 @@ export interface BrowserManager {
 
   /** Live view: stream JPEG frames of the active tab. Returns a stop function. */
   startScreencast(onFrame: (f: ScreencastFrame) => void, opts?: { quality?: number; maxFps?: number }): Promise<() => Promise<void>>;
-  /** One JPEG of the active tab's viewport. */
-  screenshotJpeg(quality?: number): Promise<Buffer>;
+  /**
+   * One JPEG of the active tab's viewport — or of `opts.clip` only (viewport CSS
+   * pixels, clamped to the viewport), e.g. the challenge box a hand-off card shows.
+   */
+  screenshotJpeg(quality?: number, opts?: { clip?: ScreenshotClip }): Promise<Buffer>;
 
   /** Human takeover: while on, agent browser actions wait (or fail with [HUMAN_TAKEOVER]). */
   setTakeover(on: boolean, by?: string): void;
@@ -122,6 +143,8 @@ export interface BrowserManager {
   waitForTakeoverEnd(signal?: AbortSignal): Promise<void>;
   /** Apply a human input event from the control center to the active tab. */
   dispatchInput(ev: HumanInputEvent): Promise<void>;
+  /** Release a mouse button the human still holds (lost 'up', takeover ended). Optional. */
+  releaseHumanMouse?(): Promise<void>;
 
   /**
    * Resolve a target on the active tab to a Playwright Locator. `ref` is a ref
