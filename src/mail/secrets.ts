@@ -175,6 +175,6 @@ export function safeErrorMessage(err: unknown, secrets: Array<string | undefined
   msg = scrubSecrets(msg, secrets, user);
   // Never echo an AUTH exchange, whatever it contains.
   msg = msg.replace(/\bAUTH(?:ENTICATE)?\s+(PLAIN|LOGIN|XOAUTH2|OAUTHBEARER|CRAM-MD5)\s+\S+/gi, 'AUTH $1 ***')
-    .replace(/\bLOGIN\s+"?[^\s"]+"?\s+"?[^\s"]+"?/g, 'LOGIN *** ***');
+    .replace(/\bLOGIN\s+"[^"]*"\s+"[^"]*"/g, 'LOGIN *** ***');
   return msg.replace(/\s+/g, ' ').trim().slice(0, 300);
 }
