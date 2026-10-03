@@ -65,6 +65,8 @@ import { getOperatorHub } from '../operator/hub.js';
 import { pickWorkingCwd } from '../session/handoff.js';
 import { getActiveProfile } from '../config/profile.js';
 import { SideRunDock } from './prompts/side-run-dock.js';
+import { useModsUiController, ModsBand, ModsPanes, ModsStatusLines, ModsToasts, ModsSpinnerWord, ModHistoryLineView } from '../mods/ui/components.js';
+import type { ModsUiSnapshot } from '../mods/ui/controller.js';
 import {
   appendLaneLine,
   applyRunToLanes,
@@ -78,7 +80,9 @@ type HistoryItem =
   | { type: 'tool'; name: string; result: string; isError?: boolean; id: string }
   | { type: 'diff'; path: string; before: string | null; after: string; id: string }
   | { type: 'system'; text: string; id: string }
-  | { type: 'error'; text: string; id: string };
+  | { type: 'error'; text: string; id: string }
+  /** $.ui.log / $.ui.notice from a mod: display only, never part of the model's messages. */
+  | { type: 'mod'; kind: 'log' | 'notice' | 'error'; plugin: string; text: string; id: string };
 
 const EDIT_DIFF_TOOLS = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
 
@@ -267,6 +271,23 @@ export function App(props: AppProps): React.ReactElement {
     return String(idCounterRef.current);
   }, []);
 
+  // Mods: the band above the prompt, panes, status lines, toasts, the spinner suffix and
+  // log/notice history lines. Draws nothing until the mods runtime registers a host.
+  const mods = useModsUiController({
+    busy, columns: cols, rows, promptEmpty: input === '', mode,
+    // One state update per burst of lines (each update repaints the whole App).
+    onHistoryLines: lines => setHistory(h => [...h, ...lines.map(line => ({ type: 'mod' as const, ...line, id: nextId() }))]),
+    // $.prompt.submit: queued like a typed prompt, so it runs when the agent is free.
+    // Never as a slash command — a mod does not get to type /auto or /mode for the user.
+    onPrompt: p => {
+      if (p.text.startsWith('/')) {
+        setHistory(h => [...h, { type: 'mod', kind: 'error', plugin: p.plugin, text: 'prompt.submit refused: a mod cannot run slash commands', id: nextId() }]);
+        return;
+      }
+      setQueued(q => [...q, p.text]);
+    },
+  });
+
   // Throttle the live streaming region: setting state on every text_delta (one per
   // token) repaints the multi-line region dozens of times a second, which the user
   // sees as flicker/jitter. We coalesce bursts into at most one repaint per ~50ms.
@@ -418,6 +439,9 @@ export function App(props: AppProps): React.ReactElement {
       sendNow();
       return;
     }
+    // Mods: Ctrl+X Tab focuses a mod pane (or the band); while one has the keyboard its
+    // Buttons take Tab/arrows/Enter/hotkeys and Esc gives the keyboard back (not a stop).
+    if (!pendingPromptRef.current && mods.ctl.handleInput(_input, key)) return;
 
     // Ctrl+B toggles the side-run dock (background live stays out of the transcript).
     if (key.ctrl && _input === 'b') {
@@ -1145,8 +1169,11 @@ export function App(props: AppProps): React.ReactElement {
 
       {!pendingPrompt && (
         <Box flexDirection="column" marginTop={1}>
+          <ModsToasts snap={mods.snap} width={cols} />
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}
-          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} />
+          <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} modsSpinner={mods.snap.spinner} />
+          <ModsPanes snap={mods.snap} width={cols} maxRows={p => mods.ctl.paneMaxRows(p)} />
+          <ModsBand snap={mods.snap} width={cols} maxRows={mods.ctl.bandMaxRows()} />
           {/* Input lives in its own bordered box, visually detached from the transcript above. */}
           <Box
             width={cols}
@@ -1162,7 +1189,7 @@ export function App(props: AppProps): React.ReactElement {
               placeholder={busy ? 'Type to redirect the running task, or /…' : 'Type a task, or /help  (Tab completes)'}
               accentColor={mode === 'plan' ? 'yellow' : 'cyan'}
               motion={motion}
-              active={!pendingPrompt}
+              active={!pendingPrompt && !mods.snap.focus && !mods.snap.chord}
               busy={busy}
               historyRef={promptHistoryRef}
               extraSlashNames={[...slashAliasMap().keys()]}
@@ -1171,6 +1198,7 @@ export function App(props: AppProps): React.ReactElement {
                 : <Text color={mode === 'plan' ? 'yellow' : 'cyan'}>{mode === 'plan' ? '📋' : '❯'}</Text>}
             />
           </Box>
+          <ModsStatusLines snap={mods.snap} width={cols} />
           {queued.length > 0 && (
             <Box paddingX={1}>
               <Text dimColor>
@@ -1238,6 +1266,8 @@ function LiveHeader(props: {
   busy: boolean;
   thinkingChars?: number;
   motion: boolean;
+  /** A mod's spinner suffix or drawing (ui.render Spinner); null keeps QodeX's own. */
+  modsSpinner?: ModsUiSnapshot['spinner'];
 }): React.ReactElement {
   const phase = useShimmer(props.motion);
   const thinkTok = props.thinkingChars && props.thinkingChars > 0
@@ -1249,7 +1279,15 @@ function LiveHeader(props: {
       {props.busy
         ? thinkTok > 0
           ? <Text color="yellow">  ·  thinking… {thinkTok} tok  ·  Esc to stop</Text>
-          : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
+          : props.modsSpinner
+            ? (
+              <>
+                <Text dimColor>  ·  </Text>
+                <ModsSpinnerWord spinner={props.modsSpinner} word="crafting" width={Math.max(10, props.width - 30)} />
+                <Text dimColor>  ·  Esc to stop</Text>
+              </>
+            )
+            : <Text dimColor>  ·  crafting…  ·  Esc to stop</Text>
         : props.mode === 'plan'
           ? <Text color="yellow">  ·  plan mode</Text>
           : <Text dimColor>  ·  ready</Text>}
@@ -1384,6 +1422,8 @@ function HistoryItemView({ item }: { item: HistoryItem }): React.ReactElement {
       return <Text color="yellow" dimColor>※ {item.text}</Text>;
     case 'error':
       return <Text color="red">⚠ {item.text}</Text>;
+    case 'mod':
+      return <ModHistoryLineView line={item} />;
   }
 }
 
