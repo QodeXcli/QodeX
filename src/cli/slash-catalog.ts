@@ -31,6 +31,7 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'mode', args: '[manual|edits|auto]', description: 'Same as /auto' },
   { name: 'status', description: 'Approval mode, strict mode, session' },
   { name: 'btw', args: '<note>', description: 'Steer a running task without stopping it' },
+  { name: 'instructions', args: '[all|first]', description: 'Load the first project instruction file or all of them' },
   { name: 'goal', args: '<done looks like> [--check "<cmd>"] [--max N]', description: 'Keep working until a check proves the goal is met' },
   { name: 'stop', args: '[all]', description: 'Emergency stop: the running task, side runs, processes (all = missions too)' },
   { name: 'learn', args: '[name]', description: 'Turn the task you just finished into a reusable skill' },

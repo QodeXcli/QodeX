@@ -50,6 +50,11 @@ export interface Job {
   error?: string;
   /** For 'subagent' jobs, the final synthesis content. */
   result?: string;
+  /** For a shell command moved here from the foreground ("send now"): what, where, which process. */
+  command?: string;
+  cwd?: string;
+  pid?: number;
+  movedFromForeground?: boolean;
   /** Internal: handle so we can cancel. */
   _abort?: AbortController;
 }
@@ -113,6 +118,74 @@ function startBash(description: string, command: string, cwd?: string, env?: Rec
   });
 
   return job;
+}
+
+/** What src/tools/shell/send-now.ts feeds into a job adopted from the foreground. */
+export interface AdoptedJob {
+  id: string;
+  appendStdout(s: string): void;
+  appendStderr(s: string): void;
+  finish(r: { code: number | null; signal: string | null; timedOut?: boolean; truncated?: boolean; stdout?: string; stderr?: string; unavailable?: string }): void;
+  fail(message: string): void;
+}
+
+/**
+ * Adopt a shell command that is ALREADY running (the shell tool's foreground command, moved here
+ * by "send now"): it keeps running; its output so far (`stdout`/`stderr`) and from now on lands
+ * in the job; background_job_cancel calls `cancel`. `timeoutMs` > 0 = it still stops at its
+ * foreground timeout, measured from `startedAt`.
+ */
+export function adoptRunningJob(o: {
+  command: string; description?: string; cwd: string; pid?: number; startedAt: number;
+  stdout?: string; stderr?: string; timeoutMs?: number; cancel: () => void;
+}): AdoptedJob {
+  const job: Job = {
+    id: newId(),
+    kind: 'bash',
+    description: o.description || o.command.slice(0, 80),
+    status: 'running',
+    startedAt: o.startedAt,
+    stdout: appendCapped('', o.stdout ?? ''),
+    stderr: appendCapped('', o.stderr ?? ''),
+    command: o.command,
+    cwd: o.cwd,
+    pid: o.pid,
+    movedFromForeground: true,
+  };
+  const abort = new AbortController();
+  job._abort = abort;
+  abort.signal.addEventListener('abort', () => {
+    try { o.cancel(); } catch { /* ignore */ }
+    job.status = 'cancelled';
+    job.finishedAt = Date.now();
+  });
+  jobs.set(job.id, job);
+  const streamed = { out: false, err: false };
+  const done = () => job.status !== 'running';
+  return {
+    id: job.id,
+    appendStdout: (s) => { streamed.out = true; job.stdout = appendCapped(job.stdout, s); },
+    appendStderr: (s) => { streamed.err = true; job.stderr = appendCapped(job.stderr, s); },
+    finish: (r) => {
+      if (done()) return;
+      // The runtime's own buffers are exact (streamed lines split at chunk boundaries): use them
+      // unless they were capped and the streamed tail is newer.
+      if (r.stdout && (!streamed.out || !r.truncated)) job.stdout = appendCapped('', r.stdout);
+      if (r.stderr && (!streamed.err || !r.truncated)) job.stderr = appendCapped('', r.stderr);
+      job.exitCode = r.code;
+      if (r.unavailable) job.error = r.unavailable;
+      else if (r.timedOut) job.error = `stopped at its timeout (${Math.round((o.timeoutMs ?? 0) / 1000)}s from start)`;
+      else if (r.signal) job.error = `killed by ${r.signal}`;
+      job.status = r.code === 0 && !r.timedOut ? 'completed' : 'failed';
+      job.finishedAt = Date.now();
+    },
+    fail: (message) => {
+      if (done()) return;
+      job.error = message;
+      job.status = 'failed';
+      job.finishedAt = Date.now();
+    },
+  };
 }
 
 /** Start a sub-agent in the background. Wires through the SubAgentRunner from the task tool. */
@@ -242,6 +315,10 @@ export class BackgroundJobStatusTool extends Tool<z.infer<typeof StatusArgs>> {
       `Status: ${job.status}`,
       `Runtime: ${Math.floor(runtime / 1000)}s`,
     ];
+    if (job.movedFromForeground) {
+      lines.push(`Command: ${job.command} (moved from the foreground by Send now)`);
+      lines.push(`Cwd: ${job.cwd}${job.pid ? ` · PID: ${job.pid}` : ''}`);
+    }
     if (job.exitCode !== undefined) lines.push(`Exit code: ${job.exitCode}`);
     if (job.error) lines.push(`Error: ${job.error}`);
     lines.push(`Output: ${job.stdout.length} bytes stdout, ${job.stderr.length} bytes stderr`);

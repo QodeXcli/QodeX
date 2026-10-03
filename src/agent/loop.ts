@@ -45,6 +45,7 @@ import type { AskMeta, AskUserFn } from './ask-meta.js';
 import { approvalModeNote, conversationSaysAutonomous } from './approval-note.js';
 import { AUTONOMY_NUDGE, endsWithQuestionToUser } from './autonomy-nudge.js';
 import { BudgetTracker } from './budget.js';
+import { placeSystemNote, resolveWrapUp, wrapUpNote, wrapUpNotice, wrapUpStopMessage, type BudgetKind } from './budget-wrapup.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import {
   transformError, explainStreamError, detectStuckLoop, detectErrorLoop, errorCodeOf, looksFutile, readLoopAction,
@@ -129,6 +130,12 @@ export interface AgentOptions {
   budgetOverride?: SubAgentBudgetOverride;
   /** Pin this run to a resolved provider/model (sub-agents use it; wins over explicitModel). */
   modelOverride?: { provider: string; model: string };
+  /**
+   * Wrap-up allowance at a budget cap (budget-wrapup.ts; amounts from config budget.wrapUp).
+   * The TUI and headless runs pass true (`--strict-budget` passes false); sub-agents and
+   * missions leave it off — their caps are hard contracts.
+   */
+  wrapUpAllowance?: boolean;
 }
 
 /** Effective budget limits for a run: config.budget with an optional per-run override. PURE. */
@@ -1676,12 +1683,38 @@ export class AgentLoop {
     // runaway guard, not an invoice.
     let promptHighWater = 0;
 
+    // ── Wrap-up allowance (budget-wrapup.ts): a cap crossed mid-task grants ONE allowance to
+    // leave the work consistent and report; its steps used up (or a cap crossed again) is the
+    // hard stop, marked "(wrap-up allowance used)". Returns the stop event, or null to go on.
+    const config = this.config;
+    const wrapUpOrStop = function* (hit: { message: string; budgetType: string }): Generator<AgentEvent, AgentEvent | null> {
+      const used = budget.getWrapUp();
+      const grant = options.wrapUpAllowance
+        ? budget.grantWrapUp({ message: hit.message, budgetType: hit.budgetType as BudgetKind }, resolveWrapUp(config.budget?.wrapUp))
+        : null;
+      if (!grant) {
+        const message = used ? wrapUpStopMessage(used.budgetType === hit.budgetType ? used.message : hit.message) : hit.message;
+        return { type: 'error', data: { message, budgetType: hit.budgetType } };
+      }
+      const placed = placeSystemNote(messages, newMessages, wrapUpNote(grant));
+      messages = placed.messages;
+      if (placed.added) sessionStore.recordTurn(sessionId, [placed.added], { input: 0, output: 0, costUsd: 0 });
+      logger.info('Wrap-up allowance granted', { budgetType: grant.budgetType, steps: grant.steps, tokens: grant.tokens, usd: grant.usd });
+      yield { type: 'notice', data: { message: wrapUpNotice(grant) } };
+      return null;
+    };
+
     while (true) {
       budget.incrementIteration();
+      if (budget.wrapUpExhausted()) {
+        const w = budget.getWrapUp()!;
+        yield { type: 'error', data: { message: wrapUpStopMessage(w.message), budgetType: w.budgetType } };
+        return;
+      }
       const exceeded = budgetError();
       if (exceeded) {
-        yield { type: 'error', data: { message: exceeded.message, budgetType: exceeded.budgetType } };
-        return;
+        const stop = yield* wrapUpOrStop(exceeded);
+        if (stop) { yield stop; return; }
       }
 
       // Iteration cap is a fuse, not a finish line. A working task extends and
@@ -1692,12 +1725,11 @@ export class AgentLoop {
       // budget checkpoint ends the run when it is exceeded.
       const explicitCap = typeof options.maxIterationsOverride === 'number' && options.maxIterationsOverride > 0;
       if (explicitCap && budget.atIterationCap()) {
-        yield {
-          type: 'error',
-          data: { message: `Iteration budget exceeded: ${budget.getIterations()}/${budget.getMaxIterations()}`, budgetType: 'iterations' },
-        };
-        return;
+        const stop = yield* wrapUpOrStop({ message: `Iteration budget exceeded: ${budget.getIterations()}/${budget.getMaxIterations()}`, budgetType: 'iterations' });
+        if (stop) { yield stop; return; }
       }
+      // The allowance's last model call goes out without tools: the run ends with a summary.
+      if (budget.wrapUpLastStep()) forceTextOnly = true;
       if (!explicitCap && budget.atIterationCap()) {
         let maxReadRepeatAtCap = 0;
         for (const [key, n] of callCounts) {

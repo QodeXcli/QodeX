@@ -211,6 +211,21 @@ export interface QodexConfig {
     perTaskMaxTokens: number;
     perTaskMaxWallSeconds: number;
     toolTimeoutSeconds: number;
+    /**
+     * Wrap-up allowance: when a token / USD / iteration / (stall-aware) wall-clock cap is hit
+     * mid-task, the run gets ONE extra allowance to leave the work consistent and report,
+     * instead of stopping mid-change. Tokens / USD = max(percent of the cap, minimum), wall
+     * clock = max(percent, 60 s), plus at most `maxIterations` more model calls. Then the hard
+     * stop. Never for /stop, Esc, Sentinel blocks or `--strict-budget`. Defaults below.
+     */
+    wrapUp?: {
+      enabled?: boolean;
+      percent?: number;
+      minTokens?: number;
+      /** USD floor of the allowance (percent of a tiny cap can be fractions of a cent). */
+      minUsd?: number;
+      maxIterations?: number;
+    };
   };
   security: {
     autoApprove: string[];
@@ -420,6 +435,11 @@ export interface QodexConfig {
      *  Default false. Explicit values above/in `compaction` always override the profile.
      *  Trade-off: the model may occasionally re-read an aged-out file. */
     efficient?: boolean;
+    /** Project instruction files (QODEX.md, CLAUDE.md, AGENTS.md, GEMINI.md, .cursorrules,
+     *  .windsurfrules, AI.md): 'first' (default) loads the first one found walking up from the
+     *  cwd; 'all' loads every one in the nearest directory that has any (headers per file,
+     *  identical contents once). `/instructions all|first` overrides it for the session. */
+    projectInstructions?: 'first' | 'all';
   };
   /**
    * LLM Critic gate — semantic peer review after the mechanical verify gate. A
@@ -697,6 +717,14 @@ export interface QodexConfig {
     defaultMode?: 'manual' | 'edits' | 'auto';
     /** Extra directories auto mode treats as part of the project (besides cwd and the temp dir). */
     extraRoots?: string[];
+    /**
+     * Auto mode's remaining asks (destructive outside the project, edits outside it, Sentinel's
+     * auto-mode asks) shown in the TUI are denied after this many seconds without an answer, with
+     * a hint to rewrite the action inside the project — an unattended run keeps going instead of
+     * waiting forever. Default 120; 0 = wait forever. Never applies to Sentinel-critical prompts
+     * (purchase, payment, credential, send, integrity) or to manual mode.
+     */
+    unattendedTimeoutSec?: number;
   };
 }
 
@@ -737,6 +765,7 @@ export const DEFAULT_CONFIG: QodexConfig = {
     // model legitimately spends that on a handful of long generations.
     perTaskMaxWallSeconds: 3600,
     toolTimeoutSeconds: 300,
+    wrapUp: { enabled: true, percent: 10, minTokens: 4000, minUsd: 0.05, maxIterations: 3 },
   },
   learning: {
     // Skill CAPTURE stays off: it writes candidate files and spends a judge call, so it is a

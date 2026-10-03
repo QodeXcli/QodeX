@@ -1,5 +1,6 @@
 import { BudgetExceededError } from '../utils/errors.js';
 import type { QodexConfig } from '../config/defaults.js';
+import { MIN_WRAP_UP_WALL_SECONDS, type BudgetKind, type WrapUpConfig, type WrapUpGrant } from './budget-wrapup.js';
 
 export interface BudgetUsage {
   tokens: number;
@@ -17,6 +18,8 @@ export class BudgetTracker {
   /** Bumped on every consume() (= a completed model call). Slow ≠ runaway: the wall-time
    *  ceiling only fires when the task is ALSO stalled, judged against this timestamp. */
   private lastProgressAt = Date.now();
+  /** The one wrap-up allowance of this run, once granted (budget-wrapup.ts). */
+  private wrapUp: WrapUpGrant | null = null;
 
   constructor(
     private maxTokens: number,
@@ -115,6 +118,49 @@ export class BudgetTracker {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Grant the ONE wrap-up allowance after `hit` (a cap that was just crossed): every finite cap
+   * moves to what is used now plus max(percent of the cap, minimum) — so a second cap can't end
+   * the wrap-up right away — and the iteration cap covers `maxIterations` more model calls,
+   * this one included. Null when disabled or already granted (the caller then hard-stops).
+   */
+  grantWrapUp(hit: { message: string; budgetType: BudgetKind }, cfg: WrapUpConfig): WrapUpGrant | null {
+    if (!cfg.enabled || this.wrapUp) return null;
+    const pct = cfg.percent / 100;
+    const steps = Math.max(1, Math.floor(cfg.maxIterations));
+    const g: WrapUpGrant = { budgetType: hit.budgetType, message: hit.message, grantedAt: this.iterations, steps };
+    if (this.maxTokens > 0) {
+      g.tokens = Math.max(Math.round(this.maxTokens * pct), cfg.minTokens);
+      this.maxTokens = Math.max(this.maxTokens, this.tokens) + g.tokens;
+    }
+    if (this.maxCostUsd > 0) {
+      g.usd = Math.max(this.maxCostUsd * pct, cfg.minUsd);
+      this.maxCostUsd = Math.max(this.maxCostUsd, this.costUsd) + g.usd;
+    }
+    if (this.maxWallSeconds > 0) {
+      g.wallSeconds = Math.max(Math.round(this.maxWallSeconds * pct), MIN_WRAP_UP_WALL_SECONDS);
+      this.maxWallSeconds = Math.max(this.maxWallSeconds, Math.ceil((Date.now() - this.startTime) / 1000)) + g.wallSeconds;
+    }
+    if (this.maxIterations > 0) this.maxIterations = Math.max(this.maxIterations, this.iterations + steps - 1);
+    this.wrapUp = g;
+    return g;
+  }
+
+  /** The granted allowance, if any. */
+  getWrapUp(): WrapUpGrant | null {
+    return this.wrapUp;
+  }
+
+  /** True once the allowance's model calls are used up (checked at the start of an iteration). */
+  wrapUpExhausted(): boolean {
+    return !!this.wrapUp && this.iterations - this.wrapUp.grantedAt >= this.wrapUp.steps;
+  }
+
+  /** True on the allowance's last model call (sent without tools, so it ends with a summary). */
+  wrapUpLastStep(): boolean {
+    return !!this.wrapUp && this.iterations - this.wrapUp.grantedAt === this.wrapUp.steps - 1;
   }
 
   getUsage(): BudgetUsage {

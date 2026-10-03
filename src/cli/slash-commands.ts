@@ -329,6 +329,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /unlimited         Remove the iteration cap for this session
     /iterations <n>    Set iteration cap for this session (0 = no limit)
     /btw <note>        Steer a RUNNING task mid-flight — inject a guidance note without stopping it
+    /instructions [all|first]  Load the first project instruction file or all of them (CLAUDE.md, AGENTS.md…)
 
   Sub-agents & safety
     /subagents [off|sequential|parallel]   Configure sub-agent dispatcher
@@ -618,6 +619,27 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         handled: true,
         message: `Strict mode: ${isStrictMode() ? 'ON 🛡' : 'OFF'}\n\nUsage: /strict on   |   /strict off\n\nWhen ON, the agent must:\n  - Run analyze_impact / project_overview before multi-file changes\n  - present_plan for any change spanning >2 files\n  - Verify with auto_fix after every batch of edits\n  - Dry-run destructive commands first\n  - Explain blast radius before risky changes\nUse for production codebases (Seven Gum, ChinPost, sg-commerce-pro).`,
       };
+    }
+
+    case 'instructions': {
+      // /instructions [all|first] — which project instruction files (QODEX.md, CLAUDE.md,
+      // AGENTS.md, GEMINI.md, AI.md, .cursorrules, .windsurfrules) the system prompt loads.
+      const { getProjectInstructionsMode, setProjectInstructionsMode, loadProjectRules } = await import('../context/claude-md.js');
+      const v = arg.trim().toLowerCase();
+      if (v !== '' && v !== 'all' && v !== 'first') {
+        return { handled: true, message: 'Usage: /instructions [all|first]' };
+      }
+      if (v === 'all' || v === 'first') setProjectInstructionsMode(v);
+      const mode = getProjectInstructionsMode();
+      const rules = await loadProjectRules(cwd, { mode }).catch(() => null);
+      const files = rules?.sources?.length ? rules.sources : rules ? [rules.sourcePath] : [];
+      const lines = [
+        `Project instructions: ${mode} — ${mode === 'all' ? 'every instruction file in the nearest folder that has one' : 'the first file found walking up from here'}`,
+        files.length ? `  loads: ${files.join(', ')}` : '  loads: (no instruction file found)',
+      ];
+      if (v) lines.push('  Applies from the next conversation (/clear) — this one already has its system prompt.');
+      lines.push('  Usage: /instructions all|first · permanent: context.projectInstructions in ~/.qodex/config.yaml');
+      return { handled: true, message: lines.join('\n') };
     }
 
     case 'context': {

@@ -54,6 +54,9 @@ import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
 import { handoffForPrompt, handoffTerminalHint } from '../control/handoff.js';
+import {
+  buildSendNowPrompt, detachForegroundShells, foregroundShellCount, sendNowKey, sendNowLine, SEND_NOW_HINT, SEND_NOW_TIP,
+} from '../tools/shell/send-now.js';
 import type { AskMeta } from '../agent/ask-meta.js';
 import { isSentinelPrompt } from '../sentinel/guard.js';
 import { autoAnswerForMode, autoAnsweredLine, autoModeBannerOnce, modeBadge } from './approval-ui.js';
@@ -226,6 +229,12 @@ export function App(props: AppProps): React.ReactElement {
   // output isn't a TTY (piped) or the user opted out via QODEX_NO_MOTION=1.
   const motion = !!stdout?.isTTY && process.env.QODEX_NO_MOTION !== '1';
   const abortRef = useRef<AbortController | null>(null);
+  // Send now (Ctrl+Enter, or the Ctrl+X Ctrl+S chord): the chord's armed state; the pending
+  // hand-off to the running turn's event loop (it ends the turn once the moved shell's result
+  // is recorded); and the prompts send-now queued → what to show for them in history.
+  const sendNowArmedRef = useRef(false);
+  const sendNowRef = useRef<{ ac: AbortController; stop: () => void } | null>(null);
+  const sendNowDisplayRef = useRef(new Map<string, string>());
   // /stop (here, the control center or Telegram) aborts the running turn through this handler.
   useEffect(() => registerStopHandler('current run', () => {
     const ac = abortRef.current;
@@ -354,6 +363,45 @@ export function App(props: AppProps): React.ReactElement {
     }
   }, [props.initialPrompt, booted]);
 
+  // Send now: end the running turn at once and send what is queued (queued prompts, or the
+  // steering note typed mid-task) as the next turn. A foreground shell command that is running
+  // keeps running as a background job (src/tools/shell/send-now.ts). Nothing queued → a hint.
+  const sendNow = (): void => {
+    const ac = abortRef.current;
+    if (!busy || !ac || ac.signal.aborted || sendNowRef.current) return;
+    const hasSteer = agentRef.current?.hasPendingSteer() ?? false;
+    if (queued.length === 0 && !hasSteer) {
+      setHistory(h => [...h, { type: 'system', text: SEND_NOW_HINT, id: nextId() }]);
+      return;
+    }
+    const moved = detachForegroundShells({ sessionId });
+    const plain = queued.filter(q => !q.startsWith('/'));
+    if (plain.length > 0 || hasSteer) {
+      // Plain queued prompts go in as ONE turn (slash commands stay queued after it); a pending
+      // steering note is injected by the loop at that turn's first step.
+      const prompt = buildSendNowPrompt(plain, moved);
+      sendNowDisplayRef.current.set(prompt, plain.length > 0 ? plain.join('\n\n') : '⏩ (send now — continue with the note above)');
+      setQueued(q => [prompt, ...q.filter(x => x.startsWith('/'))]);
+    }
+    setHistory(h => [...h, { type: 'system', text: sendNowLine(moved), id: nextId() }]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (): void => {
+      if (timer) clearTimeout(timer);
+      if (sendNowRef.current?.stop === stop) sendNowRef.current = null;
+      if (abortRef.current !== ac || ac.signal.aborted) return; // that turn already ended
+      ac.abort();
+      const broker = getApprovalBroker();
+      for (const p of broker.pending()) {
+        if (p.source === 'terminal') broker.cancel(p.id, 'user-stop');
+      }
+    };
+    if (moved.length === 0) { stop(); return; }
+    // The moved command's call returns [MOVED_TO_BACKGROUND] at once: end the turn when that
+    // tool round is recorded (iteration_done), or after 1.5 s if another tool is still running.
+    sendNowRef.current = { ac, stop };
+    timer = setTimeout(stop, 1500);
+  };
+
   // Ctrl+C handler
   useInput((_input, key) => {
     // Any keypress other than a confirming Ctrl+C disarms the exit prompt — so if you
@@ -361,6 +409,14 @@ export function App(props: AppProps): React.ReactElement {
     if (exitArmed && !(key.ctrl && _input === 'c')) {
       setExitArmed(false);
       if (exitTimer.current) { clearTimeout(exitTimer.current); exitTimer.current = null; }
+    }
+
+    // Send now: Ctrl+Enter, or Ctrl+X then Ctrl+S (terminals that send Ctrl+Enter as Enter).
+    const sendKey = sendNowKey(_input, key, sendNowArmedRef.current);
+    sendNowArmedRef.current = sendKey === 'arm';
+    if (sendKey === 'send' && busy) {
+      sendNow();
+      return;
     }
 
     // Ctrl+B toggles the side-run dock (background live stays out of the transcript).
@@ -708,6 +764,8 @@ export function App(props: AppProps): React.ReactElement {
         askUser,
         maxIterationsOverride: maxIterOverrideRef.current,
         reasoningEffort: effortOverrideRef.current,
+        // A reached budget cap gets one wrap-up allowance (config budget.wrapUp).
+        wrapUpAllowance: true,
         onToolUI: (uiEvent) => {
           if (uiEvent.type === 'diff') {
             pendingDiffRef.current = uiEvent;
@@ -722,6 +780,11 @@ export function App(props: AppProps): React.ReactElement {
       })) {
         if (ac.signal.aborted) break;
         forwardAgentEvent(sessionId, event);
+        // Send now with a moved shell: its tool round is recorded — end the turn right here.
+        if (event.type === 'iteration_done' && sendNowRef.current?.ac === ac) {
+          sendNowRef.current.stop();
+          break;
+        }
         switch (event.type) {
           case 'thinking_start':
             setThinkingChars(0);
@@ -943,6 +1006,8 @@ export function App(props: AppProps): React.ReactElement {
       agentRef.current.pushSteer(v);
       const preview = v.length > 56 ? v.slice(0, 56) + '…' : v;
       setHistory(h => [...h, { type: 'system', text: `↪ Redirected the running task: ${preview}`, id: nextId() }]);
+      // The note waits for the next step — behind a long command, say how to send it now.
+      if (foregroundShellCount({ sessionId }) > 0) setHistory(h => [...h, { type: 'system', text: SEND_NOW_TIP, id: nextId() }]);
       return;
     }
     // If a turn is in flight (or a permission prompt is open), QUEUE it instead of
@@ -966,7 +1031,10 @@ export function App(props: AppProps): React.ReactElement {
     dispatchingRef.current = true;
     const [next, ...rest] = queued;
     setQueued(rest);
-    void submitPrompt(next).finally(() => {
+    // A send-now prompt shows what the user typed, not its framing.
+    const shownAs = sendNowDisplayRef.current.get(next);
+    if (shownAs !== undefined) sendNowDisplayRef.current.delete(next);
+    void submitPrompt(next, shownAs !== undefined ? { displayAs: shownAs } : undefined).finally(() => {
       dispatchingRef.current = false;
       setDrainTick(t => t + 1);
     });
@@ -1110,6 +1178,7 @@ export function App(props: AppProps): React.ReactElement {
                   ? `⏎ queued: ${queued[0].length > 60 ? queued[0].slice(0, 60) + '…' : queued[0]}`
                   : `⏎ ${queued.length} prompts queued`}
               </Text>
+              {busy && <Text dimColor>  ·  Ctrl+Enter (or Ctrl+X Ctrl+S): send now</Text>}
             </Box>
           )}
           {exitArmed && (

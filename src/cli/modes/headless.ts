@@ -148,6 +148,9 @@ export interface HeadlessOptions {
   /** `--receipt <path>`: write a signed, tamper-evident JSON receipt of the run there.
    *  Requires a contract (there is nothing to attest without one). */
   receiptPath?: string;
+  /** `--strict-budget`: a reached budget cap stops the run at once — no wrap-up allowance
+   *  (budget-wrapup.ts). Without it the run gets one allowance to leave the work consistent. */
+  strictBudget?: boolean;
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
@@ -335,6 +338,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
         : { mode: modeOverride },
       askUser,
       signal: runAbort.signal,
+      wrapUpAllowance: !opts.strictBudget,
     })) {
       forwardAgentEvent('headless', event);
       // Contract telemetry first — independent of the output mode below.
