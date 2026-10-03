@@ -945,6 +945,26 @@ async function openTunnel(rt: Running): Promise<void> {
   }
 }
 
+/** Hand a rebound server the previous server's tunnel. The tunnel forwards to
+ *  127.0.0.1:<port>, so it keeps working when the port is unchanged; otherwise it is
+ *  replaced by a fresh one. */
+async function adoptTunnel(fresh: Running, old: Running): Promise<void> {
+  if (!old.tunnel) {
+    if (old.tunnelError && !fresh.tunnelError) fresh.tunnelError = old.tunnelError;
+    return;
+  }
+  if (fresh.port === old.port) {
+    fresh.tunnel = old.tunnel;
+    fresh.tunnelUrl = old.tunnelUrl;
+    fresh.tunnelError = undefined;
+    old.tunnel = undefined;
+    return;
+  }
+  try { old.tunnel.close(); } catch { /* ignore */ }
+  old.tunnel = undefined;
+  await openTunnel(fresh);
+}
+
 async function launch(opts: ControlCenterOptions): Promise<Running> {
   const cfg = resolveControlConfig(getActiveConfig());
   const lan = !!opts.lan;
@@ -1071,23 +1091,37 @@ function checkOrphanedTakeover(rt: Running): void {
   } catch { /* the manager went away */ }
 }
 
-async function shutdown(rt: Running, releaseTakeover: boolean): Promise<void> {
+interface ShutdownOptions {
+  /** Hand browser control back to the agent if the dashboard holds it. */
+  releaseTakeover: boolean;
+  /** Leave the tunnel child running (a LAN rebind hands it to the new server on the same port). */
+  keepTunnel?: boolean;
+  /** Leave the 'control' approval channel registered until the rebound server replaces it,
+   *  so a request made during the rebind isn't answered "no" for lack of any channel. */
+  keepChannel?: boolean;
+}
+
+async function shutdown(rt: Running, o: ShutdownOptions): Promise<void> {
   if (rt.watchdog) { clearInterval(rt.watchdog); rt.watchdog = null; }
   if (rt.cookieSweep) { clearInterval(rt.cookieSweep); rt.cookieSweep = null; }
-  try { rt.unregisterChannel(); } catch { /* ignore */ }
+  if (!o.keepChannel) {
+    try { rt.unregisterChannel(); } catch { /* ignore */ }
+  }
   try { rt.unsubscribeBus(); } catch { /* ignore */ }
   await rt.frames.close().catch(() => {});
   for (const c of [...rt.eventClients]) c.end();
   rt.eventClients.clear();
-  if (releaseTakeover) {
+  if (o.releaseTakeover) {
     // Never leave the agent paused behind a takeover nobody can hand back.
     try {
       const mgr = peekBrowserManager();
       if (mgr?.isTakeover() && mgr.status().takeoverBy === 'control') mgr.setTakeover(false, 'control');
     } catch { /* ignore */ }
   }
-  try { rt.tunnel?.close(); } catch { /* ignore */ }
-  rt.tunnel = undefined;
+  if (!o.keepTunnel) {
+    try { rt.tunnel?.close(); } catch { /* ignore */ }
+    rt.tunnel = undefined;
+  }
   await new Promise<void>(resolve => {
     rt.server.close(() => resolve());
     (rt.server as Server & { closeAllConnections?: () => void }).closeAllConnections?.();
@@ -1110,7 +1144,8 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
       if (opts.onSteer) rt.onSteer = opts.onSteer;
       if (opts.lan && !isWildcardHost(rt.host)) {
         // LAN needs an all-interfaces bind: rebind with the same token/port/settings.
-        // Open dashboards reconnect on their own; the takeover state is kept.
+        // Open dashboards reconnect on their own; the takeover state is kept, and so
+        // are the public tunnel (same shared link) and the approval channel.
         const keep: ControlCenterOptions = {
           host: rt.host,
           port: rt.port,
@@ -1121,21 +1156,34 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
           screencastQuality: rt.quality,
           screencastMaxFps: rt.maxFps,
           takeoverReleaseMs: rt.takeoverReleaseMs,
-          tunnel: !!rt.tunnel,
         };
         // (explicitly-undefined fields in `opts` must not wipe the kept settings)
         const given = Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) as ControlCenterOptions;
-        const next: ControlCenterOptions = { ...keep, ...given, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: !!opts.tunnel || !!rt.tunnel };
+        const next: ControlCenterOptions = { ...keep, ...given, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: false };
         current = null;
-        await shutdown(rt, false);
+        await shutdown(rt, { releaseTakeover: false, keepTunnel: true, keepChannel: true });
+        let fresh: Running | null = null;
+        let failure: unknown = null;
         try {
-          current = await launch(next);
+          fresh = await launch(next);
         } catch (e) {
           // Don't leave the user without a control center: restore the previous bind.
-          current = await launch(keep).catch(() => null);
-          throw e;
+          failure = e;
+          fresh = await launch(keep).catch(() => null);
         }
-        return infoOf(current);
+        if (!fresh) {
+          // Nothing serves any more: drop the orphaned channel (else unattended runs
+          // would wait on a dashboard that can't exist) and the tunnel child.
+          try { rt.unregisterChannel(); } catch { /* ignore */ }
+          try { rt.tunnel?.close(); } catch { /* ignore */ }
+          rt.tunnel = undefined;
+          throw failure;
+        }
+        await adoptTunnel(fresh, rt);
+        if (opts.tunnel && !fresh.tunnel) await openTunnel(fresh);
+        current = fresh;
+        if (failure) throw failure;
+        return infoOf(fresh);
       }
       if (opts.tunnel && !rt.tunnel) await openTunnel(rt);
       return infoOf(rt);
@@ -1151,7 +1199,7 @@ export function stopControlCenter(): Promise<boolean> {
     const rt = current;
     if (!rt) return false;
     current = null;
-    await shutdown(rt, true);
+    await shutdown(rt, { releaseTakeover: true });
     return true;
   });
 }
