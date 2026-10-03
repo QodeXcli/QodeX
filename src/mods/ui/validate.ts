@@ -128,6 +128,9 @@ const REQUIRED: Record<string, string[]> = {
 
 class Refused extends Error {}
 
+/** Own keys only: `constructor`, `toString`… inherited from Object.prototype are not props. */
+const own = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
 function fail(msg: string): never {
   throw new Refused(msg);
 }
@@ -135,6 +138,8 @@ function fail(msg: string): never {
 /** Validate (and normalize) a tree a mod returned. Never throws. */
 export function validateModTree(input: unknown): ValidateResult {
   let nodes = 0;
+  // Keyboard focus and ui.press name a Button by its key: two with one key are ambiguous.
+  const buttonKeys = new Set<string>();
 
   const describe = (v: unknown): string => {
     if (v === null) return 'null';
@@ -160,7 +165,7 @@ export function validateModTree(input: unknown): ValidateResult {
       if (typeof el.ref !== 'string') fail('an engine element has no ref');
       return { type: 'engine', ref: el.ref as string };
     }
-    if (typeof type !== 'string' || !PROPS_BY_TYPE[type]) fail(`element "${String(type)}" is not allowed`);
+    if (typeof type !== 'string' || !own(PROPS_BY_TYPE, type)) fail(`element "${String(type)}" is not allowed`);
     const t = type as string;
     if (parent === 'Text' && t !== 'Text' && t !== 'Link') fail(`Text cannot hold a ${t}`);
 
@@ -171,13 +176,18 @@ export function validateModTree(input: unknown): ValidateResult {
     for (const [name, value] of Object.entries(rawProps as Record<string, unknown>)) {
       if (name === 'children') continue; // factories may leave it in props; the real children are el.children
       if (value === undefined) continue;
-      const check = allowed[name];
+      const check = own(allowed, name) ? allowed[name] : undefined;
       if (!check) fail(`${t} prop "${name}" is not allowed`);
       if (!check(value)) fail(`${t} prop "${name}" has an invalid value`);
       props[name] = typeof value === 'string' ? cleanText(value) : value;
     }
-    for (const req of REQUIRED[t] ?? []) {
+    for (const req of own(REQUIRED, t) ? REQUIRED[t]! : []) {
       if (props[req] === undefined) fail(`${t} needs a "${req}" prop`);
+    }
+    if (t === 'Button') {
+      const k = props.key as string;
+      if (buttonKeys.has(k)) fail(`two Buttons use the key "${k}" (keys must be unique in a tree)`);
+      buttonKeys.add(k);
     }
     if (t === 'Bar') props.segments = checkSegments(props.segments as unknown[]);
 

@@ -34,7 +34,7 @@ const Box = (children: ModElement[], props: Record<string, unknown> = {}): ModEl
 const Button = (props: Record<string, unknown>): ModElement => ({ type: 'Button', props, children: [] } as unknown as ModElement);
 
 const snap = (over: Partial<ModsUiSnapshot>): ModsUiSnapshot => ({
-  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, chord: false, ...over,
+  band: [], panes: [], activePane: null, statuses: [], toasts: [], spinner: null, focus: null, focusedKey: null, focusedPlugin: null, chord: false, ...over,
 });
 
 describe('validateModTree', () => {
@@ -63,6 +63,25 @@ describe('validateModTree', () => {
     expect(validateModTree(Text(['x'], { bold: 'yes' }))).toEqual({ ok: false, reason: 'Text prop "bold" has an invalid value' });
     expect(validateModTree(Text(['x'], { color: 'constructor' })).ok).toBe(false);
     expect(validateModTree(Box([], { borderStyle: 'zigzag' })).ok).toBe(false);
+  });
+
+  it('refuses names inherited from Object.prototype as props or elements', () => {
+    // `constructor` / `toString` used to pass: the prop table lookup found Object's own
+    // functions and called them as the value check.
+    for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      const props = JSON.parse(`{"${name}":"x"}`);
+      expect(validateModTree({ type: 'Box', props, children: [] }), name).toEqual({ ok: false, reason: `Box prop "${name}" is not allowed` });
+      expect(validateModTree({ type: 'Text', props, children: ['t'] }), name).toEqual({ ok: false, reason: `Text prop "${name}" is not allowed` });
+    }
+    for (const type of ['constructor', 'toString', '__proto__']) {
+      expect(validateModTree({ type, props: {}, children: [] })).toEqual({ ok: false, reason: `element "${type}" is not allowed` });
+    }
+  });
+
+  it('refuses two Buttons with one key (focus and ui.press name a Button by its key)', () => {
+    const r = validateModTree(Box([Button({ key: 'go', label: 'Go' }), Box([Button({ key: 'go', label: 'Again' })])]));
+    expect(r).toEqual({ ok: false, reason: 'two Buttons use the key "go" (keys must be unique in a tree)' });
+    expect(validateModTree(Box([Button({ key: 'a', label: 'A' }), Button({ key: 'b', label: 'B' })])).ok).toBe(true);
   });
 
   it('refuses children in the wrong place and oversized text', () => {
