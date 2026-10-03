@@ -1170,6 +1170,14 @@ function wantsHtml(req: IncomingMessage): boolean {
   return /text\/html/i.test(String(req.headers.accept ?? ''));
 }
 
+/** Whether the viewer reached us over https (TLS socket, or a tunnel that says so). */
+function requestIsHttps(req: IncomingMessage): boolean {
+  if ((req.socket as Socket & { encrypted?: boolean }).encrypted) return true;
+  const raw = req.headers['x-forwarded-proto'];
+  const first = String(Array.isArray(raw) ? raw[0] : raw ?? '').split(',')[0]?.trim().toLowerCase();
+  return first === 'https';
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
@@ -1439,7 +1447,9 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
   if (auth.via === 'query' && isRead) {
     const stripped = stripTokenFromUrl(rawUrl);
     const target = isLocalRedirect(stripped) ? stripped : '/';
-    const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}`;
+    // Behind an https tunnel the cookie must never travel over plain http.
+    const secure = requestIsHttps(req) ? '; Secure' : '';
+    const cookie = `${controlCookieName(rt.port)}=${rt.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}${secure}`;
     if (wantsHtml(req)) {
       // An HTML bounce (not a 302) so the follow-up navigation is initiated by OUR
       // page — a SameSite=Strict cookie is then sent even when the link was opened
