@@ -4,7 +4,8 @@
  * Wayland deliberately hides other clients' windows and input, so this backend
  * is more limited than X11:
  *   input       ydotool (needs the ydotoold daemon + /dev/uinput access)
- *   screenshots grim (wlroots: sway, Hyprland, ...) → gnome-screenshot → spectacle (KDE)
+ *   screenshots grim (wlroots: sway, Hyprland, ...) → gnome-screenshot → spectacle (KDE),
+ *               the first that works
  *   clipboard   wl-copy / wl-paste
  *   windows     only where the compositor exposes them: sway (swaymsg) or
  *               Hyprland (hyprctl). Elsewhere window tools return a clear
@@ -145,6 +146,17 @@ export function parseHyprClients(json: string, activeAddress?: string): WindowIn
   }));
 }
 
+/** Best plain-text MIME type among those the clipboard offers (`wl-paste --list-types`), or null. PURE. */
+export function pickTextMime(types: string[]): string | null {
+  const lower = types.map(t => t.toLowerCase());
+  for (const want of ['text/plain;charset=utf-8', 'text/plain', 'utf8_string', 'string', 'text']) {
+    const i = lower.indexOf(want);
+    if (i >= 0) return types[i]!;
+  }
+  const i = lower.findIndex(t => t.startsWith('text/plain'));
+  return i >= 0 ? types[i]! : null;
+}
+
 /** Screen sizes are expensive to probe on Wayland (no xdotool) — cache briefly. */
 let sizeCache: { size: Size; at: number } | null = null;
 
@@ -169,6 +181,7 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
     notes.push(wm ? `windows: ${wm}` : 'windows: not exposed by this compositor (only sway/Hyprland are supported) — use screenshot + computer_use_locate');
     notes.push('ydotool needs its daemon: `sudo systemctl enable --now ydotool` (or run `ydotoold`) and access to /dev/uinput.');
     notes.push('Pointer moves are emulated: if clicks land off-target, set a flat pointer-acceleration profile.');
+    notes.push('ydotool types raw key codes through the ACTIVE keyboard layout: with a Persian (or other non-US) layout active, ASCII text comes out wrong — switch to an English/US layout, or use computer_use_type method "paste".');
     const hintText = pkgs.length ? `${hint(this.deps, pkgs)}; then start the daemon: sudo systemctl enable --now ydotool` : '';
     return { ok: missing.length === 0, missing, hint: hintText, notes };
   }
@@ -208,21 +221,39 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
         }
       }
     }
-    const tool = await firstAvailable(WAYLAND_SCREENSHOT_TOOLS);
-    if (!tool) throw this.unavailable(WAYLAND_SCREENSHOT_TOOLS.join('|'), hint(this.deps, ['grim']));
-    if (tool === 'grim') {
-      const type = /\.jpe?g$/i.test(dest) ? ['-t', 'jpeg'] : [];
-      const regionArgs = region ? ['-g', region] : [];
-      // -s 1: logical-pixel image, the same space ydotool moves in (HiDPI-safe).
-      const r = await this.run('grim', ['-s', '1', ...type, ...regionArgs, dest], { timeoutMs: 20_000 });
-      if (r.code !== 0) await this.check('grim', [...type, ...regionArgs, dest], { timeoutMs: 20_000 });
-    } else {
-      if (region) { notes.push(`${tool} can't capture a region; captured the full screen.`); origin = { x: 0, y: 0 }; }
-      if (tool === 'gnome-screenshot') await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
-      else await this.check('spectacle', ['-b', '-n', '-f', '-o', dest], { timeoutMs: 20_000 });
+    const tools: string[] = [];
+    for (const t of WAYLAND_SCREENSHOT_TOOLS) if (await which(t)) tools.push(t);
+    if (!tools.length) throw this.unavailable(WAYLAND_SCREENSHOT_TOOLS.join('|'), hint(this.deps, ['grim']));
+    // The first tool that WORKS: grim is often installed on GNOME / KDE too, but
+    // only wlroots compositors (sway, Hyprland, ...) let it capture.
+    let used: string | null = null;
+    let lastErr: unknown;
+    for (const tool of tools) {
+      try {
+        await fs.rm(dest, { force: true }); // no partial file from a failed attempt
+        if (tool === 'grim') {
+          const type = /\.jpe?g$/i.test(dest) ? ['-t', 'jpeg'] : [];
+          const regionArgs = region ? ['-g', region] : [];
+          // -s 1: logical-pixel image, the same space ydotool moves in (HiDPI-safe).
+          const r = await this.run('grim', ['-s', '1', ...type, ...regionArgs, dest], { timeoutMs: 20_000 });
+          if (r.code !== 0) await this.check('grim', [...type, ...regionArgs, dest], { timeoutMs: 20_000 });
+        } else if (tool === 'gnome-screenshot') {
+          await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
+        } else {
+          await this.check('spectacle', ['-b', '-n', '-f', '-o', dest], { timeoutMs: 20_000 });
+        }
+        used = tool;
+        break;
+      } catch (e) {
+        this.throwIfAborted();
+        lastErr = e;
+      }
     }
+    if (!used) throw lastErr;
+    const regionApplied = used === 'grim' && !!region;
+    if (region && !regionApplied) { notes.push(`${used} can't capture a region; captured the full screen.`); origin = { x: 0, y: 0 }; }
     const raw = await readImageSize(dest);
-    if (!region) sizeCache = { size: raw, at: Date.now() };
+    if (!regionApplied) sizeCache = { size: raw, at: Date.now() };
     let size = raw;
     if (opts.maxWidth && raw.width > opts.maxWidth) {
       const scaler = await firstAvailable(IMAGE_SCALERS);
@@ -399,8 +430,15 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
 
   async clipboardGet(): Promise<string> {
     if (!(await which('wl-paste'))) throw this.unavailable('wl-paste', hint(this.deps, ['wl-clipboard']));
-    const r = await this.run('wl-paste', ['--no-newline'], { timeoutMs: 5000 });
-    return r.code === 0 ? r.stdout : ''; // non-zero = empty clipboard
+    // Ask for a TEXT type explicitly: plain `wl-paste` outputs whatever was copied —
+    // PNG bytes for a copied image — which would reach the model as garbage and be
+    // "restored" as text after a paste.
+    const types = await this.run('wl-paste', ['--list-types'], { timeoutMs: 5000 });
+    if (types.code !== 0) return ''; // "Nothing is copied"
+    const mime = pickTextMime(types.stdout.split('\n').map(s => s.trim()).filter(Boolean));
+    if (!mime) return '';
+    const r = await this.run('wl-paste', ['--no-newline', '--type', mime], { timeoutMs: 5000 });
+    return r.code === 0 ? r.stdout : '';
   }
 
   async clipboardSet(text: string): Promise<void> {

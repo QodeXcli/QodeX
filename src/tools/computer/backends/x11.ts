@@ -2,7 +2,7 @@
  * Linux / X11 desktop backend.
  *
  *   input       xdotool (mousemove, click --repeat, mousedown/up, type, key)
- *   screenshots scrot → import (ImageMagick) → gnome-screenshot (first available)
+ *   screenshots scrot → import (ImageMagick) → gnome-screenshot (first that works)
  *   downscale   magick | convert (ImageMagick)
  *   clipboard   xclip | xsel
  *   windows     wmctrl -lpG (falls back to `xdotool search`), windowactivate
@@ -354,12 +354,25 @@ export class X11Backend extends CommandBackend implements DesktopBackend {
     return { path: dest, width: size.width, height: size.height, scale: size.width / raw.width, origin, window: win, notes };
   }
 
+  /** Full-screen capture with the first screenshot tool that WORKS (scrot → import → gnome-screenshot). */
   private async captureFull(dest: string): Promise<void> {
-    const tool = await firstAvailable(X11_SCREENSHOT_TOOLS);
-    if (!tool) throw this.unavailable(X11_SCREENSHOT_TOOLS.join('|'), installHint(this.deps, ['scrot']));
-    if (tool === 'scrot') await this.check('scrot', [dest], { timeoutMs: 20_000 });
-    else if (tool === 'import') await this.check('import', ['-window', 'root', dest], { timeoutMs: 20_000 });
-    else await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
+    const tools: string[] = [];
+    for (const t of X11_SCREENSHOT_TOOLS) if (await which(t)) tools.push(t);
+    if (!tools.length) throw this.unavailable(X11_SCREENSHOT_TOOLS.join('|'), installHint(this.deps, ['scrot']));
+    let lastErr: unknown;
+    for (const tool of tools) {
+      try {
+        await fs.rm(dest, { force: true }); // a failed attempt may leave a partial file (and scrot won't overwrite)
+        if (tool === 'scrot') await this.check('scrot', [dest], { timeoutMs: 20_000 });
+        else if (tool === 'import') await this.check('import', ['-window', 'root', dest], { timeoutMs: 20_000 });
+        else await this.check('gnome-screenshot', ['-f', dest], { timeoutMs: 20_000 });
+        return;
+      } catch (e) {
+        this.throwIfAborted();
+        lastErr = e;
+      }
+    }
+    throw lastErr;
   }
 
   // ── geometry ──
