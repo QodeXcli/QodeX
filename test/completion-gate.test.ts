@@ -120,6 +120,11 @@ console.log('— real-world actions (browser / desktop / workflow / mission) are
   check('failed action ([STALE_REF]) does NOT count', gatherSessionEvidence([call('browser_click'), out('browser_click', '[STALE_REF] e9 not found')]).didSuccessfulAction === false);
   check('a code-fix claim is NOT backed by a mere browser visit',
     (evaluateCompletion('I fixed the layout bug', [call('browser_navigate'), out('browser_navigate', 'Page: Home')]) ?? '').includes('no file edit'));
+  // The platform modules report success with [CODE]s too — they are evidence, not errors.
+  check('[MISSION_STARTED] mission_start counts', gatherSessionEvidence([call('mission_start'), out('mission_start', '[MISSION_STARTED] Mission m_1 is now running')]).didSuccessfulAction === true);
+  check('[BROWSER_AGENT_DONE] browser_agent counts', gatherSessionEvidence([call('browser_agent'), out('browser_agent', '[BROWSER_AGENT_DONE] 5 tool call(s)')]).didSuccessfulAction === true);
+  check('[MISSION_FAILED] does NOT count', gatherSessionEvidence([call('mission_start'), out('mission_start', '[MISSION_FAILED] Mission m_1 finished with status failed.')]).didSuccessfulAction === false);
+  check('a "✗ Workflow … stopped" replay does NOT count', gatherSessionEvidence([call('workflow_run'), out('workflow_run', '✗ Workflow "x" stopped at step 2/4: boom')]).didSuccessfulAction === false);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

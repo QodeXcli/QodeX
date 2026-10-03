@@ -182,8 +182,13 @@ export class SessionStore {
    */
   ensureSession(id: string, cwd: string, model: string): void {
     if (typeof id !== 'string' || !id) throw new Error('[SESSION_ERROR] ensureSession needs a non-empty session id');
-    this.db.prepare(`INSERT OR IGNORE INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, NULL)`)
-      .run(id, cwd, model);
+    // ON CONFLICT(id) DO NOTHING — not INSERT OR IGNORE: OR IGNORE also swallows a NOT NULL
+    // violation (cwd), silently creating no row, and the caller's first recordTurn then
+    // failed with the very FK error this method exists to prevent.
+    const safeCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+    const safeModel = typeof model === 'string' ? model : null;
+    this.db.prepare(`INSERT INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, NULL) ON CONFLICT(id) DO NOTHING`)
+      .run(id, safeCwd, safeModel);
   }
 
   /** True when a `sessions` row exists for `id`. */

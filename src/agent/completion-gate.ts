@@ -41,13 +41,29 @@ const DESKTOP_OBSERVE_ONLY = new Set([
   'computer_use_screenshot', 'computer_use_screen_info', 'computer_use_active_window',
   'computer_use_list_windows', 'computer_use_locate',
 ]);
-/** Error codes that are actually success markers. */
-const SUCCESS_CODES = new Set(['SUBAGENT_DONE', 'OK', 'DONE', 'SUCCESS']);
+/**
+ * Leading `[CODE]` tokens that are actually SUCCESS markers. The platform modules report
+ * success this way — `[SUBAGENT_DONE]`, `[BROWSER_AGENT_DONE]`, `[COMPUTER_AGENT_DONE]`,
+ * `[MISSION_STARTED]`, `[MISSION_COMPLETED]` — so a code is a success when its last word
+ * is a completion word and no word negates it (`[NOT_STARTED]`, `[MISSION_FAILED]`,
+ * `[MISSION_CANCELLED]` stay failures). PURE.
+ */
+function isSuccessCode(code: string): boolean {
+  const words = code.split('_').filter(Boolean);
+  if (words.length === 0) return false;
+  const last = words[words.length - 1]!;
+  if (!/^(OK|DONE|SUCCESS|SUCCEEDED|STARTED|COMPLETED|COMPLETE|FINISHED)$/.test(last)) return false;
+  return !words.some(w => /^(NOT|NO|UN|NEVER|FAIL|FAILED|FAILURE|ERROR|ERRORS|DENIED|BLOCKED|REJECTED|ABORTED|CANCELLED|CANCELED|TIMEOUT|INVALID|PARTIAL|PARTIALLY)$/.test(w));
+}
 
 /** True when `name` (with its parsed args, when known) is a real-world ACTION tool. PURE. */
 export function isActionTool(name: string, args?: Record<string, unknown> | null): boolean {
   if (!name) return false;
+  // A dry run only lists the steps; it doesn't touch the browser.
+  if (name === 'workflow_run' && args?.dry_run === true) return false;
   if (ACTION_TOOLS.has(name)) return true;
+  // task(role: browser|computer) is browser_agent / computer_use_agent by another door.
+  if (name === 'task') return args?.role === 'browser' || args?.role === 'computer';
   if (name.startsWith('browser_')) {
     if (BROWSER_OBSERVE_ONLY.has(name)) return false;
     const action = typeof args?.action === 'string' ? args.action : '';
@@ -73,7 +89,10 @@ export function looksLikeErrorResult(content: string): boolean {
   const head = content.slice(0, 600).split('\n').map(l => l.trim()).filter(Boolean).slice(0, 4);
   for (const line of head) {
     const m = /^\[([A-Z][A-Z0-9_]*)\]/.exec(line);
-    if (m && !SUCCESS_CODES.has(m[1]!)) return true;
+    if (m) return !isSuccessCode(m[1]!);
+    // Status lines of the platform tools: "✗ Workflow … stopped at step 2", "✓ Clicked …".
+    if (line.startsWith('✗')) return true;
+    if (line.startsWith('✓')) return false;
   }
   return false;
 }
@@ -170,7 +189,11 @@ function parseArgs(raw: unknown): Record<string, unknown> | null {
   } catch { return null; }
 }
 
-export function gatherSessionEvidence(messages: MsgLike[]): SessionEvidence {
+/**
+ * @param failedToolCallIds tool_call ids whose result the agent loop saw as `isError` —
+ *   authoritative over any text heuristic (a failed replay need not start with `[CODE]`).
+ */
+export function gatherSessionEvidence(messages: MsgLike[], failedToolCallIds?: ReadonlySet<string>): SessionEvidence {
   let didSuccessfulEdit = false;
   let didRunTests = false;
   let didRunShell = false;
@@ -196,7 +219,8 @@ export function gatherSessionEvidence(messages: MsgLike[]): SessionEvidence {
     if (m.role === 'tool') {
       const name = m.name ?? '';
       const content = typeof m.content === 'string' ? m.content : '';
-      const isError = ERROR_PREFIX_RE.test(content);
+      const knownFailed = !!m.tool_call_id && !!failedToolCallIds?.has(m.tool_call_id);
+      const isError = knownFailed || ERROR_PREFIX_RE.test(content);
       if (EDIT_TOOLS.has(name) && !isError) didSuccessfulEdit = true;
       if (name === 'shell' || name === 'auto_fix' || name === 'code_run') {
         didRunShell = true;
@@ -204,7 +228,7 @@ export function gatherSessionEvidence(messages: MsgLike[]): SessionEvidence {
       }
       if (!didSuccessfulAction) {
         const args = m.tool_call_id ? argsById.get(m.tool_call_id) ?? null : null;
-        if (isActionTool(name, args) && !looksLikeErrorResult(content)) didSuccessfulAction = true;
+        if (isActionTool(name, args) && !knownFailed && !looksLikeErrorResult(content)) didSuccessfulAction = true;
       }
     }
   }
@@ -261,8 +285,12 @@ export function checkCompletionClaims(
 }
 
 /** Convenience: one call from text + messages → corrective message or null. */
-export function evaluateCompletion(finalText: string, messages: MsgLike[]): string | null {
+export function evaluateCompletion(
+  finalText: string,
+  messages: MsgLike[],
+  opts: { failedToolCallIds?: ReadonlySet<string> } = {},
+): string | null {
   const claims = extractCompletionClaims(finalText);
   if (!claims.claimsFixOrChange && !claims.claimsTestsPass && !claims.claimsAction) return null; // nothing asserted
-  return checkCompletionClaims(claims, gatherSessionEvidence(messages));
+  return checkCompletionClaims(claims, gatherSessionEvidence(messages, opts.failedToolCallIds));
 }
