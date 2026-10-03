@@ -17,6 +17,7 @@
 
 import { createHash } from 'crypto';
 import type { InlineKeyboardMarkup } from './api.js';
+import type { HandoffMeta } from '../../control/handoff.js';
 import { detectSecrets } from '../../sentinel/policy.js';
 
 export type Lang = 'en' | 'fa';
@@ -231,6 +232,19 @@ const EN = {
   error: 'Error',
   cost: 'Cost',
   live: 'Live view',
+  handoffTitle: 'A bot check needs you',
+  handoffBody: 'Solve it in the live view — <b>QodeX continues by itself</b> as soon as it is gone.',
+  handoffOpen: '🖐 Open live view',
+  handoffDone: '✅ Done',
+  handoffCancel: '✖️ Can\'t solve it',
+  handoffLinkNote: (min: number) => `The button opens only this check and stops working in ${min} min.`,
+  handoffLan: (url: string) => `Open the control center on this Wi-Fi: ${url}`,
+  handoffLocal: 'Solve it in the browser window, or in the control center on your computer (<code>/control</code>).',
+  handoffCleared: '✓ Challenge cleared, continuing',
+  handoffSolved: '✓ Marked as solved — QodeX checks the page',
+  handoffCancelled: '✖️ Gave up — QodeX will not retry by itself',
+  handoffTimedOut: '⌛ Nobody solved it in time — QodeX stopped waiting',
+  handoffStopped: '⚪ The task was stopped',
 } as const;
 
 type Catalog = { [K in keyof typeof EN]: (typeof EN)[K] extends (...a: infer A) => string ? (...a: A) => string : string };
@@ -322,6 +336,19 @@ const FA: Catalog = {
   error: 'خطا',
   cost: 'هزینه',
   live: 'نمای زنده',
+  handoffTitle: 'یک بررسیِ ضدربات منتظر شماست',
+  handoffBody: 'آن را در نمای زنده حل کنید — <b>QodeX خودش ادامه می‌دهد</b> به محض اینکه برطرف شود.',
+  handoffOpen: '🖐 باز کردن نمای زنده',
+  handoffDone: '✅ انجام شد',
+  handoffCancel: '✖️ نمی‌توانم حلش کنم',
+  handoffLinkNote: (min: number) => `این دکمه فقط همین بررسی را باز می‌کند و پس از ${faDigits(min)} دقیقه از کار می‌افتد.`,
+  handoffLan: (url: string) => `مرکز کنترل را روی همین Wi-Fi باز کنید: ${url}`,
+  handoffLocal: 'آن را در پنجرهٔ مرورگر یا در مرکز کنترل روی کامپیوترتان (<code>/control</code>) حل کنید.',
+  handoffCleared: '✓ بررسی برطرف شد، ادامه می‌دهیم',
+  handoffSolved: '✓ حل‌شده علامت خورد — QodeX صفحه را بررسی می‌کند',
+  handoffCancelled: '✖️ صرف‌نظر شد — QodeX خودش دوباره امتحان نمی‌کند',
+  handoffTimedOut: '⌛ کسی به‌موقع حلش نکرد — QodeX دیگر منتظر نمی‌ماند',
+  handoffStopped: '⚪ کار متوقف شد',
 };
 
 const CATALOGS: Record<Lang, Catalog> = { en: EN as unknown as Catalog, fa: FA };
@@ -334,6 +361,7 @@ export function strings(lang: Lang): Catalog {
 // ── categories, risks, statuses ──────────────────────────────────────────────
 
 const CATEGORY_FA: Record<string, string> = {
+  challenge: 'بررسی ضدربات',
   purchase: 'خرید', payment: 'پرداخت', send: 'ارسال', credential: 'اطلاعات ورود', delete: 'حذف',
   publish: 'انتشار', account: 'حساب کاربری', download: 'دانلود', upload: 'آپلود', navigation: 'باز کردن سایت',
   desktop: 'کنترل دسکتاپ', other: 'سایر',
@@ -376,6 +404,8 @@ export interface ApprovalCardInput {
   risk?: string;
   source?: string;
   missionId?: string;
+  /** Set for a hand-off (validated `meta.handoff`): the card becomes a hand-off card. */
+  handoff?: HandoffMeta;
 }
 
 /** Text shown on an approval button. */
@@ -468,6 +498,7 @@ const CHANNEL_NAMES: Record<string, { en: string; fa: string }> = {
   control: { en: 'control center', fa: 'مرکز کنترل' },
   local: { en: 'terminal', fa: 'ترمینال' },
   'mission-db': { en: 'mission queue', fa: 'صف مأموریت' },
+  'challenge-cleared': { en: 'auto-resume (the check cleared)', fa: 'ادامهٔ خودکار (بررسی برطرف شد)' },
 };
 
 function channelName(by: string, lang: Lang): string {
@@ -714,4 +745,78 @@ export function formatSentinelNotice(type: string, data: unknown, lang: Lang): N
   if (summary) lines.push(esc(maskOutbound(summary), 600));
   if (tool) lines.push(`<code>${esc(tool, 60)}</code>`);
   return { text: lines.join('\n'), important: false };
+}
+
+// ── hand-off cards (a CAPTCHA / bot check a human solves) ────────────────────
+
+/** What a hand-off card shows (from the approval's validated `meta.handoff`). */
+export interface HandoffCardInput {
+  host?: string;
+  vendor?: string;
+  /** Mission that asked (a detached worker: no screenshot, no link from this process). */
+  missionId?: string;
+  /** Fallback text when the meta has no host (the approval prompt). */
+  prompt?: string;
+}
+
+const VENDOR_NAMES: Record<string, string> = {
+  recaptcha: 'reCAPTCHA', hcaptcha: 'hCaptcha', turnstile: 'Cloudflare Turnstile', cloudflare: 'Cloudflare',
+  akamai: 'Akamai', perimeterx: 'HUMAN (PerimeterX)', human: 'HUMAN (PerimeterX)', datadome: 'DataDome',
+  'aws-waf': 'AWS WAF', awswaf: 'AWS WAF', arkose: 'Arkose', funcaptcha: 'Arkose', geetest: 'GeeTest',
+  kasada: 'Kasada', 'ddos-guard': 'DDoS-Guard', sucuri: 'Sucuri', captcha: 'CAPTCHA', generic: 'CAPTCHA',
+};
+
+/** Display name of a challenge vendor id. PURE. */
+export function vendorLabel(vendor: string | undefined): string {
+  if (!vendor) return '';
+  return VENDOR_NAMES[vendor.toLowerCase()] ?? vendor;
+}
+
+/**
+ * Caption of a hand-off card (≤ 1024 visible chars). No "reply yes/no" hint, and
+ * never a link with a token: the one-tap link rides ONLY in the URL button.
+ * `lanUrl` is the token-less control-center address on this Wi-Fi (shown when
+ * Telegram refused a LAN button; the owner's own login opens it). PURE.
+ */
+export function formatHandoffCard(h: HandoffCardInput, lang: Lang, opts: { linkTtlMin?: number; lanUrl?: string; local?: boolean } = {}): string {
+  const S = strings(lang);
+  const lines = [`🧩 <b>${S.handoffTitle}</b>`];
+  const where = [h.host ? `<b>${esc(h.host, 120)}</b>` : '', h.vendor ? esc(vendorLabel(h.vendor), 40) : ''].filter(Boolean).join(' · ');
+  if (where) lines.push(where);
+  else if (h.prompt) lines.push(esc(maskOutbound(h.prompt), 300));
+  if (h.missionId) lines.push(`🎯 ${S.approvalMission}: <code>${esc(h.missionId, 60)}</code>`);
+  lines.push('', S.handoffBody);
+  if (opts.lanUrl) lines.push('', S.handoffLan(esc(redactUrlSecrets(opts.lanUrl), 200)));
+  else if (opts.linkTtlMin) lines.push('', `<i>${S.handoffLinkNote(opts.linkTtlMin)}</i>`);
+  else if (opts.local) lines.push('', S.handoffLocal);
+  return lines.join('\n');
+}
+
+/**
+ * Hand-off keyboard: the URL button (when there is a link) on its own row, then
+ * Done / Can't-solve as callback buttons on the approval's own options. PURE.
+ */
+export function handoffKeyboard(callbackId: string, options: string[], lang: Lang, linkUrl?: string): InlineKeyboardMarkup {
+  const S = strings(lang);
+  const rows: InlineKeyboardMarkup['inline_keyboard'] = [];
+  if (linkUrl) rows.push([{ text: S.handoffOpen, url: linkUrl }]);
+  const done = options.findIndex((o) => /^(done|continue|solved|ok|y)/i.test(o.trim()));
+  const cancel = options.findIndex((o) => /^(cancel|n|deny|reject|stop|skip)/i.test(o.trim()));
+  const answers: Array<{ text: string; callback_data: string }> = [];
+  if (done >= 0) answers.push({ text: S.handoffDone, callback_data: buildCallbackData(callbackId, done) ?? `ap:invalid:${done}` });
+  if (cancel >= 0) answers.push({ text: S.handoffCancel, callback_data: buildCallbackData(callbackId, cancel) ?? `ap:invalid:${cancel}` });
+  if (answers.length) rows.push(answers);
+  return { inline_keyboard: rows };
+}
+
+/** One line telling how a hand-off ended (auto-resume, solved, given up, timed out, stopped). PURE. */
+export function formatHandoffOutcome(result: { answer?: string; by?: string } | null, lang: Lang): string {
+  const S = strings(lang);
+  if (!result || !result.by) return `⚪ ${S.outcomeElsewhere}`;
+  if (result.by === 'challenge-cleared') return S.handoffCleared;
+  if (result.by === 'timeout') return S.handoffTimedOut;
+  if (AUTO_DENIED_BY.has(result.by) || result.by === 'user-stop') return S.handoffStopped;
+  const answer = String(result.answer ?? '');
+  if (/^(done|continue|solved|ok|y)/i.test(answer)) return `${S.handoffSolved} (${esc(channelName(result.by, lang), 60)})`;
+  return S.handoffCancelled;
 }
