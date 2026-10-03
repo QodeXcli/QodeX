@@ -9,7 +9,7 @@
 
 export type { ActionClassification, InjectionFinding, RiskLevel, SentinelDecision, SentinelGuard } from './types.js';
 export {
-  Sentinel, getSentinel, setSentinelForTests, formatSentinelStatus,
+  Sentinel, getSentinel, setSentinelForTests, formatSentinelStatus, isSentinelPrompt, SENTINEL_PROMPT_TITLE,
   type SentinelOptions, type SentinelVerdict,
 } from './guard.js';
 export {

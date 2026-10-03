@@ -88,6 +88,18 @@ export interface SentinelVerdict {
 const CRITICAL_OPTIONS = ['yes', 'no'];
 const ASK_OPTIONS = ['yes', 'no', 'always'];
 
+/** First line of every Sentinel approval prompt. */
+export const SENTINEL_PROMPT_TITLE = '🛡 Sentinel — approval needed · نیاز به تأیید شما';
+
+/**
+ * Is this an approval prompt Sentinel built? Its text quotes page-controlled
+ * content (button labels, URLs), so automatic answerers (the MCP server's path
+ * rules) must not match against it. A spoof only makes such a prompt be declined.
+ */
+export function isSentinelPrompt(prompt: string): boolean {
+  return String(prompt ?? '').includes('Sentinel — approval needed');
+}
+
 /** Resolve to `fallback` when `signal` aborts first. Never rejects for the abort. */
 function raceAbort<T>(p: Promise<T>, signal: AbortSignal | undefined, fallback: T): Promise<T> {
   if (!signal) return p;
@@ -292,10 +304,12 @@ export class Sentinel implements SentinelGuard {
         .slice(0, 25);
       const infos = await Promise.all(targets.map(t => describe(t.ref || undefined, t.ref ? undefined : t.selector)));
       out.elements = Object.fromEntries(targets.map((t, i) => [t.ref || t.selector, infos[i]]));
-    } else if (toolName === 'browser_evaluate' || /^\s*javascript:/i.test(str(args.url))) {
-      // A script (or javascript: URL) that clicks/submits: describe what it selects.
-      let script = toolName === 'browser_evaluate' ? str(args.script) : str(args.url).trim().replace(/^javascript:/i, '');
-      if (toolName !== 'browser_evaluate') { try { script = decodeURIComponent(script); } catch { /* keep */ } }
+    } else if (toolName === 'browser_evaluate' || (toolName === 'browser_wait_for' && str(args.kind) === 'function') || /^\s*javascript:/i.test(str(args.url))) {
+      // A script (a wait_for predicate, a javascript: URL) that clicks/submits: describe what it selects.
+      let script = toolName === 'browser_evaluate' ? str(args.script)
+        : toolName === 'browser_wait_for' ? str(args.value)
+          : str(args.url).trim().replace(/^javascript:/i, '');
+      if (toolName !== 'browser_evaluate' && toolName !== 'browser_wait_for') { try { script = decodeURIComponent(script); } catch { /* keep */ } }
       const sels = scriptSelectors(script);
       if (sels.length) out.scriptTargets = await Promise.all(sels.map(sel => describe(undefined, sel)));
     } else if (toolName === 'browser_dialog' && str(args.action) === 'accept') {
@@ -386,7 +400,7 @@ export class Sentinel implements SentinelGuard {
 
   private buildPrompt(toolName: string, cls: PolicyClassification, critical: boolean): string {
     const lines = [
-      '🛡 Sentinel — approval needed · نیاز به تأیید شما',
+      SENTINEL_PROMPT_TITLE,
       `Action: ${cls.summary}`,
       `Category: ${cls.category} · risk: ${cls.risk}`,
       `Why: ${cls.reason}`,

@@ -16,7 +16,8 @@
  *     computer_use_type): password fields, payment fields, and text that LOOKS
  *     like a secret (Luhn-valid card, Iranian card BINs, IBAN / Sheba, API keys,
  *     private keys, JWTs) → credential;
- *   - page scripts (browser_evaluate, javascript: URLs): a script that clicks /
+ *   - page scripts (browser_evaluate, browser_wait_for function predicates,
+ *     javascript: URLs): a script that clicks /
  *     submits is judged like a click on what it selects (by selector words and
  *     the described target elements), so `.click()` can't route around the
  *     purchase guard; Space on a focused button is an activation too;
@@ -679,27 +680,47 @@ const SHELL_WRITE_RE = /(?<![<=-])>>?(?!\s*(?:\/dev\/null|&\d))|\btee\b|\bsed\s+
 /** SQL that changes a database (`sqlite3 ~/.qodex/sessions.db "UPDATE mission_approvals ..."`). */
 const SQL_WRITE_RE = /\b(?:update|insert|delete|replace|drop|alter|create|attach|vacuum)\b/i;
 
+/** The qodex binary (`qodex`, `qx`, `bin/qodex.mjs`, `qodex.cmd`). */
+const QODEX_BIN = String.raw`(?:\S*[/\\])?(?:qodex|qx)(?:\.mjs|\.js|\.cmd)?`;
+/** QodeX run from a checkout (`node dist/index.js …`, `npx tsx src/index.ts …`, `npm run dev -- …`). */
+const QODEX_ENTRY = String.raw`(?:(?:(?:tsx|ts-node|bun)\s+)?(?:\S*[/\\])?(?:index|cli|main)\.[cm]?[jt]s|(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start))`;
+/**
+ * Root options before the subcommand (`qodex --json -m x mission approve …`). An option's
+ * value never swallows a subcommand word, which also keeps the match linear.
+ */
+const ROOT_OPTS = String.raw`(?:\s+-\S+(?:\s+(?!(?:missions?|vault|setup|config|control|telegram|browser)\b)[^\s-]\S*)?)*`;
+/** `--yes` / `-y` anywhere in the same command (before or after the subcommand). */
+const YES_AHEAD = String.raw`(?=[^|;&\n]*\s(?:--yes|-y)(?![\w-]))`;
+/** Answering or steering a mission (a steering note carries the user's authority). */
+const MISSION_ANSWER = String.raw`missions?\s+(?:approve|deny|steer)\b`;
+const MISSION_AUTO = String.raw`missions?\s+(?:start|resume)\b`;
+
 /**
  * CLI invocations that change the vault or QodeX's own setup, or that answer /
  * open the approval channels themselves: approving a mission's pending
- * approvals, starting a control center (its token approves anything), pairing
+ * approvals, steering it, starting a control center (its token approves anything), pairing
  * a Telegram chat (the code would let whoever receives it approve), or giving
- * a mission auto-approval. The agent must never do these on its own.
+ * a mission auto-approval. The agent must never do these on its own. A generic
+ * entry point (`node dist/index.js`) only counts for the mission subcommands, so
+ * another project's `node cli.js setup` is not mistaken for QodeX.
  */
 const QODEX_SELF_CHANGE_RE = new RegExp([
   // Command position only (start, after ; && || | ( $( ` or `sh -c "`, behind sudo/env/npx/node
   // prefixes), so `grep "qodex control" docs/` is not mistaken for running it.
   String.raw`(?:^|[;&|(\x60\n{]|\$\(|-c\s+["'])\s*`,
-  String.raw`(?:(?:sudo|nohup|exec|time|command|env(?:\s+-\S+)*|npx(?:\s+-\S+)*|node(?:\s+-\S+)*|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*`,
-  String.raw`(?:\S*[/\\])?(?:qodex|qx)(?:\.mjs|\.js|\.cmd)?\s+(?:`,
+  String.raw`(?:(?:sudo|nohup|exec|time|command|env(?:\s+(?:(?:-u|--unset)\s+[^\s-]\S*|-\S+))*|npx(?:\s+-\S+)*|node(?:\s+-\S+)*|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*`,
+  String.raw`(?:${QODEX_BIN}${ROOT_OPTS}\s+(?:`,
   String.raw`vault\s+(?:add|rm|remove)`,
   String.raw`|setup`,
   String.raw`|config\s+(?:set|edit|reset)`,
   String.raw`|control\b`,
   String.raw`|telegram\s+(?:setup|pair|unpair)`,
-  String.raw`|missions?\s+(?:approve|deny)`,
-  String.raw`|missions?\s+(?:start|resume)\b[^|;&\n]*\s(?:--yes|-y)(?![\w-])`,
+  String.raw`|${MISSION_ANSWER}`,
   String.raw`|browser\s+reset-profile`,
+  String.raw`)`,
+  String.raw`|${QODEX_BIN}${YES_AHEAD}${ROOT_OPTS}\s+${MISSION_AUTO}`,
+  String.raw`|${QODEX_ENTRY}${ROOT_OPTS}\s+${MISSION_ANSWER}`,
+  String.raw`|${QODEX_ENTRY}${YES_AHEAD}${ROOT_OPTS}\s+${MISSION_AUTO}`,
   String.raw`)`,
 ].join(''), 'i');
 
@@ -1221,7 +1242,7 @@ const WRITE_TOOLS = new Set(['write_file', 'edit_text', 'edit_symbol', 'multi_ed
 const BROWSER_GUARDED = new Set([
   'browser_navigate', 'browser_click', 'browser_fill', 'browser_type', 'browser_fill_form', 'browser_press',
   'browser_upload', 'browser_downloads', 'browser_evaluate', 'browser_tabs', 'browser_agent', 'browser_fill_secret',
-  'browser_dialog',
+  'browser_dialog', 'browser_wait_for',
 ]);
 const DESKTOP_GUARDED = new Set([
   'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_move', 'computer_use_drag',
@@ -1328,6 +1349,17 @@ function desktopSelfChange(toolName: string, text: string): PolicyClassification
       'it types a QodeX command that changes its vault, safety settings or approval channels (an agent must never approve its own actions)'),
     integrity: true,
   };
+}
+
+/** Opening these with the system handler (Start-Process / open / xdg-open) runs them as programs. */
+const PROGRAM_EXT_RE = /\.(?:exe|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|msi|com|scr|pif|cpl|lnk|reg|command|app|sh|desktop|jar|py|appimage)$/i;
+
+/** Does opening this local path / name run it as a program? PURE. */
+function opensProgram(p: string): boolean {
+  const s = String(p ?? '').trim().replace(/[\\/]+$/, ''); // "Foo.app/" is the bundle itself
+  if (!PROGRAM_EXT_RE.test(s)) return false;
+  // "example.com" without a path is a web site, not a DOS program.
+  return !/\.com$/i.test(s) || /[\\/]/.test(s);
 }
 
 function textPreview(text: string, mask: boolean): string {
@@ -1489,6 +1521,10 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
     case 'browser_evaluate':
       return classifyScript(str(a.script ?? a.expression ?? a.code), ctx, 'run a page script');
+    case 'browser_wait_for':
+      // A "function" wait polls its predicate IN the page: page JS like browser_evaluate.
+      if (str(a.kind) === 'function') return classifyScript(str(a.value), ctx, 'wait on a page script');
+      return none(`wait for ${str(a.kind) || 'the page'}`, pageHost || undefined);
     case 'browser_fill_secret': {
       const field = str(a.field) || 'secret';
       const summary = `fill the ${field} of vault entry "${oneLine(str(a.secret), 60)}" into "${elementLabel(ctx.element, str(a.ref) || str(a.selector) || 'the login form')}"${onHost}`;
@@ -1501,11 +1537,17 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       const text = str(a.text);
       // Typing `qodex mission approve ...` into a terminal is the agent approving itself.
       if (QODEX_SELF_CHANGE_RE.test(text) || commandHitsControl(text, ctx.control)) return desktopSelfChange(toolName, text);
+      const enter = a.submit ? ' + Enter' : '';
       const secrets = detectSecrets(text);
       if (secrets.length) {
-        return make('credential', riskFor('credential', cfg), `type ${textPreview(text, true)} on the desktop`, `the text looks like ${describeSecret(secrets[0].kind)}`);
+        return make('credential', riskFor('credential', cfg), `type ${textPreview(text, true)}${enter} on the desktop`, `the text looks like ${describeSecret(secrets[0].kind)}`);
       }
-      return make('desktop', riskFor('desktop', cfg), `type ${textPreview(text, false)} on the desktop`, 'keyboard input on your computer');
+      const summary = `type ${textPreview(text, false)}${enter} on the desktop`;
+      // submit presses Enter: judged like browser_type's submit (Enter in a message box sends it).
+      // Without a known focused element there is nothing to match and it stays desktop input.
+      const hit = a.submit ? classifyActivation(ctx.element, str(a.element) || undefined, ctx.url, true) : null;
+      if (hit) return make(hit.category, riskFor(hit.category, cfg), summary, hit.reason);
+      return make('desktop', riskFor('desktop', cfg), summary, a.submit ? 'keyboard input on your computer, then Enter (submits what has focus)' : 'keyboard input on your computer');
     }
     case 'computer_use_clipboard': {
       const action = str(a.action);
@@ -1518,16 +1560,51 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
       return none('read the clipboard');
     }
     case 'computer_use_open': {
-      const target = str(a.target);
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target) || /^(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:\/|$)/i.test(target)) {
+      const target = str(a.target).trim().replace(/^(["'])(.+)\1$/, '$2');
+      const shown = oneLine(maskControlTokens(maskSecrets(target)), 120);
+      // Any scheme is a URL for the system handler (file:, javascript:, ms-settings:), not only
+      // "x://"; a Windows drive path (C:\...) is not. host:port reads as http(s) (parseTarget).
+      const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(target) && !/^[a-z]:[\\/]/i.test(target);
+      const scheme = hasScheme ? parseTarget(target)?.scheme ?? '' : '';
+      if (scheme === 'javascript' || scheme === 'data' || scheme === 'vbscript') {
+        return make('desktop', 'high', `open ${shown} on your computer`, `${scheme}: URLs run script / inline content, not a page or a file`, undefined, true);
+      }
+      let local = hasScheme ? '' : target;
+      if (hasScheme || /^(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:\/|$)/i.test(target)) {
         const nav = classifyNavigation(target, ctx, 'open in your default browser');
         if (nav.block || nav.category === 'credential' || nav.risk === 'critical') return nav;
-        return make('desktop', riskFor('desktop', cfg), nav.summary, 'opens in your own browser (with your logins)', nav.domain);
+        if (scheme === 'file') {
+          // The file it names gets the local checks below.
+          local = parseTarget(target)?.url?.pathname ?? target.replace(/^file:/i, '');
+          try { local = decodeURIComponent(local); } catch { /* keep */ }
+          if (process.platform === 'win32') local = local.replace(/^\/([a-z]:)/i, '$1');
+        } else if (hasScheme && scheme !== 'http' && scheme !== 'https') {
+          return make('desktop', riskFor('desktop', cfg, { base: 'high' }), `open ${shown} with the app registered for ${scheme}:`,
+            `${scheme}: links launch whatever app handles them (settings, installers, other protocol handlers)`, nav.domain || `${scheme}:`);
+        } else if (hasScheme || !opensProgram(target)) {
+          // A web page — unless a bare "setup.exe" only looked like a domain.
+          return make('desktop', riskFor('desktop', cfg), nav.summary, 'opens in your own browser (with your logins)', nav.domain);
+        }
       }
-      return make('desktop', riskFor('desktop', cfg), `open ${oneLine(target, 120)} on your computer`, 'launching an app or file on your computer');
+      if (isProtectedPath(local, ctx.cwd, pp)) return protectedBlock(toolName, shown);
+      if (opensProgram(local)) {
+        // Fixed critical: Start-Process / open / xdg-open RUN it — code execution that /auto and
+        // --yes never wave through (sentinel.autoApprove: [other] opts out).
+        return make('other', 'critical', `run ${shown} on your computer`, 'opening a program or script with its system handler executes it, like a shell command');
+      }
+      return make('desktop', riskFor('desktop', cfg), `open ${shown} on your computer`, 'launching an app or file on your computer');
     }
-    case 'computer_use_click':
-      return make('desktop', riskFor('desktop', cfg), `click at (${str(a.x)}, ${str(a.y)})${a.button === 'right' ? ' (right button)' : ''} on the desktop`, 'mouse input on your computer');
+    case 'computer_use_click': {
+      const where = `at (${str(a.x)}, ${str(a.y)})${a.button === 'right' ? ' (right button)' : ''} on the desktop`;
+      const element = str(a.element).trim();
+      if (!element) return make('desktop', riskFor('desktop', cfg), `click ${where}`, 'mouse input on your computer');
+      const summary = `click "${elementLabel(null, element)}" ${where}`;
+      // `element` (auto-filled from computer_use_locate) names what is clicked: judged like
+      // browser_click on a button with that name. A right / middle click doesn't press it.
+      const hit = a.button === 'right' || a.button === 'middle' ? null : classifyActivation({ role: 'button', name: element }, undefined, undefined, false);
+      if (hit) return make(hit.category, riskFor(hit.category, cfg), summary, hit.reason);
+      return make('desktop', riskFor('desktop', cfg), summary, 'mouse input on your computer');
+    }
     case 'computer_use_drag':
       return make('desktop', riskFor('desktop', cfg), `drag on the desktop`, 'mouse input on your computer');
     case 'computer_use_key':
