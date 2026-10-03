@@ -546,6 +546,12 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /goal <done> [--check "<cmd>"] [--max N]   Keep working until the goal is proven (/goal · /goal clear)
 /stop [all]        Emergency stop: running task, side runs, dev servers (all: missions too)
 /learn [name]      Turn the task you just finished into a reusable skill
+/allow · /mail     Standing reply grants · mail watcher, rules, auto-reply (docs/MAIL.md)
+/mods · /mod new   Mods: hook QodeX itself; have QodeX write one (docs/MODS.md) · /reload-mods
+/context-bar       What fills the context window (built-in mod)
+/instructions first|all   Which project instruction files load (QODEX.md, CLAUDE.md, AGENTS.md, GEMINI.md…)
+/checkup prompt-audit     Audit instruction files, skills, commands → PROMPT_AUDIT.md + patch (nothing applied)
+/model opus|sonnet|haiku|fable   Latest model of each line
 /model <id>        Override model for this conversation
 /subagents off|sequential|parallel
 /snapshot list|take|restore        Manage auto-snapshots
@@ -613,6 +619,24 @@ approval:
 
 Your `security.denyRules` and the hard-deny patterns still refuse in every mode, and budgets
 (`--budget-usd`, per-task caps) still stop a run — auto mode never raises them.
+
+## Mail, password vault and CAPTCHAs
+
+- **Mail** — connect any mailbox (`qodex mail add`), read, draft and send with your approval; standing
+  reply grants you create yourself; a watcher that wakes up on new mail and runs the tasks you assigned.
+  See [docs/MAIL.md](docs/MAIL.md).
+- **Password vault** — logins the agent can use but never read: OS-keychain key, imports from Chrome /
+  Firefox / Bitwarden / 1Password, one-step `browser_login` with 2FA, strong passwords on sign-up, logins
+  you type into a secure prompt, "save this login?" after you log in yourself. See
+  [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
+- **CAPTCHAs** — QodeX never solves them; it waits out self-clearing checks and hands the rest to you
+  (Telegram card with a one-tap live-view link, solve it from your phone), then continues by itself.
+
+## Mods (Claude Code-compatible)
+
+Small JS/TS modules in `~/.qodex/mods` that hook QodeX itself — rewrite or hold tool calls, draw above the
+prompt, add commands and tools, run timers. `/mod new <what it should do>` has QodeX write one (it asks
+before writing). Project mods load only after `qodex mod trust`. See [docs/MODS.md](docs/MODS.md).
 
 ## End-to-end example
 

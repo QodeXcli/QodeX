@@ -63,3 +63,49 @@ an **app password** (a separate password only mail apps can use) and enter that.
   sent, and a draft is never sent twice.
 - Attachments from disk: QodeX's own state (`~/.qodex`) and credential files (`.env`, SSH keys,
   `.npmrc`, …) are refused.
+
+### Standing grants, the mail watcher and mail rules
+
+**Auto-replies (standing grants).** A send always needs your approval, with one exception: a *standing reply grant* that you create yourself. Only these human surfaces can create one:
+- TUI `/allow mail-replies [--account work] [--from boss@acme.com,@acme.com] [--max-per-day 50] [--expires 7d]`
+- terminal `qodex grant add mail-replies …`
+- a paired Telegram chat's `/allow …`
+- clicking **"always allow replies like this"** on a mail_send approval prompt
+
+List grants with `/allow list` or `qodex grant list`. Revoke with `/allow revoke <id|all>` or `qodex grant revoke <id>`.
+
+No tool lets the model create, widen or read a grant. Sentinel blocks the agent from reading or writing `~/.qodex/grants.json`, `~/.qodex/mail-auto/` and `~/.qodex/mail/`. If the agent runs `qodex grant …` or `qodex mail rule add …`, Sentinel treats it as a change to QodeX's own safety settings, which always needs a human.
+
+A grant covers a send only when all of these hold:
+- It is a draft made with `mail_draft reply_to_id` (a signed draft).
+- It goes in the same thread to the original sender only. A Reply-To redirect does not count, and there are no cc, bcc or other recipients.
+- It has no attachments from disk.
+- The original email was not flagged as prompt injection.
+- The reply contains no secret.
+- The account and sender filter match, the grant has not expired, and the daily cap (default 50) is not used up.
+
+A covered send needs no prompt, including in a detached run. It is audited (via `grant`), and you are told "Auto-replied to X: subject" in the TUI, the control center, Telegram and a desktop notification. Anything else gets the normal critical prompt, and with no human available it is refused.
+
+**Watcher.** Commands:
+- `qodex mail watch` runs in the foreground; `qodex mail watch --daemon` runs in the background.
+- `qodex mail watch --status` and `qodex mail watch --stop`.
+- `/mail watch start|stop|status|recent`.
+
+The watcher uses IMAP IDLE per account, with polling as a fallback. Config: `mail.watch: true` or `{ enabled, accounts, folder, pollIntervalSec, idle }`. With `mail.watch` on, `qodex telegram start` and the control center start it.
+
+New mail is announced once per message, with sender, subject and a short snippet. Messages are deduplicated by Message-ID, and the last-seen UID is kept per account and folder. Existing mail is never replayed.
+
+**Rules (standing tasks).** Add one with `qodex mail rule add "<when>" "<task>" [--cwd dir] [--auto]` or `/mail rule add …`. Conditions:
+- `from:<addr|@domain>`
+- `to:`
+- `subject:"…"`
+- `body:"…"`
+- `has:attachment`
+- `account:<name>`
+- `*` for any mail
+
+Manage rules with `/mail rule list|remove|enable|disable`. On a match, the watcher starts a background run (a mission) in the rule's directory. Its instruction is your task; the email is attached as fenced data, never as instructions. An email flagged as prompt injection gets a draft-only run, and you are notified.
+
+`qodex mail reply-all [--account a] [--from @acme.com] [--max-per-day N] [--expires 7d]` (or `/mail reply-all`) turns auto-reply on: it creates a reply grant plus a rule "draft a reply and send it". `/mail rule remove <id>` turns it off and revokes the grant. Auto-reply never answers mail from your own address, mailing lists, bulk mail, autoresponders or bounces. See `/mail status` for an overview.
+
+**خلاصهٔ فارسی:** ارسال ایمیل همیشه تأیید شما را می‌خواهد. تنها استثنا «مجوز دائمی پاسخ» است که فقط خودتان می‌سازید: با `/allow mail-replies`، با `qodex grant add`، در تلگرام، یا با گزینهٔ «always allow replies like this». این مجوز فقط پاسخ در همان رشته به فرستندهٔ اصلی را پوشش می‌دهد؛ بدون گیرندهٔ اضافه، بدون پیوست، و تنها اگر ایمیل اصلی مشکوک به تزریق دستور نباشد. هر پاسخ خودکار ثبت می‌شود و به شما خبر داده می‌شود. `qodex mail watch --daemon` ایمیل‌های تازه را اعلام می‌کند. `qodex mail rule add` برای ایمیل‌های منطبق یک کار پس‌زمینه شروع می‌کند؛ متن ایمیل فقط داده است و دستور به حساب نمی‌آید. `qodex mail reply-all` پاسخ خودکار را روشن می‌کند.

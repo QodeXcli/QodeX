@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — mail, a real password vault, CAPTCHA hand-off, Claude Code parity
+
+1. **Mail.** `qodex mail add` connects any IMAP/SMTP mailbox (presets for Gmail, Outlook, Yahoo,
+   iCloud, Yandex, Zoho, Fastmail, AOL, GMX, Proton Bridge; app passwords explained). Tools
+   `mail_list`, `mail_read` (fenced as untrusted data), `mail_draft`, `mail_send` (always asks),
+   `mail_mark`, `mail_move`, `mail_download_attachment`. **Standing reply grants** that only you
+   can create (`/allow mail-replies`, Telegram `/allow`, or "always allow replies like this") let
+   same-thread replies to the original sender go out without a prompt — audited, capped per day,
+   revocable. **Watcher** (IMAP IDLE): new mail is announced; **rules** start a task on matching
+   mail with the email as data. Guide: [docs/MAIL.md](docs/MAIL.md).
+2. **Password vault (Muse-style).** The vault key can live in the macOS Keychain / Secret Service /
+   Windows DPAPI (`qodex vault key migrate`); `qodex vault edit|rotate|import` (Chrome, Firefox,
+   Bitwarden, 1Password exports); `browser_login` signs in in one step (username-first forms, 2FA);
+   `vault_generate_and_fill` makes and saves a strong password on sign-up; `vault_request_login`
+   has *you* type a login into a masked prompt or the control center's secure form (sealed over
+   tunnels) — the agent never sees it; logins you type during a takeover are offered for saving;
+   a vault panel in the control center. Guide: [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
+3. **CAPTCHAs: a smart hand-off, never solving.** Bot checks are detected; self-clearing ones are
+   waited out; the rest are handed to you (Telegram card with a cropped screenshot and a one-tap,
+   short-lived live-view link; phone hand-off mode that relays your own press-and-hold / drag;
+   TUI hint) and QodeX continues by itself when the check is gone. The agent can never click,
+   type into, drag or analyze a challenge (`[CHALLENGE_HUMAN_ONLY]`). **`browser.stealth` is now
+   off by default** — no fingerprint spoofing. Visible browser in the TUI by default
+   (`browser.headless: auto`), per-site pacing.
+4. **Claude Code parity.** **Mods** — JS/TS modules that hook QodeX itself (tool calls, prompts,
+   permission checks within the safety rules, commands, tools, UI above/under the prompt, timers),
+   compatible with Claude Code mods; `/mod new` has QodeX write one; built-ins `context-bar`
+   (`/context-bar`) and `you-should-know` ([docs/MODS.md](docs/MODS.md)). **Wrap-up allowance**
+   when a budget runs out mid-task (`--strict-budget` to disable). **Send now** (Ctrl+Enter /
+   Ctrl+X Ctrl+S) keeps a running shell command as a background job. **Auto-mode asks time out**
+   after `approval.unattendedTimeoutSec` (default 120 s) with a rewrite hint — never the critical
+   ones. **Project instructions** `first|all` (`/instructions`, GEMINI.md). **Models:**
+   `claude-opus-5-5` (new default), `claude-sonnet-5-5`, `claude-fable-5-1`; `/model opus|sonnet|
+   haiku|fable`. **`/checkup prompt-audit`** writes `PROMPT_AUDIT.md` + `prompt-audit.patch`
+   (nothing applied). Built-in skills **build-eval** and **hillclimb**.
+5. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
+   (echo matching); the mail watcher missed mail that arrived between a check and the IDLE wait,
+   and `stop()` could wait out the IDLE timeout; Telegram `/unpair` confirmed before dropping the
+   approval channel; challenge detection stringified the page-title promise.
+
 ## Unreleased — standing goals, emergency stop, /learn, monitors
 
 1. **`/goal` — keep working until it is proven done.** `/goal <what done looks like>
