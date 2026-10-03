@@ -14,6 +14,7 @@ import { MissionStore, setMissionStoreForTests } from '../src/missions/store.js'
 import { startMissionEventBridge } from '../src/missions/index.js';
 import { runMission, missionAskUser, type AgentLike } from '../src/missions/runner.js';
 import { MissionMilestoneTool } from '../src/missions/tools.js';
+import { createTelegramMissionAdapter } from '../src/missions/telegram-adapter.js';
 import { getBus, type BusEvent } from '../src/control/bus.js';
 import { ApprovalBroker } from '../src/control/approvals.js';
 import { stopControlCenter } from '../src/control/server.js';
@@ -189,6 +190,18 @@ describe('telegram pairing', () => {
     } finally {
       await bot.stop();
       broker.reset();
+    }
+  });
+
+  it('the mission adapter never hands the control-center token to Telegram', async () => {
+    const m = store.create({ goal: 'watch prices', cwd: dir });
+    store.update(m.id, { live_url: 'http://127.0.0.1:7420/?k=SECRET-approval-token' });
+    const ad = createTelegramMissionAdapter({ store, defaultCwd: dir });
+    const listed = (await ad.list()).find(s => s.id === m.id)!;
+    const status = (await ad.status(m.id))!;
+    for (const s of [listed, status]) {
+      expect(s.liveUrl).toBeTruthy();
+      expect(s.liveUrl).not.toContain('SECRET');
     }
   });
 });
