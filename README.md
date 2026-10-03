@@ -1,12 +1,40 @@
-# QodeX — the local-first LLM agent & coding CLI agent
+# QodeX — the local-first autonomous agent: code, its own browser, your desktop
 
 > **QodeX is an open-source LLM agent for your terminal — a local-first, agentic coding CLI.** It runs on local models (Qwen3-Coder via Ollama / LM Studio) by default, with Claude / GPT / Gemini / DeepSeek as optional cloud fallbacks. A privacy-first AI coding agent built so a model on *your* machine does real, multi-step engineering work — fully offline if you want.
 
 > If you're looking for an **LLM agent**, a **CLI agent**, an **AI coding agent**, or an **autonomous terminal agent** that doesn't ship your code to someone else's cloud — that's QodeX.
 
-**Version 2.4.0** · 100+ built-in tools · English & Persian · Apache-2.0
+**Version 3.0.0** · 150+ built-in tools · English & Persian · Apache-2.0
 
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
+
+---
+
+## New in 3.0 — your agent gets its own computer
+
+QodeX is no longer only a coding agent. It now has a **dedicated browser** with persistent
+logins, **controls your desktop** (macOS, Linux, Windows), runs **missions that keep working
+after you close it**, and never buys, pays, sends or types a password **without your
+approval** — even under `/auto on`. Full guide: **[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)**.
+
+```bash
+qodex browser open https://mail.example.com      # log in once — the agent stays logged in
+qodex "find me 3 flights Tehran→Istanbul under 15M toman next Friday and compare them"
+qodex mission start "every morning, summarize new issues in my repos and draft replies"
+qodex control --lan                               # watch it live from your phone, take over, approve
+qodex vault add github --origin github.com --username me@example.com --totp
+qodex workflow record invoice --url https://billing.example.com   # teach it once, replay forever
+qodex telegram setup                              # approvals + missions from Telegram
+```
+
+- **Dedicated QodeX Browser** — persistent profiles, multi-tab, accessibility snapshots with element refs, set-of-marks screenshots, downloads/uploads, PDF, CDP attach to your own Chrome, and an autonomous `browser_agent` for long multi-page jobs.
+- **Desktop control everywhere** — screenshots, click/drag/scroll, Unicode (Persian) typing, clipboard, open apps, window focus, and `computer_use_locate` (describe an element, vision finds it).
+- **Missions** — plan → sub-agents → milestones → report, in a detached, resumable worker with its own live view; schedule them as routines.
+- **Sentinel** — purchases, payments, sending and credentials always need a human; domain allow/block lists; web/window text fenced as untrusted data with English + Persian prompt-injection detection; full audit log.
+- **Vault** — encrypted credentials the model never sees, filled only on their own site (anti-phishing), with TOTP 2FA codes.
+- **Control center** — token-protected web page: live browser view, human takeover, one-tap approvals, activity timeline, steering, missions.
+- **Workflows** — learn a task from a demonstration, replay it with self-healing selectors at zero model tokens per step.
+- **Telegram** — approve actions, start and follow missions from your phone.
 
 ---
 
@@ -44,7 +72,9 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Read and edit code** — `read_file`, `write_file`, `edit_text`, `edit_symbol` (AST-aware), `multi_edit` (single-file sequential), `multi_file_edit` (atomic across up to 50 files).
 - **Understand a codebase** — `ls`, `glob`, `grep`, plus a Tree-sitter code-graph: `project_overview`, `analyze_impact`, `find_callers`, `find_references`, `find_dead_code`, `safe_rename`.
 - **Run commands** — `bash`, plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
-- **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes.
+- **Use its own browser** — a persistent, Playwright-driven Chromium with element refs, tabs, forms, downloads and a live view — to browse, shop, book and verify your own UI changes (see [docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md)).
+- **Control the desktop** — macOS, Linux (X11/Wayland) and Windows: screenshots, mouse, keyboard, clipboard, apps and windows.
+- **Work in the background** — `mission_start` / `qodex mission start` runs long goals in a detached, resumable worker.
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
 - **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.
@@ -140,7 +170,9 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 | **Diagnostics** | type/lint checkers (tsc, eslint, ruff, pyright, go vet, cargo, php -l) |
 | **Git** | status, diff, log, branch, commit, create_pr, release_notes |
 | **Web** | web_search (DuckDuckGo / Tavily / Brave / Firecrawl), web_fetch, network_check |
-| **Browser** | navigate, click, fill, screenshot, console, evaluate, get_text, wait_for |
+| **Browser** | navigate, snapshot (refs), click, type, fill_form, select, scroll, drag, upload, tabs, extract, screenshot (set-of-marks), pdf, downloads, dialog, network, evaluate, browser_agent, fill_secret |
+| **Desktop** | computer_use_screenshot/click/type/key/move/drag/scroll/clipboard/open/focus_window/locate/agent |
+| **Missions & workflows** | mission_start/status/list/cancel/milestone, workflow_record/list/show/run |
 | **Dev server / jobs** | dev_server_start/stop/log, background_job_start/status/wait/cancel |
 | **Skills** | use_skill, search_skills, install_skill (security-scanned) |
 | **Sub-agents** | task, orchestrate, gather, present_plan, todo_read/write, auto_fix |
@@ -163,6 +195,8 @@ export FIRECRAWL_API_KEY=fc-...          # set FIRECRAWL_SCRAPE_CONTENT=1 for in
 /index [--force]   Build/refresh the code graph
 /mcp               List connected MCP servers
 /sessions  /resume <id>  /clear  /exit
+/browser  /control  /takeover  /approvals  /approve <id>  /deny <id>
+/mission <goal>  /missions  /workflows  /sentinel  /telegram  /vault  /desktop
 ```
 
 Plus any custom commands you drop in `.qodex/commands/` as markdown.

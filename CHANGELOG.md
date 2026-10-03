@@ -1,5 +1,72 @@
 # Changelog
 
+## v3.0.0 — 2026-10-03
+
+**QodeX gets its own computer: a dedicated browser, desktop control on every OS, background
+missions, and a Sentinel that never lets it buy, pay, send or type a password without you.**
+
+QodeX is now a general autonomous agent in the spirit of Meta Muse and xAI Grok Bot — but it
+runs on your machine, with your model, and also controls your desktop. Guide:
+[docs/AGENT_PLATFORM.md](docs/AGENT_PLATFORM.md).
+
+1. **Dedicated QodeX Browser.** Persistent Chromium profiles (logins survive restarts), multi-tab
+   with popup tracking, accessibility snapshots with element refs, actions by ref that return a
+   fresh compact snapshot, set-of-marks screenshots, markdown/table extraction, downloads,
+   uploads, dialogs, PDF, network log, CDP attach to your own Chrome, stealth, and
+   `browser_agent` (an autonomous browser sub-agent). 28 `browser_*` tools; `qodex browser
+   open|status|profiles|reset-profile|close`. Chromium is discovered automatically even when
+   the installed Playwright expects another revision. `browser_evaluate` now returns values
+   (it always returned `undefined`).
+2. **Desktop control on macOS, Linux (X11 + Wayland) and Windows.** Screenshot (HiDPI-aware,
+   downscaled with coordinate mapping), click/drag/move/scroll, Unicode typing (Persian via
+   paste), key combos, clipboard, open apps/files/URLs, list/focus windows,
+   `computer_use_locate` (vision grounding) and `computer_use_agent`. 15 `computer_use_*` tools.
+3. **Missions.** `qodex mission start "<goal>"` / `mission_start` plans the goal into steps, runs
+   each on a fresh agent in a detached, resumable worker (keeps going after you close QodeX),
+   reports milestones, retries failures, writes a final report, and starts its own private
+   live view. `attach`, `status`, `approve|deny`, `steer`, `cancel`, `resume`; routines via
+   `qodex schedule add --mission`. Approvals work across processes.
+4. **Sentinel.** One guard at the tool-execution choke point (main agent, sub-agents, missions,
+   MCP server). Purchases, payments, sending and credentials always need an explicit human
+   answer — `/auto on` and `--yes` cannot approve them; with nobody reachable they are refused.
+   English + Persian action classification, payment-gateway and secret detection (Luhn, Sheba,
+   IBAN, API keys), domain allow/block lists, protected QodeX files, JSONL audit log. Web and
+   window text is fenced as untrusted data and scanned for prompt injection (EN + FA, hidden
+   Unicode).
+5. **Credential vault.** `qodex vault add` — AES-256-GCM, separate 0600 key, TOTP (RFC 6238).
+   `browser_fill_secret` fills only on the entry's own https origin, re-checks right before
+   typing, and never returns the value to the model.
+6. **Control center.** `qodex control [--lan|--tunnel]` or `/control`: a token-protected web page
+   with the live browser view, human takeover, one-tap approvals, an activity timeline,
+   steering and missions (English + Persian).
+7. **Workflows.** Record the agent's or your own demonstration (`qodex workflow record`,
+   `workflow_record`), replay with self-healing selectors, Sentinel checks and vault secrets at
+   zero model tokens per step; each workflow is also saved as a skill.
+8. **Telegram channel.** `qodex telegram setup|pair|start`: approve actions with inline buttons,
+   start and follow missions, get screenshots and notifications — paired private chats only.
+9. **Approvals everywhere.** A new ApprovalBroker routes every human decision to the terminal,
+   the control center and Telegram; the first answer wins. Terminal prompts are queued (no more
+   concurrent prompts clobbering each other) and Esc cancels a stuck one.
+10. **Agent core.** Sub-agents work again (they failed on a database foreign key), run on fresh
+    agent instances, honor their iteration cap and inherit approvals; new `browser` and
+    `computer` operator roles; per-tool timeouts; loop guards that understand changing page
+    state; the completion gate accepts real-world actions as evidence; `web` and `desktop` task
+    profiles; tool relevance understands URLs and Persian site commands; headless no longer
+    auto-accepts edits without `--yes`.
+11. **CLI.** Options after a subcommand now belong to it (`qodex schedule tick --json` and every
+    new `--json` flag silently printed text before).
+
+```
+src/tools/browser/*        (dedicated browser: manager, launcher, snapshot, 28 tools, CLI)
+src/tools/computer/*       (desktop backends: macOS, X11, Wayland, Windows; 15 tools)
+src/missions/*             (store, planner, runner, daemon, tools, CLI, Telegram adapter)
+src/sentinel/*, src/vault/* (guard, policy, injection fencing, audit; encrypted vault, TOTP)
+src/control/*              (event bus, approval broker, control center server + dashboard)
+src/workflows/*            (recorder, replay, store, skill generation, tools, CLI)
+src/channels/telegram/*    (bot, Bot API client, pairing, formatting, CLI)
+src/config/agent-config.ts, src/config/paths.ts (new optional config sections + paths)
+```
+
 ## v2.4.0 — 2026-06-20
 
 **`provider add` confirms your pick before configuring — no more wrong-provider from a stray paste.**
