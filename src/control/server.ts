@@ -54,6 +54,8 @@ import { resolveControlConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { lanUrls, makeAccessToken, startTunnel, type TunnelHandle } from '../artifacts/live-share.js';
 import { renderDashboard, DASHBOARD_SCRIPT_CSP_SOURCE, type DashboardLang } from './dashboard.js';
+import { handleSecretRoute, isSecretRoute } from './secret-routes.js';
+import { getSecretRequestBroker } from '../vault/requests.js';
 import { logger } from '../utils/logger.js';
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -1154,6 +1156,8 @@ async function shutdown(rt: Running, o: ShutdownOptions): Promise<void> {
  * public link, `title`/`lang`/`onSteer` are updated in place.
  */
 export function startControlCenter(opts: ControlCenterOptions = {}): Promise<ControlCenterInfo> {
+  // While a control center runs, its secure form can take a vault_request_login.
+  getSecretRequestBroker().setSurfaceProbe('control', () => current !== null);
   return serialize(async () => {
     if (current) {
       const rt = current;
@@ -1605,6 +1609,10 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
     sendError(res, 403, '[FORBIDDEN_ORIGIN] Cross-origin requests are not allowed.', { Connection: 'close' });
     return;
   }
+
+  // 3b. Secret entry + vault panel: own module, stricter rules (full token only,
+  //     loopback/https only, sealed over tunnels; bodies never logged).
+  if (isSecretRoute(path)) return handleSecretRoute({ req, res, path, query, method, authVia: auth.via });
 
   // 4. Routes.
   const approvalMatch = path.match(/^\/api\/approvals\/([^/]+)$/);
