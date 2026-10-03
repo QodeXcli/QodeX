@@ -75,6 +75,8 @@ describe('secrets never reach prompts or classifications', () => {
     const c = classifyAction('mail_send', { to: 'a@x.org', subject: 'token sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789', body: 'here: sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' }, { config: { ...DEFAULT_SENTINEL_CONFIG } });
     const all = JSON.stringify(c);
     expect(all).not.toContain('AbCdEfGhIjKlMnOpQrStUvWxYz0123456789');
-    expect(c.category).toBe('credential');
+    // Still the critical 'send' category (the mail core's contract), with a warning line.
+    expect(c).toMatchObject({ category: 'send', risk: 'critical' });
+    expect(c.details?.join('\n')).toMatch(/⚠ The email would send/);
   });
 });

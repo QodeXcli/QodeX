@@ -62,10 +62,12 @@ import type { ActionClassification, SentinelDecision, SentinelGuard } from './ty
 import {
   AUTO_MODE_ASKS, autoModeAskReason, clearSentinelApproval, isAutonomousContext, recordSentinelApproval, rootsFor,
 } from './auto-mode.js';
-import { getGrantStore, bareAddress, type GrantStore } from '../grants/store.js';
+import { getGrantStore, type GrantStore } from '../grants/store.js';
 import { getReceivedIndex, type ReceivedIndex } from '../grants/received.js';
-import { MAIL_SEND_TOOL, checkMailReplyScope, factsFromArgs, resolveMailSend, type MailSendResolution } from '../grants/mail-scope.js';
+import { MAIL_SEND_TOOL, checkMailReplyScope, resolveMailSend, type MailSendResolution } from '../grants/mail-scope.js';
 import { publishMailEvent } from '../grants/mail-events.js';
+import { getMailService } from '../mail/service.js';
+import type { DraftStore } from '../mail/drafts.js';
 
 export interface SentinelOptions {
   /** Config source (default: resolveSentinelConfig(getActiveConfig())). */
@@ -91,6 +93,8 @@ export interface SentinelOptions {
   grants?: () => GrantStore;
   /** Received-mail index used to scope mail-reply grants (default: ~/.qodex/mail-auto/received.json). */
   receivedIndex?: () => ReceivedIndex;
+  /** The mail drafts mail_send would send (default: the mail service's — the same store the tool reads). */
+  mailDrafts?: () => DraftStore;
 }
 
 /** Outcome of a review, before any prompting. */
@@ -129,12 +133,13 @@ function beforeQuestion(prompt: string, lines: string[]): string {
   return prompt.endsWith(q) ? `${prompt.slice(0, -q.length)}\n${add.join('\n')}${q}` : `${prompt}\n${add.join('\n')}`;
 }
 
-/** Key that ties a mail_send review to its execution (preflight sees raw args, afterTool parsed ones). */
+/**
+ * Key that ties a mail_send review to its execution: the draft id. A standing grant
+ * only ever covers a draft (a reply exists only as a signed draft made with reply_to_id).
+ */
 function mailSendKey(args: Record<string, unknown>): string {
   const draft = str(args?.draft_id ?? args?.draftId).trim();
-  if (draft) return `d:${draft}`;
-  const f = factsFromArgs(args ?? {});
-  return f ? `f:${f.to.map(bareAddress).sort().join(',')}|${f.inReplyTo ?? ''}` : '';
+  return draft ? `d:${draft}` : '';
 }
 
 /** First line of every Sentinel approval prompt. */
@@ -400,11 +405,16 @@ export class Sentinel implements SentinelGuard {
     return this.opts.grants ? this.opts.grants() : getGrantStore();
   }
 
-  /** What a mail_send would send + the trusted facts about the message it replies to (null = unknown). */
-  private async resolveMail(args: Record<string, unknown>, ctx: ToolContext): Promise<MailSendResolution | null> {
+  /**
+   * What a mail_send would send: the mail core loads + verifies the draft it names
+   * (src/mail/outgoing.ts resolveOutgoingMail) from the same store the tool sends from,
+   * plus what the received-mail index knows about the replied-to message. null = unknown.
+   */
+  private async resolveMail(args: Record<string, unknown>): Promise<MailSendResolution | null> {
     try {
       const index = this.opts.receivedIndex ? this.opts.receivedIndex() : getReceivedIndex();
-      return await resolveMailSend(args, { cwd: ctx?.cwd, sessionId: ctx?.sessionId }, { index });
+      const drafts = this.opts.mailDrafts ? this.opts.mailDrafts() : getMailService().drafts();
+      return await resolveMailSend(args, { drafts, index });
     } catch {
       return null;
     }
@@ -425,15 +435,15 @@ export class Sentinel implements SentinelGuard {
       const store = this.grants();
       const rows = await store.listWithUsage();
       const used = new Map(rows.map(r => [r.grant.id, r.usedToday]));
-      const v = checkMailReplyScope(mail.send, mail.source, rows.map(r => r.grant), { usedToday: id => used.get(id) ?? 0 });
+      const v = checkMailReplyScope(mail, rows.map(r => r.grant), { usedToday: id => used.get(id) ?? 0 });
       if (v.ok) {
         const c = await store.consume(v.grant.id);
-        if (c.ok) return { allowed: true, grantId: v.grant.id, used: c.used, cap: c.cap, recipient: v.recipient, account: mail.send.account, subject: str(mail.send.subject) };
+        if (c.ok) return { allowed: true, grantId: v.grant.id, used: c.used, cap: c.cap, recipient: v.recipient, account: v.account, subject: str(mail.description.subject) };
         return { allowed: false, offer: null, note: `Not covered by standing grant ${v.grant.id}: ${c.reason}.` };
       }
       const hasGrants = rows.some(r => r.grant.kind === 'mail-reply');
       const note = hasGrants || v.blockedByCap ? `Not covered by your standing reply grant: ${v.reasons.slice(0, 3).join('; ')}.` : undefined;
-      const offer = v.replyShaped && !v.blockedByCap && v.recipient && mail.send.account ? { account: mail.send.account, from: v.recipient } : null;
+      const offer = v.replyShaped && !v.blockedByCap && v.recipient && v.account ? { account: v.account, from: v.recipient } : null;
       return { allowed: false, offer, note };
     } catch {
       return { allowed: false, offer: null };
@@ -607,7 +617,7 @@ export class Sentinel implements SentinelGuard {
     let cls: PolicyClassification | null = null;
     try {
       // mail_send: what would actually go out (a draft's contents) — for the prompt and standing grants.
-      const mail = toolName === MAIL_SEND_TOOL ? await this.resolveMail(a, ctx) : undefined;
+      const mail = toolName === MAIL_SEND_TOOL ? await this.resolveMail(a) : undefined;
       cls = await this.review(toolName, a, ctx, mail === undefined ? undefined : { mail });
       clearSentinelApproval(ctx, toolName);
       const verdict = this.decide(toolName, cls, ctx, cfg, a);
@@ -628,6 +638,9 @@ export class Sentinel implements SentinelGuard {
           this.report(cfg, toolName, a, ctx, cls, 'allow', 'grant', `grant:${g.grantId} (${g.used}/${g.cap} today)`, 'standing-grant');
           const key = mailSendKey(a);
           if (key) this.autoReplies.set(key, { at: Date.now(), account: g.account, to: g.recipient, subject: g.subject, grantId: g.grantId, used: g.used, cap: g.cap });
+          // The human's standing grant answers for this send: mail_send's own gate
+          // (takeSentinelApproval) must not ask again — the same mark a human yes leaves.
+          recordSentinelApproval(ctx, toolName);
           return this.allow(ctx, toolName, grant);
         }
         if (d.action === 'ask') {

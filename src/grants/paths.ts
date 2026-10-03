@@ -18,8 +18,8 @@ export const QODEX_GRANTS_FILE = path.join(QODEX_HOME, 'grants.json');
 /** Mail automation state dir (0700): rules, watcher state, received-mail index, pid file, event feed, log. */
 export const QODEX_MAIL_AUTO_DIR = path.join(QODEX_HOME, 'mail-auto');
 
-/** Encrypted mail account secrets (owned by the mail core, src/mail/**) — protected here too. */
-export const QODEX_MAIL_ACCOUNTS_FILE = path.join(QODEX_HOME, 'mail-accounts.enc');
+/** The mail core's own state (src/mail/paths.ts): encrypted accounts, signed drafts — protected too. */
+export { QODEX_MAIL_ACCOUNTS_FILE, QODEX_MAIL_DIR } from '../mail/paths.js';
 
 export const mailAutoPaths = (dir: string = QODEX_MAIL_AUTO_DIR) => ({
   dir,
