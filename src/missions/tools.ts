@@ -22,6 +22,7 @@ import { getActiveConfig } from '../config/loader.js';
 import { notifyDesktop } from '../utils/notify.js';
 import { isApproval } from '../control/approvals.js';
 import { maskSecrets } from '../sentinel/policy.js';
+import { isAutonomousContext } from '../sentinel/auto-mode.js';
 import { fenceUntrusted, scanInjection } from '../sentinel/injection.js';
 import { getMissionStore, type MissionEvent, type MissionStore } from './store.js';
 import { getMissionContext, type AskUser, type MissionRunResult } from './runner.js';
@@ -88,7 +89,7 @@ export function formatMissionStatus(
   const prog = s.steps.total ? ` (${s.steps.done}/${s.steps.total} steps done)` : '';
   lines.push(`Mission ${s.id} — ${statusLabel(s)}${prog}`);
   lines.push(`Goal: ${s.goal}`);
-  lines.push(`Dir: ${s.cwd}${s.model ? ` · Model: ${s.model}` : ''} · Approvals: ${s.approvalMode === 'auto' ? 'auto (critical actions still ask)' : 'ask a human'}`);
+  lines.push(`Dir: ${s.cwd}${s.model ? ` · Model: ${s.model}` : ''} · Approvals: ${s.approvalMode === 'auto' ? 'auto (critical and outside-project destructive actions still ask)' : 'ask a human'}`);
   const cap = s.costCapUsd > 0 ? ` (cap $${s.costCapUsd.toFixed(2)})` : '';
   lines.push(`Created ${relTime(s.createdAt, now)}${s.startedAt ? ` · started ${relTime(s.startedAt, now)}` : ''}${s.finishedAt ? ` · finished ${relTime(s.finishedAt, now)}` : ''} · Cost $${s.costUsd.toFixed(4)}${cap} · Tokens ${s.tokensIn} in / ${s.tokensOut} out`);
   if (s.workerPid) lines.push(`Worker: pid ${s.workerPid} (${s.workerAlive ? 'alive' : 'not running'})${s.logFile ? ` · Log: ${s.logFile}` : ''}`);
@@ -218,10 +219,15 @@ function err(content: string): ToolResult {
 /**
  * Starting a mission launches autonomous work that outlives this session and
  * spends model budget, so it goes through the permission flow exactly like the
- * equivalent shell command (`qodex mission start …`) would: allowed by `/auto` or
- * an autoApprove rule, refused by autoReject, otherwise the user is asked. Without
- * this, text planted in a web page could make the agent start detached work the
- * user never sees being created.
+ * equivalent shell command (`qodex mission start …`) would: allowed by an
+ * autoApprove rule, refused by autoReject / deny rules, otherwise the user is asked.
+ * Without this, text planted in a web page could make the agent start detached work
+ * the user never sees being created.
+ *
+ * In the autonomous auto mode there is no confirmation: the mission inherits auto mode
+ * (approval_mode 'auto'), whose worker still sends purchases, payments, passwords,
+ * sending and destructive actions outside the project to a human, and its cost cap
+ * still pauses for approval. The start is announced as progress.
  */
 async function confirmMissionStart(goal: string, cwd: string, detach: boolean, ctx: ToolContext): Promise<ToolResult | null> {
   const operation = `mission_start ${oneLine(goal, 400)}`;
@@ -232,9 +238,13 @@ async function confirmMissionStart(goal: string, cwd: string, detach: boolean, c
   } catch {
     decision = 'ask';
   }
-  if (decision === 'allow') return null;
   if (decision === 'deny') {
     return err('[PERMISSION_DENIED] Starting this mission was blocked by your security.autoReject rules.');
+  }
+  if (decision === 'allow') return null;
+  if (isAutonomousContext(ctx)) {
+    try { ctx.emit({ type: 'progress', message: `Auto mode: starting a ${detach ? 'background ' : ''}mission without asking — ${oneLine(goal, 120)}` }); } catch { /* UI only */ }
+    return null;
   }
   try { ctx.emit({ type: 'permission-request', tool: 'mission_start', operation, description }); } catch { /* UI only */ }
   const options = ['yes', 'no'];
@@ -294,6 +304,8 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
     const refused = await confirmMissionStart(args.goal, cwd, detach, ctx);
     if (refused) return refused;
     const store = getMissionStore();
+    // The mission runs under this session's approval mode: auto → the same autonomous policy.
+    const approvalMode = isAutonomousContext(ctx) ? 'auto' as const : 'ask' as const;
 
     if (!detach) {
       const runner = inlineRunner;
@@ -302,7 +314,7 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
       }
       let id: string;
       try {
-        id = startMission({ goal: args.goal, cwd, source: 'tool', spawn: false }, { store }).mission.id;
+        id = startMission({ goal: args.goal, cwd, source: 'tool', spawn: false, approvalMode }, { store }).mission.id;
       } catch (e: any) {
         return err(errMessage(e, 'MISSION_START_FAILED'));
       }
@@ -325,7 +337,7 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
     }
 
     try {
-      const { mission, pid, logFile } = startMission({ goal: args.goal, cwd, source: 'tool' }, { store });
+      const { mission, pid, logFile } = startMission({ goal: args.goal, cwd, source: 'tool', approvalMode }, { store });
       ctx.emit({ type: 'progress', message: `Mission ${mission.id} started in the background (pid ${pid})` });
       return {
         content:
@@ -334,9 +346,11 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
           `Dir: ${mission.cwd}\n` +
           `It plans its own steps, reports milestones, and keeps going after this session ends.\n` +
           `Watch: \`qodex mission attach ${mission.id}\` · status: mission_status {"id":"${mission.id}"} · log: ${logFile}\n` +
-          `Permission prompts wait for the user: \`qodex mission approve ${mission.id}\` (or the control center / Telegram).\n` +
+          (approvalMode === 'auto'
+            ? `Auto mode: ordinary steps run without asking; purchases, payments, passwords, sending messages and destructive actions outside the project wait for the user: \`qodex mission approve ${mission.id}\` (or the control center / Telegram).\n`
+            : `Permission prompts wait for the user: \`qodex mission approve ${mission.id}\` (or the control center / Telegram).\n`) +
           `Stop: mission_cancel {"id":"${mission.id}"}.`,
-        metadata: { missionId: mission.id, pid, logFile },
+        metadata: { missionId: mission.id, pid, logFile, approvalMode },
       };
     } catch (e: any) {
       return err(errMessage(e, 'MISSION_START_FAILED'));

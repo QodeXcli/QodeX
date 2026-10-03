@@ -20,6 +20,10 @@
  *        (control center / Telegram / mission queue) with a timeout, else refuse;
  *      - HIGH / MEDIUM → the normal permission engine (`sentinel:<category> ...`
  *        operation), asking yes / no / always when it is undecided;
+ *      - HIGH / MEDIUM in the autonomous 'auto' approval mode → allowed without a
+ *        prompt (still audited), except deleting / changing data on a remote service
+ *        and uploading files from outside the project (auto-mode.ts), which ask with
+ *        the reason; the user's deny rules still refuse;
  *   4. every meaningful decision → audit log + bus event {kind:'sentinel'}.
  *
  * afterTool: tools flagged `untrustedOutput` — plus web_fetch / web_search /
@@ -55,6 +59,9 @@ import {
   type PolicyClassification, type PolicyContext, type ProtectedPaths, type WorkflowLike,
 } from './policy.js';
 import type { ActionClassification, SentinelDecision, SentinelGuard } from './types.js';
+import {
+  AUTO_MODE_ASKS, autoModeAskReason, clearSentinelApproval, isAutonomousContext, recordSentinelApproval, rootsFor,
+} from './auto-mode.js';
 
 export interface SentinelOptions {
   /** Config source (default: resolveSentinelConfig(getActiveConfig())). */
@@ -81,8 +88,10 @@ export interface SentinelOptions {
 /** Outcome of a review, before any prompting. */
 export interface SentinelVerdict {
   decision: SentinelDecision;
-  /** policy | low-risk | auto-approve | session | permission | needs-human | needs-permission | no-human */
+  /** policy | low-risk | auto-approve | session | permission | auto-mode | needs-human | needs-permission | auto-asks | no-human */
   via: string;
+  /** Auto mode: why this still needs a human (shown in the prompt and to remote channels). */
+  autoReason?: string;
 }
 
 const CRITICAL_OPTIONS = ['yes', 'no'];
@@ -351,8 +360,11 @@ export class Sentinel implements SentinelGuard {
     return `${c.category}|${c.domain ?? ''}`;
   }
 
-  /** Decide without prompting. 'ask' means a human (critical) or the permission flow must answer. */
-  decide(toolName: string, cls: PolicyClassification, ctx: ToolContext, cfg: SentinelConfig = this.config()): SentinelVerdict {
+  /**
+   * Decide without prompting. 'ask' means a human (critical) or the permission flow must answer.
+   * `args` (the tool call's arguments) let auto mode look at upload paths / HTTP methods.
+   */
+  decide(toolName: string, cls: PolicyClassification, ctx: ToolContext, cfg: SentinelConfig = this.config(), args?: Record<string, unknown>): SentinelVerdict {
     if (cls.block) {
       return { via: 'policy', decision: { action: 'deny', classification: cls, message: `[SENTINEL_BLOCKED] ${cls.summary} — ${cls.reason}. This is a hard policy block; do not retry or work around it. Tell the user if the task needs it.` } };
     }
@@ -373,7 +385,10 @@ export class Sentinel implements SentinelGuard {
           },
         };
       }
-      return { via: 'needs-human', decision: { action: 'ask', classification: cls, prompt: this.buildPrompt(toolName, cls, true) } };
+      const autoReason = isAutonomousContext(ctx)
+        ? `${cls.integrity ? "changing QodeX's own safety settings" : cls.category} always needs a human (purchases, payments, passwords, sending messages and QodeX's safety settings are never automatic).`
+        : undefined;
+      return { via: 'needs-human', autoReason, decision: { action: 'ask', classification: cls, prompt: this.buildPrompt(toolName, cls, true, autoReason) } };
     }
     const operation = this.operation(toolName, cls);
     let perm: 'allow' | 'ask' | 'deny';
@@ -382,11 +397,41 @@ export class Sentinel implements SentinelGuard {
     } catch {
       perm = 'ask';
     }
-    if (perm === 'allow') return { via: 'permission', decision: { action: 'allow', classification: cls } };
     if (perm === 'deny') {
       return { via: 'permission', decision: { action: 'deny', classification: cls, message: `[PERMISSION_DENIED] ${toolName} was blocked by your security.autoReject rules (${cls.category}: ${cls.summary}).` } };
     }
+    // Autonomous 'auto' mode: Sentinel's own policy decides (the engine's auto-mode
+    // "allow" is a blanket one and its "ask" would only be a shell heuristic matching
+    // the operation string) — silent, except remote deletes / account changes /
+    // publishing and uploads from outside the project.
+    if (isAutonomousContext(ctx)) {
+      const why = autoModeAskReason(toolName, cls, args, rootsFor(ctx?.cwd, this.extraRoots()));
+      if (!why) return { via: 'auto-mode', decision: { action: 'allow', classification: cls } };
+      // Asked like a critical action: an explicit human (this terminal / chat, else the
+      // remote channels), never an unattended auto-answerer (--yes, mission auto mode).
+      if (!this.interactive() && !this.broker().hasRemoteChannel()) {
+        return {
+          via: 'no-human', autoReason: why,
+          decision: {
+            action: 'deny', classification: cls,
+            message: `[SENTINEL_BLOCKED] Auto mode still asks a human before this: ${why} No one is available to answer (${cls.summary}). Approve it from the control center (qodex control / /control) or Telegram (qodex telegram start), or run it interactively. The action was not performed; do not retry it — report this to the user.`,
+          },
+        };
+      }
+      return { via: 'auto-asks', autoReason: why, decision: { action: 'ask', classification: cls, prompt: this.buildPrompt(toolName, cls, false, why) } };
+    }
+    if (perm === 'allow') return { via: 'permission', decision: { action: 'allow', classification: cls } };
     return { via: 'needs-permission', decision: { action: 'ask', classification: cls, prompt: this.buildPrompt(toolName, cls, false) } };
+  }
+
+  /** The user's approval.extraRoots (directories auto mode treats as part of the project). */
+  private extraRoots(): string[] {
+    try {
+      const r = (getActiveConfig() as { approval?: { extraRoots?: unknown } })?.approval?.extraRoots;
+      return Array.isArray(r) ? r.filter((x): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -398,7 +443,7 @@ export class Sentinel implements SentinelGuard {
     return `sentinel:${cls.category} ${cls.domain || '-'} ${toolName}`;
   }
 
-  private buildPrompt(toolName: string, cls: PolicyClassification, critical: boolean): string {
+  private buildPrompt(toolName: string, cls: PolicyClassification, critical: boolean, autoReason?: string): string {
     const lines = [
       SENTINEL_PROMPT_TITLE,
       `Action: ${cls.summary}`,
@@ -406,8 +451,13 @@ export class Sentinel implements SentinelGuard {
       `Why: ${cls.reason}`,
       `Tool: ${toolName}`,
     ];
-    if (critical) lines.push('Critical actions always need your explicit answer (/auto and --yes do not apply).');
-    else lines.push(`"always" allows ${cls.category} actions${cls.domain ? ` on ${cls.domain}` : ''} for the rest of this session.`);
+    if (critical) {
+      lines.push('Critical actions always need your explicit answer (/auto and --yes do not apply).');
+      if (autoReason) lines.push(`${AUTO_MODE_ASKS}: ${autoReason}`);
+    } else {
+      if (autoReason) lines.push(`${AUTO_MODE_ASKS}: ${autoReason}`);
+      lines.push(`"always" allows ${cls.category} actions${cls.domain ? ` on ${cls.domain}` : ''} for the rest of this session.`);
+    }
     lines.push('Allow this action?');
     return lines.join('\n');
   }
@@ -457,10 +507,13 @@ export class Sentinel implements SentinelGuard {
     let cls: PolicyClassification | null = null;
     try {
       cls = await this.review(toolName, a, ctx);
-      const verdict = this.decide(toolName, cls, ctx, cfg);
+      clearSentinelApproval(ctx, toolName);
+      const verdict = this.decide(toolName, cls, ctx, cfg, a);
       const d = verdict.decision;
       if (d.action === 'allow') {
         this.report(cfg, toolName, a, ctx, cls, 'allow', verdict.via);
+        // The human's earlier "always" for this category + domain answers for this call too.
+        if (verdict.via === 'session') recordSentinelApproval(ctx, toolName);
         return this.allow(ctx, toolName, grant);
       }
       if (d.action === 'deny') {
@@ -468,8 +521,12 @@ export class Sentinel implements SentinelGuard {
         return this.denied(d.message, cls, verdict.via);
       }
       const r = verdict.via === 'needs-human'
-        ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg)
-        : await this.askPermission(toolName, a, ctx, cls, d.prompt, cfg);
+        ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, CRITICAL_OPTIONS, verdict.autoReason)
+        : verdict.via === 'auto-asks'
+          ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, ASK_OPTIONS, verdict.autoReason)
+          : await this.askPermission(toolName, a, ctx, cls, d.prompt, cfg);
+      // A human said yes: the MCP wrapper must not ask the same thing again (takeSentinelApproval).
+      if (!r) recordSentinelApproval(ctx, toolName);
       return r ?? this.allow(ctx, toolName, grant);
     } catch (e: any) {
       const c = cls ?? { category: null, risk: 'high' as const, summary: toolName, reason: 'review failed' };
@@ -478,23 +535,37 @@ export class Sentinel implements SentinelGuard {
     }
   }
 
-  private async askHuman(toolName: string, args: Record<string, unknown>, ctx: ToolContext, cls: PolicyClassification, prompt: string, cfg: SentinelConfig): Promise<ToolResult | null> {
+  /**
+   * An explicit human answer: this process's askUser when a human sits at it, else the
+   * remote channels with a timeout. Critical actions get yes / no; auto mode's remaining
+   * asks (`options` with "always") may also grant the category + domain for the session.
+   */
+  private async askHuman(
+    toolName: string, args: Record<string, unknown>, ctx: ToolContext, cls: PolicyClassification, prompt: string, cfg: SentinelConfig,
+    options: string[] = CRITICAL_OPTIONS, autoReason?: string,
+  ): Promise<ToolResult | null> {
     this.progress(ctx, `🛡 Sentinel: waiting for a human to approve — ${cls.summary}`);
     let answer: string;
     let by = 'local';
     if (this.interactive()) {
-      answer = await raceAbort(Promise.resolve().then(() => ctx.askUser(prompt, CRITICAL_OPTIONS)), ctx.signal, 'no');
+      answer = await raceAbort(Promise.resolve().then(() => ctx.askUser(prompt, options)), ctx.signal, 'no');
       if (ctx.signal?.aborted) by = 'abort';
     } else {
       const r = await this.broker().request({
-        prompt, options: CRITICAL_OPTIONS, category: cls.category ?? undefined, risk: 'critical', source: toolName,
+        prompt, options, category: cls.category ?? undefined, risk: cls.risk === 'low' ? 'medium' : cls.risk, source: toolName,
         timeoutMs: cfg.remoteApprovalTimeoutSec * 1000, signal: ctx.signal,
-        meta: { summary: cls.summary, domain: cls.domain, reason: cls.reason, sessionId: ctx.sessionId },
+        meta: { summary: cls.summary, domain: cls.domain, reason: cls.reason, sessionId: ctx.sessionId, ...(autoReason ? { autoMode: autoReason } : {}) },
       });
       answer = r.answer;
       by = r.by;
     }
-    if (isApproval(answer, CRITICAL_OPTIONS)) {
+    const picked = normalizeAnswer(answer, options) ?? answer;
+    if (cls.risk !== 'critical' && options.includes('always') && picked === 'always') {
+      this.approvals.add(this.approvalKey(cls));
+      this.report(cfg, toolName, args, ctx, cls, 'allow', 'human', picked, by);
+      return null;
+    }
+    if (isApproval(answer, options)) {
       this.report(cfg, toolName, args, ctx, cls, 'allow', 'human', answer, by);
       return null;
     }

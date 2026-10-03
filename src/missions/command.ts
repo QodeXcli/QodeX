@@ -178,13 +178,14 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
     return 1;
   }
 
-  const [{ resolveMissionsConfig }, loopMod, taskMod, approvals, runnerMod, toolsMod] = await Promise.all([
+  const [{ resolveMissionsConfig }, loopMod, taskMod, approvals, runnerMod, toolsMod, perms] = await Promise.all([
     import('../config/agent-config.js'),
     import('../agent/loop.js'),
     import('../tools/builtin/task.js'),
     import('../control/approvals.js'),
     import('./runner.js'),
     import('./tools.js'),
+    import('../security/permissions.js'),
   ]);
   const missionsCfg = resolveMissionsConfig(b.config);
   const cwd = store.get(missionId)!.cwd;
@@ -198,13 +199,19 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
   taskMod.setSubAgentRunner((p, o) => host.runSubagent(p, o));
   loopMod.setActiveAgent(host);
   const approvalMode = store.get(missionId)?.approval_mode === 'auto' ? 'auto' : 'ask';
+  // The worker's own permission engine and Sentinel apply the mission's mode: 'auto' is
+  // the session's autonomous policy (ordinary steps run without asking; destructive
+  // actions outside the project, remote deletes and critical actions still reach a
+  // human through the mission queue / control center / Telegram), 'ask' asks for all.
+  const prevApprovalMode = perms.getApprovalMode();
+  perms.setApprovalMode(approvalMode === 'auto' ? 'auto' : 'manual');
   const tty = opts.interactive ?? (!!opts.foreground && !!process.stdin.isTTY);
   const terminal: LocalAsker | undefined = tty ? (opts.localAsker ?? makeTtyAsker(print)) : undefined;
   // Sentinel sends CRITICAL actions (purchases, payments, sending, credentials)
   // through ctx.askUser only when a human sits at this process's askUser. With
-  // `--yes` ('auto') the step's askUser auto-answers ordinary prompts, so it must
-  // NOT count as a human — otherwise a critical action would be auto-approved too.
-  // In that mode the terminal is just another approval channel next to the
+  // `--yes` ('auto') the worker runs unattended under the autonomous policy, so it
+  // must NOT count as a human: critical actions and auto mode's remaining asks go to
+  // the broker, where the terminal is just another approval channel next to the
   // mission queue (and the control center / Telegram).
   const humanAtAskUser = !!terminal && approvalMode !== 'auto';
   approvals.setInteractiveHuman(humanAtAskUser);
@@ -248,8 +255,6 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
         approvalMode: store.get(missionId)?.approval_mode,
         signal,
         local,
-        // The timeline is shown remotely: mask secrets in e.g. an approved shell command line.
-        audit: (prompt, answer) => store.appendEvent(missionId, 'auto-approved', { stepId, prompt: runnerMod.safeLine(prompt, 500), answer }),
       }),
       humanApproval: local
         ? async (req, signal) => (await approvals.getApprovalBroker().request({
@@ -289,6 +294,7 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
     taskMod.setSubAgentRunner(null);
     loopMod.setActiveAgent(null);
     approvals.setInteractiveHuman(false);
+    perms.setApprovalMode(prevApprovalMode);
     if (hookDispose) { try { await hookDispose(); } catch { /* ignore */ } }
     try { await b.mcpManager?.stopAll(); } catch { /* ignore */ }
   }
@@ -369,6 +375,20 @@ function insideMission(): boolean {
  * default model, and scheduled mission routines (`mission start --yes …`) lost
  * their flags too.
  */
+/**
+ * The mission approval mode the CLI flags ask for: `--yes` / `--auto` / `--approval-mode auto`
+ * → 'auto' (the autonomous policy), `--approval-mode manual|edits` → 'ask', nothing →
+ * undefined (startMission then inherits this process's session mode). Throws on a bad mode.
+ */
+export function missionApprovalFromFlags(o: Record<string, any>): 'auto' | 'ask' | undefined {
+  if (o.yes || o.auto) return 'auto';
+  const raw = typeof o.approvalMode === 'string' ? o.approvalMode.trim().toLowerCase() : '';
+  if (!raw) return undefined;
+  if (raw === 'auto' || raw === 'autonomous') return 'auto';
+  if (raw === 'manual' || raw === 'edits' || raw === 'ask') return 'ask';
+  throw new Error(`[MISSION_INVALID] --approval-mode must be manual, edits or auto (got "${o.approvalMode}").`);
+}
+
 function flags(cmd: Command): Record<string, any> {
   const own = cmd.opts();
   const merged: Record<string, any> = { ...own };
@@ -418,7 +438,9 @@ export function buildMissionCommand(
     .option('--cwd <dir>', 'Working directory for the mission (default: current directory)')
     .option('--model <id>', 'Model to use (default: the configured default)')
     .option('--foreground', 'Run in this terminal instead of a detached background worker')
-    .option('-y, --yes', 'Auto-approve ordinary permission prompts (Sentinel-critical actions and the cost cap still need a human)')
+    .option('-y, --yes', 'Run in auto mode: ordinary steps run without asking; purchases, payments, passwords, sending messages, destructive actions outside the project and the cost cap still need a human')
+    .option('--auto', 'Same as --yes')
+    .option('--approval-mode <mode>', 'manual | edits | auto (default: this session\'s approval mode)')
     .option('--budget <usd>', 'Cost cap in USD before the mission pauses for approval (default: missions.maxCostUsd)')
     .option('--json', 'Print the result as JSON')
     .addOption(new Option('--from-schedule <id>', 'Started by a scheduled routine').hideHelp())
@@ -427,11 +449,13 @@ export function buildMissionCommand(
       const goal = (goalParts ?? []).join(' ').trim();
       if (!goal) { fail('[MISSION_INVALID] Give the mission a goal: qodex mission start "<goal>"'); return; }
       const cwd = path.resolve(o.cwd ?? process.cwd());
+      let approvalMode: 'auto' | 'ask' | undefined;
+      try { approvalMode = missionApprovalFromFlags(o); } catch (e: any) { fail(e.message); return; }
       await loadActiveConfig(cwd);
       const { startMission } = await import('./daemon.js');
       const input = {
         goal, cwd, model: o.model ?? null,
-        approvalMode: o.yes ? 'auto' as const : 'ask' as const,
+        approvalMode,
         costCapUsd: parseUsd(o.budget),
         source: o.fromSchedule ? `schedule:${o.fromSchedule}` : 'cli',
       };
@@ -570,15 +594,19 @@ export function buildMissionCommand(
     .command('resume <id>')
     .description('Resume a paused/failed/interrupted mission (failed steps are retried)')
     .option('--foreground', 'Run in this terminal instead of a detached worker')
-    .option('-y, --yes', 'Switch to auto-approving ordinary permission prompts')
+    .option('-y, --yes', 'Switch the mission to auto mode (critical and outside-project destructive actions still ask)')
+    .option('--auto', 'Same as --yes')
+    .option('--approval-mode <mode>', 'Switch the mission to manual | edits | auto')
     .option('--budget <usd>', 'New cost cap in USD')
     .action(async (id: string, _o: any, cmd: Command) => {
       const o = flags(cmd);
+      let approvalMode: 'auto' | 'ask' | undefined;
+      try { approvalMode = missionApprovalFromFlags(o); } catch (e: any) { fail(e.message); return; }
       const r = await resolveOrFail(id);
       if (!r) return;
       await loadActiveConfig(r.m.cwd);
       const { prepareResume, spawnMissionWorker } = await import('./daemon.js');
-      const prep = prepareResume(r.m.id, { approvalMode: o.yes ? 'auto' : undefined, costCapUsd: parseUsd(o.budget) });
+      const prep = prepareResume(r.m.id, { approvalMode, costCapUsd: parseUsd(o.budget) });
       if (!prep.ok) { fail(prep.message); return; }
       console.log(prep.message);
       try {

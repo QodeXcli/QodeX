@@ -16,6 +16,7 @@ import type { AgentLike } from '../src/missions/runner.js';
 import { getSubAgentRunner } from '../src/tools/builtin/task.js';
 import { getApprovalBroker } from '../src/control/approvals.js';
 import { getBus } from '../src/control/bus.js';
+import { getApprovalMode, setApprovalMode } from '../src/security/permissions.js';
 
 function fakeSessions() {
   let n = 0;
@@ -144,6 +145,8 @@ describe('qodex mission CLI', () => {
     const m = store.create({ goal: 'Write a haiku about missions', cwd: dir, approvalMode: 'auto' });
     const printed: string[] = [];
     let runnerDuringStep: unknown = null;
+    let modeDuringStep: string | null = null;
+    setApprovalMode('manual');
     const code = await runMissionWorker(m.id, boot, {
       store,
       installSignalHandlers: false,
@@ -154,19 +157,22 @@ describe('qodex mission CLI', () => {
       complete: async (prompt) => prompt.includes('PLANNER')
         ? JSON.stringify({ steps: [{ id: 's1', title: 'Draft', instruction: 'write it', depends_on: [] }], success_criteria: 'a haiku' })
         : 'Report: haiku written',
-      createAgent: () => new ScriptedAgent(async (_p, options) => {
+      createAgent: () => new ScriptedAgent(async () => {
         runnerDuringStep = getSubAgentRunner();
-        const ans = await options.askUser('Save haiku.txt?', ['yes', 'no']);
-        return `saved=${ans}`;
+        // The worker's engine + Sentinel run the session's autonomous policy: ordinary
+        // steps (saving a file in the project) never reach askUser.
+        modeDuringStep = getApprovalMode();
+        return 'saved=yes';
       }),
       onStart: async () => ({ liveUrl: 'http://127.0.0.1:7420/?k=t' }),
     });
     expect(code).toBe(0);
     expect(runnerDuringStep).not.toBeNull();          // sub-agents were wired for the step
     expect(getSubAgentRunner()).toBeNull();           // and unwired afterwards
+    expect(modeDuringStep).toBe('auto');              // the worker ran in auto mode
+    expect(getApprovalMode()).toBe('manual');         // and restored the previous mode
     expect(store.get(m.id)!.status).toBe('completed');
     expect(store.getStep(m.id, 's1')!.result).toBe('saved=yes');
-    expect(store.events(m.id, 0, { types: ['auto-approved'] })[0]!.payload).toMatchObject({ stepId: 's1', prompt: 'Save haiku.txt?', answer: 'yes' });
     expect(store.listApprovals(m.id)).toHaveLength(0);
     expect(store.get(m.id)!.live_url).toBe('http://127.0.0.1:7420/?k=t');
     const out = printed.join('\n');

@@ -124,16 +124,16 @@ describe('mission review: approvals', () => {
       complete: async (prompt) => prompt.includes('PLANNER') ? plan1 : 'report',
       createAgent: () => new ScriptedAgent(async (_p, options) => {
         interactiveDuringStep = isInteractiveHuman();
-        // Ordinary permission prompts are still auto-approved in 'auto' mode…
-        const ordinary = await options.askUser('Run `ls`?', ['yes', 'no']);
-        // …but a purchase goes through Sentinel exactly as ToolRegistry.execute does.
         const ctx = {
           cwd: dir, sessionId: 's', transaction: {} as any,
-          permissions: { evaluate: () => 'allow' } as any,
+          permissions: { evaluate: () => 'ask' } as any,
           askUser: options.askUser, signal: options.signal, emit: () => {},
         } as unknown as ToolContext;
+        // Ordinary actions run silently under the worker's auto mode (no askUser at all)…
+        const click = await sentinel.beforeTool('computer_use_click', { x: 1, y: 2 }, ctx);
+        // …but a purchase goes through Sentinel exactly as ToolRegistry.execute does.
         const veto = await sentinel.beforeTool('mcp__shop__purchase_item', { item: 'tv' }, ctx);
-        return `ordinary=${ordinary} purchase=${veto ? 'blocked' : 'ALLOWED'}`;
+        return `ordinary=${click ? 'blocked' : 'yes'} purchase=${veto ? 'blocked' : 'ALLOWED'}`;
       }),
     });
     expect(await done).toBe(0);
@@ -487,26 +487,31 @@ describe('mission review: untrusted output and secrets', () => {
     expect(store.get(m.id)!.report).toContain(API_KEY);
   });
 
-  it("a --yes worker's auto-approval audit trail masks secrets", async () => {
+  it("a --yes worker routes a remaining prompt to the queue with its secrets masked (never auto-answered)", async () => {
     const m = store.create({ goal: 'g', cwd: dir, approvalMode: 'auto' });
+    const other = new MissionStore(path.join(dir, 'sessions.db'));
     vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      const code = await runMissionWorker(m.id, async () => ({
+      const done = runMissionWorker(m.id, async () => ({
         config: structuredClone(DEFAULT_CONFIG), router: {} as any, registry: { list: () => [] } as any, permissions: {} as any,
       }), {
         store, installSignalHandlers: false, pollIntervalMs: 20, sessions: fakeSessions(), notify: async () => {}, print: () => {},
         complete: async (p) => p.includes('PLANNER') ? plan1 : 'report',
         createAgent: () => new ScriptedAgent(async (_p, options) =>
-          `ran=${await options.askUser(`Run: curl -H "Authorization: Bearer ${API_KEY}" https://api.example`, ['yes', 'no', 'always'])}`),
+          `ran=${await options.askUser(`Run: curl -X DELETE -H "Authorization: Bearer ${API_KEY}" https://api.example/v1/all`, ['yes', 'no', 'always'])}`),
       });
-      expect(code).toBe(0);
+      await waitFor(() => other.listPendingApprovals(m.id).length === 1);
+      const ap = other.listPendingApprovals(m.id)[0]!;
+      expect(ap.prompt).toContain('curl');
+      expect(JSON.stringify(other.listApprovals(m.id))).not.toContain(API_KEY);
+      expect(other.resolveApproval(ap.id, 'no', 'telegram').ok).toBe(true);
+      expect(await done).toBe(0);
     } finally {
       vi.restoreAllMocks();
     }
-    const audit = store.events(m.id, 0, { types: ['auto-approved'] });
-    expect(audit).toHaveLength(1);
-    expect(audit[0]!.payload.prompt).toContain('curl');
-    expect(JSON.stringify(audit)).not.toContain(API_KEY);
+    expect(store.getStep(m.id, 's1')!.result).toBe('ran=no');
+    expect(store.events(m.id, 0, { types: ['auto-approved'] })).toHaveLength(0);
+    expect(JSON.stringify(store.events(m.id, 0, { limit: 1000 }))).not.toContain(API_KEY);
   }, 15000);
 
   it('milestones are masked too', async () => {
