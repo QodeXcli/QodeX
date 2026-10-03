@@ -46,6 +46,7 @@ import {
   readLoopAbortMessage, readLoopSummarizeMessage, stuckLoopMessage,
 } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
+import { getSentinel } from '../sentinel/index.js';
 import { dedupHistory } from './dedup.js';
 import { ageToolResults } from './result-aging.js';
 import { efficiencyDefaults, resolveSetting } from './efficiency-profile.js';
@@ -2156,7 +2157,10 @@ export class AgentLoop {
     // With no timeout, the race is settled by the tool itself — or by cancellation: a
     // no-timeout tool that ignores ctx.signal must still not hang the loop after Ctrl+C.
     let onToolAbort: (() => void) | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
+    // Armed lazily, right before the tool runs: Sentinel's human approval (preflight,
+    // below) may legitimately wait longer than the tool timeout (remote approvals via
+    // the control center / Telegram wait up to sentinel.remoteApprovalTimeoutSec).
+    const armTimeout = (): Promise<never> => new Promise<never>((_, reject) => {
       if (timeoutSec <= 0) {
         onToolAbort = () => {
           const err: any = new Error(`Tool '${tc.function.name}' was cancelled`);
@@ -2325,9 +2329,26 @@ export class AgentLoop {
         }
       }
 
+      // ─── Sentinel preflight ───
+      // Review consequential actions (purchase, payment, send, credentials, blocked
+      // domains, ...) BEFORE the timeout clock starts. A pass is granted for this exact
+      // ctx so the registry's own Sentinel check doesn't prompt the human twice.
+      const prepared = typeof this.registry.prepare === 'function'
+        ? this.registry.prepare(tc.function.name, args)
+        : { ok: false as const };
+      if (prepared.ok) {
+        const veto = await getSentinel().preflight(prepared.tool.name, prepared.args, ctx, {
+          untrustedOutput: prepared.tool.untrustedOutput === true,
+          isReadOnly: prepared.tool.isReadOnly,
+        });
+        if (veto) {
+          return { content: veto.content, isError: true, uiEvents };
+        }
+      }
+
       const result = await Promise.race([
         this.registry.execute(tc.function.name, args, ctx),
-        timeoutPromise,
+        armTimeout(),
       ]);
 
       // Store successful read-only results in cache

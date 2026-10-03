@@ -65,6 +65,11 @@ export class FakeRegistry {
   getSchemas(mode: ToolExecutionMode): ToolSchema[] {
     return this.filterByMode(mode).map(t => t.schema()).sort((a, b) => a.function.name.localeCompare(b.function.name));
   }
+  prepare(name: string, args: unknown): { ok: true; tool: Tool<any>; args: Record<string, unknown> } | { ok: false } {
+    const t = this.get(name);
+    if (!t) return { ok: false };
+    try { return { ok: true, tool: t, args: t.argsSchema.parse(args ?? {}) }; } catch { return { ok: false }; }
+  }
   async execute(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {
     const t = this.get(name);
     if (!t) return { content: `[ERROR] Unknown tool: ${name}`, isError: true };

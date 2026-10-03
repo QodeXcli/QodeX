@@ -1,5 +1,5 @@
 /*
- * QodeX — Local-first agentic coding CLI
+ * QodeX — Local-first autonomous agent: code, its own browser, your desktop
  * Copyright 2026 7 SEVEN
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -139,6 +139,15 @@ async function bootstrap(): Promise<{
       const mgr = peekBrowserManager();
       if (mgr) await Promise.race([mgr.close(), new Promise(r => setTimeout(r, 3000))]);
     } catch {}
+    // Stop the control center and Telegram bot if this process started them.
+    try {
+      const { getControlCenter, stopControlCenter } = await import('./control/server.js');
+      if (getControlCenter()) await stopControlCenter();
+    } catch {}
+    try {
+      const { getTelegramBot, stopTelegramBot } = await import('./channels/telegram/index.js');
+      if (getTelegramBot()) await stopTelegramBot();
+    } catch {}
     process.exit(0);
   };
   process.once('SIGINT', shutdown);
@@ -165,7 +174,7 @@ function readVersion(): string {
 
 program
   .name('qodex')
-  .description('QodeX — Local-first agentic coding CLI')
+  .description('QodeX — local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions')
   .version(readVersion())
   .argument('[prompt...]', 'Initial prompt (omit to launch interactive REPL)')
   .option('-p, --print <prompt>', 'Run a single prompt non-interactively and exit')
@@ -966,7 +975,8 @@ schedule
       const last = e.last_run_at
         ? `${new Date(e.last_run_at).toLocaleString()} (${e.last_status})`
         : 'never';
-      console.log(`${flag} ${e.id.slice(0, 8)}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}`);
+      const kind = e.kind === 'mission' ? 'mission' : 'prompt ';
+      console.log(`${flag} ${e.id.slice(0, 8)}  ${kind}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}`);
     }
   });
 
@@ -979,6 +989,7 @@ schedule
   .option('--cwd <dir>', 'Working directory for the run (default: current cwd)')
   .option('--model <id>', 'Model to use (default: configured default)')
   .option('--allow <tools>', 'Comma-separated tool allowlist (default: all)')
+  .option('--mission', 'Start a background mission each run (the prompt is its goal) instead of a one-shot run')
   .action(async (opts: any) => {
     const { getScheduleStore } = await import('./schedule/store.js');
     try {
@@ -989,6 +1000,7 @@ schedule
         cwd: opts.cwd ?? process.cwd(),
         model: opts.model,
         allowedTools: opts.allow ? opts.allow.split(',').map((s: string) => s.trim()).filter(Boolean) : undefined,
+        kind: opts.mission ? 'mission' : 'prompt',
       });
       console.log(`✓ Scheduled "${entry.name}" (${entry.id.slice(0, 8)}).`);
       if (entry.next_run_at) console.log(`  Next run: ${new Date(entry.next_run_at).toLocaleString()}`);
@@ -1092,6 +1104,51 @@ program
 // Built as a separate sub-Command so each subcommand gets clean --help and arg validation.
 import { buildSkillCommand } from './cli/skill-command.js';
 program.addCommand(buildSkillCommand());
+
+// ── Agent platform ──────────────────────────────────────────────────────────
+// Each builder lazy-loads its module; none of them bootstraps the agent stack
+// except `mission` (its worker needs the router/registry), which gets bootstrap.
+import { buildBrowserCommand } from './tools/browser/command.js';
+import { buildControlCommand } from './control/command.js';
+import { buildMissionCommand } from './missions/command.js';
+import { buildWorkflowCommand } from './workflows/command.js';
+import { buildTelegramCommand } from './channels/telegram/command.js';
+import { buildVaultCommand } from './vault/command.js';
+
+program.addCommand(buildBrowserCommand());
+program.addCommand(buildControlCommand({
+  // `qodex control` shows this process's browser; mission actions read the shared DB,
+  // so detached missions (and their approvals) are visible and controllable too.
+  setup: async () => {
+    const { registerMissionControl } = await import('./control/missions-bridge.js');
+    await registerMissionControl({ defaultCwd: process.cwd() });
+  },
+}));
+program.addCommand(buildMissionCommand(
+  async () => {
+    const b = await bootstrap();
+    return { config: b.config, router: b.router, registry: b.registry, permissions: b.permissions, mcpManager: b.mcpManager };
+  },
+  {
+    // Every mission worker gets its own live control center (ephemeral port, token
+    // protected) so you can watch the mission's browser, take over, and approve.
+    onStart: async () => {
+      if (process.env.QODEX_MISSION_LIVE === '0') return;
+      try {
+        const { startControlCenter, stopControlCenter } = await import('./control/server.js');
+        const info = await startControlCenter({ port: 0 });
+        return { liveUrl: info.url, dispose: async () => { await stopControlCenter(); } };
+      } catch {
+        return;
+      }
+    },
+  },
+));
+program.addCommand(buildWorkflowCommand());
+program.addCommand(buildTelegramCommand({
+  missionAdapter: async () => (await import('./missions/telegram-adapter.js')).createTelegramMissionAdapter({ defaultCwd: process.cwd() }),
+}));
+program.addCommand(buildVaultCommand());
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);

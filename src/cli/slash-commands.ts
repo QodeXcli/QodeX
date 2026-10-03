@@ -315,7 +315,10 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /missions                      Background missions (start: /mission <goal>)
     /mission <goal>                Start a long-running mission that keeps working in the background
     /workflows                     Recorded workflows (learn by demonstration, replay)
-    /sentinel                      Sentinel guard status + recent decisions
+    /sentinel [reset]              Sentinel guard status + recent decisions
+    /telegram start|stop|status|pair   Approve actions & control missions from your phone
+    /vault                         Saved logins the agent can fill (it never sees the secret)
+    /desktop                       Desktop-control backend status (macOS / Linux / Windows)
 
   Coming in v0.5.1
     /compact           Summarise older history with the active model`,
@@ -1097,6 +1100,26 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           `Anthropic caching ${sub === 'on' ? 'enabled' : 'disabled'} for this session.\n` +
           '(Note: takes effect on the NEXT model call; existing in-flight request is unchanged. Restart `qx` for a clean reset, or persist with `qx setup`.)',
       };
+    }
+
+    // Agent platform: browser, control center, takeover, approvals, missions,
+    // workflows, Sentinel, Telegram, vault, desktop (see platform-slash.ts).
+    case 'browser':
+    case 'control':
+    case 'takeover':
+    case 'approvals':
+    case 'approve':
+    case 'deny':
+    case 'missions':
+    case 'mission':
+    case 'workflows':
+    case 'workflow':
+    case 'sentinel':
+    case 'telegram':
+    case 'vault':
+    case 'desktop': {
+      const { handlePlatformSlash } = await import('./platform-slash.js');
+      return handlePlatformSlash(cmd, args, cwd);
     }
 
     case 'auto': {

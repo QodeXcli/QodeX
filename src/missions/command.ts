@@ -349,7 +349,11 @@ function printStartHints(id: string, pid: number | null, logFile: string | null)
   console.log(`  Stop:     qodex mission cancel ${id}`);
 }
 
-export function buildMissionCommand(boot: MissionBootFn): Command {
+export function buildMissionCommand(
+  boot: MissionBootFn,
+  /** Integration hooks applied to every worker run (e.g. a live control center). */
+  workerHooks: Pick<MissionWorkerOptions, 'onStart'> = {},
+): Command {
   const mission = new Command('mission')
     .description('Long-running background missions: start, watch, approve, steer, cancel, resume');
 
@@ -379,7 +383,7 @@ export function buildMissionCommand(boot: MissionBootFn): Command {
         if (o.foreground) {
           const { mission: m } = startMission({ ...input, spawn: false });
           if (cwd !== process.cwd()) process.chdir(cwd);
-          const code = await runMissionWorker(m.id, boot, { foreground: true });
+          const code = await runMissionWorker(m.id, boot, { ...workerHooks, foreground: true });
           process.exit(code);
         }
         const r = startMission(input);
@@ -508,7 +512,7 @@ export function buildMissionCommand(boot: MissionBootFn): Command {
       try {
         if (o.foreground) {
           if (r.m.cwd !== process.cwd()) process.chdir(r.m.cwd);
-          const code = await runMissionWorker(r.m.id, boot, { foreground: true });
+          const code = await runMissionWorker(r.m.id, boot, { ...workerHooks, foreground: true });
           process.exit(code);
         }
         const { pid, logFile } = spawnMissionWorker(r.m.id, { cwd: r.m.cwd });
@@ -536,7 +540,7 @@ export function buildMissionCommand(boot: MissionBootFn): Command {
     .command('run <id>', { hidden: true })
     .description('Run a mission in this process (entry point of the detached worker)')
     .action(async (id: string) => {
-      const code = await runMissionWorker(id, boot);
+      const code = await runMissionWorker(id, boot, workerHooks);
       process.exit(code);
     });
 

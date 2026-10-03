@@ -7,6 +7,7 @@
  * approve only with `--yes`. Sentinel-critical actions never reach this asker — they
  * need a real human on a remote channel (control center / Telegram) or are refused.
  */
+import { forwardAgentEvent } from '../../control/forward.js';
 import { AgentLoop, setActiveAgent, getActiveAgent } from '../../agent/loop.js';
 import type { ModelRouter } from '../../llm/router.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -190,6 +191,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       askUser,
       signal: runAbort.signal,
     })) {
+      forwardAgentEvent('headless', event);
       if (opts.json) {
         process.stdout.write(JSON.stringify({ type: event.type, ...event.data }) + '\n');
       } else {

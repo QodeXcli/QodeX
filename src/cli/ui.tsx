@@ -205,9 +205,17 @@ export function App(props: AppProps): React.ReactElement {
     void import('../tools/builtin/task.js').then(m => {
       m.setSubAgentRunner((prompt, opts) => agent.runSubagent(prompt, opts));
     });
+    // mission_start {detach:false}: run a mission in this terminal, streaming its
+    // milestones (detached missions are the default and need nothing here).
+    void Promise.all([import('../missions/tools.js'), import('../missions/command.js')]).then(([mt, mc]) => {
+      mt.setMissionInlineRunner(mc.createInlineMissionRunner({
+        config: props.config, router: props.router, registry: props.registry, permissions: props.permissions,
+      }));
+    }).catch(() => { /* missions unavailable */ });
     return () => {
       void import('../agent/loop.js').then(m => m.setActiveAgent(null));
       void import('../tools/builtin/task.js').then(m => m.setSubAgentRunner(null));
+      void import('../missions/tools.js').then(m => m.setMissionInlineRunner(null)).catch(() => {});
     };
   }, [props.router, props.registry, props.permissions, props.config, props.cwd]);
 
