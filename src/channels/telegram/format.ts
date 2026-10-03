@@ -405,7 +405,8 @@ export function approvalKeyboard(callbackId: string, options: string[], lang: La
     text: optionLabel(o, lang),
     callback_data: buildCallbackData(callbackId, i) ?? `ap:invalid:${i}`,
   }));
-  const rows = buttons.length <= 3 ? [buttons] : chunk(buttons, 2);
+  // Telegram rejects an empty row, which would make the card undeliverable.
+  const rows = buttons.length === 0 ? [] : buttons.length <= 3 ? [buttons] : chunk(buttons, 2);
   return { inline_keyboard: rows };
 }
 
