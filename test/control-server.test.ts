@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as net from 'node:net';
+import { request as httpRequest } from 'node:http';
 import {
   startControlCenter,
   stopControlCenter,
@@ -21,6 +22,7 @@ import {
   publishAgentEvent,
   maskSecrets,
   controlCookieName,
+  looksLikeControlLink,
   MAX_BODY_BYTES,
   type ControlCenterInfo,
 } from '../src/control/server.js';
@@ -48,6 +50,8 @@ class FakeBrowser implements BrowserManager {
   stops = 0;
   lastOpts: { quality?: number; maxFps?: number } | undefined;
   frameData = Buffer.from('fake-jpeg').toString('base64');
+  /** URLs of the agent browser's tabs (the first is active). */
+  tabUrls: string[] = ['https://example.test/'];
   private timer: NodeJS.Timeout | null = null;
 
   async ensure(): Promise<void> { this.running = true; }
@@ -67,7 +71,7 @@ class FakeBrowser implements BrowserManager {
   async activePage(): Promise<any> { return {}; }
   context(): any { return null; }
   tabs(): TabInfo[] {
-    return this.running ? [{ index: 0, id: 't1', url: 'https://example.test/', title: 'Example', active: true }] : [];
+    return this.running ? this.tabUrls.map((url, i) => ({ index: i, id: `t${i + 1}`, url, title: 'Example', active: i === 0 })) : [];
   }
   async newTab(): Promise<TabInfo> { throw new Error('not supported'); }
   async switchTab(): Promise<TabInfo> { throw new Error('not supported'); }
@@ -797,4 +801,145 @@ describe('control center — pure helpers', () => {
     expect(validateHumanInput(null).ok).toBe(false);
     expect(validateHumanInput([]).ok).toBe(false);
   });
+});
+
+// ── adversarial review regressions ───────────────────────────────────────────
+
+describe('control center — review hardening', () => {
+  it('strips a percent-encoded token parameter too (no bounce loop, token never kept in the URL)', async () => {
+    expect(stripTokenFromUrl('/?%6B=abc&x=1')).toBe('/?x=1');
+    expect(stripTokenFromUrl('/?%6b=abc')).toBe('/');
+    expect(stripTokenFromUrl('/api/state?recent=0&%6B=abc')).toBe('/api/state?recent=0');
+    // Other parameters that merely start with k / contain encoded bytes survive untouched.
+    expect(stripTokenFromUrl('/?kk=1&lang=%66a')).toBe('/?kk=1&lang=%66a');
+
+    const r = await fetch(`${base}/?%6B=${TOKEN}`, { redirect: 'manual' });
+    expect(r.status).toBe(302);
+    const location = r.headers.get('location') ?? '';
+    expect(location).not.toContain(TOKEN);
+    expect(location).toBe('/');
+    // Following the bounce with the cookie lands on the dashboard (not another bounce).
+    const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0];
+    const page = await fetch(base + location, { redirect: 'manual', headers: { cookie, accept: 'text/html' } });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('id="takeBtn"');
+  });
+
+  it('masks control-center tokens (?k=) in text shown to viewers / channels', () => {
+    const line = `Live view: http://127.0.0.1:5555/?k=${TOKEN}`;
+    expect(maskSecrets(line)).not.toContain(TOKEN);
+    expect(maskSecrets(line)).toContain('http://127.0.0.1:5555/?k=');
+    expect(maskSecrets(`http://192.168.1.4:7420/?lang=fa&k=${TOKEN}`)).not.toContain(TOKEN);
+    const ev = agentEventToBus('mission:m1', { type: 'tool_result', data: { name: 'mission_status', result: `Live view: http://127.0.0.1:41000/?k=${TOKEN}` } }) as { data: { summary: string } };
+    expect(ev.data.summary).not.toContain(TOKEN);
+  });
+
+  it('refuses to open the control center itself inside the agent browser (would plant the login cookie there)', async () => {
+    const f = fake();
+    await post('/api/takeover', { on: true });
+    for (const url of [
+      `http://127.0.0.1:${info.port}/?k=${TOKEN}`,
+      `127.0.0.1:${info.port}/`,
+      `localhost:${info.port}/api/state`,
+      `http://[::1]:${info.port}/`,
+      `http://0.0.0.0:${info.port}/`,
+    ]) {
+      const r = await post('/api/input', { type: 'navigate', url });
+      expect(r.status).toBe(400);
+      expect((await r.json() as { error: string }).error).toMatch(/^\[CONTROL_CENTER_URL\]/);
+    }
+    expect(f.inputs).toEqual([]);
+    // Other local ports (a dev server) are still fine.
+    const other = info.port === 65535 ? 65534 : info.port + 1;
+    expect((await post('/api/input', { type: 'navigate', url: `localhost:${other}` })).status).toBe(200);
+    expect(f.inputs).toHaveLength(1);
+    // ...but not another QodeX control center's private link (e.g. a mission worker's live view).
+    for (const url of [`http://127.0.0.1:${other}/?k=abcdEFGH12345678xyz`, 'http://192.168.1.20:7420/?k=abcdEFGH12345678xyz', 'https://blue-sky-123.trycloudflare.com/?k=abcdEFGH12345678xyz']) {
+      const r = await post('/api/input', { type: 'navigate', url });
+      expect(r.status).toBe(400);
+    }
+    expect(f.inputs).toHaveLength(1);
+    // A public site that happens to use a k= search parameter is fine.
+    expect((await post('/api/input', { type: 'navigate', url: 'https://www.amazon.com/s?k=mechanicalkeyboards' })).status).toBe(200);
+    expect(f.inputs).toHaveLength(2);
+    expect(looksLikeControlLink('http://localhost:7420/?k=short')).toBe(false);
+    expect(looksLikeControlLink('http://[::1]:7420/?lang=fa&k=abcdEFGH12345678xyz')).toBe(true);
+  });
+
+  it('maps action errors to proper HTTP statuses (400 bad input, 404 not found, 500 otherwise)', async () => {
+    extraUnregister.push(registerControlAction('x.bad', () => { throw new Error('[BAD_REQUEST] "id" is required'); }));
+    extraUnregister.push(registerControlAction('x.missing', () => { throw new Error('[MISSION_NOT_FOUND] No mission matches "zz"'); }));
+    extraUnregister.push(registerControlAction('x.approval', async () => { throw new Error('[APPROVAL_NOT_FOUND] No approval ap_1.'); }));
+    extraUnregister.push(registerControlAction('x.boom', () => { throw new Error('[DB_LOCKED] busy'); }));
+    const bad = await post('/api/actions/x.bad', {});
+    expect(bad.status).toBe(400);
+    expect((await bad.json() as { error: string }).error).toBe('[BAD_REQUEST] "id" is required');
+    expect((await post('/api/actions/x.missing', {})).status).toBe(404);
+    expect((await post('/api/actions/x.approval', {})).status).toBe(404);
+    expect((await post('/api/actions/x.boom', {})).status).toBe(500);
+  });
+
+  it('refuses to serve the agent\'s own browser (it could open the dashboard and approve its own actions)', async () => {
+    const f = fake();
+    const broker = getApprovalBroker();
+    const pending = broker.request({ prompt: 'Pay $500?', options: ['yes', 'no'], category: 'payment', risk: 'critical' });
+    const id = broker.pending()[0]!.id;
+
+    // The agent's browser has a tab on the control center (it navigated there, e.g. from a leaked link).
+    f.tabUrls = ['https://shop.example/checkout', `http://127.0.0.1:${info.port}/`];
+    const approve = await post(`/api/approvals/${id}`, { answer: 'yes' }, { origin: base });
+    expect(approve.status).toBe(403);
+    expect((await approve.json() as { error: string }).error).toMatch(/^\[AGENT_BROWSER\]/);
+    expect(broker.get(id)).toBeDefined();
+    expect((await fetch(`${base}/api/state`, { headers: bearer })).status).toBe(403);
+    const page = await fetch(`${base}/`, { headers: { ...bearer, accept: 'text/html' } });
+    expect(page.status).toBe(403);
+    expect(await page.text()).not.toContain('id="takeBtn"');
+    const login = await fetch(`${base}/?k=${TOKEN}`, { redirect: 'manual' });
+    expect(login.status).toBe(403);
+    expect(login.headers.get('set-cookie')).toBeNull();
+
+    // Same through another host name for this server (Host header == the tab's host).
+    f.tabUrls = [`http://qx-alias.test:${info.port}/`];
+    const statusWithHost = (host: string) => new Promise<number>((resolve, reject) => {
+      // fetch() can't override Host; node:http can.
+      const r = httpRequest({ host: '127.0.0.1', port: info.port, path: '/api/state', headers: { ...bearer, host } }, res => { res.resume(); resolve(res.statusCode ?? 0); });
+      r.on('error', reject);
+      r.end();
+    });
+    expect(await statusWithHost(`qx-alias.test:${info.port}`)).toBe(403);
+    expect(await statusWithHost(`127.0.0.1:${info.port}`)).toBe(200);
+
+    // Once the agent's browser is elsewhere the human's dashboard works again.
+    f.tabUrls = ['https://shop.example/checkout', `http://127.0.0.1:${info.port + 1}/dev`];
+    expect((await fetch(`${base}/api/state`, { headers: bearer })).status).toBe(200);
+    expect((await post(`/api/approvals/${id}`, { answer: 'no' })).status).toBe(200);
+    expect(await pending).toEqual({ answer: 'no', by: 'control' });
+  });
+
+  it('hands an orphaned takeover back to the agent when no dashboard is connected', async () => {
+    await stopControlCenter();
+    info = await startControlCenter({ port: 0, token: TOKEN, onSteer: () => true, takeoverReleaseMs: 300 });
+    base = `http://127.0.0.1:${info.port}`;
+    const f = fake();
+    // While a viewer is connected the human keeps control.
+    const sse = await openSse(`${base}/api/events`, bearer);
+    try {
+      expect(await waitUntil(() => sse.of('hello').length === 1)).toBe(true);
+      await post('/api/takeover', { on: true });
+      expect(f.takeover).toBe(true);
+      await new Promise(r => setTimeout(r, 1200));
+      expect(f.takeover).toBe(true);
+    } finally {
+      sse.close();
+    }
+    // The viewer is gone: after the grace period control returns to the agent, with a notice.
+    expect(await waitUntil(() => !f.takeover, 5000)).toBe(true);
+    expect(getBus().recent(50).some(e => e.kind === 'notice' && /handed back/i.test(e.message))).toBe(true);
+    // A takeover held by someone else (the terminal) is never touched.
+    f.setTakeover(true, 'terminal');
+    await new Promise(r => setTimeout(r, 1200));
+    expect(f.takeover).toBe(true);
+    expect(f.takeoverBy).toBe('terminal');
+  }, 20_000);
 });

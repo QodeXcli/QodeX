@@ -230,6 +230,73 @@ describe('control center dashboard in a real browser', () => {
     await page.close();
   }, 90_000);
 
+  it.skipIf(!chromiumPath)('types emoji / AltGr / Option characters as text, drops already-answered mission approvals, URL bar follows the active tab', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#frame:not(.hidden)').waitFor({ timeout: 10_000 });
+    await page.locator('#takeBtn').click();
+    await page.locator('body.takeover').waitFor({ timeout: 10_000 });
+    fake.inputs.length = 0;
+
+    // Synthetic keydowns on the live view, as a phone emoji keyboard / AltGr layout / macOS Option would send them.
+    await page.evaluate(`(() => {
+      const s = document.getElementById('screen');
+      s.focus();
+      const fire = (init) => s.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
+      fire({ key: '😀' });
+      fire({ key: '@', ctrlKey: true, altKey: true, modifierAltGraph: true });
+      fire({ key: 'ø', altKey: true });
+    })()`);
+    expect(await waitUntil(() => fake.inputs.some(e => e.type === 'type'))).toBe(true);
+    await new Promise(r => setTimeout(r, 300));
+    const typed = fake.inputs.filter(e => e.type === 'type').map(e => (e as { text: string }).text).join('');
+    expect(typed).toBe('😀@ø');
+    expect(fake.inputs.filter(e => e.type === 'key')).toEqual([]);
+
+    // A plain Alt+letter is still a shortcut (accesskeys), and Ctrl+L is still a key combo.
+    fake.inputs.length = 0;
+    await page.evaluate(`(() => {
+      const s = document.getElementById('screen');
+      const fire = (init) => s.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
+      fire({ key: 'd', altKey: true });
+      fire({ key: 'l', ctrlKey: true });
+    })()`);
+    expect(await waitUntil(() => fake.inputs.filter(e => e.type === 'key').length === 2)).toBe(true);
+    expect(fake.inputs).toEqual([{ type: 'key', key: 'Alt+d' }, { type: 'key', key: 'ControlOrMeta+l' }]);
+    await page.locator('#takeBtn').click();
+    await page.locator('body:not(.takeover)').waitFor();
+
+    // A mission approval answered elsewhere: the server says 409 → the card goes away.
+    const tries: unknown[] = [];
+    unregister.push(registerControlAction('missions.approvals', () => [{ id: 'ap_m1', missionId: 'm_42', prompt: 'Renew the domain for $12?', options: ['yes', 'no'], category: 'payment', createdAt: new Date().toISOString() }]));
+    unregister.push(registerControlAction('missions.resolveApproval', (body) => { tries.push(body); throw new Error('[APPROVAL_NOT_PENDING] Approval ap_m1 is already approved.'); }));
+    const card = page.locator('#approvalList .card', { hasText: 'Renew the domain' });
+    await card.waitFor({ timeout: 10_000 });
+    await card.locator('button', { hasText: 'Yes' }).click();
+    expect(await waitUntil(() => tries.length === 1)).toBe(true);
+    await card.waitFor({ state: 'detached', timeout: 3000 });
+
+    // The URL bar follows the ACTIVE tab only (Module A publishes 'navigated' for every tab).
+    expect(await page.locator('#url').inputValue()).toBe('https://shop.example/cart');
+    getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: 't9', index: 3, url: 'https://ads.example/background' } });
+    getBus().publish({ kind: 'notice', level: 'info', message: 'after-background-nav' });
+    await page.locator('#activityList li', { hasText: 'after-background-nav' }).waitFor({ timeout: 10_000 });
+    expect(await page.locator('#url').inputValue()).toBe('https://shop.example/cart');
+    getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: 't1', index: 0, url: 'https://shop.example/checkout' } });
+    let seen = '';
+    for (let i = 0; i < 60 && seen !== 'https://shop.example/checkout'; i++) {
+      seen = await page.locator('#url').inputValue();
+      if (seen !== 'https://shop.example/checkout') await new Promise(r => setTimeout(r, 50));
+    }
+    expect(seen).toBe('https://shop.example/checkout');
+
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('shows an access message instead of the dashboard without the token', async () => {
     const page = await browser.newPage();
     const r = await page.goto(`http://127.0.0.1:${info.port}/`);

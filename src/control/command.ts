@@ -7,8 +7,10 @@
  * their own browser/approvals; that wiring lives in the integration step.)
  *
  * No bootstrap(): this command loads ~/.qodex/.env + config and calls
- * setActiveConfig itself, and never imports the agent loop — so Ctrl+C keeps its
- * default "exit" behavior (no SIGINT listener is installed here).
+ * setActiveConfig itself, and never imports the agent loop. It does install ONE
+ * SIGINT listener, and that listener always exits: the CLI entry (src/index.ts)
+ * statically imports the tool registry, whose process-registry module adds a
+ * non-exiting SIGINT listener — without ours Ctrl+C would be ignored here.
  *
  * Note: the root program owns `-p/--print`, `--json`, `-m`, `-y`, `-r`, `-c`, and
  * commander parses those anywhere on the line, so this subcommand deliberately has
@@ -17,6 +19,9 @@
 
 import { Command } from 'commander';
 import type { ControlCenterOptions, SteerHandler } from './server.js';
+
+/** Upper bound for a graceful stop (control center + browser profile flush). */
+const STOP_TIMEOUT_MS = 6000;
 
 export interface ControlCommandDeps {
   /**
@@ -88,6 +93,9 @@ async function runControlCommand(opts: ControlCliOptions, flags: { json: boolean
     process.exit(1);
   }
 
+  // Ctrl+C / SIGTERM handling first, so they work during setup too.
+  const stop = installStopHandlers();
+
   // Same environment as a bootstrapped run: ~/.qodex/.env (e.g. QODEX_BROWSER_EXECUTABLE)
   // then the merged config — without starting providers, MCP servers or the agent.
   try {
@@ -113,7 +121,7 @@ async function runControlCommand(opts: ControlCliOptions, flags: { json: boolean
     }
   }
 
-  const { startControlCenter, stopControlCenter, describeControlCenter } = await import('./server.js');
+  const { startControlCenter, describeControlCenter } = await import('./server.js');
   let info;
   try {
     info = await startControlCenter({ ...parsed.options, onSteer: deps.onSteer ?? (() => false) });
@@ -137,28 +145,52 @@ async function runControlCommand(opts: ControlCliOptions, flags: { json: boolean
       : '\n   This page shows the browser of THIS process: press "Take over" and enter a URL to open QodeX\'s dedicated\n   browser (persistent profile) — e.g. to log in to a site once so the agent can reuse the session.\n   Press Ctrl+C (or type q + Enter) to stop.');
   }
 
-  // Stay in the foreground until SIGTERM, "q", or Ctrl+C (default handler → exit).
-  await new Promise<void>(() => {
-    let stopping = false;
-    const stop = async (code: number) => {
-      if (stopping) return;
-      stopping = true;
-      try { await stopControlCenter(); } catch { /* ignore */ }
-      try {
-        // Close the agent browser gracefully so the persistent profile (cookies,
-        // logins) is flushed to disk.
-        const { peekBrowserManager } = await import('../tools/browser/types.js');
-        await peekBrowserManager()?.close();
-      } catch { /* ignore */ }
-      process.exit(code);
-    };
-    process.once('SIGTERM', () => { void stop(0); });
-    if (process.stdin.isTTY) {
-      process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (chunk: string) => {
-        if (/^\s*(q|quit|exit)\s*$/i.test(String(chunk))) void stop(0);
-      });
-      process.stdin.resume();
-    }
+  // Stay in the foreground until Ctrl+C, SIGTERM or "q".
+  if (process.stdin.isTTY) {
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk: string) => {
+      if (/^\s*(q|quit|exit)\s*$/i.test(String(chunk))) void stop(0);
+    });
+    process.stdin.resume();
+  }
+  await new Promise<void>(() => { /* until stop() exits the process */ });
+}
+
+/**
+ * Exit cleanly on Ctrl+C (130) / SIGTERM (0): stop the control center (releasing a
+ * takeover it holds) and close the agent browser so its persistent profile is
+ * flushed — bounded by STOP_TIMEOUT_MS. A second Ctrl+C exits at once.
+ *
+ * Why a SIGINT listener here at all: the CLI entry imports the tool registry,
+ * whose process-registry module installs a SIGINT listener that does NOT exit —
+ * with any listener present Node no longer exits on SIGINT by itself, so Ctrl+C
+ * was silently ignored. This listener always exits, so it can't cause that trap.
+ */
+function installStopHandlers(): (code: number) => Promise<void> {
+  let stopping = false;
+  const stop = async (code: number) => {
+    if (stopping) return;
+    stopping = true;
+    // Never hang on the way out (a wedged Chromium / stuck socket).
+    const hard = setTimeout(() => process.exit(code), STOP_TIMEOUT_MS);
+    hard.unref?.();
+    try {
+      const { stopControlCenter } = await import('./server.js');
+      await stopControlCenter();
+    } catch { /* ignore */ }
+    try {
+      // Close the agent browser gracefully so the persistent profile (cookies,
+      // logins) is flushed to disk.
+      const { peekBrowserManager } = await import('../tools/browser/types.js');
+      const mgr = peekBrowserManager();
+      if (mgr) await Promise.race([mgr.close(), new Promise(r => setTimeout(r, STOP_TIMEOUT_MS - 500))]);
+    } catch { /* ignore */ }
+    process.exit(code);
+  };
+  process.on('SIGINT', () => {
+    if (stopping) process.exit(130);
+    void stop(130);
   });
+  process.once('SIGTERM', () => { void stop(0); });
+  return stop;
 }
