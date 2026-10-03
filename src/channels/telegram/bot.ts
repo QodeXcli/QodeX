@@ -555,9 +555,11 @@ export class TelegramBot {
         return;
       case 'unpair':
         await this.pairing.unpair(chatId);
+        // Drop the approval channel BEFORE confirming: once the chat reads "unpaired", no
+        // approval may still be routed to it.
+        await this.refreshChannel();
         await this.send(chatId, S.unpaired);
         this.bus.publish({ kind: 'notice', level: 'info', message: `Telegram: chat ${describeChat(chat)} unpaired itself` });
-        await this.refreshChannel();
         return;
       default:
         await this.send(chatId, S.unknownCommand);
