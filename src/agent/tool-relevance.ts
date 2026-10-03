@@ -131,6 +131,13 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
       /\bplace (an|the|my) order\b/, /\border (online|from|on|via)\b/, /\bcart\b/, /\bon amazon\b/,
     ],
   },
+  // The credential vault on its own ("save my GitHub password", "رمز سایت رو ذخیره کن"):
+  // storing / rotating a login needs vault_request_login even when no page is named.
+  {
+    members: ['vault_', 'browser_fill_secret'],
+    keywords: ['password manager', 'credential vault', 'qodex vault', '2fa', 'two-factor', 'totp', 'رمز عبور', 'پسورد', 'گذرواژه', 'رمز سایت', 'رمزم'],
+    patterns: [/\b(save|store|remember|keep|add|update|change|rotate|enter|type)\b[^.\n]{0,40}\b(passwords?|logins?|credentials?)\b/, /\bvault\b/],
+  },
   {
     members: ['computer_use_'],
     keywords: [

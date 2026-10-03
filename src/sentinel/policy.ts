@@ -1251,7 +1251,7 @@ const DESKTOP_GUARDED = new Set([
   'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_move', 'computer_use_drag',
   'computer_use_scroll', 'computer_use_clipboard', 'computer_use_open', 'computer_use_focus_window',
 ]);
-const OTHER_GUARDED = new Set(['http_request', 'workflow_run']);
+const OTHER_GUARDED = new Set(['http_request', 'workflow_run', 'vault_request_login']);
 
 /** Literal name fragments that make any tool (MCP or not) a guarded action. */
 const NAME_KEYWORD_RE = /send_email|send_message|post_|create_payment|transfer|purchase|delete/i;
@@ -1686,6 +1686,15 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
     case 'workflow_run':
       return classifyWorkflow(a, ctx);
+
+    // ── vault: the human types a login into QodeX's secure prompt (src/vault/requests.ts) ──
+    case 'vault_request_login': {
+      const host = parseTarget(str(a.site))?.host ?? '';
+      const summary = `ask you to type the login for ${host || oneLine(str(a.site), 60) || 'a site'} into QodeX's secure prompt${str(a.name) ? ` (vault entry "${oneLine(str(a.name), 60)}")` : ''}`;
+      // Fixed risk, like browser_fill_secret: the value never reaches the agent, and the
+      // human typing it into the masked prompt / secure form is itself the consent.
+      return make('credential', 'high', summary, 'storing a login you type (it goes straight into the vault, never to the agent)', host || undefined);
+    }
   }
 
   if (MCP_PREFIX_RE.test(toolName) || NAME_KEYWORD_RE.test(toolName)) return classifyByName(toolName, a, cfg);
