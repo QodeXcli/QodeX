@@ -193,18 +193,34 @@ selectors (role/name → text → label), asks Sentinel before consequential ste
 secrets from the vault (`vault:<entry>`), and costs zero model tokens per step. Each workflow
 is also saved as a skill so the agent rediscovers it.
 
-## 7. Telegram — your agent in your pocket
+## 7. Your agent in your pocket — Telegram, Discord, Slack, WhatsApp, Signal
+
+**Chat with the agent** through the bot gateway (`qodex bot`, see the README): send tasks,
+watch them stream, and answer approvals with inline buttons. It now also drives the agent
+platform:
+
+| Command | What it does |
+|---|---|
+| `/mission <goal>` | start a background mission (keeps going after you close the chat) |
+| `/missions` | missions, progress, and approvals waiting for you |
+| `/approve <id>` · `/deny <id>` | answer a mission's approval (e.g. a purchase Sentinel paused) |
+
+Sentinel's critical prompts in a bot conversation arrive as buttons in that chat.
+
+**Approvals-only notifier.** `qodex telegram` is a lightweight, pairing-based Telegram bot
+for people who don't run the chat gateway: it delivers approvals (with buttons) and
+milestones from detached missions and other QodeX processes, `/mission`, `/missions`,
+`/cancel <id>`, `/status` and `/screen` (a screenshot of the agent's browser).
 
 ```bash
 qodex telegram setup     # paste the BotFather token (stored in ~/.qodex/.env)
 qodex telegram pair      # prints a one-time code; send /pair <code> to your bot
-qodex telegram start     # runs the bot (or /telegram start inside a session)
+qodex telegram start     # runs the notifier (or /telegram start inside a session)
 ```
 
-Approve or deny Sentinel prompts with inline buttons, `/mission <goal>`, `/missions`,
-`/status`, `/cancel <id>`, `/screen` (screenshot of the agent's browser), milestone and
-completion notifications. Private chats only, pairing codes expire, brute-force lockout;
-Persian and English.
+Private chats only, pairing codes expire, brute-force lockout; Persian and English.
+Telegram allows **one** poller per bot token — if you also run `qodex bot`, give the notifier
+its own bot and point `telegram.botTokenEnv` at that token's variable.
 
 ---
 
@@ -242,4 +258,4 @@ with their own session and budget.
 - **گاوصندوق رمزها**: ایجنت رمز را هرگز نمی‌بیند و فقط روی سایت اصلی پر می‌کند (ضد فیشینگ)، با پشتیبانی از کد دومرحله‌ای.
 - **مرکز کنترل وب**: تماشای زنده‌ی مرورگر ایجنت، در دست گرفتن کنترل، تأیید با یک کلیک — حتی از گوشی. `qodex control --lan`
 - **یادگیری از نمایش**: یک بار کار را انجام دهید، QodeX ضبط و بعداً تکرار می‌کند. `qodex workflow record`
-- **تلگرام**: تأیید اقدامات و شروع مأموریت از گوشی. `qodex telegram setup`
+- **تلگرام / دیسکورد / اسلک / واتس‌اپ / سیگنال**: گفتگو با ایجنت، شروع مأموریت (`/mission`) و تأیید اقدامات از گوشی (`qodex bot` یا `qodex telegram`).

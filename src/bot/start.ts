@@ -34,6 +34,13 @@ export interface StartBotsOptions {
 
 export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<void> {
   const cwd = deps.cwd ?? process.cwd();
+  // A person answers this process's approvals (inline buttons in their chat), so
+  // Sentinel-critical actions (purchases, payments, sending, credentials) are asked in
+  // the chat instead of being refused as "nobody available".
+  try {
+    const { setInteractiveHuman } = await import('../control/approvals.js');
+    setInteractiveHuman(true);
+  } catch { /* approvals module unavailable */ }
   const botCfg: any = (deps.config as any).bot ?? {};
   const allow: AllowConfig = {
     telegram: { allowedUsers: botCfg.telegram?.allowedUsers ?? [] },
