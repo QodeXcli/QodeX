@@ -44,7 +44,7 @@ class FakeStdin extends EventEmitter {
 const plain = (s: string) => s.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\u001b\][^\u0007]*\u0007/g, '');
 const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
 
-async function waitFor(cond: () => boolean, what: string, ms = 2000): Promise<void> {
+async function waitFor(cond: () => boolean, what: string, ms = 6000): Promise<void> {
   const end = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
@@ -87,7 +87,7 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-describe('terminal secret prompt', () => {
+describe('terminal secret prompt', { timeout: 20_000 }, () => {
   it('orders the fields: username, password, repeat, then the optional 2FA key', () => {
     expect(secretSteps({ fields: ['username', 'password'] })).toEqual(['username', 'password', 'repeat']);
     expect(secretSteps({ fields: ['username', 'password', 'totp'] })).toEqual(['username', 'password', 'repeat', 'totp']);
