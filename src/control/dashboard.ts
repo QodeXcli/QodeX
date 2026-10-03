@@ -90,6 +90,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     risk_medium: 'medium',
     risk_high: 'high',
     risk_critical: 'critical',
+    autoAsks: 'Auto mode still asks',
     cat_purchase: 'purchase',
     cat_payment: 'payment',
     cat_send: 'send',
@@ -176,6 +177,7 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     risk_medium: 'متوسط',
     risk_high: 'زیاد',
     risk_critical: 'بحرانی',
+    autoAsks: 'حالت خودکار باز هم می‌پرسد',
     cat_purchase: 'خرید',
     cat_payment: 'پرداخت',
     cat_send: 'ارسال',
@@ -277,7 +279,7 @@ body.takeover #screen{border-color:var(--warn);box-shadow:0 0 0 2px rgba(245,158
 .card.r-critical{border-color:rgba(220,38,38,.6)}
 .card.r-high{border-color:rgba(249,115,22,.5)}
 .card .meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;font-size:11px;color:var(--muted)}
-.card .prompt{white-space:pre-wrap;word-break:break-word;margin:4px 0 10px}
+.card .prompt{white-space:pre-wrap;word-break:break-word;margin:4px 0 10px}.card .why{color:var(--warn);font-size:12px;margin:4px 0 0}
 .card .opts{display:flex;gap:6px;flex-wrap:wrap}
 .empty{color:var(--muted);font-size:13px;padding:6px 2px}
 textarea{width:100%;min-height:70px;resize:vertical;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:8px 10px}
@@ -721,6 +723,9 @@ const SCRIPT = String.raw`
     var ts = a.createdAt || a.created_at;
     if (ts) meta.appendChild(el('time', '', hhmmss(typeof ts === 'number' ? ts : Date.parse(ts))));
     card.appendChild(meta);
+    // Auto mode is on but this still needs a person: say why (remote delete, outside the project, critical…).
+    var autoWhy = a.meta && typeof a.meta.autoMode === 'string' ? a.meta.autoMode : '';
+    if (autoWhy) card.appendChild(autoDir(el('div', 'why', '⚡ ' + t('autoAsks') + ': ' + clip(autoWhy, 400))));
     card.appendChild(autoDir(el('div', 'prompt', clip(a.prompt, 4000))));
     var opts = el('div', 'opts'), msg = el('div', 'msg');
     optionsOf(a).forEach(function (o) {
