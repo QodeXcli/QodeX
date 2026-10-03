@@ -7,7 +7,8 @@
  *     .windsurfrules, .github/copilot-instructions.md, anything under .qodex/ (project
  *     config, skills, hooks, rules) and .cursor/rules/;
  *   - user-level: everything under ~/.qodex/skills, ~/.qodex/rules, ~/.qodex/hooks,
- *     ~/.qodex/QODEX.md / AGENTS.md / memory files.
+ *     ~/.qodex/mods (mods are code QodeX runs) and ~/.qodex/mods.json (which mods load,
+ *     which project mods are trusted), ~/.qodex/QODEX.md / AGENTS.md / memory files.
  *
  * PURE path classification; the permission engine decides what to do with it.
  */
@@ -24,8 +25,8 @@ const PROJECT_PATHS = [
   ['.github', 'copilot-instructions.md'],
 ];
 
-const USER_DIRS = ['skills', 'rules', 'hooks', 'memory'];
-const USER_FILES = new Set(['qodex.md', 'agents.md', 'memory.md', 'user.md', 'facts.md', 'soul.md']);
+const USER_DIRS = ['skills', 'rules', 'hooks', 'memory', 'mods'];
+const USER_FILES = new Set(['qodex.md', 'agents.md', 'memory.md', 'user.md', 'facts.md', 'soul.md', 'mods.json']);
 
 export interface InstructionFileHit {
   /** Path relative to the project or ~/.qodex, for the prompt. */

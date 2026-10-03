@@ -53,6 +53,16 @@ export async function modsShutdown(reason: 'exit' | 'clear' | 'resume' | 'other'
   if (reason === 'exit') rt.dispose();
 }
 
+/** /clear or /resume: session.end for every mod; the next session id gets no session.start. */
+export async function modsSessionEnded(reason: 'clear' | 'resume'): Promise<void> {
+  const rt = getModsRuntime();
+  if (!rt || !modsActive()) return;
+  try {
+    await rt.endSession(reason);
+    rt.setSession(rt.sessionId);
+  } catch { /* capped and best-effort */ }
+}
+
 /**
  * Headless: load mods, session.start, then prompt.submit. Returns the prompt the model
  * reads (mod context appended) or `drop` with the reason a mod gave.
