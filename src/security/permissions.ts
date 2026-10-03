@@ -253,12 +253,14 @@ export class PermissionEngine {
 }
 
 /**
- * Tools known to be read-only, used when the engine has no registry lookup (bootstrap
- * builds `new PermissionEngine(config)` without one). Page/screen OBSERVING tools like
- * browser_screenshot / browser_get_text / computer_use_screenshot are deliberately NOT
- * here any more: they are non-read-only tools now (they must run in model order after a
- * click, never in the parallel read-only phase), so they must not be auto-allowed as
- * "pure reads" either.
+ * Tools known to be read-only, used when the engine has no registry lookup (the MCP
+ * server's and the workflow CLI's engines are built as `new PermissionEngine(config)`).
+ * Every entry MUST be `isReadOnly` in the real registry (test/core-review.test.ts checks
+ * this): Sentinel's permission step auto-allows "pure reads", so a mutating or
+ * Sentinel-guarded tool listed here would skip the user's approval. Page/screen tools that
+ * must run in model order after an action — browser_screenshot / browser_get_text /
+ * browser_console / browser_network / browser_downloads (Sentinel-guarded) /
+ * computer_use_screenshot — are non-read-only and deliberately NOT here.
  */
 export const FALLBACK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'read_file', 'ls', 'glob', 'grep', 'code_graph_find_symbol',
@@ -267,7 +269,7 @@ export const FALLBACK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'code_graph_explain_symbol', 'code_graph_stats',
   'web_search', 'web_fetch', 'todo_read',
   'network_check',
-  'browser_console', 'browser_network', 'browser_status', 'browser_downloads',
+  'browser_status',
   'computer_use_screen_info', 'computer_use_active_window', 'computer_use_list_windows',
   'workflow_list', 'workflow_show',
   'mission_status', 'mission_list',

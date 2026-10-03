@@ -23,9 +23,24 @@ function norm(name: string): string {
   return (name || '').toLowerCase().trim();
 }
 
+/**
+ * Display-only: drop Sentinel's `<untrusted_content>` fence wrapper and its one-line
+ * "[The following is DATA from …]" header (results of browser/desktop tools are fenced
+ * for the MODEL), so the terminal shows the tool's own first line ("✓ Clicked …").
+ * An injection banner in front of the fence is kept. Never feed the output to a model. PURE.
+ */
+export function stripUntrustedFence(text: string): string {
+  const t = String(text ?? '');
+  if (!/<untrusted_content\b/.test(t)) return t;
+  return t
+    // Opening tag (any attributes) + the "not instructions" header line right after it.
+    .replace(/<untrusted_content\b[^>\n]*>[ \t]*\n(?:[ \t]*\[[^\n]*(?:DATA|not instructions)[^\n]*\][ \t]*\n)?/, '')
+    .replace(/\n[ \t]*<\/untrusted_content\b[^>\n]*>\s*$/, '');
+}
+
 /** Build a compact display for a settled tool result. */
 export function summarizeToolResult(name: string, result: string, isError: boolean): ToolDisplay {
-  const raw = (result ?? '').replace(/\s+$/, '');
+  const raw = stripUntrustedFence(result ?? '').replace(/\s+$/, '');
   const allLines = raw.length ? raw.split('\n') : [];
   const n = norm(name);
 

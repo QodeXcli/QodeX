@@ -70,7 +70,8 @@ const EXACT: Record<string, ToolActivity> = {
   safe_rename: act('Renaming', '✎', C.edit, 'edit'),
   safe_delete_file: act('Removing', '✕', C.edit, 'edit'),
 
-  // Shell / execution
+  // Shell / execution (`shell` is the canonical name; `bash` an alias models still emit)
+  shell: act('Running', '⚡', C.shell, 'shell'),
   bash: act('Running', '⚡', C.shell, 'shell'),
   code_run: act('Executing', '⚡', C.shell, 'shell'),
   auto_fix: act('Verifying', '⚡', C.shell, 'shell'),

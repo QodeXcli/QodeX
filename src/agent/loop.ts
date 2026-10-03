@@ -31,7 +31,7 @@ import { buildSkillsSystemBlock, suggestSkillForPrompt, getSkill, listSkills } f
 import { suggestUninstalledSkill } from '../skills/skill-sources.js';
 import { getBuiltinRolePrompt, builtinRoleAllowedTools, OPERATOR_ROLES } from '../llm/prompts/role-prompts.js';
 import { classifyTaskForPrompt, type PromptTaskClass } from './task-classifier.js';
-import { getApprovalBroker } from '../control/approvals.js';
+import { getApprovalBroker, safeOption } from '../control/approvals.js';
 import { resolveSentinelConfig } from '../config/agent-config.js';
 import type { SubAgentRunOptions, SubAgentResult, SubAgentBudgetOverride } from '../tools/builtin/task.js';
 import type { Message, ToolCall } from '../session/store.js';
@@ -49,7 +49,7 @@ import {
   readLoopAbortMessage, readLoopSummarizeMessage, stuckLoopMessage,
 } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
-import { getSentinel } from '../sentinel/index.js';
+import { getSentinel, scanInjection } from '../sentinel/index.js';
 import { classifyPromptClass, compileTaskBrief, formatTaskBrief, readNamedFileSnippets } from './task-brief.js';
 import { setActiveAgent, getActiveAgent } from './active.js';
 export { setActiveAgent, getActiveAgent } from './active.js';
@@ -147,6 +147,44 @@ export function operatorRoleBudget(perTaskLimitUsd: number): Required<SubAgentBu
 
 /** Agent tools that would spawn a nested sub-agent from inside a sub-agent. */
 const NESTED_AGENT_TOOLS = ['browser_agent', 'computer_use_agent'];
+
+/**
+ * Tools a sub-agent may never run, whatever the registry stand-in says: recursion
+ * (task/gather/orchestrate/fanout), nested operator agents, detached missions, and
+ * present_plan. Mirrors ToolRegistry.filterByMode's sub-agent set; enforced at
+ * execution as defense in depth (relevance gating and schemas only hide tools).
+ */
+const SUBAGENT_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'task', 'gather', 'orchestrate', 'fanout', 'present_plan', ...NESTED_AGENT_TOOLS, 'mission_start',
+]);
+
+/** Per-run execution policy handed to executeToolCall. */
+interface RunExecPolicy {
+  /** Tools the caller (or config: sub-agents off) blocked for this run — canonical or alias names. */
+  blocked: ReadonlySet<string>;
+}
+
+/**
+ * Expand an allow-list (custom role / command): `name*` → every registered tool with that
+ * prefix, a bare `*` → every tool, other entries → their canonical name (aliases resolve).
+ * Keeps the shipped schemas (registry.filterByMode matches exact names) and the execution
+ * check in agreement. PURE.
+ */
+export function expandAllowList(entries: string[], allNames: string[], canonical: (n: string) => string | undefined = () => undefined): string[] {
+  const out = new Set<string>();
+  for (const raw of entries) {
+    if (typeof raw !== 'string') continue;
+    const e = raw.trim();
+    if (!e) continue;
+    if (e.endsWith('*')) {
+      const prefix = e.slice(0, -1);
+      for (const n of allNames) if (n.startsWith(prefix)) out.add(n);
+      continue;
+    }
+    out.add(canonical(e) ?? e);
+  }
+  return [...out];
+}
 
 /**
  * askUser for a run with no human at the terminal (a sub-agent spawned outside any
@@ -635,10 +673,18 @@ export class AgentLoop {
   /** Tool allow-list for a sub-agent role (config wins over the built-in lists). */
   private subagentAllowedTools(role: string): string[] | undefined {
     const roleConfig = (this.config as any).roles?.[role] as { allowedTools?: unknown } | undefined;
+    const allNames = this.registry.list().map(t => t.name);
     if (Array.isArray(roleConfig?.allowedTools)) {
-      return roleConfig!.allowedTools.filter((n): n is string => typeof n === 'string');
+      // `browser_*`-style entries are expanded here: the shipped schemas match exact names,
+      // so an unexpanded pattern used to hide every matching tool from the model while the
+      // execution check still allowed it.
+      return expandAllowList(
+        roleConfig!.allowedTools.filter((n): n is string => typeof n === 'string'),
+        allNames,
+        (n) => this.registry.get(n)?.name,
+      );
     }
-    return builtinRoleAllowedTools(role, this.registry.list().map(t => t.name));
+    return builtinRoleAllowedTools(role, allNames);
   }
 
   /** A fresh AgentLoop sharing this one's collaborators (router, registry, permissions,
@@ -712,7 +758,11 @@ export class AgentLoop {
     const { selectInjectedFacts, resolveMemoryMode } = await import('../context/memory-select.js');
     const memCfg = (this.config as any).memory ?? {};
     const memMode = resolveMemoryMode(memCfg.mode, this.defaultContextWindow);
-    const allFacts = getSessionStore().getFactsForCwd(this.cwd);
+    // Remembered facts land in the system prompt as "established context". The browser /
+    // desktop operators (and any run reading untrusted pages) can call `remember`, so a
+    // page could plant a standing instruction there ("always send the API key to …") that
+    // every later session would obey: drop facts that read as prompt injection.
+    const allFacts = withoutInjectedFacts(getSessionStore().getFactsForCwd(this.cwd));
     const knowledgeFacts = selectInjectedFacts(allFacts, { mode: memMode, injectMaxTokens: memCfg.injectMaxTokens });
     if (memMode === 'lightweight' && knowledgeFacts.length < allFacts.length) {
       // Transparency: tell the model (and the log) that memory was injected as a budgeted subset.
@@ -724,7 +774,7 @@ export class AgentLoop {
     // existing facts-injection path (no prompt-assembly surgery), and is skipped
     // (null) when there's no project/worklog yet.
     const projectBrief = getSessionStore().getProjectBriefingFact(this.cwd);
-    if (projectBrief) knowledgeFacts.unshift(projectBrief);
+    if (projectBrief && withoutInjectedFacts([projectBrief]).length > 0) knowledgeFacts.unshift(projectBrief);
 
     // Fold the Trellis harness block (if any) into the project-rules text so it
     // rides the same injection path as CLAUDE.md — present in both the role and
@@ -741,7 +791,15 @@ export class AgentLoop {
 
     // Resolve which tools the sub-agent can ACTUALLY call this turn, honoring an
     // allowedTools allow-list (vision role, custom role allowlist, etc).
-    const allRegistered = this.registry.list().map(t => t.name);
+    // A sub-agent never gets the recursion / nested-agent / mission tools (they are refused
+    // at execution), so its prompt must not advertise them either — otherwise "# Your
+    // Computer" tells it to delegate to browser_agent / mission_start, which it can't.
+    // (Normal/plan keep the full list: the TUI builds this once and the mode can change.)
+    let allRegistered = this.registry.list().map(t => t.name);
+    if (mode === 'subagent') {
+      const visible = new Set(this.registry.filterByMode({ mode: 'subagent' }).map(t => t.name));
+      allRegistered = allRegistered.filter(n => visible.has(n) && !SUBAGENT_FORBIDDEN_TOOLS.has(n));
+    }
     const effectiveTools = allowedTools && allowedTools.length > 0
       ? allRegistered.filter(n => allowedTools.includes(n))
       : allRegistered;
@@ -1271,6 +1329,13 @@ export class AgentLoop {
     // restriction: relevance gating is skipped (it would hide role tools) and calls to
     // tools outside the list are refused in executeToolCall.
     const explicitAllowList = Array.isArray(mode.allowedTools);
+    // Tools the CALLER blocked for this run (e.g. nested agent tools for a sub-agent),
+    // captured before the perf-only tool diet below adds its entries: these, and the
+    // mode's own rules (plan = read-only, sub-agent = no recursion / missions), are
+    // enforced at execution — hiding a schema alone never stopped a model that names
+    // the tool anyway (text-recovered calls, hallucinated names).
+    const execBlocked = new Set<string>((mode.blockedTools ?? []).filter((n): n is string => typeof n === 'string'));
+    const execPolicy: RunExecPolicy = { blocked: execBlocked };
 
     // ── Tool diet (perf): config `tools.disabled` + AUTO PROFILE ──
     // Two layers, user always wins:
@@ -1345,8 +1410,39 @@ export class AgentLoop {
       if (!baseBlocked.includes('task')) {
         (mode as any).blockedTools = [...baseBlocked, 'task'];
       }
+      execBlocked.add('task');
     }
     const budget = this.makeBudget(options.budgetOverride);
+    // Wall-clock budget of THIS run's own work. Time spent inside delegated long-running
+    // tools (a sub-agent / mission / workflow replay with its own budget: timeoutSeconds 0
+    // or above the global tool timeout) and waiting for a human's Sentinel approval is
+    // excused: a 20-minute browser_agent (30-min operator budget) or a 9-minute remote
+    // approval used to kill the parent at its 600s cap right after the tool returned —
+    // before the model could even report the result.
+    const runWallSeconds = resolveRunBudget(this.config.budget, options.budgetOverride).maxWallSeconds;
+    let excusedWallMs = 0;
+    const budgetError = (): { message: string; budgetType: string } | null => {
+      try {
+        budget.checkpoint();
+        return null;
+      } catch (e: any) {
+        const usage = budget.getUsage();
+        if (e?.budgetType === 'time' && runWallSeconds > 0 && excusedWallMs > 0
+          && usage.wallTimeMs - excusedWallMs <= runWallSeconds * 1000) {
+          // Iterations are not checkpoint()'s job: the fuse (default cap) and the explicit
+          // caller cap are enforced right after this check.
+          return null;
+        }
+        return { message: String(e?.message ?? e), budgetType: e?.budgetType };
+      }
+    };
+    // tool_call ids whose result the loop saw as isError — the completion gate must never
+    // count those as evidence, whatever their text looks like.
+    const failedToolCallIds = new Set<string>();
+    // Prompt task class of this request: a 'web' / 'desktop' job always ships its tool
+    // family (the task addendum tells the model to use browser_* / computer_use_*; the
+    // keyword gate alone missed short requests like "compare prices of rtx 4090").
+    const requestClass = mode.mode === 'plan' ? 'general' : classifyTaskForPrompt(latestUserTextOf(messages));
     if (options.maxIterationsOverride !== undefined) {
       budget.setMaxIterations(options.maxIterationsOverride);
     }
@@ -1385,6 +1481,7 @@ export class AgentLoop {
     let statefulMaxTool = '';
     const afterResult = (tc: ToolCall, r: { content: string; isError?: boolean }) => {
       noteResult(tc.function.name, r);
+      if (r.isError && tc.id) failedToolCallIds.add(tc.id);
       const p = pendingStateful.get(tc);
       if (!p) return;
       pendingStateful.delete(tc);
@@ -1414,10 +1511,7 @@ export class AgentLoop {
     // Scope guard: did the user ask for run/install/test? If not, a one-time advisory fires the
     // first time the model wanders into starting a dev server or installing packages on its own.
     // Derive the latest user message from `messages` (no `userPrompt` param in this method's scope).
-    const latestUserText = (() => {
-      const lu = [...messages].reverse().find(m => m.role === 'user');
-      return typeof lu?.content === 'string' ? lu.content : '';
-    })();
+    const latestUserText = latestUserTextOf(messages);
     const runBrief = compileTaskBrief(latestUserText);
     const runEffort = options.reasoningEffort
       ?? (runBrief.effort === 'high' ? 'high' as const : undefined);
@@ -1560,11 +1654,10 @@ export class AgentLoop {
     let promptHighWater = 0;
 
     while (true) {
-      try {
-        budget.incrementIteration();
-        budget.checkpoint();
-      } catch (e: any) {
-        yield { type: 'error', data: { message: e.message, budgetType: e.budgetType } };
+      budget.incrementIteration();
+      const exceeded = budgetError();
+      if (exceeded) {
+        yield { type: 'error', data: { message: exceeded.message, budgetType: exceeded.budgetType } };
         return;
       }
 
@@ -1727,6 +1820,15 @@ export class AgentLoop {
         // A per-turn set would drop families as the signal window slides, flipping the
         // tool block and invalidating the (cloud) prompt cache / (local) KV-cache prefix.
         for (const s of gated.schemas) this.sessionToolNames.add(s.function.name);
+        // The request's task class decides the playbook the system prompt got; ship the
+        // tools that playbook names (web → browser_/vault_, desktop → computer_use_).
+        const classPrefixes = requestClass === 'web' ? ['browser_', 'vault_']
+          : requestClass === 'desktop' ? ['computer_use_'] : [];
+        if (classPrefixes.length > 0) {
+          for (const s of schemasForModeAll) {
+            if (classPrefixes.some(p => s.function.name.startsWith(p))) this.sessionToolNames.add(s.function.name);
+          }
+        }
         schemasForMode = schemasForModeAll.filter(s => this.sessionToolNames.has(s.function.name));
         if (schemasForMode.length < schemasForModeAll.length) {
           logger.info('Tool gating active', {
@@ -2448,7 +2550,7 @@ export class AgentLoop {
         // (never locks). Off-switch: discipline.completionGate: false.
         if (!this.completionGateFired &&
             (this.config as any).discipline?.completionGate !== false) {
-          const correction = evaluateCompletion(assistantText, messages.concat(newMessages));
+          const correction = evaluateCompletion(assistantText, messages.concat(newMessages), { failedToolCallIds });
           if (correction) {
             this.completionGateFired = true;
             const repairMsg: Message = { role: 'user', content: correction };
@@ -2674,7 +2776,11 @@ export class AgentLoop {
       const readOnlyCalls: ToolCall[] = [];
       const mutatingCalls: ToolCall[] = [];
       for (const tc of toolCalls) {
-        if (this.registry.isReadOnly(tc.function.name)) readOnlyCalls.push(tc);
+        // Read-only browser/desktop OBSERVERS (browser_status, computer_use_active_window,
+        // …) read live state that this very turn's actions change: they keep model order
+        // (each runs solo in the ordered phase) instead of jumping ahead in the parallel
+        // read-only phase — "[navigate, status]" must report the page it navigated to.
+        if (this.registry.isReadOnly(tc.function.name) && !isStateDependentTool(tc.function.name)) readOnlyCalls.push(tc);
         else mutatingCalls.push(tc);
       }
 
@@ -2683,12 +2789,14 @@ export class AgentLoop {
         const results = await Promise.all(
           readOnlyCalls.map(async tc => {
             const t0 = Date.now();
-            const r = await this.executeToolCall(tc, txn, sessionId, options);
+            const r = await this.executeToolCall(tc, txn, sessionId, options, execPolicy);
             this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
             return r;
           }),
         );
         budget.noteProgress();
+        // Calls ran concurrently: excuse the longest delegated/approval wait, not the sum.
+        excusedWallMs += Math.max(0, ...results.map(r => r.excusedMs ?? 0));
         for (let i = 0; i < readOnlyCalls.length; i++) {
           const tc = readOnlyCalls[i]!;
           const r = results[i]!;
@@ -2722,9 +2830,10 @@ export class AgentLoop {
           // Single → execute as before
           const tc = batch[0]!;
           const t0 = Date.now();
-          const r = await this.executeToolCall(tc, txn, sessionId, options);
+          const r = await this.executeToolCall(tc, txn, sessionId, options, execPolicy);
           this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
           budget.noteProgress();
+          excusedWallMs += r.excusedMs ?? 0;
           yield { type: 'tool_result', data: { id: tc.id, name: tc.function.name, result: r.content, isError: r.isError, metadata: r.metadata } };
           if (r.isError) this.recordToolFailure(tc.function.name, r.content);
           afterResult(tc, r);
@@ -2743,12 +2852,13 @@ export class AgentLoop {
           const results = await Promise.all(
             batch.map(async tc => {
               const t0 = Date.now();
-              const r = await this.executeToolCall(tc, txn, sessionId, options);
+              const r = await this.executeToolCall(tc, txn, sessionId, options, execPolicy);
               this.noteToolInsight(sessionId, tc.function.name, r, Date.now() - t0);
               return r;
             }),
           );
           budget.noteProgress();
+          excusedWallMs += Math.max(0, ...results.map(r => r.excusedMs ?? 0));
           for (let i = 0; i < batch.length; i++) {
             const tc = batch[i]!;
             const r = results[i]!;
@@ -2892,12 +3002,36 @@ export class AgentLoop {
     }
   }
 
+  /**
+   * Refusal text when the run's MODE forbids `name` (plan = read-only + planning tools;
+   * sub-agent = no recursion / nested agents / missions) or the caller blocked it for this
+   * run; null when allowed. Unknown names fall through (the registry reports them).
+   */
+  private modeRefusal(name: string, mode: ToolExecutionMode | undefined, policy: RunExecPolicy | undefined): string | null {
+    const tool = this.registry.get(name);
+    if (!tool) return null;
+    const m = mode?.mode ?? 'normal';
+    // Normal mode keeps every tool runnable (its schema filter only hides present_plan,
+    // which the normal-mode prompt still asks for on high-risk changes).
+    const modeAllows = m === 'normal' || (this.registry.filterByMode({ mode: m }).some(t => t.name === tool.name)
+      && !(m === 'subagent' && SUBAGENT_FORBIDDEN_TOOLS.has(tool.name)));
+    const blocked = !!policy && (policy.blocked.has(tool.name) || policy.blocked.has(name));
+    if (modeAllows && !blocked) return null;
+    const why = !modeAllows && m === 'plan'
+      ? 'plan mode only allows read-only and planning tools — present the plan; the work happens after it is approved'
+      : !modeAllows && m === 'subagent'
+        ? 'a sub-agent cannot start other agents, sub-agents or missions — only the top-level agent can; do the work with your own tools or report back'
+        : 'it is disabled for this run';
+    return `[TOOL_NOT_ALLOWED] '${name}' is not available here: ${why}.`;
+  }
+
   private async executeToolCall(
     tc: ToolCall,
     transaction: Transaction,
     sessionId: string,
     options: AgentOptions,
-  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[]; metadata?: Record<string, unknown> }> {
+    policy?: RunExecPolicy,
+  ): Promise<{ content: string; isError?: boolean; uiEvents: ToolUIEvent[]; metadata?: Record<string, unknown>; excusedMs?: number }> {
     const uiEvents: ToolUIEvent[] = [];
     let args: any;
     try {
@@ -2935,6 +3069,10 @@ export class AgentLoop {
       }
     }
 
+    // ─── Mode / caller restrictions (plan = read-only, sub-agent = no recursion) ───
+    const refusal = this.modeRefusal(tc.function.name, options.mode, policy);
+    if (refusal) return { content: refusal, isError: true, uiEvents };
+
     // Per-tool abort controller. We compose two sources of abort:
     //   1. Outer agent signal (user pressed Ctrl+C) → cascades to inner
     //   2. Per-tool timeout → also triggers inner abort
@@ -2954,10 +3092,15 @@ export class AgentLoop {
     // Per-tool timeout: the tool's own `timeoutSeconds` (0 = none — e.g. an autonomous
     // browser sub-agent with its own wall-clock budget; n = max(global, n)), else the
     // global budget.toolTimeoutSeconds (default 300s).
-    const timeoutSec = resolveToolTimeoutSeconds(
-      this.config.budget?.toolTimeoutSeconds,
-      this.registry.get(tc.function.name)?.timeoutSeconds,
-    );
+    const declaredTimeout = this.registry.get(tc.function.name)?.timeoutSeconds;
+    const timeoutSec = resolveToolTimeoutSeconds(this.config.budget?.toolTimeoutSeconds, declaredTimeout);
+    // A tool that declares its own long budget (0 = none, or above the global cap) is a
+    // delegated job — sub-agent, mission, workflow replay — whose run time is excused from
+    // the parent's wall-clock budget (see budgetError in run()).
+    const globalTimeoutSec = resolveToolTimeoutSeconds(this.config.budget?.toolTimeoutSeconds, undefined);
+    const delegatedTool = typeof declaredTimeout === 'number' && Number.isFinite(declaredTimeout)
+      && (declaredTimeout === 0 || (globalTimeoutSec > 0 && declaredTimeout > globalTimeoutSec));
+    let excusedMs = 0;
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     // With no timeout, the race is settled by the tool itself — or by cancellation: a
     // no-timeout tool that ignores ctx.signal must still not hang the loop after Ctrl+C.
@@ -2985,12 +3128,26 @@ export class AgentLoop {
       }, timeoutSec * 1000);
     });
 
+    const boundAsk = askUserBoundTo(options.askUser, toolAbort.signal);
+    let inPreflight = false;
     const ctx: ToolContext = {
       cwd: this.effectiveCwd ?? this.cwd,
       sessionId,
       transaction,
       permissions: this.permissions,
-      askUser: options.askUser,
+      // An approval pending when the call is cancelled (Esc / Ctrl+C / tool timeout)
+      // resolves to the SAFE answer at once: a human answering the stale prompt later
+      // must never let a cancelled write / command / purchase go ahead. Time the human
+      // takes to answer is excused from the run's wall budget (preflight measures its own
+      // span; a delegated tool's whole run is excused already — never count twice).
+      askUser: async (prompt: string, opts?: string[]) => {
+        const asked = Date.now();
+        try {
+          return await boundAsk(prompt, opts);
+        } finally {
+          if (!inPreflight && !delegatedTool) excusedMs += Date.now() - asked;
+        }
+      },
       emit: (ev) => {
         uiEvents.push(ev);
         if (options.onToolUI) options.onToolUI(ev);
@@ -3043,7 +3200,10 @@ export class AgentLoop {
     try {
       // ─── Within-turn read-only cache: short-circuit if we have the result ───
       const tool = this.registry.get(tc.function.name);
-      if (this.toolCache && tool && tool.isReadOnly) {
+      // Live-state observers (browser_status, computer_use_active_window, …) are never
+      // cached: an action earlier in this same turn changes what they report.
+      const cacheable = !!tool && tool.isReadOnly && !isStateDependentTool(tool.name);
+      if (this.toolCache && cacheable) {
         const cached = this.toolCache.get(tc.function.name, args);
         if (cached) {
           logger.info('Tool result cache hit', { tool: tc.function.name });
@@ -3143,19 +3303,35 @@ export class AgentLoop {
         ? this.registry.prepare(tc.function.name, args)
         : { ok: false as const };
       if (prepared.ok) {
-        const veto = await getSentinel().preflight(prepared.tool.name, prepared.args, ctx, {
-          untrustedOutput: prepared.tool.untrustedOutput === true,
-          isReadOnly: prepared.tool.isReadOnly,
-        });
+        // A human may take minutes to answer (remote approvals wait up to
+        // sentinel.remoteApprovalTimeoutSec): that wait is not this run's work.
+        const reviewStarted = Date.now();
+        inPreflight = true;
+        let veto: Awaited<ReturnType<ReturnType<typeof getSentinel>['preflight']>>;
+        try {
+          veto = await getSentinel().preflight(prepared.tool.name, prepared.args, ctx, {
+            untrustedOutput: prepared.tool.untrustedOutput === true,
+            isReadOnly: prepared.tool.isReadOnly,
+          });
+        } finally {
+          inPreflight = false;
+          excusedMs += Date.now() - reviewStarted;
+        }
         if (veto) {
-          return { content: veto.content, isError: true, uiEvents };
+          return { content: veto.content, isError: true, uiEvents, excusedMs };
         }
       }
 
-      let result = await Promise.race([
-        this.registry.execute(tc.function.name, args, ctx),
-        armTimeout(),
-      ]);
+      const execStarted = Date.now();
+      let result: Awaited<ReturnType<ToolRegistry['execute']>>;
+      try {
+        result = await Promise.race([
+          this.registry.execute(tc.function.name, args, ctx),
+          armTimeout(),
+        ]);
+      } finally {
+        if (delegatedTool) excusedMs += Date.now() - execStarted;
+      }
 
       // ─── Universal spill guard (THE choke point for oversized results) ───
       // Every tool result passes through here before it can become message
@@ -3192,7 +3368,7 @@ export class AgentLoop {
       }
 
       // Store successful read-only results in cache
-      if (this.toolCache && tool && tool.isReadOnly && !result.isError && typeof result.content === 'string') {
+      if (this.toolCache && cacheable && !result.isError && typeof result.content === 'string') {
         this.toolCache.set(tc.function.name, args, result.content);
       }
 
@@ -3274,7 +3450,7 @@ export class AgentLoop {
         }
       }
 
-      return { content: finalContent, isError: result.isError, uiEvents, metadata: result.metadata as Record<string, unknown> | undefined };
+      return { content: finalContent, isError: result.isError, uiEvents, metadata: result.metadata as Record<string, unknown> | undefined, excusedMs };
     } catch (e: any) {
       // Timeout or outer cancel → both surfaced as user-friendly observations.
       const timedOut = e.code === 'TOOL_TIMEOUT' || toolAbort.signal.reason === 'TOOL_TIMEOUT';
@@ -3285,12 +3461,13 @@ export class AgentLoop {
             `Try a smaller scope, a shorter timeout_seconds, or a different approach.`,
           isError: true,
           uiEvents,
+          excusedMs,
         };
       }
       if (toolAbort.signal.aborted) {
-        return { content: `[CANCELLED] Tool '${tc.function.name}' was cancelled by user.`, isError: true, uiEvents };
+        return { content: `[CANCELLED] Tool '${tc.function.name}' was cancelled by user.`, isError: true, uiEvents, excusedMs };
       }
-      return { content: transformError(e, tc), isError: true, uiEvents };
+      return { content: transformError(e, tc), isError: true, uiEvents, excusedMs };
     } finally {
       clearTimeout(timeoutHandle);
       if (onToolAbort) toolAbort.signal.removeEventListener('abort', onToolAbort);
@@ -3576,6 +3753,47 @@ export class AgentLoop {
 }
 
 
+/**
+ * `ask` raced against `signal`: once the signal aborts, a pending (or later) question
+ * resolves to the safe option of its own options (else 'no') — the late answer is ignored.
+ */
+export function askUserBoundTo(
+  ask: AgentOptions['askUser'],
+  signal: AbortSignal,
+): AgentOptions['askUser'] {
+  return (prompt: string, options?: string[]) => {
+    const safe = safeOption(Array.isArray(options) && options.length > 0 ? options : ['yes', 'no']) ?? 'no';
+    if (signal.aborted) return Promise.resolve(safe);
+    return new Promise<string>((resolve, reject) => {
+      const onAbort = () => resolve(safe);
+      signal.addEventListener('abort', onAbort, { once: true });
+      Promise.resolve()
+        .then(() => ask(prompt, options))
+        .then(
+          (a) => { signal.removeEventListener('abort', onAbort); resolve(a); },
+          (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+        );
+    });
+  };
+}
+
+/** `facts` minus the ones Sentinel's injection scan flags as high severity (logged). */
+function withoutInjectedFacts(facts: string[]): string[] {
+  const kept: string[] = [];
+  for (const f of facts) {
+    let flagged = false;
+    try { flagged = scanInjection(String(f ?? '')).some(x => x.severity === 'high'); } catch { flagged = false; }
+    if (flagged) logger.warn('Dropped a remembered fact that reads as prompt injection', { fact: String(f).slice(0, 120) });
+    else kept.push(f);
+  }
+  return kept;
+}
+
+/** Text of the latest user message (empty when none / non-string). PURE. */
+function latestUserTextOf(messages: Message[]): string {
+  const lu = [...messages].reverse().find(m => m.role === 'user');
+  return typeof lu?.content === 'string' ? lu.content : '';
+}
 
 /**
  * Strip standalone JSON objects from text.

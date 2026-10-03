@@ -27,7 +27,7 @@ import {
   resolveScopeRoot,
   setWriteScopeRoot,
 } from '../../agent/autonomy-contract.js';
-import { getApprovalBroker, setInteractiveHuman } from '../../control/approvals.js';
+import { getApprovalBroker, isApproval, normalizeAnswer, setInteractiveHuman } from '../../control/approvals.js';
 import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.js';
 
 /**
@@ -42,6 +42,48 @@ import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.j
 export function headlessAnswer(options: string[] | undefined, autoYes: boolean): string {
   const opts = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
   return headlessAskChoice(opts, autoYes).choice;
+}
+
+/**
+ * The askUser of an unattended `--print` run: the fixed `headlessAnswer` policy, reported
+ * on stdout (`--json`: a `permission_request` line) or stderr (text mode, denials only).
+ *
+ * When a remote approval channel (control center / Telegram) lives in this process, the
+ * prompt also goes through the ApprovalBroker so it is published (bus + channels) and
+ * audited, with the policy as the local asker that answers it. A policy answer the broker
+ * can't map onto the prompt's options — 'reject' for a choice like ['React', 'Vue'] — is
+ * answered directly instead: the broker would drop it and the run would wait
+ * forever for a remote human.
+ */
+export function makeHeadlessAskUser(opts: {
+  autoYes: boolean;
+  json: boolean;
+  /** stdout writer (default process.stdout.write). */
+  write?: (line: string) => void;
+  /** stderr reporter for denials in text mode (default console.error). */
+  warn?: (line: string) => void;
+}): (prompt: string, options?: string[]) => Promise<string> {
+  const write = opts.write ?? ((line: string) => { process.stdout.write(line); });
+  const warn = opts.warn ?? ((line: string) => { console.error(line); });
+  const policyAsk = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+    const answer = headlessAnswer(options, opts.autoYes);
+    const approved = isApproval(answer, options);
+    if (opts.json) {
+      write(JSON.stringify({ type: 'permission_request', prompt, options, answer, denied: !approved }) + '\n');
+    } else if (!approved) {
+      warn(`Permission request: ${prompt} → auto-denied in headless mode (use --yes to auto-approve)`);
+    }
+    return answer;
+  };
+  return async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+    const opts2 = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
+    const broker = getApprovalBroker();
+    if (broker.hasRemoteChannel() && normalizeAnswer(headlessAnswer(opts2, opts.autoYes), opts2) !== null) {
+      const r = await broker.request({ prompt, options: opts2, source: 'headless' }, (p, o) => policyAsk(p, o));
+      return r.answer;
+    }
+    return policyAsk(prompt, opts2);
+  };
 }
 
 export interface HeadlessOptions {
@@ -203,29 +245,10 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // all). Recreated per iteration so state never leaks across turns.
   let display = new StreamDisplayFilter();
 
-  // The fixed unattended policy (see headlessAnswer). Approvals under --yes stay quiet in
-  // text mode (as before); denials are always reported so the user knows why a step failed.
-  const policyAsk = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    const { choice: answer, denied } = headlessAskChoice(options.length ? options : ['yes', 'no'], !!opts.autoApproveAll);
-    const approved = !denied;
-    if (opts.json) {
-      process.stdout.write(JSON.stringify({ type: 'permission_request', prompt, options, answer, denied: !approved }) + '\n');
-    } else if (!approved) {
-      console.error(`Permission request: ${prompt} → auto-denied in headless mode (use --yes to auto-approve)`);
-    }
-    return answer;
-  };
-  // Brokered semantics: when a remote approval channel (control center / Telegram) lives
-  // in this process, the prompt also goes through the ApprovalBroker so it is published
-  // (bus + channels) and audited; the local policy answers it.
-  const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
-    const broker = getApprovalBroker();
-    if (broker.hasRemoteChannel()) {
-      const r = await broker.request({ prompt, options, source: 'headless' }, (p, o) => policyAsk(p, o));
-      return r.answer;
-    }
-    return policyAsk(prompt, options);
-  };
+  // The fixed unattended policy (see headlessAnswer / makeHeadlessAskUser). Approvals under
+  // --yes stay quiet in text mode (as before); denials are always reported so the user knows
+  // why a step failed. Brokered (published + audited) when a remote channel is attached.
+  const askUser = makeHeadlessAskUser({ autoYes: !!opts.autoApproveAll, json: opts.json });
 
   // SIGTERM (scheduler hard-kill, `kill`, a supervising process) cancels the run cleanly:
   // the loop sees the abort, rolls back the pending transaction and stops. SIGINT is

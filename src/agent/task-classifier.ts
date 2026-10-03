@@ -59,7 +59,9 @@ export function normalizeForClassify(text: string): string {
 
 /** Popular sites people name without a TLD. github/gitlab are deliberately absent:
  *  "open a PR on github" is usually a coding request. */
-const KNOWN_SITES_EN = 'amazon|ebay|aliexpress|etsy|walmart|bestbuy|youtube|twitter|linkedin|facebook|instagram|reddit|gmail|booking\\.com|airbnb|expedia|tripadvisor|skyscanner|kayak|craigslist|netflix|spotify|opentable|uber eats|doordash';
+const KNOWN_SITES_EN = 'amazon|ebay|aliexpress|etsy|walmart|bestbuy|youtube|twitter|linkedin|facebook|instagram|reddit|gmail|booking\\.com|airbnb|expedia|tripadvisor|skyscanner|kayak|craigslist|netflix|spotify|opentable|uber eats|doordash'
+  // Iranian sites written in Latin script (tool-relevance's SITE_NAME_KEYWORDS knows them too).
+  + '|digikala|divar|snappfood|snapp|tapsi|torob|aparat|basalam|sheypoor|filimo|namava|cafebazaar|jabama|alibaba\\.ir';
 const KNOWN_SITES_FA = 'دیجی ?کالا|دیجیکالا|دیوار|اسنپ ?فود|اسنپ ?تریپ|اسنپ|تپسی|علی ?بابا|ترب|باسلام|شیپور|آپارات|فیلیمو|نماوا|کافه ?بازار|جاباما|اینستاگرام|توییتر|لینکدین|یوتیوب|گوگل|آمازون|جیمیل';
 
 /** Navigation intent ("go to", "visit", "log in to", ...). */
@@ -72,7 +74,7 @@ const KNOWN_SITE_FA_RE = new RegExp(`(${KNOWN_SITES_FA})`);
 const CODE_MARKER_RE = /(\b[\w-]+\.(?:tsx?|jsx?|mjs|cjs|py|php|rb|go|rs|java|kt|swift|vue|svelte|css|scss|less|html?|json|ya?ml|toml|md|sql|sh)\b|\bsrc\/|\bcodebase\b|\bpull request\b|\bstack ?trace\b|\bunit tests?\b|\btest suite\b)/;
 
 /** Coding intent (English). Either a plainly technical word, or a build verb aimed at a UI/code noun. */
-const CODING_WORD_RE = /\b(implement|refactor|debug|fix|bug|bugs|scaffold|redesign|deploy|compile|lint|coding|code|function|component|class|module|endpoint|api|exception|crash|stack ?trace|repo|repository|codebase|landing ?page|css|html|jsx|tsx|react|vue|svelte|angular|next\.?js|tailwind|typescript|javascript|python|django|laravel|php|wordpress (?:theme|plugin)|readme|changelog|docstring|regex|schema|migration|unit tests?)\b/;
+const CODING_WORD_RE = /\b(implement|refactor|debug|fix|bug|bugs|scaffold|redesign|deploy|compile|lint|coding|code|function|component|class|module|endpoint|api|exception|crash|stack ?trace|repo|repository|codebase|landing ?page|css|html|jsx|tsx|react|vue|svelte|angular|next\.?js|tailwind|typescript|javascript|python|django|laravel|php|wordpress (?:theme|plugin)|readme|changelog|docstring|regex|schema|migration|unit tests?|npm|npx|yarn|pnpm|node_modules|webpack|vite|dev server)\b/;
 const CODING_BUILD_RE = /\b(build|create|make|add|write|design|develop|style|generate|update|change|edit)\b[^.!?\n]{0,60}\b(sites?|website|web ?app|apps?|pages?|form|forms|button|component|layout|navbar|header|footer|modal|ui|ux|frontend|backend|dashboard|feature|flow|template|widget|section|hero|logo|link|links|route|handler|validation|script|bot|scraper|crawler|extension|toggle|dark mode|theme|animation|icon|menu)\b/;
 /** Persian coding intent: technical words, or a build verb whose object is a site/UI/code
  *  noun ("یه سایت فروشگاهی بساز"). The object must precede the verb without an ' و '

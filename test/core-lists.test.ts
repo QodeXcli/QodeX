@@ -21,13 +21,17 @@ describe('permissions read-only fallback list', () => {
   const eng = new PermissionEngine(minimalConfig);
   const ev = (tool: string) => eng.evaluate({ tool, operation: `${tool}:x` });
   it('auto-allows the new read-only platform tools', () => {
-    for (const t of ['browser_console', 'browser_network', 'browser_status', 'browser_downloads', 'computer_use_screen_info',
+    for (const t of ['browser_status', 'computer_use_screen_info',
       'computer_use_active_window', 'computer_use_list_windows', 'workflow_list', 'workflow_show', 'mission_status', 'mission_list', 'vault_list']) {
       expect(ev(t), t).toBe('allow');
     }
   });
   it('no longer treats page/screen observers as pure reads', () => {
-    for (const t of ['browser_screenshot', 'browser_get_text', 'computer_use_screenshot', 'browser_click', 'mission_start']) {
+    // browser_console / browser_network / browser_downloads are non-read-only in the real
+    // registry (ordered after actions; browser_downloads is Sentinel-guarded) — listing them
+    // here auto-allowed Sentinel's permission step for them.
+    for (const t of ['browser_screenshot', 'browser_get_text', 'computer_use_screenshot', 'browser_click', 'mission_start',
+      'browser_console', 'browser_network', 'browser_downloads']) {
       expect(FALLBACK_READ_ONLY_TOOLS.has(t), t).toBe(false);
       expect(ev(t), t).toBe('ask');
     }

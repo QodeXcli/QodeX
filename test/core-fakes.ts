@@ -55,7 +55,8 @@ export class FakeRegistry {
     let tools = this.list();
     if (mode.mode === 'plan') tools = tools.filter(t => t.isReadOnly || t.name === 'present_plan' || t.name.startsWith('todo_'));
     else if (mode.mode === 'subagent') {
-      const noRecursion = new Set(['task', 'gather', 'orchestrate', 'fanout', 'present_plan']);
+      // Same set as the real ToolRegistry.filterByMode.
+      const noRecursion = new Set(['task', 'gather', 'orchestrate', 'fanout', 'present_plan', 'browser_agent', 'computer_use_agent', 'mission_start']);
       tools = tools.filter(t => !noRecursion.has(t.name));
     } else tools = tools.filter(t => t.name !== 'present_plan');
     if (mode.allowedTools) tools = tools.filter(t => mode.allowedTools!.includes(t.name));

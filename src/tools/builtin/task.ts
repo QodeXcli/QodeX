@@ -86,6 +86,24 @@ const TaskArgs = z.object({
   role: z.string().describe('Role for this sub-agent. Built-in: "subagent" (default), "vision" (image analysis), "browser" (drives your dedicated browser on a web goal), "computer" (drives the desktop apps). Custom roles from config.roles.* also accepted.').optional(),
 });
 
+/**
+ * The report of a browser/desktop operator sub-agent is built from page/window text — it
+ * is untrusted DATA for the parent, exactly like browser_agent's report: scan it for
+ * prompt injection and fence it (Sentinel's own afterTool, so sentinel.enabled /
+ * injectionDefense and the audit/bus reporting apply). Our status line stays outside the
+ * fence. Best-effort: returns the text unchanged if Sentinel can't be loaded.
+ */
+async function fenceOperatorReport(text: string, role: string): Promise<string> {
+  if (!text) return text;
+  try {
+    const { getSentinel } = await import('../../sentinel/index.js');
+    const r = getSentinel().afterTool(`task:${role}`, { role }, { content: text }, { untrustedOutput: true });
+    return typeof r?.content === 'string' ? r.content : text;
+  } catch {
+    return text;
+  }
+}
+
 /** Default iteration caps: operator roles need more rounds (observe → act → verify). */
 const DEFAULT_MAX_ITERATIONS = 8;
 const OPERATOR_ROLE_MAX_ITERATIONS = 25;
@@ -161,6 +179,7 @@ export class TaskTool extends Tool<z.infer<typeof TaskArgs>> {
       askUser: typeof ctx.askUser === 'function' ? ctx.askUser : undefined,
     });
     const elapsedSec = Math.round((Date.now() - start) / 1000);
+    const report = operatorRole ? await fenceOperatorReport(result.finalText, role!) : result.finalText;
 
     if (!result.ok) {
       return {
@@ -168,7 +187,7 @@ export class TaskTool extends Tool<z.infer<typeof TaskArgs>> {
           `[SUBAGENT_FAILED] Sub-agent "${args.description}" failed after ${result.toolCallsRun} tool call(s) in ${elapsedSec}s.\n` +
           `Model: ${result.modelUsed ?? 'unknown'}\n` +
           `Error: ${result.error ?? 'unknown'}\n` +
-          `Partial output:\n${result.finalText || '(none)'}`,
+          `Partial output:\n${report || '(none)'}`,
         isError: true,
         metadata: { subSessionId, toolCallsRun: result.toolCallsRun, elapsedSec, modelUsed: result.modelUsed },
       };
@@ -178,7 +197,7 @@ export class TaskTool extends Tool<z.infer<typeof TaskArgs>> {
       content:
         `[SUBAGENT_DONE] "${args.description}" — completed in ${result.toolCallsRun} tool call(s), ${elapsedSec}s` +
         `${result.modelUsed ? ` (model: ${result.modelUsed})` : ''}\n\n` +
-        `--- Sub-agent summary ---\n${result.finalText}`,
+        `--- Sub-agent summary ---\n${report}`,
       metadata: { subSessionId, toolCallsRun: result.toolCallsRun, elapsedSec, ok: true, modelUsed: result.modelUsed },
     };
   }

@@ -552,7 +552,9 @@ export function detectComputerFamilies(toolNames: string[]): ComputerFamilies {
   const has = (prefix: string) => names.some(n => n.startsWith(prefix));
   const browser = has('browser_');
   const desktop = has('computer_use_');
-  const missions = has('mission_');
+  // The Missions bullet tells the model to START one: only when it can (a sub-agent keeps
+  // mission_status / mission_list but never gets mission_start).
+  const missions = names.includes('mission_start');
   return {
     browser,
     browserAgent: names.includes('browser_agent'),
