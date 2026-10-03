@@ -50,6 +50,8 @@ export function register(on) {
       immediate: true,
     })
     visible = (await $.store.get('visible')) === true
+    // The band may already have been drawn (empty) before this ran: draw it again now.
+    if (visible) $.ui.invalidate('ui.render')
     return next(e)
   })
 

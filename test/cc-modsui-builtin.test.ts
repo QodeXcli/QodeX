@@ -199,6 +199,7 @@ describe('context-bar', () => {
     const m = await loadMod('context-bar', { usage: usage() });
     await m.fire('session.start', { sessionId: 's', cwd: '/w', surface: 'terminal' });
     expect(m.state.commands).toEqual([expect.objectContaining({ name: 'context-bar', immediate: true })]);
+    expect(m.state.invalidations).toBe(0);
     expect(await m.fire('ui.render', band)).toBeUndefined();
   });
 
@@ -213,6 +214,8 @@ describe('context-bar', () => {
 
     const again = await loadMod('context-bar', { usage: usage(), store });
     await again.fire('session.start', { sessionId: 's2', cwd: '/w', surface: 'terminal' });
+    // The band may have been drawn before session.start restored "on": it asks for a redraw.
+    expect(again.state.invalidations).toBe(1);
     expect(await again.fire('ui.render', band)).toBeTruthy();
     expect(await again.fire('command.run', { command: 'context-bar', args: 'off' })).toEqual({ text: 'Context bar off.' });
     expect(store.get('visible')).toBe(false);
