@@ -62,6 +62,7 @@ import type { ActionClassification, SentinelDecision, SentinelGuard } from './ty
 import {
   AUTO_MODE_ASKS, autoModeAskReason, clearSentinelApproval, isAutonomousContext, recordSentinelApproval, rootsFor,
 } from './auto-mode.js';
+import { askLocalWithTimeout, autoModeTimeoutMessage, unattendedTimeoutSec } from '../security/human-approval.js';
 
 export interface SentinelOptions {
   /** Config source (default: resolveSentinelConfig(getActiveConfig())). */
@@ -523,7 +524,7 @@ export class Sentinel implements SentinelGuard {
       const r = verdict.via === 'needs-human'
         ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, CRITICAL_OPTIONS, verdict.autoReason)
         : verdict.via === 'auto-asks'
-          ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, ASK_OPTIONS, verdict.autoReason)
+          ? await this.askHuman(toolName, a, ctx, cls, d.prompt, cfg, ASK_OPTIONS, verdict.autoReason, true)
           : await this.askPermission(toolName, a, ctx, cls, d.prompt, cfg);
       // A human said yes: the MCP wrapper must not ask the same thing again (takeSentinelApproval).
       if (!r) recordSentinelApproval(ctx, toolName);
@@ -542,12 +543,20 @@ export class Sentinel implements SentinelGuard {
    */
   private async askHuman(
     toolName: string, args: Record<string, unknown>, ctx: ToolContext, cls: PolicyClassification, prompt: string, cfg: SentinelConfig,
-    options: string[] = CRITICAL_OPTIONS, autoReason?: string,
+    options: string[] = CRITICAL_OPTIONS, autoReason?: string, autoAsk = false,
   ): Promise<ToolResult | null> {
     this.progress(ctx, `🛡 Sentinel: waiting for a human to approve — ${cls.summary}`);
     let answer: string;
     let by = 'local';
-    if (this.interactive()) {
+    if (this.interactive() && autoAsk && cls.risk !== 'critical') {
+      // Auto mode's own asks give up after approval.unattendedTimeoutSec at the terminal (an
+      // unattended auto run keeps going); critical prompts (the branch below) keep waiting.
+      const r = await askLocalWithTimeout(
+        () => raceAbort(Promise.resolve().then(() => ctx.askUser(prompt, options)), ctx.signal, 'no'), prompt, options, unattendedTimeoutSec());
+      answer = r.answer;
+      if (ctx.signal?.aborted) by = 'abort';
+      else if (r.by === 'timeout') by = 'auto-timeout';
+    } else if (this.interactive()) {
       answer = await raceAbort(Promise.resolve().then(() => ctx.askUser(prompt, options)), ctx.signal, 'no');
       if (ctx.signal?.aborted) by = 'abort';
     } else {
@@ -569,7 +578,7 @@ export class Sentinel implements SentinelGuard {
       this.report(cfg, toolName, args, ctx, cls, 'allow', 'human', answer, by);
       return null;
     }
-    this.report(cfg, toolName, args, ctx, cls, 'deny', by === 'timeout' ? 'timeout' : 'human', answer, by);
+    this.report(cfg, toolName, args, ctx, cls, 'deny', by === 'timeout' || by === 'auto-timeout' ? 'timeout' : 'human', answer, by);
     return this.denied(this.declineMessage(cls, by, cfg), cls, 'human');
   }
 
@@ -593,6 +602,7 @@ export class Sentinel implements SentinelGuard {
   }
 
   private declineMessage(cls: PolicyClassification, by: string, cfg: SentinelConfig): string {
+    if (by === 'auto-timeout') return autoModeTimeoutMessage(cls.summary, cls.reason, unattendedTimeoutSec());
     if (by === 'timeout') {
       return `[SENTINEL_DENIED] No approval arrived within ${cfg.remoteApprovalTimeoutSec}s for: ${cls.summary}. The action was not performed. Do not retry on your own; tell the user it is waiting for their approval.`;
     }

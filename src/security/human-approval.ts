@@ -7,9 +7,14 @@
  * center / Telegram) through the ApprovalBroker with a timeout; with nobody → null.
  * Unattended askers — headless `--yes`, a mission in 'auto', a bot chat in /auto — are never
  * consulted, so none of them can answer "yes" for the user.
+ *
+ * In the TUI the ask waits approval.unattendedTimeoutSec (default 120 s, 0 = forever) and is
+ * then denied with a rewrite hint ([AUTO_MODE_TIMEOUT]): an auto run the user walked away from
+ * keeps going instead of sitting on one prompt. Remote answers (control center / Telegram)
+ * still count while it waits. Sentinel-critical prompts never use this (they keep waiting).
  */
 import type { ToolContext } from '../tools/base.js';
-import { getApprovalBroker, isInteractiveHuman } from '../control/approvals.js';
+import { getApprovalBroker, isInteractiveHuman, safeOption } from '../control/approvals.js';
 import { getActiveConfig } from '../config/loader.js';
 import { resolveSentinelConfig } from '../config/agent-config.js';
 import { AUTO_NEEDS_HUMAN_TAG, needsHumanMessage } from './autonomy.js';
@@ -30,6 +35,59 @@ function remoteTimeoutMs(): number {
   }
 }
 
+export const AUTO_MODE_TIMEOUT_TAG = '[AUTO_MODE_TIMEOUT]';
+
+/** approval.unattendedTimeoutSec: seconds an auto-mode ask waits in the TUI (default 120, 0 = forever). */
+export function unattendedTimeoutSec(): number {
+  try {
+    const v = (getActiveConfig() as { approval?: { unattendedTimeoutSec?: unknown } } | null)?.approval?.unattendedTimeoutSec;
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+  } catch { /* default */ }
+  return 120;
+}
+
+/** "2 minutes", "1 minute", "45 seconds". PURE. */
+export function formatWait(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  if (s >= 60 && s % 60 === 0) return s === 60 ? '1 minute' : `${s / 60} minutes`;
+  return s === 1 ? '1 second' : `${s} seconds`;
+}
+
+/** The tool result when an auto-mode ask got no answer in the TUI within the timeout. PURE. */
+export function autoModeTimeoutMessage(what: string, reason: string | undefined, sec: number): string {
+  return `${AUTO_MODE_TIMEOUT_TAG} No answer in ${formatWait(sec)} — not done. Rewrite it to stay inside the project ` +
+    '(e.g. target a path under the workspace) or leave it for the user and continue with the rest.' +
+    `\n  Asked: ${what}${reason ? ` — ${reason}` : ''}`;
+}
+
+/**
+ * Ask the human at this terminal, giving up after `sec` seconds (0 = wait forever): resolves
+ * `{ by: 'local' }` with their answer, or `{ answer: <safe option>, by: 'timeout' }`. On timeout
+ * the prompt this ask put up (a terminal entry in the ApprovalBroker with this exact text) is
+ * withdrawn, so it does not linger on screen or on the remote channels.
+ */
+export function askLocalWithTimeout(ask: () => Promise<string>, prompt: string, options: string[], sec: number): Promise<HumanAnswer> {
+  if (!(sec > 0)) return Promise.resolve().then(ask).then(answer => ({ answer, by: 'local' }));
+  const broker = getApprovalBroker();
+  const before = new Set(broker.pending().map(p => p.id));
+  return new Promise<HumanAnswer>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      for (const p of broker.pending()) {
+        if (!before.has(p.id) && p.prompt === prompt) broker.cancel(p.id, 'timeout');
+      }
+      resolve({ answer: safeOption(options) ?? 'no', by: 'timeout' });
+    }, sec * 1000);
+    timer.unref?.();
+    Promise.resolve().then(ask).then(
+      (answer) => { if (done) return; done = true; clearTimeout(timer); resolve({ answer, by: 'local' }); },
+      (e) => { if (done) return; done = true; clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 /**
  * Ask a human. Returns null when no human can be reached (no interactive terminal and no
  * remote channel) — the caller refuses with needsHumanMessage().
@@ -41,7 +99,7 @@ export async function askHumanForAutoMode(
   meta: { source: string; reason?: string },
 ): Promise<HumanAnswer | null> {
   if (isInteractiveHuman()) {
-    return { answer: await ctx.askUser(prompt, options), by: 'local' };
+    return askLocalWithTimeout(() => ctx.askUser(prompt, options), prompt, options, unattendedTimeoutSec());
   }
   const broker = getApprovalBroker();
   if (!broker.hasRemoteChannel()) return null;
@@ -60,6 +118,8 @@ export async function askHumanForAutoMode(
 
 /** The tool result when a human could not be reached / did not answer in time. */
 export function unansweredMessage(what: string, reason: string | undefined, by: string | null): string {
+  // A timeout at this terminal is the unattended one (askHumanForAutoMode's TUI branch).
+  if (by === 'timeout' && isInteractiveHuman()) return autoModeTimeoutMessage(what, reason, unattendedTimeoutSec());
   if (by === 'timeout') {
     return `${AUTO_NEEDS_HUMAN_TAG} No approval arrived in time for: ${what}${reason ? ` — ${reason}` : ''}. It was not done. Do not retry it on your own; tell the user it is waiting for their approval.`;
   }
