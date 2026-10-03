@@ -5,7 +5,8 @@
  *   qodex workflow show <name> [--json]       params + steps
  *   qodex workflow rm <name> [--keep-skill]   delete (and its generated skill)
  *   qodex workflow run <name> [-p k=v]...     replay in the QodeX browser
- *   qodex workflow record <name> [--url u]    demonstrate a task in a visible
+ *   qodex workflow record <name> [--url u] [--browser-profile p]
+ *                                             demonstrate a task in a visible
  *                                             browser window; Enter saves it
  *
  * Wired into the top-level commander by src/index.ts (`program.addCommand(
@@ -238,9 +239,10 @@ export function buildWorkflowCommand(): Command {
     .description('Demonstrate a task in a visible QodeX browser window and save it as a replayable workflow')
     .option('--url <url>', 'Page to open before recording starts')
     .option('-d, --description <text>', 'What the workflow does (asked for at the end when omitted)')
-    .option('--profile <name>', 'Browser profile to use (default: the configured one)')
+    // Not --profile: that is the root program's config overlay.
+    .option('--browser-profile <name>', 'Browser profile to record in (default: the configured one)')
     .option('--force', 'Replace an existing workflow with the same name')
-    .action(async (name: string, opts: { url?: string; description?: string; profile?: string; force?: boolean }) => {
+    .action(async (name: string, opts: { url?: string; description?: string; browserProfile?: string; force?: boolean }) => {
       await loadActiveConfig();
       const store = new WorkflowStore();
       const id = normalizeWorkflowName(name);
@@ -255,7 +257,7 @@ export function buildWorkflowCommand(): Command {
         fail(`[BROWSER_UNAVAILABLE] ${String(e?.message ?? e).split('\n')[0]}`);
       }
       try {
-        await mgr.restart({ headless: false, ...(opts.profile ? { profile: opts.profile } : {}) });
+        await mgr.restart({ headless: false, ...(opts.browserProfile ? { profile: opts.browserProfile } : {}) });
       } catch (e: any) {
         fail(`could not open a visible browser window: ${String(e?.message ?? e).split('\n')[0]}\n  On a machine without a display, demonstrate through the control center instead (qodex control → Take over) and let the agent record with workflow_record source=human.`);
       }

@@ -22,7 +22,7 @@ import { TelegramApi, type FetchLike, type TgUpdate } from '../src/channels/tele
 import { TelegramPairingStore } from '../src/channels/telegram/pairing.js';
 import { TelegramBot } from '../src/channels/telegram/bot.js';
 import { handlePlatformSlash } from '../src/cli/platform-slash.js';
-import { makeCliContext } from '../src/workflows/command.js';
+import { buildWorkflowCommand, makeCliContext } from '../src/workflows/command.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { QodexMcpServer } from '../src/mcp/server/server.js';
 import { ToolRegistry } from '../src/tools/registry.js';
@@ -266,4 +266,10 @@ describe('qodex workflow', () => {
     expect(verdicts).toEqual(['my_plugin_reader:allow', 'code_run:allow']);
   });
 
+  it('record takes --browser-profile (the root program owns --profile)', () => {
+    const record = buildWorkflowCommand().commands.find(c => c.name() === 'record')!;
+    const longs = record.options.map(o => o.long);
+    expect(longs).toContain('--browser-profile');
+    expect(longs).not.toContain('--profile');
+  });
 });
