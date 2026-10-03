@@ -155,7 +155,7 @@ export class TelegramApiError extends Error {
   /** Telegram could not parse our HTML entities (fall back to plain text). */
   get isParseError(): boolean { return this.status === 400 && /parse entities|can't parse|unsupported start tag/i.test(this.description); }
   /** Text over 4096 characters (after entity parsing) — resend shortened. */
-  get isTooLong(): boolean { return this.status === 400 && /too long/i.test(this.description); }
+  get isTooLong(): boolean { return this.status === 400 && /too long|MESSAGE_TOO_LONG/i.test(this.description); }
   /** editMessageText with identical content — harmless. */
   get isNotModified(): boolean { return this.status === 400 && /message is not modified/i.test(this.description); }
 }
