@@ -1780,7 +1780,7 @@ schedule
         ? `${new Date(e.last_run_at).toLocaleString()} (${e.last_status})`
         : 'never';
       const kind = e.kind === 'mission' ? 'mission' : 'prompt ';
-      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : ''].filter(Boolean).join('  ');
+      const tags = [e.recipe ? `recipe:${e.recipe}` : '', e.deliver ? `→${e.deliver}` : '', e.continuity ? 'continuity' : '', e.notify_on === 'change' ? 'notify:change' : ''].filter(Boolean).join('  ');
       console.log(`${flag} ${e.id.slice(0, 8)}  ${kind}  ${e.name.padEnd(20)}  ${e.cron.padEnd(15)}  next: ${next}  last: ${last}  runs: ${e.run_count}${tags ? `  ${tags}` : ''}`);
     }
   });
@@ -1797,6 +1797,8 @@ schedule
   .option('--mission', 'Start a background mission each run (the prompt is its goal) instead of a one-shot run')
   .option('--deliver <target>', 'Send the result to chat, e.g. "telegram:<chatId>" or "discord:<channelId>"')
   .option('--recipe <kind>', 'Run a protocol instead of a bare prompt: "verified-pr" (sandbox branch → verify → open PR only if green)')
+  .option('--continuity', 'Give each run the previous run\'s answer so it reports what changed (monitors: prices, pages, issues)')
+  .option('--notify-on-change', 'Notify / deliver only when the answer differs from the previous run')
   .action(async (_opts: unknown, cmd: Command) => {
     // Root -m/--model swallows a post-subcommand --model under default parsing (see `provider add`).
     const opts: any = cmd.optsWithGlobals();
@@ -1820,9 +1822,13 @@ schedule
         kind: opts.mission ? 'mission' : 'prompt',
         deliver: opts.deliver,
         recipe: opts.recipe,
+        continuity: !!opts.continuity,
+        notifyOnChange: !!opts.notifyOnChange,
       });
       console.log(`✓ Scheduled "${entry.name}" (${entry.id.slice(0, 8)}).`);
       if (entry.recipe) console.log(`  Recipe:   ${entry.recipe}`);
+      if (entry.continuity) console.log('  Continuity: each run sees the previous answer and reports what changed');
+      if (entry.notify_on === 'change') console.log('  Notifies:   only when the answer changes');
       if (entry.deliver) console.log(`  Delivers: ${entry.deliver}`);
       if (entry.next_run_at) console.log(`  Next run: ${new Date(entry.next_run_at).toLocaleString()}`);
       console.log(`  Make sure the tick is installed: \`qodex schedule install\``);
