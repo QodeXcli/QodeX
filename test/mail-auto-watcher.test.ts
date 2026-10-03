@@ -3,10 +3,14 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  MailWatcher, WatchStateStore, createImapWatchSource, scrubSecrets, htmlToText, resolveMailWatchConfig,
+  MailWatcher, WatchStateStore, resolveMailWatchConfig, listWatchAccounts, openMailServiceSource,
   claimPidFile, runningWatcher, readPidFile, spawnMailWatchDaemon, attachMailAutomationCommands,
   type WatchMessage, type WatchSource,
 } from '../src/mail/watcher.js';
+import { MailAccountStore } from '../src/mail/accounts.js';
+import { DraftStore } from '../src/mail/drafts.js';
+import { InMemoryMailTransport } from '../src/mail/fake.js';
+import { MailService, setMailServiceForTests } from '../src/mail/service.js';
 import { MailRuleStore, type RuleRunStarter } from '../src/mail/rules.js';
 import { ReceivedIndex } from '../src/grants/received.js';
 import { GrantStore } from '../src/grants/store.js';
@@ -232,72 +236,105 @@ describe('MailWatcher loop', () => {
     expect((await state.read()).accounts.work.mode).toBe('poll');
   });
 
-  it('errors are reported once, scrubbed of credentials, and the loop retries', async () => {
+  it('a failing source is reported once and the loop retries', async () => {
     const box = new FakeMailbox(false);
-    box.failNext = new Error('LOGIN failed for me@work.com with password Hunter2-Secret!');
-    const w = watcher(box, { factory: async () => { const s = box.source(); return { ...s, status: async (f) => { try { return await s.status(f); } catch (e: any) { throw new Error(scrubSecrets(e.message, ['Hunter2-Secret!'])); } } }; }, backoff: { initialMs: 50, maxMs: 50 } });
+    box.failNext = new Error('[MAIL_IMAP] server unavailable');
+    const w = watcher(box, { backoff: { initialMs: 50, maxMs: 50 } });
     await w.start();
     await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX, 5000);
     await w.stop();
-    const err = events.find(e => e.type === 'watch-error');
-    expect(err?.data.error).toContain('LOGIN failed');
-    expect(JSON.stringify(events)).not.toContain('Hunter2-Secret!');
-    expect(JSON.stringify(await state.read())).not.toContain('Hunter2-Secret!');
+    expect(events.filter(e => e.type === 'watch-error')).toHaveLength(1);
+    expect(events.find(e => e.type === 'watch-error')?.data.error).toContain('server unavailable');
   });
 });
 
-describe('IMAP source (imapflow) secret hygiene', () => {
-  it('a failing connection never leaks the password or token', async () => {
-    class FakeImapFlow {
-      constructor(readonly opts: any) {}
-      on() {}
-      async connect() { throw Object.assign(new Error(`Invalid credentials for ${this.opts.auth.user}: ${this.opts.auth.pass ?? this.opts.auth.accessToken}`), { responseText: `AUTHENTICATE failed (${Buffer.from(String(this.opts.auth.pass ?? this.opts.auth.accessToken)).toString('base64')})` }); }
-      close() {}
-    }
-    for (const auth of [{ pass: 'app-pass-1234-SECRET' }, { accessToken: 'ya29.oauth-TOKEN-xyz' }]) {
-      const err = await createImapWatchSource({ host: 'imap.example.com', port: 993, secure: true, user: 'me@example.com', ...auth }, { ImapFlow: FakeImapFlow, simpleParser: async () => ({}) }).catch(e => e as Error);
-      expect(err).toBeInstanceOf(Error);
-      const secret = (auth as any).pass ?? (auth as any).accessToken;
-      expect(err.message).not.toContain(secret);
-      expect(err.message).not.toContain(Buffer.from(secret).toString('base64'));
-      expect(err.message).toMatch(/^\[MAIL_IMAP\]/);
-    }
+describe('the mail core transport as the watch source', () => {
+  const PW = 'Hunter2-App-Pass-Secret!';
+  let accounts: MailAccountStore;
+  let fake: InMemoryMailTransport;
+  let service: MailService;
+  beforeEach(async () => {
+    const keyFile = path.join(tmp, '.vault-key');
+    const vaultFile = path.join(tmp, 'vault.json');
+    accounts = new MailAccountStore({ file: path.join(tmp, 'mail-accounts.enc'), keyFile, vaultFile });
+    await accounts.add({ name: 'work', email: 'me@work.example', provider: 'gmail', password: PW });
+    fake = new InMemoryMailTransport({ account: 'work' });
+    service = new MailService({ accounts: () => accounts, drafts: () => new DraftStore({ dir: path.join(tmp, 'drafts'), keyFile, vaultFile }), factory: () => fake });
+    setMailServiceForTests(service);
+  });
+  afterEach(() => { setMailServiceForTests(null); });
+
+  it('lists the configured accounts and reads new mail with the tools\' ids, text and headers', async () => {
+    expect(await listWatchAccounts()).toEqual(['work']);
+    fake.deliver({ from: 'old@x.org', subject: 'old', text: 'before' });
+    const src = await openMailServiceSource('work');
+    expect(src.self).toBe('me@work.example');
+    expect(await src.status('INBOX')).toEqual({ uidValidity: '1', uidNext: 2 });
+    const id = fake.deliver({
+      from: 'Boss <boss@acme.com>', to: ['me@work.example'], cc: ['c@acme.com'], subject: 'Q3', text: 'Full body text here.',
+      messageId: '<q3@acme.com>', attachments: [{ filename: 'q3.pdf', content: 'pdf' }], headers: { 'list-id': '<team.acme.com>' },
+    });
+    const msgs = await src.fetchSince('INBOX', 2, 50);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      uid: 2, id, messageId: '<q3@acme.com>', from: 'Boss <boss@acme.com>', to: ['me@work.example'], cc: ['c@acme.com'],
+      subject: 'Q3', text: 'Full body text here.', attachments: [{ name: 'q3.pdf', size: 3 }], headers: { 'list-id': '<team.acme.com>' },
+    });
+    expect(typeof src.waitForChange).toBe('function');
   });
 
-  it('the real imapflow against a closed port fails cleanly without the password', async () => {
-    const err = await createImapWatchSource({ host: '127.0.0.1', port: 1, secure: false, user: 'me', pass: 'Real-Secret-Pass-987' }).catch(e => e as Error);
+  it('the watcher loop over the mail service: deliver() wakes IDLE, one notification, the received index fills', async () => {
+    const w = new MailWatcher({
+      accounts: ['work'], state, index, rules, startRun, pollIntervalMs: 60_000, idleMaxMs: 60_000,
+      publish: (type, data) => { events.push({ type, data: cleanMailData(data) }); },
+    });
+    await w.start();
+    await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX);
+    await waitFor(async () => (await state.read()).accounts.work?.mode === 'idle');
+    fake.deliver({ from: 'Boss <boss@acme.com>', subject: 'Ping', text: 'Are you there?', messageId: '<ping@acme.com>' });
+    await waitFor(() => events.some(e => e.type === 'new-mail'));
+    await new Promise(r => setTimeout(r, 50));
+    await w.stop();
+    expect(events.filter(e => e.type === 'new-mail')).toHaveLength(1);
+    expect(events.find(e => e.type === 'new-mail')?.data).toMatchObject({ account: 'work', from: 'Boss <boss@acme.com>', subject: 'Ping', snippet: 'Are you there?' });
+    expect(await index.lookup('work', '<ping@acme.com>')).toMatchObject({ from: 'boss@acme.com', flagged: false, folder: 'INBOX' });
+  });
+
+  it('transport errors are reported once, scrubbed of the password (every encoding), and the loop retries', async () => {
+    fake.failWith = new Error(`LOGIN failed for me@work.example with password ${PW} (AUTH PLAIN ${Buffer.from(`\0me@work.example\0${PW}`).toString('base64')})`);
+    const w = new MailWatcher({
+      accounts: ['work'], state, index, rules, startRun, pollIntervalMs: 1000, backoff: { initialMs: 50, maxMs: 50 },
+      publish: (type, data) => { events.push({ type, data: cleanMailData(data) }); },
+    });
+    await w.start();
+    await waitFor(() => events.some(e => e.type === 'watch-error'));
+    fake.failWith = undefined;
+    await waitFor(async () => !!(await state.read()).accounts.work?.folders.INBOX, 5000);
+    await w.stop();
+    expect(events.filter(e => e.type === 'watch-error')).toHaveLength(1);
+    const all = JSON.stringify(events) + JSON.stringify(await state.read());
+    expect(all).toContain('LOGIN failed');
+    expect(all).not.toContain(PW);
+    expect(all).not.toContain(Buffer.from(PW).toString('base64'));
+    expect(all).not.toContain(Buffer.from(`\0me@work.example\0${PW}`).toString('base64'));
+  });
+
+  it('the real IMAP transport against a closed port fails cleanly without the password', async () => {
+    const real = new MailService({ accounts: () => accounts });
+    await accounts.add({
+      name: 'local', email: 'me@local.test', provider: 'custom', password: 'Real-Secret-Pass-987', allowInsecure: true,
+      imap: { host: '127.0.0.1', port: 1, secure: false }, smtp: { host: '127.0.0.1', port: 1, secure: false },
+    });
+    const src = await openMailServiceSource('local', real);
+    const err = await src.status('INBOX').catch(e => e as Error);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).not.toContain('Real-Secret-Pass-987');
-  }, 20_000);
-
-  it('parses a fetched message (text, attachments, Message-ID) through mailparser', async () => {
-    const raw = [
-      'From: Boss <boss@acme.com>', 'To: me@work.com', 'Subject: Hello', 'Message-ID: <p1@acme.com>',
-      'MIME-Version: 1.0', 'Content-Type: text/html; charset=utf-8', '', '<p>Hi <b>there</b></p><script>x</script>',
-    ].join('\r\n');
-    class FakeImapFlow {
-      mailbox = { path: 'INBOX' };
-      on() {} off() {}
-      async connect() {}
-      async status() { return { uidValidity: 9n, uidNext: 5 }; }
-      async getMailboxLock() { return { release() {} }; }
-      async *fetch() { yield { uid: 3, source: Buffer.from(raw), envelope: {} }; yield { uid: 4, source: Buffer.from(raw.replace('p1@', 'p2@')), envelope: {} }; }
-      async logout() {}
-    }
-    const src = await createImapWatchSource({ host: 'h', port: 993, secure: true, user: 'u', pass: 'p' }, { ImapFlow: FakeImapFlow });
-    expect(await src.status('INBOX')).toEqual({ uidValidity: '9', uidNext: 5 });
-    const msgs = await src.fetchSince('INBOX', 4, 10);
-    expect(msgs).toHaveLength(1);
-    expect(msgs[0]).toMatchObject({ uid: 4, id: 'INBOX:4', messageId: '<p2@acme.com>', subject: 'Hello', from: 'Boss <boss@acme.com>', to: ['me@work.com'] });
-    expect(msgs[0].text).toContain('Hi there');
-    expect(msgs[0].text).not.toContain('<b>');
     await src.close?.();
-  });
+  }, 20_000);
 });
 
 describe('helpers, daemon bookkeeping, events', () => {
-  it('htmlToText and config', () => {
-    expect(htmlToText('<style>x{}</style><p>a&amp;b</p><br>c')).toBe('a&b\n\nc'.replace('\n\n', '\n\n'));
+  it('config', () => {
     expect(resolveMailWatchConfig({ mail: { watch: true } })).toMatchObject({ enabled: true, folder: 'INBOX', pollIntervalSec: 60, idle: true });
     expect(resolveMailWatchConfig({ mail: { watch: { enabled: true, accounts: ['a'], pollIntervalSec: 5, idle: false } } })).toMatchObject({ accounts: ['a'], pollIntervalSec: 60, idle: false });
     expect(resolveMailWatchConfig(null).enabled).toBe(false);

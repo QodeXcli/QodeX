@@ -22,12 +22,11 @@
  *   4. start a run for every matching rule (src/mail/rules.ts): the rule's task is the
  *      trusted instruction, the email is fenced data; flagged mail → draft only.
  *
- * Where mail comes from is pluggable: the mail core (src/mail/**) registers its
- * accounts and IMAP credentials (`registerMailAccountProvider`) and this module's
- * IMAP source (imapflow + mailparser, optional deps loaded dynamically) does the
- * rest — or it registers a whole `WatchSource` factory. Tests use an in-memory
- * source. Credentials never leave the source: errors are scrubbed of them before
- * they reach logs, the bus, notifications or the state file.
+ * Mail comes from the mail core (src/mail/service.ts): `getMailService().transport(name)`
+ * per account — `status` / `list({sinceUid})` / `fetch` / `waitForNew` (IMAP IDLE on its
+ * own connection). Tests inject the in-memory transport (setMailServiceForTests) or a
+ * WatchSource factory. Credentials never leave the transport: errors go through the
+ * service's `errorText` before they reach logs, the bus, notifications or the state file.
  */
 
 import { promises as fs, openSync, closeSync, writeSync, mkdirSync, readFileSync, unlinkSync } from 'fs';
@@ -38,7 +37,6 @@ import { writeFileAtomic } from '../utils/atomic-write.js';
 import { withLock } from '../utils/file-lock.js';
 import { logger } from '../utils/logger.js';
 import { getActiveConfig } from '../config/loader.js';
-import { maskSecrets } from '../sentinel/policy.js';
 import { mailAutoPaths } from '../grants/paths.js';
 import { bareAddress } from '../grants/store.js';
 import { getReceivedIndex, normalizeMessageId, type ReceivedIndex } from '../grants/received.js';
@@ -47,13 +45,15 @@ import {
   getMailRuleStore, runMatchingRules, scanMail, splitArgs, runMailAutomationCommand,
   type IncomingMail, type MailRuleStore, type RuleRunStarter,
 } from './rules.js';
+import { getMailService, type MailService } from './service.js';
+import { formatAddress, type MailTransport } from './types.js';
 
 // ── sources ───────────────────────────────────────────────────────────────────
 
 /** A message as the watcher needs it (parsed: text body, attachment names). */
 export interface WatchMessage {
   uid: number;
-  /** The mail tools' id for this message (default `<folder>:<uid>` is NOT assumed — sources set it). */
+  /** The mail tools' id for this message ("<folder>#<uid>": mail_read / mail_draft reply_to_id). */
   id?: string;
   /** Message-ID header (with or without angle brackets). */
   messageId?: string;
@@ -64,6 +64,8 @@ export interface WatchMessage {
   text: string;
   date?: string;
   attachments?: Array<{ name: string; size?: number }>;
+  /** A few headers (auto-submitted, list-id, precedence …): auto-generated mail never gets an auto-reply. */
+  headers?: Record<string, string>;
 }
 
 export interface WatchSource {
@@ -77,199 +79,85 @@ export interface WatchSource {
    */
   waitForChange?(folder: string, maxMs: number, signal: AbortSignal): Promise<void>;
   close?(): Promise<void>;
+  /** The account's own address (its own mail never gets an auto-reply). */
+  self?: string;
 }
 
 export type WatchSourceFactory = (account: string) => Promise<WatchSource>;
 
-/** IMAP connection settings for one account (from the mail core's encrypted store). */
-export interface ImapConnectionOptions {
-  host: string;
-  port: number;
-  /** Implicit TLS (993). false = STARTTLS / plain (e.g. proton-bridge on localhost). */
-  secure: boolean;
-  user: string;
-  /** App password. Never logged. */
-  pass?: string;
-  /** OAuth2 access token (XOAUTH2). Never logged. */
-  accessToken?: string;
-  /** e.g. { rejectUnauthorized: false } for a local bridge with a self-signed cert. */
-  tls?: Record<string, unknown>;
-}
-
-/** What the mail core registers so the watcher can reach its accounts. */
-export interface MailAccountProvider {
-  /** Account names. */
-  list(): Promise<string[]>;
-  /** IMAP settings (with the decrypted secret) for one account. */
-  imap(account: string): Promise<ImapConnectionOptions>;
-}
-
-let accountProvider: MailAccountProvider | null = null;
-let sourceFactory: WatchSourceFactory | null = null;
-
-/** The mail core: how to list accounts and reach their IMAP servers. Returns an unregister function. */
-export function registerMailAccountProvider(p: MailAccountProvider | null): () => void {
-  accountProvider = p;
-  return () => { if (accountProvider === p) accountProvider = null; };
-}
-
-/** Replace how a WatchSource is opened for an account (the mail core's own transport, or tests). */
-export function registerWatchSourceFactory(f: WatchSourceFactory | null): () => void {
-  sourceFactory = f;
-  return () => { if (sourceFactory === f) sourceFactory = null; };
-}
-
-/**
- * The mail core module path, loaded on demand so it can register its provider. Kept
- * in a variable: the mail core is a sibling module that may not exist in every build.
- */
-const MAIL_CORE_MODULES = ['./index.js'];
-
-async function ensureProvider(): Promise<void> {
-  if (accountProvider || sourceFactory) return;
-  for (const spec of MAIL_CORE_MODULES) {
-    try {
-      const m: any = await import(spec);
-      if (typeof m?.registerMailWatchProvider === 'function') await m.registerMailWatchProvider();
-    } catch { /* not available */ }
-    if (accountProvider || sourceFactory) return;
-  }
-}
-
-export async function listWatchAccounts(): Promise<string[]> {
-  await ensureProvider();
-  if (!accountProvider) return [];
-  try { return [...new Set((await accountProvider.list()).map(String).filter(Boolean))]; } catch { return []; }
-}
-
-async function openSource(account: string): Promise<WatchSource> {
-  await ensureProvider();
-  if (sourceFactory) return sourceFactory(account);
-  if (!accountProvider) throw new Error('[MAIL_NOT_CONFIGURED] No mail accounts are set up. Add one with `qodex mail add`.');
-  const conn = await accountProvider.imap(account);
-  return createImapWatchSource(conn);
-}
-
-/** Remove every occurrence of the given secrets from `text`, then mask secret-looking strings. PURE. */
-export function scrubSecrets(text: unknown, secrets: Array<string | undefined>): string {
-  let s = String(text ?? '');
-  for (const sec of secrets) {
-    if (sec && sec.length >= 3) s = s.split(sec).join('***');
-    if (sec && sec.length >= 3) {
-      try { s = s.split(Buffer.from(sec).toString('base64')).join('***'); } catch { /* ignore */ }
-    }
-  }
-  return maskSecrets(s);
-}
-
-/** HTML → readable text (fallback when the parser gives no text part). PURE. */
-export function htmlToText(html: string): string {
-  return String(html ?? '')
-    .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|tr|h\d)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n\s*/g, '\n\n')
-    .trim();
-}
-
-/**
- * IMAP source over imapflow (IDLE) + mailparser. Both are optional dependencies,
- * loaded dynamically. The secret stays inside this closure; every error that leaves
- * it is scrubbed of the password / token.
- */
-export async function createImapWatchSource(conn: ImapConnectionOptions, deps: { ImapFlow?: any; simpleParser?: any } = {}): Promise<WatchSource> {
-  const secrets = [conn.pass, conn.accessToken];
-  const scrub = (e: unknown) => new Error(`[MAIL_IMAP] ${scrubSecrets((e as any)?.responseText || (e as any)?.message || e, secrets).slice(0, 300)}`);
-  let ImapFlow = deps.ImapFlow;
-  let simpleParser = deps.simpleParser;
+/** Every configured mail account (the mail core's encrypted store). Never throws. */
+export async function listWatchAccounts(service: MailService = getMailService()): Promise<string[]> {
   try {
-    if (!ImapFlow) ImapFlow = (await import('imapflow' as string) as any).ImapFlow;
-    if (!simpleParser) simpleParser = (await import('mailparser' as string) as any).simpleParser;
+    return [...new Set((await service.accounts().list()).map(a => a.name).filter(Boolean))];
   } catch {
-    throw new Error('[MAIL_DEPS_MISSING] The mail libraries (imapflow, mailparser) are not installed. Run `npm install imapflow mailparser` in the QodeX install directory.');
+    return [];
   }
-  const auth = conn.accessToken ? { user: conn.user, accessToken: conn.accessToken } : { user: conn.user, pass: conn.pass };
-  const client = new ImapFlow({
-    host: conn.host, port: conn.port, secure: conn.secure, auth,
-    logger: false, emitLogs: false, ...(conn.tls ? { tls: conn.tls } : {}),
-  });
-  client.on?.('error', () => { /* surfaced through the failing call */ });
-  try {
-    await client.connect();
-  } catch (e) {
-    try { client.close?.(); } catch { /* ignore */ }
-    throw scrub(e);
-  }
-  const parse = async (raw: Buffer | string): Promise<{ text: string; attachments: Array<{ name: string; size?: number }>; messageId?: string; from?: string; to?: string[]; cc?: string[]; subject?: string; date?: string }> => {
-    const p = await simpleParser(raw, { skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: false });
-    const addr = (v: any): string[] => (v?.value ?? []).map((a: any) => (a?.name ? `${a.name} <${a.address}>` : String(a?.address ?? ''))).filter(Boolean);
-    return {
-      text: typeof p.text === 'string' && p.text.trim() ? p.text : htmlToText(typeof p.html === 'string' ? p.html : ''),
-      attachments: (p.attachments ?? []).map((a: any) => ({ name: String(a?.filename ?? 'attachment'), size: Number(a?.size) || undefined })),
-      messageId: p.messageId,
-      from: addr(p.from)[0],
-      to: addr(p.to),
-      cc: addr(p.cc),
-      subject: p.subject,
-      date: p.date instanceof Date ? p.date.toISOString() : undefined,
-    };
-  };
+}
+
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) return resolve();
+  const t = setTimeout(done, ms);
+  function done() { clearTimeout(t); signal?.removeEventListener('abort', done); resolve(); }
+  signal?.addEventListener('abort', done, { once: true });
+});
+
+/**
+ * A WatchSource over the mail core's transport for `account`
+ * (`getMailService().transport(name)`): `status` for UIDVALIDITY / UIDNEXT, `list`
+ * with `sinceUid` for what is new, `fetch` for the text body, and `waitForNew` (IMAP
+ * IDLE on its own connection) to sleep until mail arrives. Every error that leaves it
+ * goes through the service's `errorText` (passwords / tokens scrubbed in every encoding).
+ */
+export async function openMailServiceSource(account: string, service: MailService = getMailService()): Promise<WatchSource> {
+  const safe = (e: unknown) => new Error(service.errorText(e));
+  let resolved: { account: { name: string; email: string }; transport: MailTransport };
+  try { resolved = await service.transport(account); } catch (e) { throw safe(e); }
+  const { transport } = resolved;
+  const name = resolved.account.name;
   return {
+    self: resolved.account.email,
     async status(folder) {
       try {
-        const st = await client.status(folder, { uidNext: true, uidValidity: true });
-        return { uidValidity: String(st.uidValidity ?? ''), uidNext: Number(st.uidNext ?? 1) };
-      } catch (e) { throw scrub(e); }
+        if (transport.status) {
+          const st = await transport.status(folder);
+          return { uidValidity: String(st.uidValidity ?? ''), uidNext: Number(st.uidNext) || 1 };
+        }
+        // No STATUS support: the newest UID stands in for UIDNEXT (UIDVALIDITY unknown → constant).
+        const newest = await transport.list({ folder, limit: 1 });
+        return { uidValidity: 'list', uidNext: (newest[0]?.uid ?? 0) + 1 };
+      } catch (e) { throw safe(e); }
     },
     async fetchSince(folder, fromUid, limit) {
-      const out: WatchMessage[] = [];
-      let lock: any;
       try {
-        lock = await client.getMailboxLock(folder);
-        for await (const msg of client.fetch(`${Math.max(1, fromUid)}:*`, { uid: true, envelope: true, source: true }, { uid: true })) {
-          if (!msg || Number(msg.uid) < fromUid) continue; // `n:*` also returns the last message when none is ≥ n
-          const p = await parse(msg.source);
+        const rows = (await transport.list({ folder, sinceUid: Math.max(0, fromUid - 1), limit }))
+          .filter(r => r.uid >= fromUid)
+          .sort((a, b) => a.uid - b.uid);
+        const out: WatchMessage[] = [];
+        for (const r of rows) {
+          const m = await transport.fetch(r.id);
+          if (!m) continue;
           out.push({
-            uid: Number(msg.uid),
-            id: `${folder}:${msg.uid}`,
-            messageId: p.messageId ?? msg.envelope?.messageId,
-            from: p.from ?? '',
-            to: p.to ?? [],
-            cc: p.cc ?? [],
-            subject: p.subject ?? msg.envelope?.subject ?? '',
-            text: p.text,
-            date: p.date,
-            attachments: p.attachments,
+            uid: m.uid, id: m.id, messageId: m.messageId,
+            from: formatAddress(m.from[0]), to: m.to.map(formatAddress).filter(Boolean), cc: m.cc.map(formatAddress).filter(Boolean),
+            subject: m.subject ?? '', text: m.text ?? '', date: m.date,
+            attachments: m.attachments.filter(a => !a.inline).map(a => ({ name: a.filename, size: a.size })),
+            ...(m.headers ? { headers: { ...m.headers } } : {}),
           });
-          if (out.length >= limit) break;
         }
-      } catch (e) {
-        throw scrub(e);
-      } finally {
-        try { lock?.release(); } catch { /* ignore */ }
-      }
-      return out;
+        return out;
+      } catch (e) { throw safe(e); }
     },
-    async waitForChange(folder, maxMs, signal) {
-      try {
-        if (client.mailbox?.path !== folder) await client.mailboxOpen(folder, { readOnly: true });
-      } catch (e) { throw scrub(e); }
-      await new Promise<void>((resolve) => {
-        const done = () => { clearTimeout(t); client.off?.('exists', onExists); client.off?.('close', done); signal.removeEventListener('abort', done); resolve(); };
-        const onExists = (ev: any) => { if (!ev?.path || ev.path === folder) done(); };
-        const t = setTimeout(done, Math.max(1000, maxMs));
-        client.on('exists', onExists);
-        client.on('close', done);
-        signal.addEventListener('abort', done, { once: true });
-      });
-      if (client.usable === false) throw new Error('[MAIL_IMAP] connection closed');
-    },
+    ...(transport.waitForNew ? {
+      async waitForChange(folder: string, maxMs: number, signal: AbortSignal) {
+        let r;
+        try { r = await transport.waitForNew!(folder, { timeoutMs: maxMs, signal }); } catch (e) { throw safe(e); }
+        // The IDLE connection closed under us: pause like a poll instead of spinning.
+        if (r?.reason === 'closed' && !signal.aborted) await sleep(Math.min(maxMs, 60_000), signal);
+      },
+    } : {}),
     async close() {
-      try { await client.logout(); } catch { try { client.close?.(); } catch { /* ignore */ } }
+      // Drop the cached transport: a reconnect after an error starts from a fresh login.
+      try { await service.forget(name); } catch { /* ignore */ }
     },
   };
 }
@@ -389,13 +277,6 @@ export interface ProcessedMail {
   rules: Array<{ ruleId: string; missionId?: string; draftOnly: boolean; error?: string }>;
 }
 
-const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
-  if (signal?.aborted) return resolve();
-  const t = setTimeout(done, ms);
-  function done() { clearTimeout(t); signal?.removeEventListener('abort', done); resolve(); }
-  signal?.addEventListener('abort', done, { once: true });
-});
-
 export class MailWatcher {
   private readonly opts: MailWatcherOptions;
   private readonly state: WatchStateStore;
@@ -453,7 +334,7 @@ export class MailWatcher {
     let source: WatchSource | null = null;
     while (!signal.aborted) {
       try {
-        if (!source) source = await (this.opts.factory ?? openSource)(account);
+        if (!source) source = await (this.opts.factory ?? openMailServiceSource)(account);
         await this.check(account, source);
         backoff = initialBackoff;
         if (signal.aborted) break;
@@ -517,7 +398,7 @@ export class MailWatcher {
       const messageId = normalizeMessageId(m.messageId) || `uid-${st.uidValidity}-${m.uid}@${account}`;
       if (seen.has(messageId)) continue;
       seen.add(messageId);
-      out.push(await this.processMessage(account, folder, m, messageId));
+      out.push(await this.processMessage(account, folder, m, messageId, source.self));
       // Persist after each message: a crash never re-announces what was handled.
       await this.state.update(account, a => {
         a.folders[folder] = { uidValidity: st.uidValidity, lastUid: m.uid };
@@ -534,7 +415,7 @@ export class MailWatcher {
     return out;
   }
 
-  private async processMessage(account: string, folder: string, m: WatchMessage, messageId: string): Promise<ProcessedMail> {
+  private async processMessage(account: string, folder: string, m: WatchMessage, messageId: string, self?: string): Promise<ProcessedMail> {
     const findings = scanMail({ from: m.from, subject: m.subject, text: m.text });
     const flagged = findings.length > 0;
     const index = this.opts.index ?? getReceivedIndex();
@@ -553,6 +434,7 @@ export class MailWatcher {
       account, id: m.id, messageId, folder, uid: m.uid, from: m.from, to: m.to ?? [], cc: m.cc ?? [],
       subject: m.subject ?? '', text: m.text ?? '', date: m.date, attachments: m.attachments ?? [],
       flagged, findings: findings.map(f => f.id),
+      ...(m.headers ? { headers: m.headers } : {}), ...(self ? { self } : {}),
     };
     const rules = await runMatchingRules(incoming, { store: this.opts.rules ?? getMailRuleStore(), start: this.opts.startRun, publish: this.opts.publish });
     for (const r of rules) {
@@ -769,7 +651,7 @@ export function buildMailWatchCommand(): Command {
         }
         await runForeground({ accounts, worker: !!o.worker });
       } catch (e: any) {
-        process.stderr.write(`${scrubSecrets(e?.message ?? e, [])}\n`);
+        process.stderr.write(`${getMailService().errorText(e)}\n`);
         process.exitCode = 1;
       }
     });

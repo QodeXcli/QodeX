@@ -91,6 +91,10 @@ export interface IncomingMail {
   /** Already known to be flagged (the watcher's own scan). */
   flagged?: boolean;
   findings?: string[];
+  /** A few headers (auto-submitted, list-id, list-unsubscribe, precedence, x-auto-response-suppress). */
+  headers?: Record<string, string>;
+  /** The receiving account's own address. */
+  self?: string;
 }
 
 // ── parsing (PURE) ────────────────────────────────────────────────────────────
@@ -202,6 +206,30 @@ export function matchesRule(m: MailRuleMatch, mail: IncomingMail): boolean {
   }
   if (m.hasAttachment !== undefined && m.hasAttachment !== ((mail.attachments?.length ?? 0) > 0)) return false;
   return true;
+}
+
+// ── auto-reply loops ──────────────────────────────────────────────────────────
+
+const ROBOT_SENDER_RE = /^(?:mailer-daemon|postmaster|no-?reply|do-?not-?reply|bounces?|notifications?-?noreply)(?:[+._-][^@]*)?@/i;
+
+/**
+ * Why the reply-all preset must not answer this mail (RFC 3834): it was sent by the
+ * account itself, by a mailing list or bulk sender, by an autoresponder / bounce, or
+ * asks not to be auto-answered. Two auto-repliers would otherwise mail each other
+ * until the daily cap. null = a person wrote it. PURE.
+ */
+export function autoReplySkipReason(mail: Pick<IncomingMail, 'from' | 'headers' | 'self'>): string | null {
+  const from = bareAddress(mail.from);
+  const self = bareAddress(mail.self ?? '');
+  if (from && self && from === self) return 'it was sent from this account';
+  const h: Record<string, string> = {};
+  for (const [k, v] of Object.entries(mail.headers ?? {})) h[k.toLowerCase()] = String(v ?? '').toLowerCase();
+  if (h['auto-submitted'] && h['auto-submitted'].trim() !== 'no') return `it is auto-submitted (${cleanLine(h['auto-submitted'], 40)})`;
+  if (/\b(bulk|junk|list|auto_reply)\b/.test(h.precedence ?? '')) return `it is bulk / list mail (precedence ${cleanLine(h.precedence, 20)})`;
+  if (h['list-id'] || h['list-unsubscribe']) return 'it came from a mailing list';
+  if (/\b(all|oof|autoreply)\b/.test(h['x-auto-response-suppress'] ?? '')) return 'it asks not to be auto-answered';
+  if (from && ROBOT_SENDER_RE.test(from)) return 'it came from an automated sender';
+  return null;
 }
 
 // ── run goal (trusted task + fenced email) ────────────────────────────────────
@@ -449,7 +477,10 @@ export async function runMatchingRules(
     } catch { /* never break the watcher */ }
   };
   const store = opts.store ?? getMailRuleStore();
-  const rules = (opts.rules ?? await store.list()).filter(r => r.enabled && matchesRule(r.match, mail));
+  const matching = (opts.rules ?? await store.list()).filter(r => r.enabled && matchesRule(r.match, mail));
+  // The reply-all preset never answers its own account, lists, bulk mail or other robots.
+  const skip = autoReplySkipReason(mail);
+  const rules = skip ? matching.filter(r => r.preset !== 'reply-all') : matching;
   if (!rules.length) return [];
   const findings = scanMail(mail);
   const flagged = findings.length > 0 || mail.flagged === true;
