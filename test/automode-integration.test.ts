@@ -35,3 +35,41 @@ describe('auto-mode asks carry the marker channels match on', () => {
     expect(whyLine({ autoPolicy: true })).toBe('');
   });
 });
+
+describe('code_run in auto mode', () => {
+  it('the snippet is analyzed like the equivalent command line', async () => {
+    const { codeRunCommandLine } = await import('../src/tools/shell/code-run.js');
+    setApprovalMode('auto');
+    const e = new PermissionEngine(DEFAULT_CONFIG);
+    const run = (language: string, code: string, cwd?: string) =>
+      e.evaluate({ tool: 'code_run', operation: codeRunCommandLine({ language, code, cwd }), cwd: '/work/app' });
+    expect(run('python', 'print(2 + 2)')).toBe('allow');
+    expect(run('python', "import shutil; shutil.rmtree('/etc/qodex-test')")).toBe('ask');
+    expect(run('node', "require('fs').rmSync('/etc/qodex-test', { recursive: true })")).toBe('ask');
+    expect(run('bash', 'rm -rf ~/qodex-test')).toBe('ask');
+    expect(run('bash', "echo it's fine > out.txt")).toBe('allow');
+    expect(run('python', "open('notes.txt', 'w').write('x')")).toBe('allow');
+  });
+
+  it('the tool refuses outside-project deletes with no human and runs ordinary code', async () => {
+    if (process.platform === 'darwin') return; // sandbox-exec confines writes there
+    const { CodeRunTool } = await import('../src/tools/shell/code-run.js');
+    const { setInteractiveHuman } = await import('../src/control/approvals.js');
+    setApprovalMode('auto');
+    setInteractiveHuman(false);
+    try {
+      let asked = 0;
+      const ctx: any = {
+        cwd: process.cwd(), sessionId: 's1', permissions: new PermissionEngine(DEFAULT_CONFIG),
+        askUser: async () => { asked++; return 'yes'; }, emit: () => {},
+      };
+      const tool = new CodeRunTool();
+      const bad = await tool.execute({ language: 'python', code: "import shutil; shutil.rmtree('/etc/qodex-never')" } as any, ctx);
+      expect(bad.isError).toBe(true);
+      expect(String(bad.content)).toMatch(/AUTO_MODE_NEEDS_HUMAN/);
+      expect(asked).toBe(0);
+      const ok = await tool.execute({ language: 'bash', code: 'echo $((40 + 2))' } as any, ctx);
+      expect(String(ok.content)).toContain('42');
+    } finally { setInteractiveHuman(false); }
+  });
+});

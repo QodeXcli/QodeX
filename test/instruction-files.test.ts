@@ -77,3 +77,19 @@ describe('permission engine: instruction-file writes ask in every mode', () => {
     expect(e.evaluate(ed('QODEX.md'))).toBe('deny');
   });
 });
+
+describe('per-conversation auto (the chat bot\'s /auto on)', () => {
+  it('still asks for instruction files, as an auto-mode ask an automatic answerer leaves to a human', async () => {
+    const { autonomousPermissions, isAutoModeAskPrompt } = await import('../src/sentinel/auto-mode.js');
+    const { explainRequest, whyLine } = await import('../src/security/human-approval.js');
+    setApprovalMode('manual');
+    const chat = autonomousPermissions(new PermissionEngine(DEFAULT_CONFIG), '/work/app');
+    const req = { tool: 'write_file', operation: 'AGENTS.md', cwd: '/work/app' };
+    expect(chat.evaluate(req)).toBe('ask');
+    expect(chat.evaluate({ ...req, operation: 'src/a.ts' })).toBe('allow');
+    const ex = explainRequest(chat as any, req);
+    expect(ex.autoPolicy).toBe(true);
+    expect(ex.canAlways).toBe(false);
+    expect(isAutoModeAskPrompt(`Write AGENTS.md${whyLine(ex)}`)).toBe(true);
+  });
+});
