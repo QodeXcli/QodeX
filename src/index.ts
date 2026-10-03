@@ -152,6 +152,7 @@ async function bootstrap(): Promise<{
   // Graceful shutdown — also fires SessionEnd hooks
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
+    try { await (await import('./mods/surface.js')).modsShutdown('exit'); } catch { /* mods: session.end, capped */ }
     try {
       if (hooks.hasAny('SessionEnd')) {
         await hooks.dispatch('SessionEnd', { event: 'SessionEnd', sessionId: 'shutdown', cwd: process.cwd() });
@@ -226,6 +227,7 @@ program
   .option('-c, --continue', 'Resume the most recent session in this directory (no id needed)')
   .option('--list-models', 'List available models from all providers and exit')
   .option('--list-sessions', 'List recent sessions and exit')
+  .option('--mod-dir <dir>', 'Load the mod(s) in <dir> for this session and reload them on save (repeatable; also QODEX_MOD_DIRS)', (v: string, prev: string[] = []) => [...prev, v])
   // FIRST: commander's default parsing lets the ROOT swallow its flags (-p, --profile,
   // --json, -m, -y, --scope, ...) even when they're written after a subcommand that
   // declares the same flag. Hand those back to that subcommand (matched by the flag as
@@ -377,6 +379,7 @@ program
         contract: contract ?? undefined,
         receiptPath: opts.receipt,
         strictBudget: !!opts.strictBudget,
+        modDirs: opts.modDir,
       });
       process.exit(code);
     }
@@ -415,6 +418,9 @@ program
     if (config.defaults.warmOnStart !== false) {
       void import('./llm/warmup.js').then(m => m.warmModel(router, config)).catch(() => {});
     }
+    // Mods: load before the first frame (session.start fires once the session id is known).
+    const mods = await import('./mods/surface.js');
+    await mods.modsInteractiveInit({ cwd: process.cwd(), bindings: { config, router, registry }, extraDirs: opts.modDir });
     const { waitUntilExit } = render(
       React.createElement(App, {
         cwd: process.cwd(),
@@ -427,6 +433,7 @@ program
         explicitModel: opts.model,
         onSessionActive: (id: string) => {
           activeSessionId = id;
+          void mods.modsSessionActive(id);
           void import('./session/handoff.js').then(m => {
             const loaded = getSessionStore().loadSession(id);
             return m.writeHandoff(id, loaded?.meta.cwd ?? process.cwd());
@@ -435,6 +442,7 @@ program
       }),
     );
     await waitUntilExit();
+    await mods.modsShutdown('exit'); // mods: session.end (capped at 1.5 s)
     if (activeSessionId) {
       const short = activeSessionId.slice(0, 8);
       console.log(`\nResume this session with:  qodex --resume ${short}   (or: qodex --continue)`);
@@ -2029,6 +2037,9 @@ program.addCommand(buildVaultCommand());
 // Mail subcommands from other modules (watch, rule) attach with mailCommand.addCommand(...).
 const mailCommand = buildMailCommand();
 program.addCommand(mailCommand);
+// `qodex mod list|new|validate|test|enable|disable|trust|untrust|path` — mods (hooks into QodeX itself).
+import { buildModCommand } from './mods/command.js';
+program.addCommand(buildModCommand());
 
 // Standing grants (`qodex grant …`) and the mail automation (`qodex mail watch|rule|reply-all`).
 // Keep attachMailAutomationCommands AFTER the core `qodex mail` command is added: it mounts

@@ -151,6 +151,8 @@ export interface HeadlessOptions {
   /** `--strict-budget`: a reached budget cap stops the run at once — no wrap-up allowance
    *  (budget-wrapup.ts). Without it the run gets one allowance to leave the work consistent. */
   strictBudget?: boolean;
+  /** `--mod-dir <dir>` (repeatable): extra mods for this run. */
+  modDirs?: string[];
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
@@ -240,6 +242,23 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     resumeCwd = pickWorkingCwd({ sessionCwd: loaded.meta.cwd, hostCwd: opts.cwd });
   } else {
     sessionId = store.createSession(opts.cwd, explicitModelOverride ?? opts.config.defaults.model);
+  }
+
+  // ── Mods: load, session.start, then prompt.submit (may rewrite, add context or drop) ──
+  {
+    const { modsHeadlessBegin, modsHeadlessEnd } = await import('../../mods/surface.js');
+    const sub = await modsHeadlessBegin({
+      cwd: resumeCwd ?? opts.cwd, sessionId, extraDirs: opts.modDirs,
+      bindings: { config, router: opts.router, registry: opts.registry },
+    }, effectivePrompt);
+    if (sub.drop) {
+      if (opts.json) process.stdout.write(JSON.stringify({ type: 'prompt_dropped', reason: sub.drop }) + '\n');
+      else process.stderr.write(`Prompt dropped by a mod: ${sub.drop}\n`);
+      await modsHeadlessEnd();
+      return 0;
+    }
+    effectivePrompt = sub.text;
+    if (initialMessages) initialMessages[initialMessages.length - 1] = { role: 'user' as const, content: effectivePrompt };
   }
 
   const agent = new AgentLoop({
@@ -423,6 +442,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     if (opts.contract?.scopePrefix) setWriteScopeRoot(null);
     // Same for the approval mode this run switched on for --yes.
     if (opts.autoApproveAll && modeBefore !== 'auto') setApprovalMode(modeBefore);
+    // Mods: session.end (all hooks together capped at 1.5 s).
+    await (await import('../../mods/surface.js')).modsHeadlessEnd();
   }
 
   // ── Autonomy contract enforcement: verify → rollback-on-fail → RUN REPORT ──

@@ -61,6 +61,13 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     return { handled: false };
   }
 
+  // Mods: command.run — a mod's own commands, and mods answering a command in QodeX's place.
+  {
+    const { modsCommandRun } = await import('../mods/integration.js');
+    const byMod = await modsCommandRun(cmd!, arg);
+    if (byMod.handled) return { handled: true, ...(byMod.text ? { message: byMod.text } : {}) };
+  }
+
   switch (cmd) {
     case 'goal': {
       // /goal <what done looks like> [--check "<cmd>"] [--max N] · /goal · /goal clear
@@ -351,6 +358,9 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /skills                        List installed skills (taste, ui-ux-pro-max, ghost, OODA, L99, god-mode, artifacts)
     /skill <name> [args]           Run a skill explicitly (also: /skill enable|disable|reload)
     /hooks                         List configured lifecycle hooks
+    /mods [enable|disable|trust|untrust <name>]   List mods (hooks into QodeX itself), or switch / trust one
+    /reload-mods                   Reload mods from disk
+    /mod new <description>         Have QodeX write a mod (asks before writing ~/.qodex/mods)
     /mcp                           Show status of MCP servers
     /mcp-restart <id>              Restart an MCP server
     /release-notes [<a>..<b>] [--write] [--bump=patch|minor|major] [--all]
@@ -372,7 +382,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /vault                         Saved logins the agent can fill (it never sees the secret)
     /desktop                       Desktop-control backend status (macOS / Linux / Windows)
 
-  Tab completes a command name. Mid-task, a plain message redirects the running agent.`,
+  Tab completes a command name. Mid-task, a plain message redirects the running agent.` + (await import('../mods/command.js')).modCommandsHelp(),
       };
     }
 
@@ -490,6 +500,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     }
 
     case 'clear': {
+      await (await import('../mods/surface.js')).modsSessionEnded('clear'); // mods: session.end
       clearTodos(sessionId);
       getSessionStore().clearMessages(sessionId);
       try {
@@ -576,10 +587,43 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       const all = store.listRecentSessions(100);
       const match = all.find(s => s.id.startsWith(arg));
       if (!match) return { handled: true, message: `No session found matching "${arg}".` };
+      await (await import('../mods/surface.js')).modsSessionEnded('resume'); // mods: session.end
       return {
         handled: true,
         action: { type: 'switch_session', sessionId: match.id },
         message: `Resumed session ${match.id.slice(0, 8)} (${match.turn_count} turns).`,
+      };
+    }
+
+    case 'mods': {
+      // /mods · /mods enable|disable|trust|untrust <name>
+      const { handleModsSlash } = await import('../mods/command.js');
+      return { handled: true, message: await handleModsSlash(args, cwd) };
+    }
+
+    case 'reload-mods': {
+      const { reloadModsSlash } = await import('../mods/command.js');
+      return { handled: true, message: await reloadModsSlash() };
+    }
+
+    case 'mod': {
+      // /mod new <what the mod should do> — QodeX writes it (create-mod skill). The write to
+      // ~/.qodex/mods asks you first: mods dirs are agent instruction files.
+      const sub = (args[0] ?? '').toLowerCase();
+      const description = args.slice(1).join(' ').trim();
+      if (sub !== 'new' || !description) {
+        return { handled: true, message: 'Usage: /mod new <what the mod should do>   (list them with /mods)' };
+      }
+      const spec = getSkill('create-mod');
+      const ask = `Write a QodeX mod that does this: ${description}\n\nPut it in ~/.qodex/mods/<a short name>/ (mod.json + register.js), check it with \`qodex mod validate <dir>\`, then tell me to run /reload-mods.`;
+      return {
+        handled: true,
+        action: {
+          type: 'submit_prompt',
+          prompt: spec ? buildSkillRunPrompt(spec.name, spec.body, ask) : `${ask}\nSee docs/MODS.md for the events and the $ API.`,
+          commandName: '/mod new',
+          rawInput: trimmed,
+        },
       };
     }
 

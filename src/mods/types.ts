@@ -36,7 +36,10 @@ export interface ModEventMap {
   /** Once per named system-prompt section. `{ text }` replaces it, `{ text: null }` omits it. */
   'prompt.section': { payload: { name: string; text: string }; result: void | { text: string | null } };
 
-  /** A tool is about to run. `{ deny }` refuses, `{ result }` answers without running, next({...e, args}) rewrites. */
+  /**
+   * A tool is about to run. `{ deny }` refuses, `{ result }` answers without running, next({...e, args}) rewrites.
+   * Each argument is also mirrored as a top-level field (e.command), as Claude Code mods read them.
+   */
   'tool.call': { payload: { tool: string; args: Record<string, unknown>; callId: string; cwd: string }; result: void | { deny: string } | { result: string; isError?: boolean } };
   /** After the permission engine decided; `{ decision }` overrides (a mod can never turn a hard deny / Sentinel-critical into allow). */
   'tool.check': { payload: { tool: string; operation: string; decision: 'allow' | 'ask' | 'deny' }; result: void | { decision: 'allow' | 'ask' | 'deny' } };
@@ -79,8 +82,8 @@ export type ModRenderSite =
   /** The spinner line while a turn runs: next({...e, props: {...e.props, suffix}}) to add text. */
   | 'Spinner';
 
-/** Filter on payload fields: a value, or a list of accepted values. `*` event matches all. */
-export type ModMatcher = Record<string, string | number | boolean | Array<string | number | boolean>>;
+/** Filter on payload fields: a value, a list of accepted values, or a RegExp (strings). `*` event matches all. */
+export type ModMatcher = Record<string, string | number | boolean | RegExp | Array<string | number | boolean>>;
 
 /** The rest of the chain: later mods, then QodeX's own behavior. */
 export interface ModNext<E extends ModEventName> {
@@ -256,6 +259,8 @@ export interface ModManifest {
   /** Entry file relative to the mod dir (default: register.{js,mjs,ts,mts}). */
   main?: string;
   userConfig?: Record<string, { type: 'string' | 'number' | 'boolean'; default?: unknown; description?: string }>;
+  /** Built-in mods only: on until the user switches it off (default true). `enabledByDefault` is read too. */
+  defaultEnabled?: boolean;
 }
 
 export type ModScope = 'builtin' | 'user' | 'project';
@@ -274,6 +279,12 @@ export interface ModInfo {
   events: ModEventName[];
   commands: string[];
   tools: string[];
+  /** Loaded from --mod-dir / QODEX_MOD_DIRS (session only, scope 'user'). */
+  fromModDir?: boolean;
+  /** Project mods: 'untrusted' (never trusted), 'changed' (files changed since trust), 'trusted'. */
+  trustState?: 'not-needed' | 'trusted' | 'untrusted' | 'changed';
+  /** Load warnings (unknown events, a duplicate bare hook…). */
+  warnings?: string[];
 }
 
 /** Limits (QodeX follows Claude Code's where they apply). */
