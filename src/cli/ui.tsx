@@ -265,7 +265,8 @@ export function App(props: AppProps): React.ReactElement {
   // log/notice history lines. Draws nothing until the mods runtime registers a host.
   const mods = useModsUiController({
     busy, columns: cols, rows, promptEmpty: input === '', mode,
-    onHistory: line => setHistory(h => [...h, { type: 'mod', ...line, id: nextId() }]),
+    // One state update per burst of lines (each update repaints the whole App).
+    onHistoryLines: lines => setHistory(h => [...h, ...lines.map(line => ({ type: 'mod' as const, ...line, id: nextId() }))]),
     // $.prompt.submit: queued like a typed prompt, so it runs when the agent is free.
     // Never as a slash command — a mod does not get to type /auto or /mode for the user.
     onPrompt: p => {

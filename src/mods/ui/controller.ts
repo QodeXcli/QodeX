@@ -109,6 +109,7 @@ export class ModsUiController {
   /** What the last render pass drew (functions left out), to skip identical repaints. */
   private lastViewSig = '';
   private disposed = false;
+  private wakeQueued = false;
   private readonly surface: ModSurface;
   private readonly now: () => number;
 
@@ -199,9 +200,19 @@ export class ModsUiController {
       focusedPlugin: this.focusedPlugin,
       chord: this.chordUntil > 0,
     };
-    for (const l of [...this.listeners]) {
-      try { l(); } catch { /* ignore */ }
-    }
+    // Wake React once per burst. Ink renders on a legacy root, so every listener call
+    // outside its own input batch is a full synchronous App render: a mod calling
+    // $.ui.status in a loop, or the bus replaying its backlog, would otherwise paint
+    // once per event. The snapshot itself is current at once; only the wake waits for
+    // the end of the current task (still before the next keypress is read).
+    if (this.wakeQueued) return;
+    this.wakeQueued = true;
+    queueMicrotask(() => {
+      this.wakeQueued = false;
+      for (const l of [...this.listeners]) {
+        try { l(); } catch { /* ignore */ }
+      }
+    });
   }
 
   // ── the bus ────────────────────────────────────────────────────────────────

@@ -279,4 +279,43 @@ describe('useModsUiController', () => {
       setModsUiHost(null);
     }
   });
+
+  it('onHistoryLines gets a burst of lines in one call (one transcript update, not one per line)', async () => {
+    const stdout = new EventEmitter() as unknown as NodeJS.WriteStream & { columns: number; rows: number };
+    Object.assign(stdout, { columns: 60, rows: 30, isTTY: false, write: () => true });
+    const calls: string[][] = [];
+    let emit: (ev: any) => void = () => {};
+    const host: ModsUiHost = {
+      subscribe(l) { emit = l; return () => { emit = () => {}; }; },
+      async renderSite() { return { trees: [] }; },
+      async press() {},
+      list: () => [],
+    };
+    function Probe(): React.ReactElement {
+      useModsUiController({
+        busy: false, columns: 60, rows: 30, promptEmpty: true,
+        onHistoryLines: ls => { calls.push(ls.map(l => `${l.kind}:${l.text}`)); },
+      });
+      return React.createElement(InkText, null, 'x');
+    }
+    const inst = render(React.createElement(Probe), { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
+    try {
+      setModsUiHost(host);
+      await new Promise(r => setTimeout(r, 50));
+      for (let i = 0; i < 50; i++) emit({ kind: 'log', plugin: 'loop', text: `line ${i}` });
+      emit({ kind: 'notice', plugin: 'ysk', text: 'last' });
+      expect(calls).toEqual([]);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toHaveLength(51);
+      expect(calls[0]![0]).toBe('log:line 0');
+      expect(calls[0]![50]).toBe('notice:last');
+      emit({ kind: 'log', plugin: 'loop', text: 'later' });
+      await Promise.resolve();
+      expect(calls).toEqual([expect.any(Array), ['log:later']]);
+    } finally {
+      inst.unmount();
+      setModsUiHost(null);
+    }
+  });
 });

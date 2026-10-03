@@ -23,18 +23,33 @@ export interface ModsUiBinding {
 /**
  * Mount the mods UI in a TUI component: one controller for the component's life that
  * follows the registered mods host, kept told of the busy state, terminal size, prompt
- * emptiness and mode. `onHistory` receives $.ui.log / $.ui.notice lines (and refusals).
+ * emptiness and mode. $.ui.log / $.ui.notice lines (and refusals) go to `onHistoryLines`
+ * — every line of one burst in a single call, so a transcript holding them in React state
+ * repaints once, not once per line — or else one by one to `onHistory`.
  */
 export function useModsUiController(opts: ModsUiContext & {
-  onHistory: (line: ModHistoryLine) => void;
+  onHistory?: (line: ModHistoryLine) => void;
+  onHistoryLines?: (lines: ModHistoryLine[]) => void;
   onPrompt?: (p: { plugin: string; text: string; asUser: boolean }) => void;
 }): ModsUiBinding {
   const onHistory = useRef(opts.onHistory);
   onHistory.current = opts.onHistory;
+  const onHistoryLines = useRef(opts.onHistoryLines);
+  onHistoryLines.current = opts.onHistoryLines;
   const onPrompt = useRef(opts.onPrompt);
   onPrompt.current = opts.onPrompt;
+  const pending = useRef<ModHistoryLine[]>([]);
   const [ctl] = useState(() => new ModsUiController({
-    onHistory: line => onHistory.current(line),
+    onHistory: line => {
+      if (!onHistoryLines.current) { onHistory.current?.(line); return; }
+      pending.current.push(line);
+      if (pending.current.length > 1) return;
+      queueMicrotask(() => {
+        const lines = pending.current;
+        pending.current = [];
+        if (lines.length) onHistoryLines.current?.(lines);
+      });
+    },
     onPrompt: p => onPrompt.current?.(p),
   }));
   useEffect(() => ctl.start(), [ctl]);

@@ -390,6 +390,27 @@ describe('chord, sanitizing and repaint economy', () => {
     off();
   });
 
+  it('a burst of bus events wakes React once, and the snapshot is current at once', async () => {
+    const f = fakeHost();
+    ctl.attach(f.host);
+    await flush();
+    let wakes = 0;
+    const off = ctl.subscribe(() => { wakes++; });
+    for (let i = 0; i < 200; i++) f.emit({ kind: 'status', plugin: 'loop', text: `step ${i}` });
+    for (let i = 0; i < 5; i++) f.emit({ kind: 'toast', plugin: 'loop', text: `t${i}` });
+    expect(ctl.getSnapshot().statuses).toEqual([{ plugin: 'loop', text: 'step 199' }]);
+    expect(ctl.getSnapshot().toasts.map(t => t.text)).toEqual(['t2', 't3', 't4']);
+    expect(wakes).toBe(0);
+    await Promise.resolve();
+    expect(wakes).toBe(1);
+    // Keys still reach React before the next keypress is read (one wake per key).
+    ctl.handleInput('x', k({ ctrl: true }));
+    await Promise.resolve();
+    expect(wakes).toBe(2);
+    expect(ctl.getSnapshot().chord).toBe(true);
+    off();
+  });
+
   it('a new host that draws the same tree as the old one still shows it', async () => {
     const a = fakeHost();
     const b = fakeHost();
