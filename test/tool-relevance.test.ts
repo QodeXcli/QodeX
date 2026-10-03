@@ -132,6 +132,32 @@ console.log('— specialist composes with common —');
   check('unrelated specialist (docker) absent', !t.has('docker_build'));
 }
 
+console.log('— agent-platform families: browser (+vault) on sites/URLs, workflow_, mission_, desktop apps —');
+{
+  const P = [...ALL, 'browser_snapshot', 'browser_fill_secret', 'vault_list', 'computer_use_click',
+    'workflow_run', 'workflow_record', 'mission_start', 'mission_status'];
+  const pn = (sig: string) => selectRelevantToolNames(P, sig).selected;
+  check('URL pulls browser', pn('open https://example.com and read the title').has('browser_click'));
+  check('bare domain pulls browser', pn('go to digikala.com').has('browser_snapshot'));
+  check('bare domain is never trivial', selectRelevantToolNames(P, 'digikala.com').trivial === false);
+  check('login/checkout words pull browser', pn('log in and checkout the cart').has('browser_click'));
+  check('browser family includes vault_', pn('sign in to my bank').has('vault_list'));
+  check('persian "برو تو سایت" pulls browser', pn('برو تو سایت دیجی‌کالا').has('browser_click'));
+  check('persian "دیجی‌کالا رو باز کن" pulls browser + not trivial',
+    pn('دیجی‌کالا رو باز کن').has('browser_navigate') && selectRelevantToolNames(P, 'دیجی‌کالا رو باز کن').trivial === false);
+  check('persian "سبد خرید" pulls browser', pn('به سبد خرید اضافه کن').has('browser_click'));
+  check('persian ZWNJ/space variants both match', pn('وب‌سایت رو باز کن').has('browser_click') && pn('وب سایت رو باز کن').has('browser_click'));
+  check('workflow words pull workflow_', pn('record this workflow and replay it later').has('workflow_run'));
+  check('persian "ضبط کن" pulls workflow_', pn('این کارو ضبط کن').has('workflow_record'));
+  check('mission words pull mission_', pn('keep working on it overnight').has('mission_start'));
+  check('persian "ماموریت" pulls mission_', pn('یه ماموریت بساز برای پیگیری قیمت').has('mission_start'));
+  check('desktop app words pull computer_use_', pn('open the Notes app').has('computer_use_click'));
+  check('CSS background does NOT pull mission_', !pn('make the background color darker').has('mission_start'));
+  check('persian bug task still EXCLUDES browser/mission/workflow',
+    !pn('باگ‌های هیرو رو پیدا کن').has('browser_click') && !pn('باگ‌های هیرو رو پیدا کن').has('mission_start') && !pn('باگ‌های هیرو رو پیدا کن').has('workflow_run'));
+  check('app.tsx does NOT pull computer_use_', !pn('fix the type error in app.tsx').has('computer_use_click'));
+}
+
 console.log('— schema wrapper —');
 {
   const schemas = ALL.map(n => ({ type: 'function' as const, function: { name: n, description: '', parameters: {} } }));

@@ -48,5 +48,21 @@ console.log('— analysis profile equips the model for trade-off / business task
   check('gets no delegation nudge (not read-heavy)', !a.includes('SEPARATE context window'));
 }
 
+console.log('— web automation / desktop control profiles —');
+{
+  const web = systemAddendumFor('web');
+  check('web has its profile header', web.includes('## Task profile: web automation'));
+  check('web teaches snapshot → act by ref → verify', web.includes('browser_snapshot') && web.includes('ref') && web.includes('Verify'));
+  check('web prefers browser over curl', /curl/.test(web));
+  check('web points long jobs to browser_agent and background goals to mission_start', web.includes('browser_agent') && web.includes('mission_start'));
+  check('web uses the vault for logins', web.includes('browser_fill_secret'));
+  check('web covers Sentinel + untrusted content + evidence', web.includes('Sentinel') && web.includes('untrusted') && web.includes('evidence'));
+  check('web gets no delegation nudge', !web.includes('Keep your context small'));
+  const desk = systemAddendumFor('desktop');
+  check('desktop has its profile header', desk.includes('## Task profile: desktop control'));
+  check('desktop explains screenshot-pixel coordinates + locate', desk.includes('SCREENSHOT pixels') && desk.includes('computer_use_locate'));
+  check('desktop gets no delegation nudge', !desk.includes('Keep your context small'));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

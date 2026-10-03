@@ -1,4 +1,54 @@
+import { createHash } from 'crypto';
 import type { ToolCall } from '../session/store.js';
+
+// ── Tool-family helpers for the loop guards and gates ─────────────────────────────
+
+/**
+ * Tool families that act on the agent's "own computer" (browser, desktop, workflows,
+ * missions, vault). They are not code changes, so the coding-discipline gates (the
+ * architecture/preflight plan gate and the per-turn git auto-snapshot) don't apply to
+ * them — same reasoning as the existing `artifact_` exemption.
+ */
+const GATE_EXEMPT_PREFIXES = ['artifact_', 'browser_', 'computer_use_', 'workflow_', 'mission_', 'vault_'];
+
+/** True when the preflight plan gate and the auto-snapshot must skip this tool. PURE. */
+export function isGateExemptTool(name: string): boolean {
+  return GATE_EXEMPT_PREFIXES.some(p => name.startsWith(p));
+}
+
+/**
+ * Tools whose result depends on live external state (a web page, the screen). Calling
+ * them repeatedly with identical args is NORMAL when the state changes in between
+ * (scroll → snapshot while reading a long page), so the loop guards key them by
+ * name + args + a hash of the RESULT: only a truly identical call+result repeat counts
+ * as "stuck". PURE.
+ */
+export function isStateDependentTool(name: string): boolean {
+  return name.startsWith('browser_') || name.startsWith('computer_use_');
+}
+
+/** Short stable hash of a tool result (8 hex chars). PURE. */
+export function resultHash(content: unknown): string {
+  const s = typeof content === 'string' ? content : JSON.stringify(content ?? '');
+  return createHash('md5').update(s).digest('hex').slice(0, 8);
+}
+
+/**
+ * Effective per-call timeout in seconds. `toolSec` is the tool's own `timeoutSeconds`:
+ *   - undefined / negative / NaN → the global budget.toolTimeoutSeconds;
+ *   - 0 → no timeout for this tool (it must honor ctx.signal; sub-agent-style tools carry
+ *     their own wall-clock budget);
+ *   - n > 0 → max(global, n), so a tool can only ever get MORE time than the global cap.
+ * A global value ≤ 0 also means "no timeout" (budget convention: 0 = unlimited). PURE.
+ */
+export function resolveToolTimeoutSeconds(globalSec: number | undefined, toolSec: number | undefined): number {
+  const g = typeof globalSec === 'number' && Number.isFinite(globalSec) ? globalSec : 300;
+  if (typeof toolSec === 'number' && Number.isFinite(toolSec) && toolSec >= 0) {
+    if (toolSec === 0) return 0;
+    return g <= 0 ? 0 : Math.max(g, toolSec);
+  }
+  return g <= 0 ? 0 : g;
+}
 
 /**
  * Turn a raw provider/stream error string into a clear, actionable message for the USER
@@ -120,6 +170,52 @@ export function readLoopAction(maxIdenticalReads: number): 'none' | 'summarize' 
   if (maxIdenticalReads >= 5) return 'abort';
   if (maxIdenticalReads >= 3) return 'summarize';
   return 'none';
+}
+
+/** Final message when readLoopAction says 'abort'. File re-reads get the context-window
+ *  explanation; a browser/desktop observation that keeps returning the same result gets
+ *  a "the page/screen isn't changing" explanation. PURE. */
+export function readLoopAbortMessage(tool: string, count: number, contextWindow: number): string {
+  if (isStateDependentTool(tool)) {
+    return `I stopped: \`${tool}\` kept returning exactly the same result ${count} times, so the ` +
+      `page/screen isn't changing and repeating it won't help. Tell me how to proceed (or take over ` +
+      `the browser/desktop yourself), and I'll continue from there.`;
+  }
+  const ctx = Number.isFinite(contextWindow) ? contextWindow.toLocaleString() : String(contextWindow);
+  return `I got stuck re-reading the same files. This codebase is larger than the model's context ` +
+    `window (${ctx} tokens), so I keep losing my place and starting over. To finish this, either ` +
+    `narrow the task (e.g. “find bugs in src/pages/CartPage.jsx”) or use a model with a larger ` +
+    `context window (~/.qodex/config.yaml → providers.*.extraModels[].contextWindow).`;
+}
+
+/** The forced-summary nudge when readLoopAction says 'summarize'. PURE. */
+export function readLoopSummarizeMessage(tool: string, count: number): string {
+  if (isStateDependentTool(tool)) {
+    return `[SYSTEM] You have called \`${tool}\` with the same arguments ${count} times and it returned ` +
+      `the same result each time — the page/screen is not changing. STOP repeating it. In your NEXT ` +
+      `message, report what you have found so far and what is blocking you, in plain text. Tools are ` +
+      `disabled for that message.`;
+  }
+  return `[SYSTEM] You have re-read the same file ${count} times — a sign your context was ` +
+    `compacted and you restarted instead of continuing. STOP calling tools. In your NEXT message, ` +
+    `list the bugs/issues you have ALREADY found, in plain text. Tools are disabled for that message.`;
+}
+
+/** The nudge when detectStuckLoop fires, with advice targeted at the repeated tool. PURE. */
+export function stuckLoopMessage(lastTool: string): string {
+  let advice: string;
+  if (lastTool === 'read_file') {
+    advice = ' You are re-reading files you already examined — a sign your context was compacted and you restarted the task instead of continuing it. Do NOT start over. Based on what you have ALREADY read, report your findings now (e.g. the bugs you found) in your reply. If you need more detail on ONE specific thing, use grep with a precise pattern rather than re-reading whole files.';
+  } else if (lastTool === 'edit_symbol') {
+    advice = ' edit_symbol is failing repeatedly. Switch to edit_text or write_file for the same change. Don\'t retry edit_symbol on this file.';
+  } else if (lastTool === 'project_overview') {
+    advice = ' project_overview failed. SKIP it for now and use ls + read_file on specific files instead.';
+  } else if (isStateDependentTool(lastTool)) {
+    advice = ' Each repeat returned the SAME result — the page/screen is not changing. Do something different: act on another element/ref, scroll or navigate somewhere new, wait for a specific change (browser_wait_for), or take a fresh look (browser_snapshot / computer_use_screenshot) and re-plan.';
+  } else {
+    advice = ' Try a fundamentally different approach (different tool, different file, different angle).';
+  }
+  return `[SYSTEM] You've called \`${lastTool}\` with the same arguments 3+ times in a row. This isn't working.${advice} If you genuinely can't proceed, explain to the user IN ONE SENTENCE what's blocking you and stop. Do not apologize repeatedly. Do not loop.`;
 }
 
 /**

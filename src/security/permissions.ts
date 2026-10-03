@@ -122,22 +122,36 @@ export class PermissionEngine {
       }
     }
     // Fallback list for tools we know to be read-only (used when registry unset)
-    return [
-      'read_file', 'ls', 'glob', 'grep', 'code_graph_find_symbol',
-      'code_graph_find_callers', 'code_graph_find_references',
-      'code_graph_search_symbols', 'code_graph_list_symbols',
-      'code_graph_explain_symbol', 'code_graph_stats',
-      'web_search', 'web_fetch', 'todo_read',
-      'network_check',
-      'browser_screenshot', 'browser_console', 'browser_get_text',
-      'dev_server_log', 'dev_server_list',
-      'background_job_status', 'background_job_log',
-      'background_job_wait', 'background_job_list',
-      'vision_analyze',
-      'git_status', 'git_diff', 'git_log',
-    ].includes(tool);
+    return FALLBACK_READ_ONLY_TOOLS.has(tool);
   }
 }
+
+/**
+ * Tools known to be read-only, used when the engine has no registry lookup (bootstrap
+ * builds `new PermissionEngine(config)` without one). Page/screen OBSERVING tools like
+ * browser_screenshot / browser_get_text / computer_use_screenshot are deliberately NOT
+ * here any more: they are non-read-only tools now (they must run in model order after a
+ * click, never in the parallel read-only phase), so they must not be auto-allowed as
+ * "pure reads" either.
+ */
+export const FALLBACK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  'read_file', 'ls', 'glob', 'grep', 'code_graph_find_symbol',
+  'code_graph_find_callers', 'code_graph_find_references',
+  'code_graph_search_symbols', 'code_graph_list_symbols',
+  'code_graph_explain_symbol', 'code_graph_stats',
+  'web_search', 'web_fetch', 'todo_read',
+  'network_check',
+  'browser_console', 'browser_network', 'browser_status', 'browser_downloads',
+  'computer_use_screen_info', 'computer_use_active_window', 'computer_use_list_windows',
+  'workflow_list', 'workflow_show',
+  'mission_status', 'mission_list',
+  'vault_list',
+  'dev_server_log', 'dev_server_list',
+  'background_job_status', 'background_job_log',
+  'background_job_wait', 'background_job_list',
+  'vision_analyze',
+  'git_status', 'git_diff', 'git_log',
+]);
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Session-wide auto-approve toggle.

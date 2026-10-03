@@ -169,6 +169,28 @@ export class SessionStore {
     return id;
   }
 
+  /**
+   * Make sure a `sessions` row exists for a caller-chosen id (INSERT OR IGNORE).
+   *
+   * Sub-agents, fanout workers, scouts, background jobs and orchestrator workers run
+   * under derived ids (`<parent>/sub-<ts>`, `bg-<job>`, …) that were never inserted
+   * into `sessions`. Because `messages.session_id` REFERENCES sessions(id) and the DB
+   * runs with foreign_keys=ON, their first recordTurn threw "FOREIGN KEY constraint
+   * failed" and every sub-agent run came back ok:false. Calling this before the run
+   * fixes that without changing the id scheme. Idempotent; an existing row (and its
+   * model/cwd/title) is left untouched.
+   */
+  ensureSession(id: string, cwd: string, model: string): void {
+    if (typeof id !== 'string' || !id) throw new Error('[SESSION_ERROR] ensureSession needs a non-empty session id');
+    this.db.prepare(`INSERT OR IGNORE INTO sessions (id, cwd, model, title) VALUES (?, ?, ?, NULL)`)
+      .run(id, cwd, model);
+  }
+
+  /** True when a `sessions` row exists for `id`. */
+  hasSession(id: string): boolean {
+    return !!this.db.prepare(`SELECT 1 AS ok FROM sessions WHERE id = ?`).get(id);
+  }
+
   recordTurn(
     sessionId: string,
     messages: Message[],
@@ -386,4 +408,13 @@ let _store: SessionStore | null = null;
 export function getSessionStore(): SessionStore {
   if (!_store) _store = new SessionStore();
   return _store;
+}
+
+/**
+ * Test hook: point the process-wide store at a temp-DB instance (or `null` to drop
+ * it so the next getSessionStore() reopens the default ~/.qodex/sessions.db). Lets
+ * agent-loop tests run end-to-end without writing to the developer's real DB.
+ */
+export function setSessionStoreForTests(store: SessionStore | null): void {
+  _store = store;
 }
