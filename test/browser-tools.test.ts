@@ -289,9 +289,9 @@ describe('qodex browser command', () => {
   const build = (extra: Parameters<typeof buildBrowserCommand>[0] = {}) =>
     buildBrowserCommand({ profilesDir: tmp, downloadsDir: path.join(tmp, 'dl'), loadConfig: async () => null, out: l => lines.push(l), err: l => errs.push(l), ...extra });
 
-  it('has open / status / profiles / reset-profile / close', () => {
+  it('has open / status / profiles / reset-profile / close / bot-auth', () => {
     const names = build().commands.map(c => c.name());
-    expect(names).toEqual(['open', 'status', 'profiles', 'reset-profile', 'close']);
+    expect(names).toEqual(['open', 'status', 'profiles', 'reset-profile', 'close', 'bot-auth']);
   });
 
   it('unknown words after `browser` explain how to quote a prompt instead of crashing', async () => {

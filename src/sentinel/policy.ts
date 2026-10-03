@@ -54,7 +54,7 @@ import { domainToASCII } from 'url';
 import type { SentinelCategory, SentinelConfig } from '../config/agent-config.js';
 import { QODEX_CONFIG_FILE, QODEX_HOME, QODEX_SESSION_DB } from '../config/defaults.js';
 import {
-  QODEX_BROWSER_PROFILES_DIR, QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE,
+  QODEX_BROWSER_PROFILES_DIR, QODEX_BROWSER_BOT_AUTH_DIR, QODEX_CHANNELS_DIR, QODEX_SENTINEL_DIR, QODEX_VAULT_FILE, QODEX_VAULT_KEY_FILE,
 } from '../config/paths.js';
 import type { ElementInfo } from '../tools/browser/types.js';
 import { QODEX_GRANTS_FILE, QODEX_MAIL_AUTO_DIR } from '../grants/paths.js';
@@ -684,9 +684,10 @@ export const DEFAULT_PROTECTED_PATHS: ProtectedPaths = {
   // signed drafts (~/.qodex/mail): the agent may neither read nor write them — only the
   // human surfaces and the mail tools themselves change them.
   files: [QODEX_VAULT_KEY_FILE, QODEX_VAULT_FILE, QODEX_GRANTS_FILE, QODEX_MAIL_ACCOUNTS_FILE],
-  dirs: [QODEX_BROWSER_PROFILES_DIR, QODEX_MAIL_AUTO_DIR, QODEX_MAIL_DIR],
+  dirs: [QODEX_BROWSER_PROFILES_DIR, QODEX_BROWSER_BOT_AUTH_DIR, QODEX_MAIL_AUTO_DIR, QODEX_MAIL_DIR],
   markers: [
     markerFor(QODEX_VAULT_KEY_FILE), markerFor(QODEX_VAULT_FILE), markerFor(QODEX_BROWSER_PROFILES_DIR),
+    markerFor(QODEX_BROWSER_BOT_AUTH_DIR),
     markerFor(QODEX_GRANTS_FILE), markerFor(QODEX_MAIL_ACCOUNTS_FILE), markerFor(QODEX_MAIL_AUTO_DIR),
     markerFor(QODEX_MAIL_DIR),
   ],

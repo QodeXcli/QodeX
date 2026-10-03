@@ -47,6 +47,7 @@ import { getBus } from '../../control/bus.js';
 import { isInteractiveHuman } from '../../control/approvals.js';
 import { resolveBrowserExecutable, missingBrowserHint, type LauncherDeps, type ResolvedExecutable } from './launcher.js';
 import { LeanBlocker, leanEnabled, LEAN_BLOCK_ERROR, LEAN_FAILURE_TEXT, type LeanStatus } from './lean.js';
+import { BotAuthSigner, type BotAuthStatus } from './bot-auth.js';
 import {
   detectChallenge,
   pickChallengeHeaders,
@@ -628,6 +629,8 @@ export interface QodexBrowserStatus extends BrowserStatus {
   challenge?: { tab: number; vendor: string; state: string; host: string };
   /** Lean mode (browser.lean), when this launch started lean. */
   lean?: LeanStatus;
+  /** Web Bot Auth (browser.botAuth), when this launch signs its requests. */
+  botAuth?: BotAuthStatus;
 }
 
 export class QodexBrowserManager implements BrowserManager {
@@ -643,6 +646,8 @@ export class QodexBrowserManager implements BrowserManager {
   private closing: Promise<void> | null = null;
   private launchedCfg: BrowserConfig | null = null;
   private lean = new LeanBlocker(false, () => true);
+  private botAuth: BotAuthSigner | null = null;
+  private botAuthOn = false;
   private profileInUse = '';
   private exe: ResolvedExecutable | null = null;
   private browserVersion: string | undefined;
@@ -740,6 +745,7 @@ export class QodexBrowserManager implements BrowserManager {
     this.lean = new LeanBlocker(leanEnabled(cfg, this.mode), this.opts.leanExempt ?? leanExemptPage);
 
     const ctx = this.ctx;
+    await this.setupBotAuth(ctx, cfg);
     ctx.on('page', (p: Page) => { this.attachPage(p); });
     ctx.on('close', () => this.onContextClosed(ctx));
     for (const p of ctx.pages()) this.attachPage(p, { initial: true });
@@ -761,6 +767,49 @@ export class QodexBrowserManager implements BrowserManager {
     });
     logger.info('QodeX browser ready', { mode: this.mode, profile: this.profileInUse, executable: this.exe?.executablePath, source: this.exe?.source });
     this.followCasts();
+  }
+
+  /**
+   * Web Bot Auth: when enabled, sign the agent's own requests so a site can recognise
+   * QodeX (honest identity, not evasion). A context.route adds the signature headers to
+   * same-authority document / XHR / fetch requests on public hosts; everything else is
+   * passed through untouched. Loopback / LAN / file pages are never signed. Never throws
+   * out of launch: if the key can't be loaded, bot-auth just stays off.
+   */
+  private async setupBotAuth(ctx: any, cfg: BrowserConfig): Promise<void> {
+    this.botAuth = null;
+    this.botAuthOn = false;
+    if (!cfg.botAuth?.enabled) return;
+    if (this.mode !== 'launch') {
+      // On the user's own Chrome (CDP) the context is shared with their tabs; never add
+      // headers to requests that are not the agent's.
+      this.notice('Web Bot Auth is only applied to QodeX\'s own browser, not your Chrome (cdpUrl).');
+      return;
+    }
+    try {
+      const signer = await BotAuthSigner.load(cfg.botAuth);
+      const exempt = this.opts.leanExempt ?? leanExemptPage;
+      await ctx.route('**/*', (route: any) => {
+        let handled = false;
+        try {
+          const req = route.request();
+          const url = String(req.url());
+          const type = String(req.resourceType?.() ?? '');
+          if (/^https?:/i.test(url) && !exempt(url) && (type === 'document' || type === 'xhr' || type === 'fetch')) {
+            const signed = signer.headersForUrl(url);
+            if (signed) { handled = true; void route.continue({ headers: { ...req.headers(), ...signed } }).catch(() => {}); }
+          }
+        } catch { /* fall through to pass-through */ }
+        if (!handled) { void route.fallback().catch(() => { void route.continue().catch(() => {}); }); }
+      });
+      this.botAuth = signer;
+      this.botAuthOn = true;
+      logger.info('Web Bot Auth on', { keyid: signer.keyid, directory: signer.directoryUrl || '(keyid only)' });
+      this.notice(`Web Bot Auth is on — requests are signed as this agent (key ${signer.keyid.slice(0, 12)}…).`);
+    } catch (e) {
+      logger.warn('Web Bot Auth disabled: ' + firstLine(e));
+      this.notice('Web Bot Auth could not start (key error) — continuing without it. See `qodex browser bot-auth`.');
+    }
   }
 
   private async attachCdp(pw: any, cfg: BrowserConfig): Promise<void> {
@@ -880,6 +929,8 @@ export class QodexBrowserManager implements BrowserManager {
     this.activeTab = null;
     this.launchedCfg = null;
     this.lean = new LeanBlocker(false, () => true);
+    this.botAuth = null;
+    this.botAuthOn = false;
     if (this.fallbackProfileDir) {
       // The browser has exited: drop the throwaway profile (its logins were never the
       // user's). Chromium may still flush a file or two while exiting, hence retries.
@@ -1155,7 +1206,13 @@ export class QodexBrowserManager implements BrowserManager {
       pendingDialog: pending ? { type: pending.type, message: pending.message } : undefined,
       challenge: ch && chTab ? { tab: this.tabList.indexOf(chTab), vendor: ch.vendor, state: ch.state, host: ch.host } : undefined,
       lean: this.ctx && this.lean.enabled ? this.lean.status() : undefined,
+      botAuth: this.ctx && this.botAuthOn && this.botAuth ? this.botAuth.status(true) : undefined,
     };
+  }
+
+  /** The Web Bot Auth signer in force (for `qodex browser bot-auth`), or null. */
+  botAuthSigner(): BotAuthSigner | null {
+    return this.botAuthOn ? this.botAuth : null;
   }
 
   /**

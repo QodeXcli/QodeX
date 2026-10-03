@@ -41,7 +41,14 @@
    `context.route`, which turns the cache off). Never on your own Chrome or localhost / LAN
    pages; off for the rest of the session on a screenshot, takeover, live view or bot check.
    12-photo page: ~0 MB vs 5 MB downloaded, ~270 ms vs ~720 ms, ~100–180 MB less memory.
-6. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
+6. **Web Bot Auth — an honest agent identity** (`browser.botAuth`, off by default). QodeX
+   can sign its own requests with an Ed25519 key (HTTP Message Signatures / RFC 9421, tag
+   `web-bot-auth`) so a site recognises the agent and may let it through — the opposite of
+   detection evasion. `qodex browser bot-auth --init|--directory`; the private key lives in
+   `~/.qodex/browser/bot-auth/` (0600) and Sentinel keeps the agent out of it. Signs only
+   same-site document/xhr/fetch on public hosts; never loopback/LAN or the user's own
+   Chrome. No fingerprint spoofing, no hiding `navigator.webdriver`, no synthetic input.
+7. **Fixes found while merging:** workflow recording dropped a human's Back on fast machines
    (echo matching); the mail watcher missed mail that arrived between a check and the IDLE wait,
    and `stop()` could wait out the IDLE timeout; Telegram `/unpair` confirmed before dropping the
    approval channel; challenge detection stringified the page-title promise; the terminal's

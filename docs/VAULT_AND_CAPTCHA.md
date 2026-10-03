@@ -84,3 +84,50 @@ QodeX هرگز کپچا را حل نمی‌کند. وقتی یک بررسی به
 - **مرکز کنترل**: `?handoff=<id>` (یا همان لینک) حالت واگذاری را باز می‌کند: در گوشی نمای زنده اول می‌آید، روی بررسی بزرگ‌نمایی شده و دکمه‌های «انجام شد» و «نمی‌توانم» دارد. نگه‌داشتن و کشیدنِ خودِ شما همان‌طور که انجام می‌دهید منتقل می‌شود؛ هر نگه‌داشتن حداکثر ۱۵ ثانیه است و همیشه رها می‌شود. با دو انگشت بزرگ‌نمایی کنید؛ برای کپچای متنی دکمهٔ «صفحه‌کلید» را بزنید.
 - **ترمینال**: پیام می‌گوید «آن را در پنجرهٔ مرورگر یا مرکز کنترل حل کنید — QodeX خودش ادامه می‌دهد» و نشانیِ مرکز کنترل محلی را نشان می‌دهد. d یعنی انجام شد، c یعنی نمی‌توانم، و Esc کار را متوقف می‌کند.
 - **مأموریت‌های جدا**: واگذاری از طریق صف مأموریت به‌صورت کارت متنی (انجام شد / نمی‌توانم) به تلگرام می‌رسد، بدون تصویر و لینک، چون مرورگرِ worker در پردازش دیگری اجرا می‌شود.
+
+## Web Bot Auth — an honest agent identity (optional)
+
+QodeX never hides that it is automated. The opposite option is **Web Bot Auth**: QodeX
+signs its own requests with an Ed25519 key so a site can *recognise* QodeX — "this is the
+agent, acting for its user" — and choose to let it through. It earns fewer bot challenges
+by being identifiable, not by evading detection. Off by default.
+
+It implements HTTP Message Signatures (RFC 9421) with the `web-bot-auth` tag (the
+Cloudflare / IETF draft). Each signed request carries `Signature-Agent` (the URL where
+you publish the public key), `Signature-Input` and `Signature`, covering the target
+`@authority` and that directory URL.
+
+Set it up:
+1. `qodex browser bot-auth --init` creates the key at `~/.qodex/browser/bot-auth/ed25519.pem`
+   (0600). The private key never leaves the machine; Sentinel keeps the agent out of that
+   folder, so QodeX itself can never read, copy or change the key.
+2. In `~/.qodex/config.yaml`:
+   ```yaml
+   browser:
+     botAuth:
+       enabled: true
+       directoryUrl: https://your-domain/.well-known/http-message-signatures-directory
+   ```
+3. `qodex browser bot-auth --directory` prints the public key as a JWK Set — host it at
+   that URL. A site (or Cloudflare) fetches it to verify the signature. To get fewer
+   challenges on Cloudflare you also register the agent in its verified-bots programme;
+   QodeX provides the signature, you do the registration.
+
+What it is and is not:
+- It signs only same-site `document`, `xhr` and `fetch` requests on public hosts. Images,
+  fonts and third-party subresources are not signed. Loopback / LAN pages (dev servers)
+  are never signed, and the user's own Chrome (`cdpUrl`) is never touched.
+- `QODEX_BROWSER_BOT_AUTH=1|0` forces it on / off; `browser_status` and
+  `qodex browser status` show it.
+- It does **not** spoof a fingerprint, hide `navigator.webdriver`, or forge human input.
+  A site is free to ignore the signature. Signing requests reduces HTTP caching a little
+  (lean mode still saves image/font/media bandwidth).
+
+**خلاصهٔ فارسی.** «Web Bot Auth» هویت صادقانهٔ ایجنت است، نه پنهان‌کاری: QodeX درخواست‌های
+خودش را با یک کلید Ed25519 امضا می‌کند تا سایت بفهمد «این QodeX است که از طرف کاربرش کار
+می‌کند» و اجازهٔ عبور بدهد. پیش‌فرض خاموش است. با `qodex browser bot-auth --init` کلید ساخته
+می‌شود (کلید خصوصی هرگز از دستگاه خارج نمی‌شود و Sentinel ایجنت را از آن پوشه بیرون نگه
+می‌دارد)، بعد در config مقدار `browser.botAuth.enabled: true` و `directoryUrl` را بگذارید و
+خروجی `qodex browser bot-auth --directory` را روی آن نشانی منتشر کنید. فقط درخواست‌های
+هم‌سایتِ صفحه روی میزبان‌های عمومی امضا می‌شوند؛ localhost و Chrome خودتان دست‌نخورده می‌مانند.
+این قابلیت اثرانگشت مرورگر را جعل نمی‌کند و رفتار انسانی نمی‌سازد.

@@ -13,6 +13,8 @@
  *   const cfg = resolveBrowserConfig(getActiveConfig());
  */
 
+import { resolveBotAuthConfig, DEFAULT_BOT_AUTH_CONFIG, type BotAuthConfig } from '../tools/browser/bot-auth.js';
+
 export interface BrowserConfig {
   /**
    * Run headless — resolved from `headlessMode`. `browser.headless: auto` (the default)
@@ -80,6 +82,13 @@ export interface BrowserConfig {
    * QODEX_BROWSER_LEAN=1 / 0 forces it on / off.
    */
   lean: 'auto' | 'on' | 'off';
+  /**
+   * Web Bot Auth (`browser.botAuth`): sign the agent's own requests with an Ed25519 key
+   * so a site can recognise QodeX and choose to let it through — an honest identity, not
+   * detection evasion. Off by default. See src/tools/browser/bot-auth.ts and
+   * `qodex browser bot-auth`.
+   */
+  botAuth: BotAuthConfig;
 }
 
 export interface DesktopConfig {
@@ -198,6 +207,7 @@ export const DEFAULT_BROWSER_CONFIG: BrowserConfig = {
   handoffLinkTtlSec: 600,
   hostPacingMs: 500,
   lean: 'auto',
+  botAuth: DEFAULT_BOT_AUTH_CONFIG,
 };
 
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
@@ -347,6 +357,7 @@ export function resolveBrowserConfig(cfg: unknown, env: NodeJS.ProcessEnv = proc
     hostPacingMs: num(s.hostPacingMs, d.hostPacingMs, 0, 1000),
     lean: env.QODEX_BROWSER_LEAN === '1' ? 'on' : env.QODEX_BROWSER_LEAN === '0' ? 'off'
       : s.lean === true ? 'on' : s.lean === false ? 'off' : oneOf(s.lean, ['auto', 'on', 'off'] as const, d.lean),
+    botAuth: resolveBotAuthConfig(s.botAuth, env),
   };
 }
 

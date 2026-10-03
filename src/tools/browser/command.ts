@@ -238,7 +238,7 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
     .action((words: string[]) => {
       if (!words?.length) { out(cmd.helpInformation().trimEnd()); return; }
       err(
-        `Unknown browser subcommand "${words[0]}". Subcommands: open, status, profiles, reset-profile, close.\n` +
+        `Unknown browser subcommand "${words[0]}". Subcommands: open, status, profiles, reset-profile, close, bot-auth.\n` +
         `To give QodeX a task that starts with the word "browser", quote it: qodex "browser ${words.join(' ')}"`,
       );
       process.exitCode = 1;
@@ -332,6 +332,8 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
       out(`  Profiles:    ${profiles.length} in ${profilesDir}`);
       out(`  Downloads:   ${downloadsDir}`);
       out(`  Dialogs:     ${cfg.dialogPolicy}; snapshot after action: ${cfg.snapshotAfterAction ? 'on' : 'off'}`);
+      out(`  Lean mode:   ${cfg.lean} (${cfg.lean === 'auto' ? 'skip images/fonts/media only when headless' : cfg.lean === 'on' ? 'always skip images/fonts/media' : 'never skip'})`);
+      out(`  Bot auth:    ${cfg.botAuth.enabled ? `on${cfg.botAuth.directoryUrl ? `, directory ${cfg.botAuth.directoryUrl}` : ' (keyid only — set directoryUrl)'}` : 'off'}  →  qodex browser bot-auth`);
     });
 
   cmd
@@ -397,6 +399,54 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
         }
       }
       if (!stopped) out(rows.some(r => r.lock.locked) ? 'No QodeX browser could be stopped safely.' : 'No QodeX browser is running.');
+    });
+
+  cmd
+    .command('bot-auth')
+    .description('Web Bot Auth: sign the agent\'s requests so sites can recognise QodeX (honest identity, not evasion)')
+    .option('--init', 'Create the signing key now if it does not exist')
+    .option('--directory', 'Print the public-key directory (JWK Set) to host at your directoryUrl')
+    .option('--directory-out <file>', 'Write the public-key directory to a file')
+    .action(async (opts: { init?: boolean; directory?: boolean; directoryOut?: string }) => {
+      const cfg = resolveBrowserConfig((await loadCfg()) ?? null);
+      const bot = cfg.botAuth;
+      const { BotAuthSigner, WELL_KNOWN_DIRECTORY } = await import('./bot-auth.js');
+      const { existsSync } = fsSync;
+      const haveKey = existsSync(bot.keyFile);
+      const wantDirectory = opts.directory || !!opts.directoryOut;
+      if (!haveKey && !opts.init && !wantDirectory) {
+        out('Web Bot Auth is an opt-in, honest agent identity — it signs QodeX\'s own requests so a site can');
+        out('recognise QodeX and choose to let it through. It never hides that the browser is automated.');
+        out('');
+        out(`  Status:      ${bot.enabled ? 'enabled in config' : 'OFF (default)'}`);
+        out(`  Key:         not created yet → ${bot.keyFile}`);
+        out(`  Directory:   ${bot.directoryUrl || '(not set — add browser.botAuth.directoryUrl so sites can fetch the key)'}`);
+        out('');
+        out('Next: `qodex browser bot-auth --init` creates the key, then set in ~/.qodex/config.yaml:');
+        out('  browser:');
+        out('    botAuth:');
+        out('      enabled: true');
+        out(`      directoryUrl: https://your-domain${WELL_KNOWN_DIRECTORY}`);
+        out('Host the output of `qodex browser bot-auth --directory` at that URL.');
+        return;
+      }
+      let signer;
+      try { signer = await BotAuthSigner.load(bot); } catch (e: any) { err(`Could not load the key: ${String(e?.message ?? e)}`); process.exitCode = 1; return; }
+      if (wantDirectory) {
+        const json = JSON.stringify(signer.directory(), null, 2);
+        if (opts.directoryOut) { await fs.writeFile(opts.directoryOut, json + '\n', 'utf8'); out(`✓ Wrote the public-key directory to ${opts.directoryOut}`); }
+        else out(json);
+        return;
+      }
+      out('Web Bot Auth');
+      out(`  Status:      ${bot.enabled ? 'enabled in config' : 'OFF in config (set browser.botAuth.enabled: true to use it)'}`);
+      out(`  Key:         ${bot.keyFile}${haveKey ? '' : ' (created now)'}`);
+      out(`  Key id:      ${signer.keyid}`);
+      out(`  Algorithm:   Ed25519 (RFC 9421 HTTP Message Signatures, tag "web-bot-auth")`);
+      out(`  Directory:   ${signer.directoryUrl || '(not set — sites can only verify if they already know this key)'}`);
+      out('');
+      out('Publish the public key: `qodex browser bot-auth --directory` → host at your directoryUrl.');
+      out('The private key never leaves this machine. Turn it off any time with browser.botAuth.enabled: false.');
     });
 
   return cmd;

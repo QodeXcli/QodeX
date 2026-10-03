@@ -857,7 +857,7 @@ export class BrowserStatusTool extends Tool<z.infer<typeof StatusArgs>> {
 
   async execute(_args: z.infer<typeof StatusArgs>, _ctx: ToolContext): Promise<ToolResult> {
     const mgr = await getBrowserManager();
-    const s = mgr.status() as ReturnType<typeof mgr.status> & { executableSource?: string; notice?: string; pendingDialog?: { type: string; message: string }; cdpUrl?: string; downloads?: number; lean?: { on: boolean; blocked: number; suspended?: string } };
+    const s = mgr.status() as ReturnType<typeof mgr.status> & { executableSource?: string; notice?: string; pendingDialog?: { type: string; message: string }; cdpUrl?: string; downloads?: number; lean?: { on: boolean; blocked: number; suspended?: string }; botAuth?: { enabled: boolean; keyid?: string; directoryUrl?: string; signed: number; hasDirectory: boolean } };
     const lines = [
       `Running: ${s.running ? 'yes' : 'no'}${s.running ? ` (${s.mode === 'cdp' ? `attached to your Chrome${s.cdpUrl ? ` at ${s.cdpUrl}` : ''}` : s.headless ? 'headless' : 'visible window'})` : ''}`,
       `Profile: ${s.profile} (logins persist between runs)`,
@@ -869,6 +869,9 @@ export class BrowserStatusTool extends Tool<z.infer<typeof StatusArgs>> {
       lines.push(s.lean.on
         ? `Lean mode: on — images, fonts and media are skipped (${s.lean.blocked} so far); a screenshot or takeover turns it off`
         : `Lean mode: off since a ${s.lean.suspended ?? 'request'} needed the pixels (${s.lean.blocked} skipped before)`);
+    }
+    if (s.botAuth?.enabled) {
+      lines.push(`Web Bot Auth: on — requests signed as this agent (${s.botAuth.signed} so far)${s.botAuth.hasDirectory ? '' : '; no directory URL set, so most sites cannot verify it yet'}. QodeX cannot read or change this; it is a config setting.`);
     }
     if (s.pendingDialog) lines.push(`Dialog waiting: (${s.pendingDialog.type}) "${s.pendingDialog.message.slice(0, 160)}"`);
     if (s.notice) lines.push(`Note: ${s.notice}`);

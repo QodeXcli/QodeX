@@ -18,6 +18,8 @@ export const QODEX_BROWSER_DIR = path.join(QODEX_HOME, 'browser');
 export const QODEX_BROWSER_PROFILES_DIR = path.join(QODEX_BROWSER_DIR, 'profiles');
 /** Where files downloaded by the agent's browser land. */
 export const QODEX_BROWSER_DOWNLOADS_DIR = path.join(QODEX_BROWSER_DIR, 'downloads');
+/** The Web Bot Auth signing key (Ed25519 private key); Sentinel keeps the agent out. */
+export const QODEX_BROWSER_BOT_AUTH_DIR = path.join(QODEX_BROWSER_DIR, 'bot-auth');
 /** Screenshots taken by browser / desktop tools. */
 export const QODEX_SCREENSHOTS_DIR = path.join(QODEX_HOME, 'screenshots');
 /** Mission logs + per-mission artifacts (DB rows live in sessions.db). */

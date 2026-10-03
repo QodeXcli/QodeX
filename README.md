@@ -631,6 +631,10 @@ Your `security.denyRules` and the hard-deny patterns still refuse in every mode,
   [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
 - **CAPTCHAs** — QodeX never solves them; it waits out self-clearing checks and hands the rest to you
   (Telegram card with a one-tap live-view link, solve it from your phone), then continues by itself.
+- **Web Bot Auth** (`browser.botAuth`, off by default) — the honest alternative to stealth: QodeX signs its
+  own requests with an Ed25519 key (RFC 9421) so a site can recognise the agent and let it through, instead
+  of hiding that it is automated. `qodex browser bot-auth --init`; no fingerprint spoofing. See
+  [docs/VAULT_AND_CAPTCHA.md](docs/VAULT_AND_CAPTCHA.md).
 
 ## Mods (Claude Code-compatible)
 
