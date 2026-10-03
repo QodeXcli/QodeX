@@ -38,6 +38,7 @@ import {
   BrowserStatusTool,
 } from './tools-extra.js';
 import { BrowserAgentTool } from './agent-tool.js';
+import { BrowserRequestHumanTool } from './handoff.js';
 
 export const BROWSER_TOOL_CLASSES = [
   // original set (names unchanged)
@@ -68,6 +69,8 @@ export const BROWSER_TOOL_CLASSES = [
   BrowserDialogTool,
   BrowserPdfTool,
   BrowserStatusTool,
+  // CAPTCHA / bot-check hand-off to the human (never solved by the agent)
+  BrowserRequestHumanTool,
   // autonomous sub-agent
   BrowserAgentTool,
 ] as const;
@@ -99,6 +102,7 @@ export {
   BrowserDialogTool,
   BrowserPdfTool,
   BrowserStatusTool,
+  BrowserRequestHumanTool,
   BrowserAgentTool,
 };
 export {
@@ -113,6 +117,12 @@ export {
   maskSecretValues, maskSecretText, collectSecretValues,
 } from './snapshot.js';
 export { buildBrowserCommand } from './command.js';
+export {
+  classifyChallenge, detectChallenge, waitForChallengeChange, isChallengeFrameUrl, isChallengeElement, challengeLabel,
+} from './challenge.js';
+export type { ChallengeInfo, ChallengeVendor, ChallengeState, ChallengeBox } from './challenge.js';
+export { runHandoff, resolveHandoff, pendingHandoffs, HANDOFF_OPTIONS } from './handoff.js';
+export type { HandoffMeta, HandoffResult, HandoffOutcome } from './handoff.js';
 export { buildBrowserAgentPrompt } from './agent-tool.js';
 export { getBrowserManager, peekBrowserManager, setBrowserManagerForTests } from './types.js';
 export type { BrowserManager, BrowserStatus, TabInfo, ElementInfo, BrowserActionRecord, HumanInputEvent, ScreencastFrame } from './types.js';

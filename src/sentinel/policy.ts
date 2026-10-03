@@ -1268,7 +1268,7 @@ const WRITE_TOOLS = new Set(['write_file', 'edit_text', 'edit_symbol', 'multi_ed
 const BROWSER_GUARDED = new Set([
   'browser_navigate', 'browser_click', 'browser_fill', 'browser_type', 'browser_fill_form', 'browser_press',
   'browser_upload', 'browser_downloads', 'browser_evaluate', 'browser_tabs', 'browser_agent', 'browser_fill_secret',
-  'browser_dialog', 'browser_wait_for',
+  'browser_dialog', 'browser_wait_for', 'browser_request_human',
 ]);
 const DESKTOP_GUARDED = new Set([
   'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_move', 'computer_use_drag',
@@ -1582,6 +1582,10 @@ export function classifyAction(toolName: string, args: Record<string, unknown>, 
     }
     case 'browser_evaluate':
       return classifyScript(str(a.script ?? a.expression ?? a.code), ctx, 'run a page script');
+    case 'browser_request_human':
+      // Low risk: it only waits for the human (who acts in the browser themselves) and
+      // never acts on the page. The human's own step is the consent, in every mode.
+      return none(`hand the browser to the human: ${oneLine(str(a.reason), 80)}`, pageHost || undefined);
     case 'browser_wait_for':
       // A "function" wait polls its predicate IN the page: page JS like browser_evaluate.
       if (str(a.kind) === 'function') return classifyScript(str(a.value), ctx, 'wait on a page script');

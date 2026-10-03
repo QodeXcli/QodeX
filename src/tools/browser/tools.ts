@@ -41,7 +41,8 @@ import {
   QodexBrowserManager, normalizeUrl, formatBytes, refFromSelector, redactTypedArgs,
   isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal,
 } from './session.js';
-import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets } from './snapshot.js';
+import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets, maskSecretText } from './snapshot.js';
+import { challengeHint, challengeLabel, isChallengeElement, isChallengeFrameUrl, type ChallengeInfo } from './challenge.js';
 import { QODEX_SCREENSHOTS_DIR } from '../../config/paths.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import { logger } from '../../utils/logger.js';
@@ -129,11 +130,16 @@ export function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 export async function waitForHuman(mgr: BrowserManager, ctx: ToolContext): Promise<void> {
   if (!mgr.isTakeover()) return;
   const by = mgr.status().takeoverBy;
-  ctx.emit({ type: 'progress', message: `Waiting: ${by ? `${by} has` : 'a human has'} taken over the QodeX browser — continuing when it is handed back.` });
+  ctx.emit({
+    type: 'progress',
+    message: /^handoff:/.test(String(by ?? ''))
+      ? 'Waiting: a human is passing a check in the QodeX browser (hand-off) — continuing when it is done.'
+      : `Waiting: ${by ? `${by} has` : 'a human has'} taken over the QodeX browser — continuing when it is handed back.`,
+  });
   await mgr.waitForTakeoverEnd(ctx.signal);
 }
 
-const CODE_RE = /^\[(STALE_REF|PLAYWRIGHT_MISSING|BROWSER_LAUNCH_FAILED|BROWSER_ERROR|ABORTED|HUMAN_TAKEOVER|PARTIAL_LOAD)\]/;
+const CODE_RE = /^\[(STALE_REF|PLAYWRIGHT_MISSING|BROWSER_LAUNCH_FAILED|BROWSER_ERROR|ABORTED|HUMAN_TAKEOVER|PARTIAL_LOAD|CHALLENGE|CHALLENGE_HUMAN_ONLY|CHALLENGE_UNSOLVED)\]/;
 
 /** Map an exception to a model-readable `[CODE] ...` result with a fix hint. */
 export function browserErrorResult(e: unknown, what: string): ToolResult {
@@ -171,26 +177,141 @@ export function browserErrorResult(e: unknown, what: string): ToolResult {
   return { content: `[BROWSER_ERROR] ${what} failed: ${first}${details}${hint ? `\nHint: ${hint}` : ''}`, isError: true };
 }
 
+/** The refusal for any agent action on a CAPTCHA / bot-check widget. */
+export function humanOnlyMessage(what: string): string {
+  return `[CHALLENGE_HUMAN_ONLY] ${what} is part of a CAPTCHA / bot check — only a human may act on it. ` +
+    'Do not click, type into, drag or analyze it, and do not script around it. Call browser_request_human (it hands the browser to the user and resumes by itself), or tell the user.';
+}
+
+/** A page script that reaches into a CAPTCHA widget or its token (refused like a click on it). PURE. */
+export const CHALLENGE_SCRIPT_RE = /captcha|turnstile|_cf_chl|cf-chl|challenge-platform|geetest|arkose|funcaptcha|captcha-delivery|awswaf|px-captcha/i;
+
+function withTimeoutValue<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    (t as any).unref?.();
+    p.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
+
+/**
+ * Refuse ([CHALLENGE_HUMAN_ONLY]) when a resolved target belongs to a challenge: the
+ * in-page describer flagged it, or — when it could not be described — the frame it lives
+ * in is a challenge vendor's frame. A frame ref that cannot be resolved at all while the
+ * tab shows a challenge is refused too (fail closed). Human input (dispatchInput) is
+ * never checked here.
+ */
+export async function assertNotChallenge(
+  mgr: BrowserManager,
+  loc: any,
+  el: ElementInfo | null,
+  target: { ref?: string; selector?: string } | null,
+): Promise<void> {
+  if (isChallengeElement(el)) throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  if (el) return;
+  let frameUrl: string | null = null;
+  const handle: any = await withTimeoutValue(Promise.resolve().then(() => loc?.elementHandle?.({ timeout: 500 })), 1500, null);
+  if (handle) {
+    try {
+      const frame = await withTimeoutValue(Promise.resolve().then(() => handle.ownerFrame()), 1000, null);
+      frameUrl = frame ? String(frame.url()) : null;
+    } catch { frameUrl = null; }
+    void Promise.resolve(handle.dispose?.()).catch(() => {});
+  }
+  if (frameUrl && isChallengeFrameUrl(frameUrl)) throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  const qm = asQodex(mgr);
+  if (!frameUrl && target?.ref && /^f\d+e/.test(target.ref) && qm?.challengeOf()) {
+    throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  }
+}
+
+/** The soft refusal to load a URL again whose last two loads ended on a bot check. */
+export function refuseChallengeReload(url: string): ToolResult {
+  let where = url;
+  try { const u = new URL(url); where = `${u.host}${u.pathname}`; } catch { /* keep */ }
+  return {
+    content: `[CHALLENGE] Not loading ${where} again: its last 2 loads ended on a bot check, and reloading restarts the check and looks more like a bot. ` +
+      'Call browser_request_human to hand it to the user (or tell the user).',
+    isError: true,
+  };
+}
+
 /** Error when an observation tool is called before the browser was opened. */
 export function notRunningResult(): ToolResult {
   return { content: '[BROWSER_ERROR] The QodeX browser is not open yet — call browser_navigate first.', isError: true };
 }
 
+/** What the challenge gate found after an action: lines for the result + the challenge still up (or null). */
+export interface ChallengeGate {
+  lines: string[];
+  challenge: ChallengeInfo | null;
+  /** The challenge was there and cleared by itself during the auto-wait. */
+  cleared?: ChallengeInfo;
+}
+
+/** `[CHALLENGE] …` line for a challenge that is still up. PURE. */
+export function formatChallengeLine(ch: ChallengeInfo, mode: 'auto' | 'report' | 'off' = 'auto'): string {
+  return `[CHALLENGE] ${challengeHint(ch.vendor, ch.state, ch.host, mode === 'report' ? 'report' : 'auto')}`;
+}
+
 /**
- * Compose an action result: the `✓` line, navigation change, manager notices and
- * (optionally) a compact interactive snapshot of the page after the action.
+ * The CAPTCHA / bot-check check every navigate / action / snapshot result goes through:
+ * detect on the active tab; a check that clears by itself is waited out (up to
+ * browser.challengeAutoWaitSec, honouring ctx.signal, no model calls); anything still up
+ * becomes a `[CHALLENGE]` line telling the model to hand off (browser_request_human) —
+ * never to touch it. browser.challengeHandoff 'off' disables it.
+ */
+export async function challengeGate(mgr: BrowserManager, ctx?: ToolContext, opts: { wait?: boolean } = {}): Promise<ChallengeGate> {
+  const qm = asQodex(mgr);
+  if (!qm || !qm.isRunning() || qm.pendingDialog()) return { lines: [], challenge: null };
+  const cfg = qm.currentConfig();
+  if (cfg.challengeHandoff === 'off') return { lines: [], challenge: null };
+  let ch = await qm.detectChallengeNow();
+  const lines: string[] = [];
+  let cleared: ChallengeInfo | undefined;
+  if (ch && ch.state === 'self-clearing' && opts.wait !== false && cfg.challengeAutoWaitSec > 0) {
+    const label = `${challengeLabel(ch.vendor)}${ch.host ? ` on ${ch.host}` : ''}`;
+    try {
+      ctx?.emit?.({ type: 'progress', message: `Waiting up to ${cfg.challengeAutoWaitSec}s for the ${label} to clear by itself…` });
+    } catch { /* progress is cosmetic */ }
+    const first = ch;
+    const r = await qm.waitForChallenge(undefined, {
+      timeoutMs: cfg.challengeAutoWaitSec * 1000,
+      signal: ctx?.signal,
+      intervalMs: 500,
+      confirmations: 2,
+      until: c => !c || c.state !== 'self-clearing',
+    });
+    ch = r.challenge;
+    if (!ch) {
+      cleared = first;
+      lines.push(`✓ The ${label} cleared by itself after ${Math.max(1, Math.round(r.waitedMs / 1000))}s.`);
+    }
+  }
+  if (ch) lines.push(formatChallengeLine(ch, cfg.challengeHandoff));
+  return { lines, challenge: ch, ...(cleared ? { cleared } : {}) };
+}
+
+/**
+ * Compose an action result: the `✓` line, navigation change, the challenge gate
+ * (auto-wait / `[CHALLENGE]`), manager notices and (optionally) a compact interactive
+ * snapshot of the page after the action. Pass `gate` when the caller already ran it.
  */
 export async function composeActionResult(
   mgr: BrowserManager,
   lines: string[],
   before: { url: string; title?: string } | null,
   wantSnapshot: boolean | undefined,
+  ctx?: ToolContext,
+  gate?: ChallengeGate,
 ): Promise<string> {
   const out = [...lines];
   const qm = asQodex(mgr);
+  const g = gate ?? await challengeGate(mgr, ctx);
   const nowUrl = mgr.activeUrl();
   const nowTitle = qm?.activeTitle() ?? '';
   if (before && nowUrl && nowUrl !== before.url) out.push(`→ Now at: ${nowUrl}${nowTitle ? ` — "${nowTitle}"` : ''}`);
+  out.push(...g.lines);
   for (const n of qm?.drainNotices() ?? []) out.push(`• ${n}`);
   const cfg = qm?.currentConfig();
   const snap = wantSnapshot ?? cfg?.snapshotAfterAction ?? false;
@@ -268,11 +389,22 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
       locator = await mgr.locator(target);
       element = qm ? await qm.describeLocator(locator) : (target.ref ? await mgr.describeRef(target.ref) : null);
       if (element && target.ref) element = { ...element, ref: target.ref };
+      // Never on a CAPTCHA / bot-check widget: that is the human's part.
+      await assertNotChallenge(mgr, locator, element, target);
     } else if (spec.focusTarget && qm) {
       const f = await qm.focusedElement(page);
       if (f === 'unknown') focusUnknown = true;
       else element = f;
+      // Typing / keys go to the focused element — refuse when that is inside a challenge
+      // (or focus is in a frame we cannot inspect while the tab shows one).
+      if (isChallengeElement(element) || (focusUnknown && qm.challengeOf(page))) {
+        throw new Error(humanOnlyMessage(element ? `the focused ${describeTarget(element, null)}` : 'the focused element'));
+      }
     }
+
+    // Not too fast for the same site (bot scores punish bursts); never for local hosts.
+    await qm?.paceHost(before.url);
+    throwIfAborted(ctx.signal);
 
     // A dialog opened by the action blocks the page; stop waiting for the action then.
     let unsubscribe: (() => void) | null = null;
@@ -305,7 +437,7 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
         actor: 'agent',
       });
     }
-    const content = await composeActionResult(mgr, lines, before, spec.snapshot);
+    const content = await composeActionResult(mgr, lines, before, spec.snapshot, ctx);
     return { content, metadata: { url: mgr.activeUrl(), tabs: mgr.tabs().length, target: target ?? undefined } };
   } catch (e) {
     return browserErrorResult(e, spec.tool);
@@ -388,6 +520,11 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
       await waitForHuman(mgr, ctx);
       throwIfAborted(ctx.signal);
       const qm = asQodex(mgr);
+      // Reloading a page whose last loads were a bot check restarts the check and looks
+      // more like a bot: hand it to the human instead.
+      if (qm && qm.challengeLoadCount(url) >= 2) return refuseChallengeReload(url);
+      await qm?.paceHost(url);
+      throwIfAborted(ctx.signal);
       if (args.new_tab) await mgr.newTab();
       const page = await mgr.activePage();
       const pending = qm?.pendingDialog(page);
@@ -410,15 +547,18 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
         logger.info('browser_navigate timed out; returning partial state', { url, waitUntil, timeout });
       }
       if (qm) await qm.settle({ timeoutMs: 1500 });
+      // A Cloudflare-style "Just a moment…" is waited out here, before the page is reported.
+      const gate = await challengeGate(mgr, ctx);
       const title = await safeTitleOf(page);
       const finalUrl = safeUrlOf(page) || url;
+      for (const u of new Set([url, finalUrl])) qm?.noteChallengeLoad(u, !!gate.challenge);
       mgr.recordAction({ tool: 'browser_navigate', args: { url }, url: finalUrl, title, actor: 'agent' });
 
       let htmlSection = '';
       if (args.return_html === true || timedOut) {
         try {
           // Frameworks mirror field values into the value="" attribute: mask secrets.
-          const html = await maskPageSecrets(page, String(await page.content()));
+          const html = await maskPageSecrets(page, String(await page.content()), qm?.extraSecretsFor(page) ?? []);
           const max = 25_000;
           const slice = html.length > max ? html.slice(0, max) + `\n\n…[truncated, ${html.length - max} more chars]` : html;
           htmlSection = `\n\n--- HTML (${html.length} chars) ---\n${slice}`;
@@ -431,16 +571,18 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
         timedOut
           ? `[PARTIAL_LOAD] navigation timed out after ${timeout}ms (waitUntil=${waitUntil}); returning whatever the page has so far. Reason: ${phaseError ?? 'timeout'}`
           : `✓ Loaded ${finalUrl}`,
-        `  HTTP ${status ?? '?'}${status && status >= 400 ? ' (the site returned an error page)' : ''}`,
+        `  HTTP ${status ?? '?'}${status && status >= 400
+          ? gate.challenge ? ' (a CAPTCHA / bot-check page — see [CHALLENGE])' : gate.cleared ? ' (a bot check that has since cleared)' : ' (the site returned an error page)'
+          : ''}`,
         `  Title: ${title || '(none)'}`,
         ...(finalUrl !== url ? [`  Final URL: ${finalUrl} (redirected from ${url})`] : []),
         `  Console: ${bufs?.console.length ?? 0} msg(s)  Errors: ${bufs?.errors.length ?? 0}`,
         ...preNotes,
       ];
-      const content = await composeActionResult(mgr, lines, null, timedOut ? (args.snapshot ?? true) : args.snapshot);
+      const content = await composeActionResult(mgr, lines, null, timedOut ? (args.snapshot ?? true) : args.snapshot, ctx, gate);
       return {
         content: content + htmlSection,
-        metadata: { url: finalUrl, status, title, timedOut, waitUntil },
+        metadata: { url: finalUrl, status, title, timedOut, waitUntil, ...(gate.challenge ? { challenge: { vendor: gate.challenge.vendor, state: gate.challenge.state, host: gate.challenge.host } } : {}) },
       };
     } catch (e) {
       return browserErrorResult(e, 'navigate');
@@ -560,11 +702,24 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
       const bad = await checkOutputPath(dest, ['.png', '.jpg', '.jpeg'], mgr);
       if (bad) return { content: `[BROWSER_ERROR] screenshot: ${bad}`, isError: true };
       const page = await mgr.activePage();
+      if (args.analyze && qm) {
+        // A vision model must never read a CAPTCHA (that would be automated solving).
+        const ch = await qm.detectChallengeNow();
+        if (ch) {
+          return {
+            content: `[CHALLENGE_HUMAN_ONLY] No screenshot analysis while a ${challengeLabel(ch.vendor)} is on this tab — a vision model must never read it. ` +
+              'Call browser_request_human (it hands the browser to the user and resumes by itself), or tell the user.',
+            isError: true,
+          };
+        }
+      }
       await fs.mkdir(path.dirname(dest), { recursive: true });
       const target = targetOf({ ref: args.ref, selector: args.selector });
       const legend: string[] = [];
       if (target) {
         const loc = await mgr.locator(target);
+        // No close-up of a CAPTCHA either: an image of it is what a solver would read.
+        await assertNotChallenge(mgr, loc, qm ? await qm.describeLocator(loc) : null, target);
         await loc.screenshot({ path: dest, timeout: qm?.currentConfig().actionTimeoutMs ?? 8000 });
       } else if (args.marks) {
         const { marks } = qm ? await qm.boxes() : await snapshotWithBoxes(page);
@@ -628,8 +783,10 @@ export class BrowserConsoleTool extends Tool<z.infer<typeof ConsoleArgs>> {
       ? '  (no messages)'
       : slice.map(m => `  [${m.type}] ${m.text}${m.location ? `  (${m.location})` : ''}`).join('\n');
     const errors = bufs.errors.length === 0 ? '  (no page errors)' : bufs.errors.slice(-limit).map(e => `  ${e.message}`).join('\n');
+    // A page that logs a vault-filled value must not carry it into the conversation.
+    const extra = asQodex(mgr)?.extraSecretsFor() ?? [];
     return {
-      content: `Console (${slice.length}/${filtered.length} ${level} message(s)):\n${consoleLines}\n\nPage errors (${bufs.errors.length}):\n${errors}`,
+      content: maskSecretText(`Console (${slice.length}/${filtered.length} ${level} message(s)):\n${consoleLines}\n\nPage errors (${bufs.errors.length}):\n${errors}`, extra),
     };
   }
 }
@@ -687,6 +844,7 @@ export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
     try {
       const mgr = await getBrowserManager();
       if (!mgr.isRunning()) return notRunningResult();
+      if (CHALLENGE_SCRIPT_RE.test(args.script)) return { content: humanOnlyMessage('What this script touches'), isError: true };
       await waitForHuman(mgr, ctx);
       const page = await mgr.activePage();
       let fn: (...a: unknown[]) => Promise<unknown>;
@@ -706,7 +864,7 @@ export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
       }
       // A script reading a password / card field (e.g. one filled from the vault)
       // must not carry its value into the conversation.
-      formatted = await maskPageSecrets(page, formatted);
+      formatted = await maskPageSecrets(page, formatted, asQodex(mgr)?.extraSecretsFor(page) ?? []);
       const notes = asQodex(mgr)?.drainNotices() ?? [];
       return {
         content: `Result:\n${formatted.slice(0, 5000)}${formatted.length > 5000 ? `\n…[truncated, ${formatted.length - 5000} more chars]` : ''}${notes.length ? '\n' + notes.map(n => `• ${n}`).join('\n') : ''}`,
@@ -751,6 +909,8 @@ export class BrowserGetTextTool extends Tool<z.infer<typeof GetTextArgs>> {
       } else {
         text = String(await page.innerText('body', { timeout: 5000 }));
       }
+      // A site may echo a revealed password into the page: hide secrets / vault fills.
+      text = await maskPageSecrets(page, text, asQodex(mgr)?.extraSecretsFor(page) ?? []);
       const truncated = text.length > maxChars;
       return {
         content: `${text.slice(0, maxChars)}${truncated ? `\n…[truncated, ${text.length - maxChars} more chars]` : ''}`,
@@ -826,6 +986,7 @@ export class BrowserWaitForTool extends Tool<z.infer<typeof WaitForArgs>> {
         msg = '✓ Network idle reached';
       } else {
         const miss = need('function'); if (miss) return miss;
+        if (CHALLENGE_SCRIPT_RE.test(args.value!)) return { content: humanOnlyMessage('What this predicate touches'), isError: true };
         await withAbort(page.waitForFunction(args.value, undefined, { timeout }), ctx.signal);
         msg = `✓ Predicate satisfied: ${args.value!.slice(0, 80)}`;
       }

@@ -16,6 +16,8 @@
  * in the page with the element/argument.
  */
 
+import { CHALLENGE_ELEMENT_JS } from './challenge.js';
+
 // ── pure helpers (unit-tested on sample strings) ────────────────────────────
 
 /** Roles the agent can act on — kept by the interactive-only filter. */
@@ -341,9 +343,13 @@ export function maskSecretText(text: string, secrets: string[]): string {
   return maskSecretValues(out, vals);
 }
 
-/** Mask the current secret field values of `page` in `text` (see maskSecretText). */
-export async function maskPageSecrets(page: any, text: string): Promise<string> {
-  return maskSecretText(text, await collectSecretValues(page));
+/**
+ * Mask the current secret field values of `page` in `text` (see maskSecretText), plus
+ * `extra` values (the manager's per-tab vault fills — masked even when the site has
+ * revealed them, e.g. a "show password" toggle turned the field into type=text).
+ */
+export async function maskPageSecrets(page: any, text: string, extra: string[] = []): Promise<string> {
+  return maskSecretText(text, [...await collectSecretValues(page), ...extra]);
 }
 
 // ── in-page sources ─────────────────────────────────────────────────────────
@@ -352,6 +358,8 @@ export async function maskPageSecrets(page: any, text: string): Promise<string> 
  * `function (el) → ElementInfo-like | null`, evaluated IN THE PAGE. Shared by
  * describeRef/describeSelector, human-click introspection and the DOM walker.
  * Never returns the value of an input (passwords, card numbers stay in the page).
+ * `challenge: true` marks a CAPTCHA / bot-check part (challenge.ts) — agent tools
+ * refuse to act on it ([CHALLENGE_HUMAN_ONLY]).
  */
 export const DESCRIBE_ELEMENT_JS = String.raw`function describeElement(el) {
   if (!el || el.nodeType !== 1) return null;
@@ -459,6 +467,7 @@ export const DESCRIBE_ELEMENT_JS = String.raw`function describeElement(el) {
     return parts.join(' > ');
   }
   var info = { role: role, name: name, tag: tag, isPassword: isPassword, selector: buildSelector() };
+  if (${CHALLENGE_ELEMENT_JS}) info.challenge = true;
   if (type) info.inputType = type;
   if (ac) info.autocomplete = ac;
   if (href) info.href = href;
@@ -721,6 +730,8 @@ export interface SnapshotOptions {
   /** Tab strip info for the header; derived from the page's context when absent. */
   tabs?: { count: number; active: number };
   timeoutMs?: number;
+  /** More values to hide (vault fills the manager remembers for this tab). Never echoed. */
+  extraSecrets?: string[];
 }
 
 export interface SnapshotResult {
@@ -807,7 +818,7 @@ export async function takeSnapshotDetailed(page: any, opts: SnapshotOptions = {}
 
   // The AI snapshot prints field VALUES, password inputs included: hide secrets
   // (vault fills, saved logins, card numbers) before anything reaches the model.
-  const secrets = await collectSecretValues(page);
+  const secrets = [...await collectSecretValues(page), ...(opts.extraSecrets ?? [])];
   raw = maskSecretValues(raw, secrets);
   const refCount = (raw.match(/\[ref=/g) || []).length;
   let body = opts.interactiveOnly ? filterInteractive(raw) : truncateLongUrls(raw, 300);
@@ -827,11 +838,11 @@ export async function takeSnapshot(page: any, opts: SnapshotOptions = {}): Promi
  * Snapshot with element boxes for set-of-marks overlays. In AI mode boxes come
  * from `[box=...]`; in fallback mode from the DOM walker's tagged elements.
  */
-export async function snapshotWithBoxes(page: any, opts: { timeoutMs?: number } = {}): Promise<{ text: string; marks: MarkBox[]; mode: 'aria' | 'dom' }> {
+export async function snapshotWithBoxes(page: any, opts: { timeoutMs?: number; extraSecrets?: string[] } = {}): Promise<{ text: string; marks: MarkBox[]; mode: 'aria' | 'dom' }> {
   const aria = await tryAria(page, { boxes: true, timeoutMs: opts.timeoutMs });
   if (aria !== null) {
     // Unnamed fields borrow their inline VALUE as the mark name: mask secrets first.
-    const raw = maskSecretValues(aria, await collectSecretValues(page));
+    const raw = maskSecretValues(aria, [...await collectSecretValues(page), ...(opts.extraSecrets ?? [])]);
     return { text: stripBoxes(raw), marks: parseBoxes(raw), mode: 'aria' };
   }
   const text = String(await page.locator('body').first().evaluate(DOM_WALK_FN, { interactiveOnly: true }) ?? '');

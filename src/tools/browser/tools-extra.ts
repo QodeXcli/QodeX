@@ -27,7 +27,9 @@ import { extractContent, type ExtractFormat } from './snapshot.js';
 import { QODEX_BROWSER_DOWNLOADS_DIR } from '../../config/paths.js';
 import {
   asQodex,
+  assertNotChallenge,
   browserErrorResult,
+  challengeGate,
   checkOutputPath,
   composeActionResult,
   describeTarget,
@@ -36,6 +38,7 @@ import {
   notRunningResult,
   redactForRecord,
   refField,
+  refuseChallengeReload,
   resolveUserPath,
   runBrowserAction,
   selectorField,
@@ -71,15 +74,17 @@ export class BrowserSnapshotTool extends Tool<z.infer<typeof SnapshotArgs>> {
   untrustedOutput = true;
   argsSchema = SnapshotArgs;
 
-  async execute(args: z.infer<typeof SnapshotArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof SnapshotArgs>, ctx: ToolContext): Promise<ToolResult> {
     try {
       const mgr = await getBrowserManager();
       if (!mgr.isRunning()) return notRunningResult();
       const qm = asQodex(mgr);
       if (!qm) return { content: '[BROWSER_ERROR] snapshots need the QodeX browser manager.', isError: true };
       const max = args.max_chars ?? qm.currentConfig().snapshotMaxChars;
+      // A bot check that clears by itself is waited out before the page is described.
+      const gate = await challengeGate(mgr, ctx);
       const snap = await qm.snapshot({ interactiveOnly: args.interactive_only, selector: args.selector, maxChars: max });
-      const notes = qm.drainNotices().map(n => `• ${n}`);
+      const notes = [...gate.lines, ...qm.drainNotices().map(n => `• ${n}`)];
       return {
         content: [...notes, ...(notes.length ? [''] : []), snap.text].join('\n'),
         metadata: { url: snap.url, title: snap.title, refs: snap.refCount, truncated: snap.truncated, mode: snap.mode },
@@ -196,6 +201,8 @@ export class BrowserFillFormTool extends Tool<z.infer<typeof FillFormArgs>> {
           try {
             const loc = await mgr.locator(target);
             const el: ElementInfo | null = qm ? await qm.describeLocator(loc) : null;
+            // Each field resolves its own locator: the challenge guard runs per field.
+            await assertNotChallenge(mgr, loc, el, target);
             const role = el?.role ?? '';
             const tag = el?.tag ?? '';
             const type = el?.inputType ?? '';
@@ -434,6 +441,8 @@ export class BrowserDragTool extends Tool<z.infer<typeof DragArgs>> {
       perform: async ({ mgr, locator, element, timeout }) => {
         const toLoc = await mgr.locator(to);
         const toEl = asQodex(mgr) ? await asQodex(mgr)!.describeLocator(toLoc) : null;
+        // A slider CAPTCHA's drop target is as off-limits as its handle.
+        await assertNotChallenge(mgr, toLoc, toEl, to);
         await locator.dragTo(toLoc, { timeout });
         return `✓ Dragged ${describeTarget(element, from)} onto ${describeTarget(toEl, to)}`;
       },
@@ -528,6 +537,15 @@ export class BrowserHistoryTool extends Tool<z.infer<typeof HistoryArgs>> {
   argsSchema = HistoryArgs;
 
   async execute(args: z.infer<typeof HistoryArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const qm = asQodex(await getBrowserManager());
+    const reloading = args.action === 'reload' && qm?.isRunning() ? qm.activeUrl() : '';
+    if (reloading && qm!.challengeLoadCount(reloading) >= 2) return refuseChallengeReload(reloading);
+    const result = await this.navigateHistory(args, ctx);
+    if (reloading && qm && !result.isError) qm.noteChallengeLoad(qm.activeUrl() || reloading, !!qm.challengeOf());
+    return result;
+  }
+
+  private navigateHistory(args: z.infer<typeof HistoryArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runBrowserAction({
       tool: 'browser_history',
       ctx,
@@ -611,7 +629,7 @@ export class BrowserTabsTool extends Tool<z.infer<typeof TabsArgs>> {
         await mgr.closeTab(args.index);
         line = `✓ Closed tab [${idx ?? '?'}]`;
       }
-      const content = await composeActionResult(mgr, [line, '', `Tabs (* = active):\n${await list()}`], null, args.snapshot);
+      const content = await composeActionResult(mgr, [line, '', `Tabs (* = active):\n${await list()}`], null, args.snapshot, ctx);
       return { content, metadata: { tabs: mgr.tabs().length } };
     } catch (e) {
       return browserErrorResult(e, `tabs ${args.action}`);
@@ -645,6 +663,9 @@ export class BrowserExtractTool extends Tool<z.infer<typeof ExtractArgs>> {
       const page = await mgr.activePage();
       const format: ExtractFormat = args.format ?? 'markdown';
       const r = await extractContent(page, { format, selector: args.selector, maxChars: args.max_chars ?? 20_000 });
+      // A site may echo a revealed password into the page: hide secrets / vault fills.
+      const qm = asQodex(mgr);
+      if (qm) r.content = await qm.maskText(page, r.content);
       let title = '';
       try { title = String(await page.title()); } catch { /* ignore */ }
       const header = `Page: ${title || '(untitled)'}\nURL: ${mgr.activeUrl()}\nFormat: ${format}${args.selector ? ` (selector ${args.selector})` : ''} — ${r.length} chars`;
@@ -775,7 +796,7 @@ export class BrowserDialogTool extends Tool<z.infer<typeof DialogArgs>> {
       if (!entry) return { content: '[BROWSER_ERROR] No dialog is waiting for an answer.', isError: true };
       const line = `✓ ${args.action === 'accept' ? 'Accepted' : 'Dismissed'} ${entry.type} "${entry.message.slice(0, 200)}"${args.text !== undefined && args.action === 'accept' ? ` with "${args.text}"` : ''}`;
       await qm.settle();
-      return { content: await composeActionResult(mgr, [line], null, undefined) };
+      return { content: await composeActionResult(mgr, [line], null, undefined, ctx) };
     } catch (e) {
       return browserErrorResult(e, 'dialog');
     }

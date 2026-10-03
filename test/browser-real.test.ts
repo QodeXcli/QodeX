@@ -208,9 +208,9 @@ describe.skipIf(!chromium)('QodeX browser (real Chromium)', () => {
     expect(c.content).toBe('Result:\n/');
     const d = await run(new BrowserEvaluateTool(), { script: 'const r = await Promise.resolve(arg.n * 2); return r;', arg: '{"n": 21}' });
     expect(d.content).toBe('Result:\n42');
-    // stealth init script ran (a syntax error in it would fail silently)
-    const st = await run(new BrowserEvaluateTool(), { script: 'return [navigator.webdriver === undefined, typeof window.chrome, navigator.languages.length > 0]' });
-    expect(JSON.parse(st.content.replace(/^Result:\n/, ''))).toEqual([true, 'object', true]);
+    // No stealth by default: the browser does not hide that it is automated.
+    const st = await run(new BrowserEvaluateTool(), { script: 'return [navigator.webdriver === true, navigator.languages.length > 0]' });
+    expect(JSON.parse(st.content.replace(/^Result:\n/, ''))).toEqual([true, true]);
   }, 30_000);
 
   it('a popup from the active tab becomes the active tab and is reported; tabs list/switch work', async () => {

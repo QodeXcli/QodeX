@@ -60,6 +60,8 @@ export interface ElementInfo {
   formAction?: string;
   /** Stable selector usable for replay (role+name, #id, data-testid, css). */
   selector?: string;
+  /** Part of a CAPTCHA / bot check (inside a challenge frame or widget): only a human may act on it. */
+  challenge?: boolean;
 }
 
 /** One agent- or human-performed browser action (fed to the workflow recorder). */
@@ -78,6 +80,14 @@ export type HumanInputEvent =
   /** Coordinates are in screencast-frame pixels; frameWidth/Height let the manager rescale to the viewport. */
   | { type: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clickCount?: number; frameWidth?: number; frameHeight?: number }
   | { type: 'move'; x: number; y: number; frameWidth?: number; frameHeight?: number }
+  /**
+   * The human's OWN press-and-hold / drag, relayed from the live view ('down', 'move'…,
+   * 'up') — e.g. a "Press & Hold" or slider check they solve from a phone. QodeX never
+   * synthesizes these; a hold is capped (an 'up' is forced) so a dropped stream cannot
+   * leave the button stuck. Not recorded for replay.
+   */
+  | { type: 'down'; x: number; y: number; button?: 'left' | 'right' | 'middle'; frameWidth?: number; frameHeight?: number }
+  | { type: 'up'; x?: number; y?: number; button?: 'left' | 'right' | 'middle'; frameWidth?: number; frameHeight?: number }
   | { type: 'type'; text: string }
   | { type: 'key'; key: string }
   | { type: 'scroll'; dx: number; dy: number; x?: number; y?: number; frameWidth?: number; frameHeight?: number }
@@ -112,14 +122,20 @@ export interface BrowserManager {
 
   /** Live view: stream JPEG frames of the active tab. Returns a stop function. */
   startScreencast(onFrame: (f: ScreencastFrame) => void, opts?: { quality?: number; maxFps?: number }): Promise<() => Promise<void>>;
-  /** One JPEG of the active tab's viewport. */
-  screenshotJpeg(quality?: number): Promise<Buffer>;
+  /** One JPEG of the active tab's viewport (or only `clip`, viewport CSS px). */
+  screenshotJpeg(quality?: number, opts?: { clip?: { x: number; y: number; width: number; height: number } }): Promise<Buffer>;
 
-  /** Human takeover: while on, agent browser actions wait (or fail with [HUMAN_TAKEOVER]). */
-  setTakeover(on: boolean, by?: string): void;
+  /**
+   * Human takeover: while on, agent browser actions wait (or fail with [HUMAN_TAKEOVER]).
+   * Turning it on never steals it from another owner (the QodeX manager returns false
+   * then); turning it off always releases.
+   */
+  setTakeover(on: boolean, by?: string): void | boolean;
+  /** Compare-and-release: end the takeover only if `by` still owns it (hand-offs use 'handoff:<id>'). */
+  releaseTakeover?(by: string): boolean;
   isTakeover(): boolean;
-  /** Resolve when takeover ends (or immediately if not active). */
-  waitForTakeoverEnd(signal?: AbortSignal): Promise<void>;
+  /** Resolve when takeover ends (or immediately if not active); with `timeoutMs`, resolves false on timeout. */
+  waitForTakeoverEnd(signal?: AbortSignal, timeoutMs?: number): Promise<void | boolean>;
   /** Apply a human input event from the control center to the active tab. */
   dispatchInput(ev: HumanInputEvent): Promise<void>;
 

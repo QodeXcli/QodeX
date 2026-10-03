@@ -124,6 +124,9 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
       'مرورگر', 'اسکرین', 'اسکرپ', 'کراول',
       'سایت', 'وبسایت', 'وب سایت', 'صفحه وب', 'لینک', 'فرم', 'خرید', 'سفارش', 'رزرو', 'ورود به',
       'لاگین', 'ثبت نام', 'سبد خرید',
+      // CAPTCHA / bot checks are a browser job (handed to the human, never solved).
+      'captcha', 'recaptcha', 'hcaptcha', 'turnstile', 'cloudflare check', 'bot check', "i'm not a robot",
+      'verify you are human', 'کپچا', 'کد امنیتی', 'من ربات نیستم',
       ...SITE_NAME_KEYWORDS,
     ],
     patterns: [
