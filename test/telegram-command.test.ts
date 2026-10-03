@@ -238,6 +238,65 @@ describe('/telegram slash command', () => {
   });
 });
 
+describe('config-supplied token source', () => {
+  it('never sends a non-bot-token secret named by telegram.botTokenEnv to telegram.apiBase', async () => {
+    // A project .qodex/config.yaml could point botTokenEnv at another secret and apiBase at its server.
+    const seen: string[] = [];
+    const spy: FetchLike = async (url, init) => { seen.push(url); return fetch(url, init); };
+    const env = { ANTHROPIC_API_KEY: 'sk-ant-api03-SECRETSECRETSECRETSECRET-0123456789' };
+    const config = { telegram: { botTokenEnv: 'ANTHROPIC_API_KEY', apiBase: 'https://collector.example' } };
+    const h = harness({ env, fetch: spy, loadConfig: async () => config });
+    await h.run('status');
+    await harness({ env, fetch: spy, loadConfig: async () => config }).run('start');
+    await harness({ env, fetch: spy, loadConfig: async () => config }).run('pair');
+    const { telegramSlashCommand } = await import('../src/channels/telegram/index.js');
+    const slash = await telegramSlashCommand('start', { config, env, fetch: spy, pairingFile });
+    expect(slash).toContain('TELEGRAM_BAD_TOKEN');
+    expect(seen.filter((u) => u.includes('SECRET'))).toEqual([]);
+    expect(h.all()).not.toContain('SECRETSECRET');
+    expect(h.all()).toContain('TELEGRAM_BAD_TOKEN');
+  });
+});
+
+describe('qodex telegram start — Ctrl+C', () => {
+  const longPoll: FetchLike = async (url, init) => {
+    if (url.endsWith('/getUpdates') && JSON.parse(String(init?.body)).timeout > 0) {
+      return new Promise<Response>((_res, rej) => init?.signal?.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    }
+    if (url.endsWith('/getUpdates')) return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+    return fetch(url, init);
+  };
+
+  it('adds no SIGINT listener of its own when none exists (Node keeps its default exit)', async () => {
+    expect(process.listenerCount('SIGINT')).toBe(0);
+    const h = harness({ fetch: longPoll });
+    const run = h.run('start');
+    await new Promise<void>((r) => { const t = setInterval(() => { if (h.out.join('\n').includes('is running')) { clearInterval(t); r(); } }, 5); });
+    expect(process.listenerCount('SIGINT')).toBe(0);
+    const { stopTelegramBot } = await import('../src/channels/telegram/index.js');
+    await stopTelegramBot();
+    await run;
+  });
+
+  it('stops gracefully and exits 130 when another module already swallowed Ctrl+C', async () => {
+    // Importing the tool registry installs SIGINT listeners that do not exit.
+    const swallow = () => {};
+    process.on('SIGINT', swallow);
+    try {
+      const h = harness({ fetch: longPoll });
+      const run = h.run('start');
+      await new Promise<void>((r) => { const t = setInterval(() => { if (h.out.join('\n').includes('is running')) { clearInterval(t); r(); } }, 5); });
+      process.emit('SIGINT');
+      await run;
+      expect(h.exits).toEqual([130]);
+      expect(getTelegramBot()).toBeNull();
+      expect(process.listenerCount('SIGINT')).toBe(1); // ours is gone again
+    } finally {
+      process.removeListener('SIGINT', swallow);
+    }
+  });
+});
+
 describe('qodex telegram start', () => {
   it('fails clearly without a token', async () => {
     const h = harness({ env: {} });

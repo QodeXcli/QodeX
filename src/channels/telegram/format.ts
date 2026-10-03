@@ -6,12 +6,17 @@
  * thin. Messages use Telegram's HTML parse mode; EVERY dynamic string (page
  * titles, prompts, mission goals, URLs) goes through `escapeHtml` — page text
  * is attacker-controlled and must not be able to inject markup or links.
+ * Text that originates on this machine (approval prompts like `Run: <cmd>`,
+ * mission reports, tab URLs) also goes through `maskOutbound` first: it leaves
+ * the machine via Telegram's servers, so card numbers, API keys, tokens and
+ * `KEY=value` secrets are replaced with `[redacted:…]`.
  *
  * Language: Persian when the chat's `language_code` starts with 'fa' (or the
  * user chose it with /lang), else English.
  */
 
 import type { InlineKeyboardMarkup } from './api.js';
+import { detectSecrets } from '../../sentinel/policy.js';
 
 export type Lang = 'en' | 'fa';
 
@@ -55,6 +60,57 @@ export function htmlToPlain(html: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, '&');
+}
+
+/** `Authorization: Bearer <token>` and friends. */
+const AUTH_HEADER_SECRET = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/g;
+/** `OPENAI_API_KEY=...`, `--password=...`, `"token": "..."` (key names that hold secrets). */
+const ASSIGNED_SECRET = /\b([A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|token|secret|passw(?:or)?d|pwd|authorization|credentials?)["']?)(\s*[=:]\s*)(["']?)([^\s"'&;|,]{6,})/gi;
+
+/**
+ * Mask secrets in text that is about to leave this machine through Telegram's
+ * servers (approval prompts such as `Run: <shell command>`, mission reports,
+ * URLs): card numbers, IBAN/Sheba, API keys, JWTs, credentials in URLs (the
+ * Sentinel detector), bearer tokens and `KEY=value` style assignments. PURE.
+ * Persian digits elsewhere in the text are left as they are.
+ */
+export function maskOutbound(text: unknown): string {
+  let s = String(text ?? '');
+  if (!s) return s;
+  for (let guard = 0; guard < 20; guard++) {
+    // Indices refer to a digit-normalized copy of the same length (1:1 mapping).
+    const f = detectSecrets(s)[0];
+    if (!f) break;
+    s = s.slice(0, f.index) + `[redacted:${f.kind}]` + s.slice(f.index + f.length);
+  }
+  return s
+    .replace(AUTH_HEADER_SECRET, (_m, scheme: string) => `${scheme} [redacted]`)
+    .replace(ASSIGNED_SECRET, (m, key: string, sep: string, quote: string, value: string) =>
+      value.startsWith('[redacted') ? m : `${key}${sep}${quote}[redacted]`);
+}
+
+/** Query parameters that carry access keys (the control center's `?k=` link, OAuth...). */
+const SECRET_URL_PARAMS = /^(k|key|token|access_token|id_token|auth|apikey|api_key|password|secret|sig|signature)$/i;
+
+/**
+ * Drop credentials from a URL before it leaves the machine: userinfo and
+ * key-like query parameters (a mission's live view is
+ * `http://127.0.0.1:<port>/?k=<control-center token>`). PURE.
+ */
+export function redactUrlSecrets(url: string): string {
+  const raw = String(url ?? '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    u.username = '';
+    u.password = '';
+    for (const name of [...u.searchParams.keys()]) {
+      if (SECRET_URL_PARAMS.test(name)) u.searchParams.delete(name);
+    }
+    return u.toString();
+  } catch {
+    return raw.replace(/[?#].*$/s, '');
+  }
 }
 
 /** Persian digits for display in FA messages. */
@@ -128,6 +184,7 @@ const EN = {
   approvalHint: 'Tap a button, or reply to this message with <i>yes</i> / <i>no</i>.',
   approvalAnswerHint: (opts: string[]) => `Please answer with one of: ${opts.map((o) => `<code>${esc(o, 40)}</code>`).join(' / ')}`,
   approvalExpired: 'This approval is no longer pending.',
+  approvalRetry: 'Could not record your answer — please try again.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'en'), 60)}`,
   notAuthorized: 'Not authorized.',
   outcomeApproved: 'Approved',
@@ -214,6 +271,7 @@ const FA: Catalog = {
   approvalHint: 'یکی از دکمه‌ها را بزنید یا به همین پیام با <i>بله</i> یا <i>خیر</i> پاسخ بدهید.',
   approvalAnswerHint: (opts: string[]) => `لطفاً یکی از این‌ها را بفرستید: ${opts.map((o) => `<code>${esc(o, 40)}</code>`).join(' / ')}`,
   approvalExpired: 'این درخواست دیگر در انتظار نیست.',
+  approvalRetry: 'ثبت پاسخ شما ممکن نشد — لطفاً دوباره امتحان کنید.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'fa'), 60)}`,
   notAuthorized: 'اجازهٔ دسترسی ندارید.',
   outcomeApproved: 'تأیید شد',
@@ -347,7 +405,7 @@ export function formatApproval(a: ApprovalCardInput, lang: Lang): string {
   const lines = [head.join(' · ')];
   if (a.missionId) lines.push(`🎯 ${S.approvalMission}: <code>${esc(a.missionId, 80)}</code>`);
   else if (a.source) lines.push(`${S.approvalFrom}: <code>${esc(a.source, 80)}</code>`);
-  lines.push('', esc(a.prompt, 3000));
+  lines.push('', esc(maskOutbound(a.prompt), 3000));
   return lines.join('\n');
 }
 
@@ -368,12 +426,20 @@ function channelName(by: string, lang: Lang): string {
   return known ? known[lang] : by;
 }
 
+/**
+ * `by` values that mean nobody answered: the run was aborted, the mission ended
+ * or its worker died, no channel could ask... (broker + mission-DB reasons).
+ */
+const AUTO_DENIED_BY = new Set([
+  'abort', 'reset', 'cancel', 'cancelled', 'expired', 'worker-exited', 'mission-ended', 'local-error', 'fallback',
+]);
+
 /** One line describing how an approval ended. */
 export function formatOutcome(result: { answer?: string; by?: string; approved?: boolean } | null, options: string[], lang: Lang): string {
   const S = strings(lang);
   if (!result || !result.by) return `⚪ ${S.outcomeElsewhere}`;
   if (result.by === 'timeout') return `⌛ ${S.outcomeTimeout}`;
-  if (result.by === 'abort' || result.by === 'reset') return `⚪ ${S.outcomeCancelled}`;
+  if (AUTO_DENIED_BY.has(result.by)) return `⚪ ${S.outcomeCancelled}`;
   const answer = String(result.answer ?? '');
   const approved = result.approved ?? isApprovingAnswer(answer, options);
   const denied = !approved && isDenyingAnswer(answer);
@@ -417,7 +483,7 @@ export interface MissionStatusView extends MissionSummaryView {
 
 export function formatMissionLine(m: MissionSummaryView, lang: Lang): string {
   const progress = m.progress ? ` · ${esc(m.progress, 40)}` : '';
-  return `${statusIcon(m.status)} <code>${esc(m.id, 40)}</code> ${esc(statusLabel(m.status, lang), 30)}${progress}\n   ${esc(m.goal, 140)}`;
+  return `${statusIcon(m.status)} <code>${esc(m.id, 40)}</code> ${esc(statusLabel(m.status, lang), 30)}${progress}\n   ${esc(maskOutbound(m.goal), 140)}`;
 }
 
 export function formatMissionList(list: MissionSummaryView[], lang: Lang): string {
@@ -430,23 +496,29 @@ export function formatMissionStatus(m: MissionStatusView, lang: Lang): string {
   const S = strings(lang);
   const lines = [
     `${statusIcon(m.status)} <b>${esc(statusLabel(m.status, lang), 30)}</b> · <code>${esc(m.id, 60)}</code>`,
-    `<i>${esc(m.goal, 600)}</i>`,
+    `<i>${esc(maskOutbound(m.goal), 600)}</i>`,
   ];
   if (m.steps?.length) {
     lines.push('', `<b>${S.stepsHeader}</b>`);
     m.steps.slice(0, 15).forEach((s, i) => {
-      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(s.title, 120)}`);
+      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(maskOutbound(s.title), 120)}`);
     });
   }
   if (m.milestones?.length) {
     lines.push('', `<b>${S.lastMilestones}</b>`);
-    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(ms, 200)}`);
+    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(maskOutbound(ms), 200)}`);
   }
   if (m.pendingApprovals) lines.push('', S.approvalsPending(m.pendingApprovals));
   if (typeof m.costUsd === 'number' && m.costUsd > 0) lines.push(`${S.cost}: $${m.costUsd.toFixed(m.costUsd < 1 ? 4 : 2)}`);
-  if (m.liveUrl) lines.push(`${S.live}: ${esc(m.liveUrl, 300)}`);
-  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(m.error, 800)}`);
-  if (m.report) lines.push('', `<b>${S.report}</b>`, esc(m.report, 2000));
+  // The live-view link carries the control center's access key: never send that to Telegram.
+  if (m.liveUrl) lines.push(`${S.live}: ${esc(redactUrlSecrets(m.liveUrl), 300)}`);
+  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(maskOutbound(m.error), 800)}`);
+  if (m.report) {
+    // The report gets whatever room is left under Telegram's 4096-character limit.
+    const used = htmlToPlain(lines.join('\n')).length + S.report.length + 8;
+    const room = Math.min(2000, MAX_MESSAGE_CHARS - 96 - used);
+    if (room >= 120) lines.push('', `<b>${S.report}</b>`, esc(maskOutbound(m.report), room));
+  }
   return lines.join('\n');
 }
 
@@ -476,7 +548,7 @@ export function formatStatus(input: {
   } else {
     lines.push(S.browserRunning(b.mode, b.headless, b.profile, b.tabs.length));
     const active = b.tabs.find((t) => t.active);
-    if (active) lines.push(`   ▸ ${esc(active.title || '(untitled)', 80)}\n   ${esc(active.url, 200)}`);
+    if (active) lines.push(`   ▸ ${esc(maskOutbound(active.title || '(untitled)'), 80)}\n   ${esc(maskOutbound(active.url), 200)}`);
     if (b.takeover) lines.push(S.takeover(b.takeoverBy ?? 'control'));
   }
   if (input.activeMissions === null) {
@@ -495,7 +567,7 @@ export function formatStatus(input: {
  *  1024-char caption limit AFTER entity parsing, so truncating the raw parts
  *  (≤ 200 + 1 + 700 chars) keeps it in bounds without cutting an entity. */
 export function formatScreenCaption(title: string, url: string): string {
-  return `${esc(title || '(untitled)', 200)}\n${esc(url, 700)}`;
+  return `${esc(maskOutbound(title || '(untitled)'), 200)}\n${esc(maskOutbound(url), 700)}`;
 }
 
 // ── notifications (bus / mission events) ────────────────────────────────────
@@ -504,6 +576,9 @@ export interface NoticeView {
   text: string;
   /** Terminal events (completed/failed/cancelled) bypass the rate limiter. */
   important: boolean;
+  /** For state changes: the same mission reaching the same state twice (a 'status' event
+   *  plus a bridged 'completed' event) is announced once. */
+  dedupeKey?: string;
 }
 
 function pickStr(data: unknown, ...keys: string[]): string | undefined {
@@ -538,24 +613,24 @@ export function formatMissionNotice(missionId: string, type: string, data: unkno
     const detail = pickStr(data, 'detail', 'details');
     const progress = pickNum(data, 'progress');
     const pct = progress !== undefined ? ` (${num(lang, Math.round(progress <= 1 && progress > 0 ? progress * 100 : progress))}%)` : '';
-    const body = [`🏁 <b>${S.milestone}</b> · ${idHtml}${pct}`, esc(title, 400)];
-    if (detail) body.push(`<i>${esc(detail, 600)}</i>`);
+    const body = [`🏁 <b>${S.milestone}</b> · ${idHtml}${pct}`, esc(maskOutbound(title), 400)];
+    if (detail) body.push(`<i>${esc(maskOutbound(detail), 600)}</i>`);
     return { text: body.join('\n'), important: false };
   }
   if (status === 'completed' || status === 'done' || status === 'finished' || status === 'success') {
     const report = pickStr(data, 'report', 'summary', 'result', 'message');
-    return { text: `✅ <b>${S.missionCompleted}</b> · ${idHtml}${report ? `\n${esc(report, 2500)}` : ''}`, important: true };
+    return { text: `✅ <b>${S.missionCompleted}</b> · ${idHtml}${report ? `\n${esc(maskOutbound(report), 2500)}` : ''}`, important: true, dedupeKey: 'completed' };
   }
   if (status === 'failed') {
     const err = pickStr(data, 'error', 'reason', 'message');
-    return { text: `❌ <b>${S.missionFailed}</b> · ${idHtml}${err ? `\n${esc(err, 1500)}` : ''}`, important: true };
+    return { text: `❌ <b>${S.missionFailed}</b> · ${idHtml}${err ? `\n${esc(maskOutbound(err), 1500)}` : ''}`, important: true, dedupeKey: 'failed' };
   }
   if (status === 'cancelled' || status === 'canceled') {
-    return { text: `⛔ <b>${S.missionCancelled}</b> · ${idHtml}`, important: true };
+    return { text: `⛔ <b>${S.missionCancelled}</b> · ${idHtml}`, important: true, dedupeKey: 'cancelled' };
   }
   if (status === 'paused') {
-    const reason = pickStr(data, 'reason', 'message');
-    return { text: `⏸ <b>${S.missionPaused}</b> · ${idHtml}${reason ? `\n${esc(reason, 600)}` : ''}`, important: true };
+    const reason = pickStr(data, 'reason', 'message', 'error');
+    return { text: `⏸ <b>${S.missionPaused}</b> · ${idHtml}${reason ? `\n${esc(maskOutbound(reason), 600)}` : ''}`, important: true, dedupeKey: 'paused' };
   }
   return null;
 }
@@ -575,7 +650,7 @@ export function formatSentinelNotice(type: string, data: unknown, lang: Lang): N
   const tool = pickStr(d, 'tool', 'toolName');
   const head = `🛡 <b>${S.sentinelBlocked}</b>${category ? ` · <i>${esc(categoryLabel(category, lang), 40)}</i>` : ''}`;
   const lines = [head];
-  if (summary) lines.push(esc(summary, 600));
+  if (summary) lines.push(esc(maskOutbound(summary), 600));
   if (tool) lines.push(`<code>${esc(tool, 60)}</code>`);
   return { text: lines.join('\n'), important: false };
 }

@@ -5,9 +5,21 @@ import * as path from 'path';
 import { TelegramApi, type FetchLike, type TgUpdate } from '../src/channels/telegram/api.js';
 import { TelegramPairingStore } from '../src/channels/telegram/pairing.js';
 import { TelegramBot, type TelegramBotOptions, type TelegramMissionAdapter, type TelegramMissionApproval } from '../src/channels/telegram/bot.js';
+import { htmlToPlain } from '../src/channels/telegram/format.js';
 import { ApprovalBroker } from '../src/control/approvals.js';
 import { getBus } from '../src/control/bus.js';
 import type { BrowserManager } from '../src/tools/browser/types.js';
+import { MissionStore } from '../src/missions/store.js';
+import { createTelegramMissionAdapter } from '../src/missions/telegram-adapter.js';
+import { resolveBrowserExecutable } from '../src/tools/browser/launcher.js';
+import { QodexBrowserManager } from '../src/tools/browser/session.js';
+
+let pw: any = null;
+try { pw = await import('playwright'); } catch { pw = null; }
+let pwExe = '';
+try { pwExe = String(pw?.chromium?.executablePath?.() ?? ''); } catch { pwExe = ''; }
+const chromiumExe = resolveBrowserExecutable({ playwrightExecutablePath: pwExe, headless: true });
+const chromium = !!pw && !!(chromiumExe.executablePath || chromiumExe.channel);
 
 const TOKEN = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw0';
 const OWNER = 1001;
@@ -23,6 +35,8 @@ class FakeTelegram {
   scripted: Array<() => Response> = [];
   private msgId = 500;
   private updateId = 1;
+  /** Server clock for the HTTP Date header (like api.telegram.org sends). Unset = no header. */
+  serverDate: (() => number) | null = null;
 
   fetch: FetchLike = async (url, init = {}) => {
     const method = url.split('/').pop()!;
@@ -31,7 +45,16 @@ class FakeTelegram {
     if (typeof init.body === 'string') body = JSON.parse(init.body);
     const call: Call = { method, body, raw: init.body, headers };
     this.calls.push(call);
-    const ok = (result: unknown) => new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+    const resHeaders: Record<string, string> = this.serverDate ? { Date: new Date(this.serverDate()).toUTCString() } : {};
+    const ok = (result: unknown) => new Response(JSON.stringify({ ok: true, result }), { status: 200, headers: resHeaders });
+    // Telegram's real limit: 4096 characters AFTER entity parsing.
+    if ((method === 'sendMessage' || method === 'editMessageText') && typeof body.text === 'string') {
+      const visible = body.parse_mode === 'HTML' ? htmlToPlain(body.text) : body.text;
+      if (visible.length > 4096) {
+        call.result = 'too-long';
+        return new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message is too long' }), { status: 400 });
+      }
+    }
     switch (method) {
       case 'getMe': return ok({ id: 999, is_bot: true, first_name: 'QodeX', username: 'qx_test_bot' });
       case 'getUpdates': {
@@ -618,5 +641,338 @@ describe('polling resilience', () => {
     expect(confirm.length).toBeGreaterThanOrEqual(1);
     expect(confirm[confirm.length - 1].body.timeout).toBe(0);
     expect(broker.channelNames()).toEqual([]);
+  });
+});
+
+describe.skipIf(!chromium)('with the real QodeX browser (local pages only)', () => {
+  it('/screen sends a real JPEG of the active tab; /status masks tokens in its URL; a busy page times out', async () => {
+    const http = await import('http');
+    const server = http.createServer((req, res) => {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      if ((req.url ?? '').startsWith('/busy')) {
+        res.end('<title>Busy</title><h1>busy</h1><script>setTimeout(() => { const e = Date.now() + 8000; while (Date.now() < e) {} }, 50)</script>');
+        return;
+      }
+      res.end('<title>Cart &lt;3&gt; — سبد خرید</title><h1 style="font-size:64px">Checkout</h1>');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const base = `http://127.0.0.1:${(server.address() as any).port}`;
+    const mgr = new QodexBrowserManager({
+      profilesDir: path.join(dir, 'profiles'),
+      downloadsDir: path.join(dir, 'downloads'),
+      config: { headless: true },
+    });
+    try {
+      await mgr.ensure();
+      const page = await mgr.activePage();
+      await page.goto(`${base}/cb?access_token=ya29.AbCdEfGhIjKlMnOpQrStUv&step=2`);
+      await pairOwner();
+      await startBot({ browser: () => mgr, screenshotTimeoutMs: 1500 });
+
+      tg.text(OWNER, '/screen');
+      const photo = await waitUntil(() => tg.of('sendPhoto')[0], 15_000);
+      const ct = photo.headers['Content-Type'];
+      const form = await new Response(photo.raw as Buffer, { headers: { 'content-type': ct } }).formData();
+      const file = form.get('photo') as any;
+      const bytes = Buffer.from(await file.arrayBuffer());
+      expect(bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))).toBe(true); // JPEG SOI
+      expect(bytes.length).toBeGreaterThan(1000);
+      const caption = String(form.get('caption'));
+      expect(caption).toContain('Cart &lt;3&gt; — سبد خرید');
+      expect(caption).toContain(`${base}/cb`);
+      expect(caption).not.toContain('ya29.');
+
+      tg.text(OWNER, '/status');
+      const st = await waitUntil(() => tg.sent(OWNER).find((c) => String(c.body.text).includes('Browser: running')));
+      expect(st.body.text).toContain('1 tab(s)');
+      expect(st.body.text).not.toContain('ya29.');
+
+      // A page stuck in a script: /screen gives up instead of blocking the bot for 30s.
+      await page.goto(`${base}/busy`);
+      await new Promise((r) => setTimeout(r, 200));
+      const t0 = Date.now();
+      tg.text(OWNER, '/screen');
+      const failed = await waitUntil(() => tg.sent(OWNER).find((c) => String(c.body.text).includes('Screenshot failed')), 15_000);
+      expect(Date.now() - t0).toBeLessThan(8000);
+      expect(failed.body.text).toContain('SCREENSHOT_TIMEOUT');
+      expect(failed.body.text).not.toMatch(/\u001b\[/);
+    } finally {
+      await bot?.stop();
+      await mgr.close();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }, 60_000);
+});
+
+describe('with the real mission store', () => {
+  it('delivers a detached mission approval, records the answer in the DB, and reports completion', async () => {
+    const store = new MissionStore(path.join(dir, 'sessions.db'));
+    const missions = createTelegramMissionAdapter({ store, defaultCwd: dir });
+    await pairOwner();
+    await startBot({ missions });
+    const m = store.create({ goal: 'buy a desk lamp', cwd: dir });
+    store.createApproval({ id: 'ap_lamp', missionId: m.id, prompt: 'Pay $30 on <shop.example>?', options: ['yes', 'no'], category: 'payment', risk: 'critical' });
+    const card = await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    expect(card.body.text).toContain('Pay $30 on &lt;shop.example&gt;?');
+    expect(card.body.text).toContain(`<code>${m.id}</code>`);
+    tg.callback(OWNER, 'ap:ap_lamp:0', card.result.message_id);
+    await waitUntil(() => store.getApproval('ap_lamp')!.status !== 'pending');
+    expect(store.getApproval('ap_lamp')).toMatchObject({ status: 'approved', answer: 'yes', resolved_by: 'telegram:@alice' });
+    const edit = await waitUntil(() => tg.of('editMessageText').find((e) => e.body.message_id === card.result.message_id));
+    expect(edit.body.text).toContain('✅ Approved');
+
+    store.update(m.id, { report: 'Lamp ordered, arrives Tuesday' });
+    store.setStatus(m.id, 'completed');
+    const done = await waitUntil(() => tg.sent(OWNER).find((c) => String(c.body.text).includes('Mission completed')));
+    expect(done.body.text).toContain('Lamp ordered, arrives Tuesday');
+    // Only one approval card ever went out.
+    expect(tg.sent(OWNER).filter((c) => c.body.reply_markup)).toHaveLength(1);
+  });
+});
+
+describe('adversarial review', () => {
+  it('does not leave a live card when the approval is answered before delivery finishes', async () => {
+    await pairOwner();
+    await startBot();
+    // A local asker that answers at once (headless policy), and an already-aborted request.
+    const r = await broker.request({ prompt: 'Write notes.md?', options: ['yes', 'no'] }, async () => 'yes');
+    expect(r).toEqual({ answer: 'yes', by: 'local' });
+    const ac = new AbortController();
+    ac.abort();
+    expect(await broker.request({ prompt: 'Pay?', options: ['yes', 'no'], signal: ac.signal })).toEqual({ answer: 'no', by: 'abort' });
+    await new Promise((res) => setTimeout(res, 80));
+    // Every card that was sent must have been edited to its outcome (no dangling buttons).
+    const cards = tg.sent(OWNER).filter((c) => c.body.reply_markup);
+    for (const c of cards) {
+      expect(tg.of('editMessageText').some((e) => e.body.message_id === c.result.message_id)).toBe(true);
+    }
+  });
+
+  it('a double tap keeps the real outcome on the card (not "answered elsewhere")', async () => {
+    await pairOwner();
+    await startBot();
+    const pr = broker.request({ prompt: 'Buy?', options: ['yes', 'no'], category: 'purchase' });
+    const card = await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    const id = broker.pending()[0].id;
+    const msgId = card.result.message_id as number;
+    tg.callback(OWNER, `ap:${id}:0`, msgId);
+    tg.callback(OWNER, `ap:${id}:0`, msgId);
+    expect(await pr).toEqual({ answer: 'yes', by: 'telegram' });
+    await waitUntil(() => tg.of('answerCallbackQuery').length === 2);
+    await new Promise((res) => setTimeout(res, 50));
+    const edits = tg.of('editMessageText').filter((e) => e.body.message_id === msgId);
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits[edits.length - 1].body.text).toContain('✅ Approved');
+    expect(edits.map((e) => e.body.text).join('\n')).not.toContain('No longer pending');
+  });
+
+  it('sends one card per approval when it is pending in both the broker and the mission DB', async () => {
+    await pairOwner();
+    const missions = fakeMissions();
+    await startBot({ missions });
+    // An in-process mission mirrors its broker approval into the DB with the same id.
+    const pr = broker.request({ prompt: 'Submit order?', options: ['yes', 'no'], source: 'mission:m_1', meta: { missionId: 'm_1' }, timeoutMs: 10_000 });
+    await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    const id = broker.pending()[0].id;
+    missions.approvals = [{ id, missionId: 'm_1', prompt: 'Submit order?', options: ['yes', 'no'] }];
+    await new Promise((res) => setTimeout(res, 80));
+    tg.text(OWNER, '/approvals');
+    await waitUntil(() => tg.sent(OWNER).length >= 2);
+    tg.text(OWNER, '/status');
+    await waitUntil(() => tg.sent(OWNER).some((c) => String(c.body.text).includes('Approvals pending')));
+    await new Promise((res) => setTimeout(res, 50));
+    const cards = tg.sent(OWNER).filter((c) => c.body.reply_markup);
+    expect(cards).toHaveLength(2); // the original delivery + exactly one from /approvals
+    const status = tg.sent(OWNER).find((c) => String(c.body.text).includes('Approvals pending'))!;
+    expect(status.body.text).toContain('Approvals pending: <b>1</b>');
+    broker.resolve(id, 'no', 'test');
+    await pr;
+  });
+
+  it('does not double-deliver when the tick sees a mirrored mission row while the broker card is in flight', async () => {
+    // The broker delivery's pairing read is slow, so a tick sees the mirrored row first.
+    let slowNext = false;
+    class SlowPairing extends TelegramPairingStore {
+      async listChats() {
+        if (slowNext) { slowNext = false; await new Promise((r) => setTimeout(r, 150)); }
+        return super.listChats();
+      }
+    }
+    pairing = new SlowPairing({ file: path.join(dir, 'telegram.json') });
+    await pairOwner();
+    const missions = fakeMissions();
+    await startBot({ missions });
+    slowNext = true;
+    const pr = broker.request({ prompt: 'Book the flight?', options: ['yes', 'no'], meta: { missionId: 'm_1' }, timeoutMs: 10_000 });
+    const id = broker.pending()[0].id;
+    missions.approvals = [{ id, missionId: 'm_1', prompt: 'Book the flight?', options: ['yes', 'no'] }];
+    await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    await new Promise((res) => setTimeout(res, 300));
+    expect(tg.sent(OWNER).filter((c) => c.body.reply_markup)).toHaveLength(1);
+    broker.resolve(id, 'no', 'test');
+    await pr;
+  });
+
+  it('still answers /status <id> when the mission report is huge', async () => {
+    await pairOwner();
+    const missions = fakeMissions({
+      async status(id: string) {
+        return {
+          id, goal: 'G'.repeat(600), status: 'completed',
+          steps: Array.from({ length: 15 }, (_, i) => ({ title: `step ${i} ` + 'x'.repeat(110), status: 'done' })),
+          milestones: Array.from({ length: 5 }, () => 'm'.repeat(200)),
+          error: 'e'.repeat(800), report: 'r'.repeat(5000), liveUrl: 'http://127.0.0.1:7420/',
+        };
+      },
+    });
+    await startBot({ missions });
+    tg.text(OWNER, '/status m_big');
+    await waitUntil(() => tg.sent(OWNER).length >= 1);
+    await new Promise((res) => setTimeout(res, 30));
+    const delivered = tg.sent(OWNER).filter((c) => c.result && c.result !== 'too-long');
+    expect(delivered).toHaveLength(1);
+    expect(htmlToPlain(delivered[0].body.text)).toContain('step 0');
+  });
+
+  it('never sends the control-center access key of a mission live view to Telegram', async () => {
+    await pairOwner();
+    const missions = fakeMissions({
+      async status(id: string) { return { id, goal: 'g', status: 'running', liveUrl: 'http://127.0.0.1:7420/?k=SECRETKEY123456' }; },
+    });
+    await startBot({ missions });
+    tg.text(OWNER, '/status m_1');
+    await waitUntil(() => tg.sent(OWNER).length === 1);
+    expect(tg.sent(OWNER)[0].body.text).not.toContain('SECRETKEY123456');
+    expect(tg.sent(OWNER)[0].body.text).toContain('127.0.0.1:7420');
+  });
+
+  it('bounds the replies an unpaired stranger can trigger (no flood amplification)', async () => {
+    await startBot();
+    for (let i = 0; i < 15; i++) tg.text(66, '/start');
+    for (let i = 0; i < 15; i++) tg.text(66, '/pair 12');
+    for (let c = 0; c < 60; c++) tg.text(1000 + c, '/start');
+    // The whole flood arrives in one batch; the next poll starts once it has been handled.
+    await waitUntil(() => tg.calls.filter((c) => c.method === 'getUpdates').length >= 2);
+    await new Promise((res) => setTimeout(res, 100));
+    expect(tg.sent(66).length).toBeLessThanOrEqual(5);
+    expect(tg.sent().length).toBeLessThanOrEqual(40);
+    // The owner can still pair afterwards.
+    const { code } = await pairing.createPairingCode();
+    tg.text(OWNER, `/pair ${code}`);
+    await waitUntil(() => tg.sent(OWNER).some((c) => String(c.body.text).includes('Paired!')));
+  });
+
+  it('does not ignore fresh commands when the local clock runs ahead of Telegram', async () => {
+    await pairOwner();
+    tg.serverDate = () => Date.now();
+    const missions = fakeMissions();
+    await startBot({ missions, now: () => Date.now() + 10 * 60_000 });
+    tg.text(OWNER, '/mission stale goal', { date: Math.floor(Date.now() / 1000) - 3600 });
+    tg.text(OWNER, '/mission fresh goal');
+    await waitUntil(() => tg.sent(OWNER).length === 1);
+    expect(missions.started).toEqual(['fresh goal']);
+  });
+
+  it('/screen gives up on a hung page instead of blocking approvals', async () => {
+    await pairOwner();
+    const hung = {
+      isRunning: () => true,
+      screenshotJpeg: () => new Promise<Buffer>(() => {}),
+      activeUrl: () => 'about:blank',
+      status: () => ({ running: true, mode: 'launch', headless: true, profile: 'default', tabs: [], takeover: false, downloadsDir: '/tmp' }),
+    } as unknown as BrowserManager;
+    await startBot({ browser: () => hung, screenshotTimeoutMs: 50 } as Partial<TelegramBotOptions>);
+    tg.text(OWNER, '/screen');
+    const pr = broker.request({ prompt: 'Pay?', options: ['yes', 'no'], timeoutMs: 5000 });
+    const card = await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    tg.callback(OWNER, `ap:${broker.pending()[0].id}:1`, card.result.message_id);
+    expect(await pr).toEqual({ answer: 'no', by: 'telegram' });
+    const failed = await waitUntil(() => tg.sent(OWNER).find((c) => String(c.body.text).includes('Screenshot failed')));
+    expect(failed.body.text).toContain('SCREENSHOT_TIMEOUT');
+  });
+
+  it('keeps the buttons and asks to retry when recording a mission answer fails', async () => {
+    await pairOwner();
+    const missions = fakeMissions();
+    missions.approvals = [{ id: 'ma_busy', missionId: 'm_1', prompt: 'Pay?', options: ['yes', 'no'] }];
+    let fail = true;
+    missions.resolveApproval = async (id, answer, by) => {
+      if (fail) { fail = false; throw new Error('SQLITE_BUSY: database is locked'); }
+      missions.resolved.push([id, answer, by]);
+      missions.approvals = [];
+      return true;
+    };
+    await startBot({ missions });
+    const card = await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    const msgId = card.result.message_id as number;
+    tg.callback(OWNER, 'ap:ma_busy:0', msgId);
+    const ack = await waitUntil(() => tg.of('answerCallbackQuery')[0]);
+    expect(ack.body.text).not.toContain('no longer pending');
+    expect(tg.of('editMessageText').filter((e) => e.body.message_id === msgId)).toHaveLength(0);
+    tg.callback(OWNER, 'ap:ma_busy:0', msgId);
+    await waitUntil(() => missions.resolved.length === 1);
+    const edit = await waitUntil(() => tg.of('editMessageText').find((e) => e.body.message_id === msgId));
+    expect(edit.body.text).toContain('✅ Approved');
+  });
+
+  it('labels approvals that expired with their mission as cancelled, not denied by a person', async () => {
+    await pairOwner();
+    await startBot();
+    const pr = broker.request({ prompt: 'Upload?', options: ['yes', 'no'] });
+    await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup));
+    broker.resolve(broker.pending()[0].id, 'no', 'worker-exited');
+    await pr;
+    const edit = await waitUntil(() => tg.of('editMessageText')[0]);
+    expect(edit.body.text).toContain('Cancelled');
+    expect(edit.body.text).not.toContain('Denied');
+  });
+
+  it('logs a failing mission store once instead of every tick', async () => {
+    await pairOwner();
+    const logs: string[] = [];
+    const missions = fakeMissions({ async pendingApprovals() { throw new Error('SQLITE_CANTOPEN'); } });
+    await startBot({ missions, log: (_l, m) => logs.push(m) });
+    await new Promise((res) => setTimeout(res, 200)); // ~10 ticks
+    expect(logs.filter((l) => l.includes('SQLITE_CANTOPEN')).length).toBe(1);
+  });
+
+  it('retries a broker approval card that could not be sent (Telegram briefly unreachable)', async () => {
+    await pairOwner();
+    const base = tg.fetch;
+    let down = true;
+    let failed = 0;
+    tg.fetch = async (url, init) => {
+      if (down && url.endsWith('/sendMessage')) { failed++; throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } }); }
+      return base(url, init);
+    };
+    await startBot();
+    const pr = broker.request({ prompt: 'Pay 50 EUR?', options: ['yes', 'no'], category: 'payment', timeoutMs: 10_000 });
+    await waitUntil(() => failed >= 2); // the first try and its retry both failed
+    down = false;
+    const card = await waitUntil(() => tg.sent(OWNER).find((c) => c.body.reply_markup && c.result));
+    tg.callback(OWNER, `ap:${broker.pending()[0].id}:0`, card.result.message_id);
+    expect(await pr).toEqual({ answer: 'yes', by: 'telegram' });
+  });
+
+  it('does not echo a Sentinel denial the user just made on Telegram', async () => {
+    await pairOwner();
+    await startBot();
+    getBus().publish({ kind: 'sentinel', type: 'decision', data: { action: 'deny', via: 'human', category: 'payment', summary: 'pay', answeredBy: 'telegram' } });
+    getBus().publish({ kind: 'sentinel', type: 'decision', data: { action: 'deny', via: 'timeout', category: 'send', summary: 'send mail', answeredBy: 'timeout' } });
+    const n = await waitUntil(() => tg.sent(OWNER)[0]);
+    await new Promise((res) => setTimeout(res, 50));
+    expect(tg.sent(OWNER)).toHaveLength(1);
+    expect(n.body.text).toContain('send mail');
+  });
+
+  it('does not repeat a terminal mission notice published twice on the bus', async () => {
+    await pairOwner();
+    await startBot();
+    const bus = getBus();
+    bus.publish({ kind: 'mission', missionId: 'm_9', type: 'status', data: { from: 'running', to: 'completed', status: 'completed' } });
+    bus.publish({ kind: 'mission', missionId: 'm_9', type: 'completed', data: { status: 'completed', report: 'done' } });
+    await waitUntil(() => tg.sent(OWNER).length >= 1);
+    await new Promise((res) => setTimeout(res, 50));
+    expect(tg.sent(OWNER).filter((c) => String(c.body.text).includes('Mission completed'))).toHaveLength(1);
   });
 });
