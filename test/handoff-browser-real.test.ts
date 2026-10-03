@@ -17,7 +17,7 @@ import { QodexBrowserManager } from '../src/tools/browser/session.js';
 import { setBrowserManagerForTests } from '../src/tools/browser/types.js';
 import { detectChallenge } from '../src/tools/browser/challenge.js';
 import { BrowserNavigateTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool } from '../src/tools/browser/tools.js';
-import { BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool } from '../src/tools/browser/tools-extra.js';
+import { BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool, BrowserHistoryTool } from '../src/tools/browser/tools-extra.js';
 import { getBus } from '../src/control/bus.js';
 import { BrowserRequestHumanTool, pendingHandoffs, resolveHandoff } from '../src/tools/browser/handoff.js';
 
@@ -140,7 +140,7 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     server = http.createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://x');
       res.setHeader('content-type', 'text/html');
-      if (url.pathname === '/recaptcha') { res.end(recaptchaPage(vendor)); return; }
+      if (url.pathname === '/recaptcha' || url.pathname === '/again') { res.end(recaptchaPage(vendor)); return; }
       if (url.pathname === '/badge') { res.end(badgePage(vendor)); return; }
       if (url.pathname === '/turnstile') { res.end(turnstilePage(vendor)); return; }
       if (url.pathname === '/interstitial') {
@@ -412,6 +412,26 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     const r = await pending;
     expect(r.content).toMatch(/^✓ The PerimeterX "Press & Hold" on 127\.0\.0\.1 is gone/);
     expect(r.content).toContain('Welcome back');
+  }, 60_000);
+
+  it('refuses (softly) to load a URL again whose last 2 loads were a challenge; a clean load resets it', async () => {
+    const a = await run(new BrowserNavigateTool(), { url: `${base}/again?x=1`, snapshot: false });
+    expect(a.content).toContain('[CHALLENGE]');
+    const reload = await run(new BrowserHistoryTool(), { action: 'reload', snapshot: false });
+    expect(reload.content).toContain('[CHALLENGE]');
+    const third = await run(new BrowserNavigateTool(), { url: `${base}/again?x=2`, snapshot: false });
+    expect(third.isError).toBe(true);
+    expect(third.content).toMatch(/^\[CHALLENGE\] Not loading 127\.0\.0\.1:\d+\/again again: its last 2 loads ended on a bot check/);
+    expect(third.content).not.toContain('x=2');
+    const again = await run(new BrowserHistoryTool(), { action: 'reload', snapshot: false });
+    expect(again.content).toMatch(/^\[CHALLENGE\] Not loading/);
+    // The human passes it: the URL is fine again.
+    const page = await mgr.activePage();
+    await page.evaluate("document.getElementById('rc').remove()");
+    expect(await mgr.detectChallengeNow()).toBeNull();
+    expect(mgr.challengeLoadCount(`${base}/again`)).toBe(0);
+    const ok = await run(new BrowserNavigateTool(), { url: `${base}/again`, snapshot: false });
+    expect(ok.content).toMatch(/^✓ Loaded/);
   }, 60_000);
 
   it('navigate waits out a self-clearing interstitial without the human', async () => {

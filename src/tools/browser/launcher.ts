@@ -16,6 +16,10 @@
  *   5. headless-shell builds from the caches (headless launches only)
  *   6. a configured Playwright `channel` ('chrome', 'msedge', ...)
  *
+ * For a VISIBLE (headed) browser a configured `channel` wins right after an explicit
+ * executable: the user's real Google Chrome / Edge instead of a test Chromium (a
+ * legitimate way to look like the browser it is — no spoofing).
+ *
  * `resolveBrowserExecutable` is PURE: every filesystem / environment access goes
  * through injectable deps so discovery is unit-testable for every OS on any OS.
  */
@@ -219,6 +223,10 @@ export function resolveBrowserExecutable(opts: ResolveExecutableOptions = {}, de
     if (deps.existsSync(explicit)) return { executablePath: explicit, source: 'config' };
     warnings.push(`Configured browser executable not found: ${explicit} — falling back to auto-discovery.`);
   }
+
+  // 1b. headed + a configured channel → the user's branded browser
+  const configuredChannel = (opts.channel || '').trim();
+  if (configuredChannel && opts.headless === false) return withWarnings({ channel: configuredChannel, source: 'channel' });
 
   // 2. Playwright's pinned revision, when it is actually installed
   const pwPath = (opts.playwrightExecutablePath || '').trim();

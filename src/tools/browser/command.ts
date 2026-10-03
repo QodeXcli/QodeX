@@ -323,7 +323,10 @@ export function buildBrowserCommand(deps: BrowserCommandDeps = {}): Command {
         out(`  Executable:  ${exe.executablePath ?? (exe.channel ? `channel "${exe.channel}"` : 'none found')}${exe.source !== 'none' ? `  [${exe.source}]` : ''}`);
         if (exe.source === 'none') out(`               ${missingBrowserHint()}`);
         for (const w of exe.warnings ?? []) out(`  Warning:     ${w}`);
-        out(`  Mode:        ${cfg.headless ? 'headless' : 'visible window'}${cfg.stealth ? ', stealth' : ''}, viewport ${cfg.viewport.width}x${cfg.viewport.height}`);
+        const mode = cfg.headlessMode === 'auto'
+          ? 'auto (a visible window in the interactive TUI on a desktop, headless for --print / missions / no display)'
+          : cfg.headless ? 'headless' : 'visible window';
+        out(`  Mode:        ${mode}${cfg.stealth ? ', stealth' : ''}, viewport ${cfg.viewport.width}x${cfg.viewport.height}`);
       }
       out(`  Profile:     ${sanitizeName(cfg.profile) || 'default'} → ${profileDir}${lock.locked ? `  (IN USE${lock.pid ? ` by pid ${lock.pid}` : ''})` : ''}`);
       out(`  Profiles:    ${profiles.length} in ${profilesDir}`);

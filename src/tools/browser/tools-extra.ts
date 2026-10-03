@@ -38,6 +38,7 @@ import {
   notRunningResult,
   redactForRecord,
   refField,
+  refuseChallengeReload,
   resolveUserPath,
   runBrowserAction,
   selectorField,
@@ -536,6 +537,15 @@ export class BrowserHistoryTool extends Tool<z.infer<typeof HistoryArgs>> {
   argsSchema = HistoryArgs;
 
   async execute(args: z.infer<typeof HistoryArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const qm = asQodex(await getBrowserManager());
+    const reloading = args.action === 'reload' && qm?.isRunning() ? qm.activeUrl() : '';
+    if (reloading && qm!.challengeLoadCount(reloading) >= 2) return refuseChallengeReload(reloading);
+    const result = await this.navigateHistory(args, ctx);
+    if (reloading && qm && !result.isError) qm.noteChallengeLoad(qm.activeUrl() || reloading, !!qm.challengeOf());
+    return result;
+  }
+
+  private navigateHistory(args: z.infer<typeof HistoryArgs>, ctx: ToolContext): Promise<ToolResult> {
     return runBrowserAction({
       tool: 'browser_history',
       ctx,

@@ -617,6 +617,10 @@ export class QodexBrowserManager implements BrowserManager {
   private takeoverOn = false;
   private takeoverWho: string | undefined;
   private takeoverWaiters = new Set<() => void>();
+  /** Last agent navigation / action per public host (pacing). */
+  private hostLast = new Map<string, number>();
+  /** Consecutive agent loads of a URL (origin + path) that ended on a challenge. */
+  private challengeLoads = new Map<string, number>();
   /** A human press-and-hold in progress (relayed 'down'): forced 'up' after HOLD_CAP_MS. */
   private hold: { page: Page; button: 'left' | 'right' | 'middle'; timer: NodeJS.Timeout } | null = null;
   static readonly HOLD_CAP_MS = 20_000;
@@ -744,11 +748,13 @@ export class QodexBrowserManager implements BrowserManager {
     this.exe = exe;
     for (const w of exe.warnings ?? []) { logger.warn(w); this.notice(w); }
 
+    // A visible browser uses its real window (no emulated viewport that differs from the
+    // window); headless keeps the configured viewport.
     const options: Record<string, unknown> = {
       headless: cfg.headless,
-      viewport: { ...cfg.viewport },
+      viewport: cfg.headless ? { ...cfg.viewport } : null,
       acceptDownloads: true,
-      args: ['--no-first-run', '--no-default-browser-check'],
+      args: ['--no-first-run', '--no-default-browser-check', ...(cfg.headless ? [] : [`--window-size=${cfg.viewport.width},${cfg.viewport.height}`])],
     };
     if (cfg.stealth) {
       (options.args as string[]).unshift('--disable-blink-features=AutomationControlled');
@@ -791,7 +797,7 @@ export class QodexBrowserManager implements BrowserManager {
         profile = alt;
       } else if (!cfg.headless && allowHeadlessFallback && isMissingDisplayError(e)) {
         try {
-          ctx = await open(profile, { ...options, headless: true });
+          ctx = await open(profile, { ...options, headless: true, viewport: { ...cfg.viewport } });
         } catch (e2) {
           throw explainLaunchError(e2, exe);
         }
@@ -1194,6 +1200,8 @@ export class QodexBrowserManager implements BrowserManager {
       const doc = st.doc;
       const r = await detectChallenge(st.page, { status: doc?.status, headers: doc?.headers });
       if (r !== 'unknown' && this.tabList.includes(st)) this.setChallenge(st, r);
+      // A URL that loaded without a challenge may be reloaded freely again.
+      if (r === null) this.challengeLoads.delete(stripQuery(safeUrl(st.page)));
       return r;
     })().finally(() => { st.challengeRun = null; });
     st.challengeRun = run;
@@ -1272,6 +1280,40 @@ export class QodexBrowserManager implements BrowserManager {
         return () => { this.events.off('challenge', onChange); this.events.off('tab-navigated', onNav); };
       },
     });
+  }
+
+  /**
+   * Pace agent navigations / actions per public host (browser.hostPacingMs, ≤1 s): a
+   * burst of back-to-back requests is what bot scoring punishes. Loopback / LAN hosts
+   * (dev servers) are never paced. Returns the ms waited.
+   */
+  async paceHost(url: string): Promise<number> {
+    const ms = this.currentConfigSafe()?.hostPacingMs ?? 0;
+    let host = '';
+    try { host = new URL(url).hostname.toLowerCase(); } catch { host = ''; }
+    if (ms <= 0 || !host || isLocalHost(host)) return 0;
+    const now = Date.now();
+    const wait = Math.max(0, (this.hostLast.get(host) ?? 0) + ms - now);
+    this.hostLast.set(host, now + wait);
+    if (this.hostLast.size > 500) {
+      for (const [h, t] of this.hostLast) if (t < now - 60_000) this.hostLast.delete(h);
+    }
+    if (wait > 0) await sleep(wait);
+    return wait;
+  }
+
+  /** How many consecutive agent loads of `url` (origin + path) ended on a challenge. */
+  challengeLoadCount(url: string): number {
+    return this.challengeLoads.get(stripQuery(url)) ?? 0;
+  }
+
+  /** Count an agent load of `url` that ended on a challenge (or reset it). */
+  noteChallengeLoad(url: string, challenged: boolean): void {
+    const key = stripQuery(url);
+    if (!key) return;
+    if (!challenged) { this.challengeLoads.delete(key); return; }
+    this.challengeLoads.set(key, (this.challengeLoads.get(key) ?? 0) + 1);
+    if (this.challengeLoads.size > 200) this.challengeLoads.delete(this.challengeLoads.keys().next().value as string);
   }
 
   /** The Playwright page of a tab index (null when out of range). */
@@ -1888,6 +1930,18 @@ export class QodexBrowserManager implements BrowserManager {
 
 function safe<T>(fn: () => T): T | undefined {
   try { return fn(); } catch { return undefined; }
+}
+
+/** Loopback / private-network / .local hosts (dev servers): never paced. PURE. */
+export function isLocalHost(host: string): boolean {
+  const h = String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '::1' || h === '0.0.0.0') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (!m) return /^(fc|fd|fe80)/.test(h) && h.includes(':');
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
 }
 
 function safeUrl(page: Page): string {

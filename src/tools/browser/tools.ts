@@ -220,6 +220,17 @@ export async function assertNotChallenge(
   }
 }
 
+/** The soft refusal to load a URL again whose last two loads ended on a bot check. */
+export function refuseChallengeReload(url: string): ToolResult {
+  let where = url;
+  try { const u = new URL(url); where = `${u.host}${u.pathname}`; } catch { /* keep */ }
+  return {
+    content: `[CHALLENGE] Not loading ${where} again: its last 2 loads ended on a bot check, and reloading restarts the check and looks more like a bot. ` +
+      'Call browser_request_human to hand it to the user (or tell the user).',
+    isError: true,
+  };
+}
+
 /** Error when an observation tool is called before the browser was opened. */
 export function notRunningResult(): ToolResult {
   return { content: '[BROWSER_ERROR] The QodeX browser is not open yet — call browser_navigate first.', isError: true };
@@ -386,6 +397,10 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
       }
     }
 
+    // Not too fast for the same site (bot scores punish bursts); never for local hosts.
+    await qm?.paceHost(before.url);
+    throwIfAborted(ctx.signal);
+
     // A dialog opened by the action blocks the page; stop waiting for the action then.
     let unsubscribe: (() => void) | null = null;
     const dialogOpened = new Promise<'dialog'>(resolve => {
@@ -500,6 +515,11 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
       await waitForHuman(mgr, ctx);
       throwIfAborted(ctx.signal);
       const qm = asQodex(mgr);
+      // Reloading a page whose last loads were a bot check restarts the check and looks
+      // more like a bot: hand it to the human instead.
+      if (qm && qm.challengeLoadCount(url) >= 2) return refuseChallengeReload(url);
+      await qm?.paceHost(url);
+      throwIfAborted(ctx.signal);
       if (args.new_tab) await mgr.newTab();
       const page = await mgr.activePage();
       const pending = qm?.pendingDialog(page);
@@ -526,6 +546,7 @@ export class BrowserNavigateTool extends Tool<z.infer<typeof NavigateArgs>> {
       const gate = await challengeGate(mgr, ctx);
       const title = await safeTitleOf(page);
       const finalUrl = safeUrlOf(page) || url;
+      for (const u of new Set([url, finalUrl])) qm?.noteChallengeLoad(u, !!gate.challenge);
       mgr.recordAction({ tool: 'browser_navigate', args: { url }, url: finalUrl, title, actor: 'agent' });
 
       let htmlSection = '';
