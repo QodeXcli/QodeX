@@ -281,3 +281,26 @@ function oneLine(s: string, max = 140): string {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
+
+// ── /allow, /mail (standing grants + mail automation) ────────────────────────
+
+/**
+ * `/allow …` (standing grants, src/grants/command.ts) and `/mail …` (watcher, rules,
+ * the reply-all preset, src/mail/rules.ts). The TUI is a human surface; a headless
+ * run (a schedule's prompt) may list / revoke / remove but never create a grant or
+ * a rule. Arguments are re-split so "quoted conditions" and "quoted tasks" survive.
+ */
+export async function mailAutomationSlash(cmd: string, args: string[], cwd: string, sessionId: string): Promise<PlatformSlashResult> {
+  const origin = sessionId === 'headless' ? 'headless' as const : 'tui' as const;
+  try {
+    const { splitArgs, runMailAutomationCommand } = await import('../mail/rules.js');
+    const argv = splitArgs(args.join(' '));
+    if (cmd === 'allow') {
+      const { runAllowCommand } = await import('../grants/command.js');
+      return ok(await runAllowCommand(argv, { origin }));
+    }
+    return ok(await runMailAutomationCommand(argv, { origin, cwd }));
+  } catch (e: any) {
+    return ok(`/${cmd} failed: ${e?.message ?? e}`);
+  }
+}

@@ -720,6 +720,17 @@ export async function maybeStartMailWatchFromConfig(opts: { config?: unknown; cw
 
 /** Run the watcher in this process until SIGTERM (worker) or Ctrl+C (foreground). */
 async function runForeground(o: { accounts?: string[]; worker: boolean }): Promise<void> {
+  // A CLI command runs without the agent bootstrap: load ~/.qodex/.env (the Telegram
+  // token for notifications) and the config (mail.watch, telegram.*) here.
+  try {
+    const { loadEnvFileIntoProcess } = await import('../setup/env-writer.js');
+    await loadEnvFileIntoProcess().catch(() => 0);
+    const { loadConfig, setActiveConfig, ensureQodexHome } = await import('../config/loader.js');
+    await ensureQodexHome();
+    if (!getActiveConfig()) setActiveConfig(await loadConfig(process.cwd()));
+  } catch (e: any) {
+    logger.debug('mail watcher: config not loaded', { err: String(e?.message ?? e).slice(0, 200) });
+  }
   const cfg = resolveMailWatchConfig(getActiveConfig());
   const accounts = o.accounts?.length ? o.accounts : cfg.accounts.length ? cfg.accounts : await listWatchAccounts();
   if (!accounts.length) throw new Error('[MAIL_NOT_CONFIGURED] No mail accounts to watch. Add one with `qodex mail add`.');

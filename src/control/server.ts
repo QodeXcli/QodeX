@@ -1207,9 +1207,16 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
       return infoOf(rt);
     }
     current = await launch(opts);
+    // Mail automation: timeline mirror of other processes' mail events + mail.* actions.
+    if (!mailControlRelease) {
+      void import('./mail-bridge.js').then(m => { if (current && !mailControlRelease) mailControlRelease = m.startMailTimelineBridge(); }).catch(() => {});
+    }
     return infoOf(current);
   });
 }
+
+/** Release function of the mail automation bridge started with the control center (mail-bridge.ts). */
+let mailControlRelease: (() => void) | null = null;
 
 /** Stop the control center. Resolves true when one was running. */
 export function stopControlCenter(): Promise<boolean> {
@@ -1218,6 +1225,7 @@ export function stopControlCenter(): Promise<boolean> {
     if (!rt) return false;
     current = null;
     await shutdown(rt, { releaseTakeover: true });
+    if (mailControlRelease) { try { mailControlRelease(); } catch { /* ignore */ } mailControlRelease = null; }
     return true;
   });
 }
