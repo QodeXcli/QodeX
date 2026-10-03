@@ -16,8 +16,9 @@ export {
   classifyAction, classifyNavigation, isGuardedTool, normalizeText, toAsciiDigits, detectSecrets, maskSecrets,
   describeSecret, luhnValid, ibanValid, hostMatchesDomain, normalizeDomainPattern, isLoopbackHost, isPrivateHost,
   isPaymentGatewayHost, isProtectedPath, textHitsProtectedMarker, isSecretFile, categoriesForLabel, parseTarget,
-  DEFAULT_PROTECTED_PATHS,
+  maskControlTokens, scriptSelectors, isEnterKey, isSpaceKey, DEFAULT_PROTECTED_PATHS,
   type PolicyClassification, type PolicyContext, type ProtectedPaths, type WorkflowLike, type SecretKind, type SecretMatch,
+  type ControlCenterLike,
 } from './policy.js';
 export {
   scanInjection, fenceUntrusted, injectionBanner, isFenced, unfenceForDisplay, decodeTagChars,

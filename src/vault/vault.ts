@@ -160,7 +160,9 @@ export function normalizeOrigin(input: string): NormalizedOrigin | null {
   if (!host || host.includes('*')) return null;
   host = host.replace(/^www\./, '');
   if (scheme === 'http' && !isLoopback(host)) return null;
-  const exact = MULTI_TENANT_SUFFIXES.includes(host);
+  // The suffix itself AND every tenant under it (me.github.io, mybucket.s3.amazonaws.com):
+  // names below a tenant can belong to someone else (S3 bucket "evil.mybucket").
+  const exact = MULTI_TENANT_SUFFIXES.some(sfx => host === sfx || host.endsWith('.' + sfx));
   return { host, port: u.port, scheme, exact };
 }
 
