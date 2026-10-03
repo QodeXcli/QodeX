@@ -60,6 +60,8 @@ export interface ShellAnalysis {
   segments: ExecSegment[];
   /** Write targets (redirections, tee, cp/mv destinations…) outside the roots or on a raw device. */
   outsideWrites: string[];
+  /** Every local path the command writes, deletes, moves or chmods (inside the roots too). */
+  writeTargets?: string[];
   /** Set when the input was not well-formed. */
   parseError?: string;
 }
@@ -1307,6 +1309,7 @@ class Analyzer {
       const one: Val = { ...v, v: alt };
       const p = this.resolvePath(one, cwd);
       if (!p) continue;
+      if (!this.remote) (this.out.writeTargets ??= []).push(p);
       const cls = this.classOf(p);
       const shown = p.endsWith('__dynamic__') ? path.dirname(p) + '/…' : p.endsWith('__item__') ? path.dirname(p) + '/…' : p;
       if (cls === 'device') {

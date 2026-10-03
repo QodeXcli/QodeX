@@ -3,7 +3,7 @@
  * gets the agent to edit one of these persists the injection into every future session,
  * so writes to them need a human in EVERY approval mode, auto included:
  *
- *   - project instructions: QODEX.md, AGENTS.md, CLAUDE.md, GEMINI.md, .cursorrules,
+ *   - project instructions: QODEX.md, AGENTS.md, CLAUDE.md, GEMINI.md, AI.md, .cursorrules,
  *     .windsurfrules, .github/copilot-instructions.md, anything under .qodex/ (project
  *     config, skills, hooks, rules) and .cursor/rules/;
  *   - user-level: everything under ~/.qodex/skills, ~/.qodex/rules, ~/.qodex/hooks,
@@ -15,7 +15,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 const PROJECT_FILES = new Set([
-  'qodex.md', 'agents.md', 'claude.md', 'gemini.md', '.cursorrules', '.windsurfrules',
+  'qodex.md', 'agents.md', 'claude.md', 'gemini.md', 'ai.md', '.cursorrules', '.windsurfrules',
 ]);
 
 const PROJECT_PATHS = [
