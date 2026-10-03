@@ -248,8 +248,20 @@ export function parseMissionPlan(text: string, opts: { maxSteps?: number } = {})
     const kept = steps.slice(0, max);
     const keptIds = new Set(kept.map(s => s.id));
     const dropped = steps.slice(max);
-    for (const s of kept) s.depends_on = s.depends_on.filter(d => keptIds.has(d));
+    const droppedIds = new Set(dropped.map(s => s.id));
     const last = kept[kept.length - 1]!;
+    // The overflow now runs inside `last`, so it must keep the overflow's ordering:
+    // `last` waits for what the dropped steps needed, and kept steps that needed a
+    // dropped step wait for `last` — unless that would close a cycle.
+    const tryAddDep = (s: PlanStep, dep: string) => {
+      if (dep === s.id || s.depends_on.includes(dep)) return;
+      s.depends_on.push(dep);
+      if (hasCycle(kept)) s.depends_on.pop();
+    };
+    const needsLast = kept.filter(s => s !== last && s.depends_on.some(d => droppedIds.has(d)));
+    for (const s of kept) s.depends_on = s.depends_on.filter(d => keptIds.has(d));
+    for (const d of dropped) for (const dep of d.depends_on) if (keptIds.has(dep)) tryAddDep(last, dep);
+    for (const s of needsLast) tryAddDep(s, last.id);
     last.instruction += '\n\nAlso complete these remaining parts of the plan:\n' +
       dropped.map(s => `- ${s.title}: ${s.instruction.replace(/\s+/g, ' ').slice(0, 300)}`).join('\n');
     finalSteps = kept;

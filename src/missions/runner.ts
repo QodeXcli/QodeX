@@ -25,7 +25,7 @@ import type { Message, WorklogKind } from '../session/store.js';
 import { getSessionStore } from '../session/store.js';
 import { getBus } from '../control/bus.js';
 import {
-  getApprovalBroker, safeOption, isApproval,
+  getApprovalBroker, isApproval,
   type ApprovalChannel, type PendingApproval, type ApprovalResult, type ApprovalRequest, type LocalAsker,
 } from '../control/approvals.js';
 import { resolveMissionsConfig, type MissionsConfig } from '../config/agent-config.js';
@@ -38,6 +38,8 @@ import {
 } from './store.js';
 import { planMission, type MissionPlan } from './planner.js';
 import { extractThinking } from '../llm/thinking.js';
+import { maskSecrets } from '../sentinel/policy.js';
+import { fenceUntrusted, scanInjection } from '../sentinel/injection.js';
 
 export type AskUser = (prompt: string, options?: string[]) => Promise<string>;
 
@@ -184,14 +186,17 @@ export class MissionApprovalChannel implements ApprovalChannel {
     if (!this.accepts(p) || this.tracked.has(p.id)) return;
     try {
       const stepId = ((p.meta as Record<string, unknown> | undefined)?.stepId as string | undefined) ?? null;
+      // The row is shown remotely (Telegram, control center, other terminals): never
+      // carry a secret from e.g. a shell command line ("curl -H 'Authorization: …'").
+      const prompt = maskSecrets(p.prompt);
       const row = this.store.createApproval({
-        id: p.id, missionId: this.missionId, stepId, prompt: p.prompt, options: p.options,
+        id: p.id, missionId: this.missionId, stepId, prompt, options: p.options,
         category: p.category ?? null, risk: p.risk ?? null,
       });
       this.tracked.set(p.id, { stepId });
       this.store.markAwaitingApproval(this.missionId);
       this.store.appendEvent(this.missionId, 'approval-requested', {
-        approvalId: p.id, prompt: p.prompt, options: p.options, category: p.category, risk: p.risk, stepId, source: p.source,
+        approvalId: p.id, prompt, options: p.options, category: p.category, risk: p.risk, stepId, source: p.source,
       });
       this.ensurePolling();
       try { this.opts.onRequested?.(row); } catch { /* observer failure is not ours */ }
@@ -226,11 +231,12 @@ export class MissionApprovalChannel implements ApprovalChannel {
       try { row = this.store.getApproval(id); } catch { continue; }
       if (row && row.status === 'pending') continue;
       if (!row) {
-        broker.resolve(id, 'no', 'mission-db');
-      } else if (row.status === 'expired') {
-        broker.resolve(id, safeOption(approvalOptions(row)) ?? 'no', row.resolved_by ?? 'expired');
-      } else {
-        broker.resolve(id, row.answer ?? '', row.resolved_by ?? 'mission-db');
+        // Deleted (e.g. `mission rm`): withdraw with the safe answer. cancel() works
+        // for any option set; resolve('no') would be refused by options like
+        // ['accept', 'edit'] and leave the tool waiting forever.
+        broker.cancel(id, 'mission-db');
+      } else if (row.status === 'expired' || !row.answer || !broker.resolve(id, row.answer, row.resolved_by ?? 'mission-db')) {
+        broker.cancel(id, row.resolved_by ?? 'expired');
       }
       // broker.finish → retract() normally removes it; make sure even if the broker forgot it.
       if (this.tracked.delete(id)) {
@@ -258,6 +264,44 @@ export class MissionApprovalChannel implements ApprovalChannel {
     }
     this.tracked.clear();
     try { this.store.clearAwaitingApproval(this.missionId); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Shows every broker request at a terminal (foreground `--yes` workers). Unlike the
+ * broker's own local asker this is just another channel: the terminal answer races
+ * the mission queue / control center / Telegram, a failing terminal (stdin closed)
+ * never decides the request, and prompts are shown one at a time (FIFO).
+ */
+export class TerminalApprovalChannel implements ApprovalChannel {
+  readonly name: string;
+  private open = new Map<string, AbortController>();
+  private chain: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly ask: LocalAsker, missionId: string) {
+    this.name = `mission-terminal:${missionId}`;
+  }
+
+  deliver(p: PendingApproval): void {
+    if (this.open.has(p.id)) return;
+    const ac = new AbortController();
+    this.open.set(p.id, ac);
+    this.chain = this.chain.then(async () => {
+      if (ac.signal.aborted) return;
+      try {
+        const answer = await this.ask(p.prompt, p.options, ac.signal);
+        if (!ac.signal.aborted) getApprovalBroker().resolve(p.id, answer, 'local');
+      } catch {
+        /* dismissed (answered elsewhere) or the terminal went away: other channels decide */
+      } finally {
+        this.open.delete(p.id);
+      }
+    });
+  }
+
+  retract(id: string): void {
+    this.open.get(id)?.abort();
+    this.open.delete(id);
   }
 }
 
@@ -318,7 +362,30 @@ function oneLine(s: string | null | undefined, max: number): string {
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
+/**
+ * One line for OBSERVERS (mission events, the bus, the control center, Telegram,
+ * desktop notifications, the worklog): secret-looking values (API keys, tokens,
+ * card numbers, credentials in URLs) are masked. Step results and the report
+ * themselves stay intact — later steps and the user need the real values.
+ */
+export function safeLine(s: string | null | undefined, max: number): string {
+  return oneLine(maskSecrets(String(s ?? '').slice(0, Math.max(2000, max * 4))), max);
+}
+
 const STEP_MARK: Record<string, string> = { pending: '·', running: '▶', done: '✓', failed: '✗', skipped: '⤼' };
+
+/**
+ * Step results are agent output that often relays web pages, emails and files, so
+ * a page can plant instructions that would otherwise reach the NEXT step's prompt
+ * (or the report writer) as if the user wrote them. Fence them as data, with a
+ * banner when they look like an injection attempt.
+ */
+function asData(text: string, source: string): string {
+  // Always wrap (even text that relays an already-fenced tool output): the result was
+  // clipped, so an inner fence may have lost its closing tag; fenceUntrusted escapes
+  // any inner closing tag, so nesting is safe.
+  return text ? fenceUntrusted(text, source, scanInjection(text)) : text;
+}
 
 export function parsePlanMeta(planJson: string | null | undefined): { success_criteria: string } {
   try {
@@ -349,7 +416,7 @@ export function buildStepPrompt(input: {
   const depBlocks = deps
     .map(d => byId.get(d))
     .filter((d): d is MissionStepRow => !!d)
-    .map(d => `### [${d.id}] ${d.title}\n${clip(d.result, 3000) || '(no result recorded)'}`);
+    .map(d => `### [${d.id}] ${d.title}\n${asData(clip(d.result, 3000), `the result of mission step ${d.id}`) || '(no result recorded)'}`);
 
   const parts = [
     `# Mission step ${pos}/${total}: ${step.title}`,
@@ -375,7 +442,7 @@ export function buildStepPrompt(input: {
       '',
       `## Previous attempt failed (attempt ${step.attempts})`,
       `Error: ${clip(step.error, 1200)}`,
-      ...(step.result ? [`Last output:\n${clip(step.result, 1500)}`] : []),
+      ...(step.result ? [`Last output:\n${asData(clip(step.result, 1500), `the previous attempt of step ${step.id}`)}`] : []),
       'Do not repeat the same approach blindly — fix the cause or try a different way.',
     );
   }
@@ -399,7 +466,9 @@ export function buildReportPrompt(mission: Pick<MissionRow, 'id' | 'goal' | 'pla
   const criteria = parsePlanMeta(mission.plan_json).success_criteria;
   const results = steps.map(s =>
     `### [${s.id}] ${s.title} — ${s.status}\n` +
-    (s.status === 'done' ? clip(s.result, 2500) : clip(s.error ?? s.result ?? '', 800) || '(no output)'),
+    (s.status === 'done'
+      ? asData(clip(s.result, 2500), `the result of mission step ${s.id}`)
+      : asData(clip(s.error ?? s.result ?? '', 800), `the output of mission step ${s.id}`) || '(no output)'),
   ).join('\n\n');
   return [
     'Write the final report of an autonomous agent mission for the user who started it.',
@@ -520,6 +589,13 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
     return result(initial.status, initial.error);
   }
 
+  const channelMode = deps.approvalChannel ?? 'tagged';
+  // Claim the mission for this process. A dedicated worker ('exclusive') may be
+  // signalled by `mission cancel`; any other host (a TUI running it inline) never is.
+  if (!store.claimWorker(missionId, process.pid, { shared: channelMode !== 'exclusive' })) {
+    throw new Error(`[MISSION_BUSY] Mission ${missionId} is already being run by pid ${store.get(missionId)?.pid}.`);
+  }
+
   // ── mission-wide abort (cancel, SIGTERM, caller signal) ──
   const missionAbort = new AbortController();
   const onCallerAbort = () => { if (!missionAbort.signal.aborted) missionAbort.abort(deps.signal?.reason ?? 'aborted'); };
@@ -528,14 +604,12 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
     else deps.signal.addEventListener('abort', onCallerAbort, { once: true });
   }
 
-  store.update(missionId, { pid: process.pid });
   if (initial.cost_cap_usd <= 0 && cfg.maxCostUsd > 0) store.update(missionId, { cost_cap_usd: cfg.maxCostUsd });
   const baseCap = initial.cost_cap_usd > 0 ? initial.cost_cap_usd : cfg.maxCostUsd;
 
   // ── approvals channel ──
   let channel: MissionApprovalChannel | null = null;
   let unregisterChannel: () => void = () => {};
-  const channelMode = deps.approvalChannel ?? 'tagged';
   if (channelMode !== 'none') {
     channel = new MissionApprovalChannel(store, missionId, {
       exclusive: channelMode === 'exclusive',
@@ -545,7 +619,7 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
         safeNotify({
           title: 'QodeX mission needs your approval',
           subtitle: oneLine(initial.goal, 60),
-          message: `${oneLine(row.prompt, 140)} — qodex mission approve ${missionId}`,
+          message: `${safeLine(row.prompt, 140)} — qodex mission approve ${missionId}`,
           sound: true,
         });
       },
@@ -690,7 +764,7 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
             case 'tool_result':
               emit('tool', {
                 name: ev.data?.name, ok: !ev.data?.isError,
-                excerpt: oneLine(typeof ev.data?.result === 'string' ? ev.data.result : '', 160),
+                excerpt: safeLine(typeof ev.data?.result === 'string' ? ev.data.result : '', 160),
               }, { stepId: step.id });
               break;
             case 'budget_update': {
@@ -701,7 +775,7 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
               break;
             }
             case 'notice':
-              if (ev.data?.message) emit('notice', { message: oneLine(ev.data.message, 300) }, { stepId: step.id });
+              if (ev.data?.message) emit('notice', { message: safeLine(ev.data.message, 300) }, { stepId: step.id });
               break;
             case 'steer_injected':
               emit('steer-injected', { note: ev.data?.note }, { stepId: step.id, persist: false });
@@ -732,8 +806,8 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
     const ok = !reason && !errorMsg && finalText.trim().length > 0;
     if (ok) {
       store.updateStep(missionId, step.id, { status: 'done', result: clip(finalText, 20_000), error: null, finished_at: iso() });
-      emit('step-done', { title: step.title, attempt, toolCalls, costUsd: stepCost, excerpt: oneLine(finalText, 300) }, { stepId: step.id });
-      worklog(sessionId, `Mission ${missionId} — ${oneLine(step.title, 80)}: ${oneLine(finalText, 200)}`);
+      emit('step-done', { title: step.title, attempt, toolCalls, costUsd: stepCost, excerpt: safeLine(finalText, 300) }, { stepId: step.id });
+      worklog(sessionId, `Mission ${missionId} — ${oneLine(step.title, 80)}: ${safeLine(finalText, 200)}`);
       try { sessions().markStatus?.(sessionId, 'completed'); } catch { /* ignore */ }
       return;
     }
@@ -744,10 +818,10 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
     const partial = finalText.trim() ? clip(finalText, 4000) : null;
     if (attempt < Math.max(1, cfg.maxAttempts)) {
       store.updateStep(missionId, step.id, { status: 'pending', error: err, result: partial, finished_at: iso() });
-      emit('step-retry', { title: step.title, attempt, error: oneLine(err, 300) }, { stepId: step.id });
+      emit('step-retry', { title: step.title, attempt, error: safeLine(err, 300) }, { stepId: step.id });
     } else {
       store.updateStep(missionId, step.id, { status: 'failed', error: err, result: partial, finished_at: iso() });
-      emit('step-failed', { title: step.title, attempt, error: oneLine(err, 300) }, { stepId: step.id });
+      emit('step-failed', { title: step.title, attempt, error: safeLine(err, 300) }, { stepId: step.id });
     }
     try { sessions().markStatus?.(sessionId, 'completed'); } catch { /* ignore */ }
   };
@@ -932,7 +1006,7 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
         report = fallbackReport(store.get(missionId)!, store.steps(missionId));
       }
       store.update(missionId, { report });
-      emit('report', { excerpt: oneLine(report, 400) });
+      emit('report', { excerpt: safeLine(report, 400) });
       if (failed.length || skipped.length || stuck.length) {
         status = 'failed';
         const bad = [...failed, ...skipped, ...stuck].map(s => `[${s.id}] ${oneLine(s.title, 40)}`);
@@ -949,17 +1023,20 @@ export async function runMission(id: string, deps: MissionDeps): Promise<Mission
   try { setStatus(status, { error }); } catch (e: any) { logger.error('mission status write failed', { missionId, err: e?.message }); }
   try { store.expirePendingApprovals(missionId, `mission-${status}`); } catch { /* ignore */ }
   if (channel) { channel.dispose(`mission-${status}`); unregisterChannel(); }
+  // This process no longer runs the mission: a later cancel/resume must not treat
+  // it (a TUI, a control center, a worker winding down) as the mission's worker.
+  try { store.releaseWorker(missionId, process.pid); } catch { /* ignore */ }
 
   const final = result(status, error);
-  emit(status, { report: oneLine(final.report, 400), error, stepsDone: final.stepsDone, stepsFailed: final.stepsFailed, costUsd: final.costUsd }, { persist: false });
+  emit(status, { report: safeLine(final.report, 400), error, stepsDone: final.stepsDone, stepsFailed: final.stepsFailed, costUsd: final.costUsd }, { persist: false });
   if (status === 'completed' || status === 'failed') {
-    worklog(null, `Mission ${missionId} ${status}: ${oneLine(initial.goal, 80)} — ${oneLine(final.report ?? error ?? '', 220)}`);
+    worklog(null, `Mission ${missionId} ${status}: ${oneLine(initial.goal, 80)} — ${safeLine(final.report ?? error ?? '', 220)}`);
   }
   if (isTerminalStatus(status) || status === 'paused') {
     const title = status === 'completed' ? '✓ QodeX mission complete'
       : status === 'failed' ? '✗ QodeX mission failed'
       : status === 'cancelled' ? 'QodeX mission cancelled' : 'QodeX mission paused';
-    safeNotify({ title, subtitle: oneLine(initial.goal, 60), message: oneLine(final.report ?? error ?? '', 180) || `Mission ${missionId}`, sound: true });
+    safeNotify({ title, subtitle: oneLine(initial.goal, 60), message: safeLine(final.report ?? error ?? '', 180) || `Mission ${missionId}`, sound: true });
   }
   return final;
 }
