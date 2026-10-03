@@ -32,6 +32,13 @@ export interface DashboardOptions {
   title?: string;
   /** Initial language (the viewer can toggle; the choice is remembered locally). */
   lang?: DashboardLang;
+  /**
+   * Open in hand-off mode for this hand-off (a CAPTCHA / bot check a human solves).
+   * `scoped` = the viewer came through a hand-off link: only the live view of this
+   * hand-off exists for them (no events, approvals, steering, missions or stop).
+   * Without it the page still enters hand-off mode from `?handoff=<id>`.
+   */
+  handoff?: { id: string; scoped?: boolean };
 }
 
 /** Every UI string in both languages. Keys must exist in both maps. */
@@ -119,6 +126,28 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     opt_skip: 'Skip',
     opt_edit: 'Edit',
     opt_continue: 'Continue',
+    opt_done: 'Done',
+    cat_challenge: 'bot check',
+    hoBanner: 'Solve it — QodeX continues by itself',
+    hoSub: 'A bot check needs a person. Tap, press and hold, or drag on the page below just as you would on the site.',
+    hoDone: 'Done ✓',
+    hoCant: 'Can\'t solve it',
+    hoConfirmCant: 'Give up on this check? QodeX stops waiting and tells you.',
+    hoWaiting: 'Waiting for you…',
+    hoChecking: 'Checking the page…',
+    hoStill: 'QodeX still sees the check — keep going.',
+    hoCleared: '✓ Cleared — QodeX continues by itself. You can close this page.',
+    hoEnded: 'This hand-off is over — QodeX continues by itself. You can close this page.',
+    hoCancelled: 'Cancelled — QodeX will not retry by itself.',
+    hoTimeout: 'Time ran out — QodeX stopped waiting.',
+    hoZoomIn: 'Zoom to the check',
+    hoZoomOut: 'Whole page',
+    hoModeHold: 'Touch: tap · hold · drag',
+    hoModeScroll: 'Touch: scroll',
+    hoKeyboard: 'Keyboard',
+    hoOpen: 'Open live view',
+    hoHoldCapped: 'Released — a hold lasts at most 15 seconds.',
+    hoScopedNote: 'This link only shows this check and expires soon. Don\'t share it.',
     st_planning: 'planning',
     st_running: 'running',
     st_paused: 'paused',
@@ -210,6 +239,28 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     opt_skip: 'رد شدن',
     opt_edit: 'ویرایش',
     opt_continue: 'ادامه',
+    opt_done: 'انجام شد',
+    cat_challenge: 'بررسی ضدربات',
+    hoBanner: 'حلش کنید — QodeX خودش ادامه می‌دهد',
+    hoSub: 'یک بررسیِ ضدربات به انسان نیاز دارد. روی صفحهٔ زیر همان‌طور که در خودِ سایت کار می‌کنید بزنید، نگه دارید یا بکشید.',
+    hoDone: 'انجام شد ✓',
+    hoCant: 'نمی‌توانم حلش کنم',
+    hoConfirmCant: 'از این بررسی صرف‌نظر شود؟ QodeX دیگر منتظر نمی‌ماند و به شما خبر می‌دهد.',
+    hoWaiting: 'منتظر شما…',
+    hoChecking: 'در حال بررسی صفحه…',
+    hoStill: 'QodeX هنوز بررسی را می‌بیند — ادامه دهید.',
+    hoCleared: '✓ برطرف شد — QodeX خودش ادامه می‌دهد. می‌توانید این صفحه را ببندید.',
+    hoEnded: 'این واگذاری تمام شد — QodeX خودش ادامه می‌دهد. می‌توانید این صفحه را ببندید.',
+    hoCancelled: 'لغو شد — QodeX خودش دوباره امتحان نمی‌کند.',
+    hoTimeout: 'مهلت تمام شد — QodeX دیگر منتظر نمی‌ماند.',
+    hoZoomIn: 'بزرگ‌نمایی روی بررسی',
+    hoZoomOut: 'کل صفحه',
+    hoModeHold: 'لمس: زدن · نگه‌داشتن · کشیدن',
+    hoModeScroll: 'لمس: پیمایش',
+    hoKeyboard: 'صفحه‌کلید',
+    hoOpen: 'باز کردن نمای زنده',
+    hoHoldCapped: 'رها شد — نگه‌داشتن حداکثر ۱۵ ثانیه طول می‌کشد.',
+    hoScopedNote: 'این لینک فقط همین بررسی را نشان می‌دهد و به‌زودی منقضی می‌شود. آن را با کسی به اشتراک نگذارید.',
     st_planning: 'در حال برنامه‌ریزی',
     st_running: 'در حال اجرا',
     st_paused: 'متوقف',
@@ -219,6 +270,9 @@ export const DASHBOARD_STRINGS: Record<DashboardLang, Record<string, string>> = 
     st_cancelled: 'لغو شد',
   },
 };
+
+/** Same shape as src/control/handoff.ts HANDOFF_ID_RE (kept local: the page script tests it too). */
+const HANDOFF_BOOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
@@ -311,6 +365,21 @@ textarea{width:100%;min-height:70px;resize:vertical;background:var(--bg);border:
 footer{color:var(--muted);font-size:11.5px;text-align:center;padding:0 16px 22px}
 .hidden{display:none!important}
 @media (max-width:900px){main{display:flex;flex-direction:column;align-items:stretch;padding:10px}#side{display:contents}#approvalsPanel{order:1}#livePanel{order:2}#steerPanel{order:3}#missionsPanel{order:4}#activityPanel{order:5}header{padding:10px}#activityList{max-height:300px}}
+.hobar{border:1px solid rgba(245,158,11,.55);background:rgba(245,158,11,.10);border-radius:10px;padding:10px;margin-bottom:10px}
+.hobar .hotitle{font-weight:700;font-size:15px;color:#fde68a}
+.hobar .hoinfo,.hobar .hosub{font-size:12px;color:var(--muted);margin-top:2px}
+.hobar .hostatus{font-size:13px;margin:6px 0;min-height:18px}
+.hobar .hostatus.ok{color:#bbf7d0}.hobar .hostatus.err{color:#fca5a5}
+.hobar .opts{display:flex;gap:6px;flex-wrap:wrap}
+.hobar .btn.big{padding:9px 16px;font-weight:650}
+#frame{transform-origin:0 0;transition:transform .2s ease}
+body.handoff #takeBtn{display:none}
+body.handoff #screen{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+body.handoff.takeover #screen{touch-action:pinch-zoom}
+body.handoff.hoscroll.takeover #screen{touch-action:none}
+body.scoped #side,body.scoped #activityPanel,body.scoped #stopBtn,body.scoped #urlForm,body.scoped #backBtn,body.scoped #fwdBtn,body.scoped #approvalCount{display:none!important}
+body.scoped main{grid-template-columns:minmax(0,1fr);grid-template-areas:"live"}
+@media (max-width:900px){body.handoff #livePanel{order:0}}
 `;
 
 /**
@@ -330,7 +399,15 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;padding:0 16px 22px
  * coalescing so a slow link never builds a backlog: consecutive pointer moves
  * collapse to the latest, a move right before a click (or a positioned scroll) is
  * dropped, scrolls at the same point and consecutive typing merge, and the queue is
- * bounded (oldest move dropped first, then the oldest event).
+ * bounded (oldest move dropped first, then the oldest event). A press-and-hold's
+ * 'down' / 'up' are never merged or dropped: a lost 'up' would leave a button held.
+ *
+ * qxHoldStep(g, ev, now) is the hand-off gesture state machine: it turns the human's
+ * pointer events ({kind:'down'|'move'|'up'|'cancel'|'abort'|'tick', id, p}) into the
+ * 'down' / 'move' / 'up' input events to relay, one gesture at a time. Every 'down'
+ * it emits is followed by exactly one 'up' — on release, cancel, a second finger
+ * (that is a pinch zoom, not page input), abort (page hidden, stream dropped, control
+ * lost) or after QX_HOLD_MAX_MS (a hold is capped; 'capped' is set on the gesture).
  */
 export const DASHBOARD_INPUT_HELPERS = String.raw`
 var QX_MODIFIER_KEYS = ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'FnLock', 'OS', 'Hyper', 'Super', 'Symbol', 'SymbolLock'];
@@ -385,11 +462,55 @@ function qxEnqueueInput(queue, ev, max) {
   }
   queue.push(ev);
   while (queue.length > cap) {
-    var drop = -1;
-    for (var i = 0; i < queue.length - 1; i++) if (queue[i].type === 'move') { drop = i; break; }
-    queue.splice(drop >= 0 ? drop : 0, 1);
+    var drop = -1, i;
+    for (i = 0; i < queue.length - 1; i++) if (queue[i].type === 'move') { drop = i; break; }
+    if (drop < 0) for (i = 0; i < queue.length; i++) if (queue[i].type !== 'down' && queue[i].type !== 'up') { drop = i; break; }
+    if (drop < 0) break;
+    queue.splice(drop, 1);
   }
   return queue;
+}
+var QX_HOLD_MAX_MS = 15000;
+var QX_MOVE_EVERY_MS = 40;
+function qxHoldEvent(type, p) {
+  var ev = { type: type, button: 'left' };
+  if (p) { ev.x = p.x; ev.y = p.y; if (p.frameWidth) ev.frameWidth = p.frameWidth; if (p.frameHeight) ev.frameHeight = p.frameHeight; }
+  return ev;
+}
+function qxHoldStep(g, ev, now) {
+  var out = [];
+  if (!g.pointers) g.pointers = {};
+  var kind = ev && ev.kind;
+  var release = function (p) {
+    if (!g.down) return;
+    g.down = false;
+    out.push(qxHoldEvent('up', p || g.p));
+  };
+  if (kind === 'down') {
+    g.pointers[ev.id] = true;
+    var n = 0, k;
+    for (k in g.pointers) if (Object.prototype.hasOwnProperty.call(g.pointers, k)) n++;
+    if (n > 1) { release(null); return out; }
+    if (!ev.p) return out;
+    release(null);
+    g.down = true; g.id = ev.id; g.p = ev.p; g.t0 = now; g.lastMove = 0; g.capped = false;
+    out.push(qxHoldEvent('down', ev.p));
+  } else if (kind === 'move') {
+    if (!g.down || ev.id !== g.id || !ev.p) return out;
+    g.p = ev.p;
+    if (now - (g.lastMove || 0) < QX_MOVE_EVERY_MS) return out;
+    g.lastMove = now;
+    out.push(qxHoldEvent('move', ev.p));
+  } else if (kind === 'up' || kind === 'cancel') {
+    delete g.pointers[ev.id];
+    if (g.down && ev.id === g.id) release(kind === 'up' && ev.p ? ev.p : null);
+  } else if (kind === 'abort') {
+    g.pointers = {};
+    release(null);
+  } else if (kind === 'tick') {
+    if (g.down && now - g.t0 >= QX_HOLD_MAX_MS) { g.capped = true; release(null); }
+  }
+  return out;
 }
 `;
 
@@ -429,6 +550,16 @@ const SCRIPT = String.raw`
     takeover: false, live: false, frameW: 0, frameH: 0, activity: [], connected: false, authLost: false
   };
 
+  // Hand-off mode: a CAPTCHA / bot check waits for a person (boot.handoff from a
+  // hand-off link — scoped to this one hand-off — or ?handoff=<id> for the owner).
+  var HO_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+  var HO = boot.handoff && HO_ID_RE.test(String(boot.handoff.id || '')) ? { id: String(boot.handoff.id), scoped: !!boot.handoff.scoped } : null;
+  if (!HO) {
+    try { var qho = new URLSearchParams(window.location.search).get('handoff'); if (qho && HO_ID_RE.test(qho)) HO = { id: qho, scoped: false }; } catch (e) {}
+  }
+  var ho = { info: null, zoom: true, mode: 'hold', answered: '', ended: '', autoTook: false };
+  var hold = { down: false, pointers: {} }, holdTimer = null;
+
   // ── API ─────────────────────────────────────────────────────────────────────
   function api(method, path, body) {
     var init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: {} };
@@ -437,7 +568,8 @@ const SCRIPT = String.raw`
       return r.text().then(function (txt) {
         var j = {};
         try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
-        if (r.status === 401) setAuthLost(true);
+        if (r.status === 401) { if (HO && HO.scoped) handoffEnded(''); else setAuthLost(true); }
+        if (r.status === 410 && HO) handoffEnded(j.outcome || '');
         if (!r.ok) { var err = new Error(j.error || ('HTTP ' + r.status)); err.status = r.status; throw err; }
         return j;
       });
@@ -461,6 +593,7 @@ const SCRIPT = String.raw`
     $('appTitle').textContent = baseTitle();
     $('langBtn').textContent = lang === 'fa' ? 'English' : 'فارسی';
     renderConn(); renderTakeover(); renderApprovals(); renderMissions(); renderActivity(); renderBrowserInfo();
+    if (HO) renderHandoff();
   }
   $('langBtn').addEventListener('click', function () {
     lang = lang === 'fa' ? 'en' : 'fa';
@@ -490,7 +623,8 @@ const SCRIPT = String.raw`
   }
   function setBrowser(b) {
     state.browser = b || null;
-    state.takeover = !!(b && b.takeover);
+    // A hand-off link drives the browser only through its own hand-off's takeover.
+    state.takeover = !!(b && b.takeover) && !(HO && HO.scoped && b.takeoverBy !== 'handoff:' + HO.id);
     var tab = activeTab(b);
     if (tab && document.activeElement !== $('url')) $('url').value = tab.url || '';
     renderTakeover();
@@ -514,6 +648,7 @@ const SCRIPT = String.raw`
     var ids = ['url', 'goBtn', 'backBtn', 'fwdBtn', 'reloadBtn', 'typeBox', 'typeSend', 'enterBtn'];
     for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = !state.takeover;
     if (!state.takeover && inputQueue) { inputQueue.length = 0; typeBuf = ''; }
+    if (!state.takeover && hold && hold.down) holdAbort();
     renderOverlay();
   }
   $('takeBtn').addEventListener('click', function () {
@@ -543,7 +678,7 @@ const SCRIPT = String.raw`
   }
   var framesES = null, framesRetry = null;
   function openFrames() {
-    if (framesES || document.hidden) return;
+    if (framesES || document.hidden || (HO && HO.scoped && ho.ended)) return;
     var es = new EventSource('/api/frames');
     framesES = es;
     es.addEventListener('frame', function (e) {
@@ -552,13 +687,16 @@ const SCRIPT = String.raw`
       state.frameW = f.w || 0; state.frameH = f.h || 0;
       $('frame').src = 'data:image/jpeg;base64,' + f.data;
       if (!state.live) { state.live = true; renderOverlay(); }
+      if (HO) applyZoom();
     });
     es.addEventListener('idle', function (e) {
       var d = {}; try { d = JSON.parse(e.data); } catch (x) {}
       idleReason = d.reason || 'no-browser'; idleDetail = d.message || '';
       state.live = false; renderOverlay();
+      holdAbort(); // the human can no longer see what they hold
     });
     es.onerror = function () {
+      holdAbort();
       if (es.readyState === 2) {
         if (framesES === es) framesES = null;
         clearTimeout(framesRetry);
@@ -569,7 +707,7 @@ const SCRIPT = String.raw`
   function closeFrames() { if (framesES) { framesES.close(); framesES = null; } }
   document.addEventListener('visibilitychange', function () {
     // A hidden tab stops the screencast server-side (no viewers → no frames).
-    if (document.hidden) closeFrames(); else { openFrames(); refreshState(); }
+    if (document.hidden) { holdAbort(); closeFrames(); } else { openFrames(); refreshState(); }
   });
 
   // ── human input (only while the human holds control) ───────────────────────
@@ -604,6 +742,7 @@ const SCRIPT = String.raw`
   frameImg.addEventListener('dragstart', function (e) { e.preventDefault(); });
   screen.addEventListener('click', function (e) {
     if (!state.takeover) return;
+    if (hoGestures()) { e.preventDefault(); return; } // relayed as down/up already
     screen.focus();
     var p = framePoint(e); if (!p) return;
     e.preventDefault();
@@ -611,6 +750,7 @@ const SCRIPT = String.raw`
     sendInput({ type: 'click', x: p.x, y: p.y, button: 'left', clickCount: Math.min(3, Math.max(1, e.detail || 1)), frameWidth: p.frameWidth, frameHeight: p.frameHeight });
   });
   screen.addEventListener('contextmenu', function (e) {
+    if (HO) { e.preventDefault(); return; } // a phone long-press is a hold, never a right-click
     if (!state.takeover) return;
     e.preventDefault();
     var p = framePoint(e); if (!p) return;
@@ -624,7 +764,7 @@ const SCRIPT = String.raw`
   });
   var lastMove = 0;
   screen.addEventListener('mousemove', function (e) {
-    if (!state.takeover) return;
+    if (!state.takeover || hold.down) return;
     var now = Date.now(); if (now - lastMove < 120) return;
     var p = framePoint(e); if (!p) return;
     lastMove = now;
@@ -648,11 +788,11 @@ const SCRIPT = String.raw`
   }, { passive: false });
   var touch = null;
   screen.addEventListener('touchstart', function (e) {
-    if (!state.takeover || e.touches.length !== 1) { touch = null; return; }
+    if (!state.takeover || e.touches.length !== 1 || hoGestures()) { touch = null; return; }
     touch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   }, { passive: true });
   screen.addEventListener('touchmove', function (e) {
-    if (!state.takeover || !touch || e.touches.length !== 1) return;
+    if (!state.takeover || !touch || e.touches.length !== 1 || hoGestures()) return;
     e.preventDefault();
     var nx = e.touches[0].clientX, ny = e.touches[0].clientY;
     var r = frameImg.getBoundingClientRect(), fw = frameImg.naturalWidth || state.frameW || r.width;
@@ -661,6 +801,143 @@ const SCRIPT = String.raw`
     touch = { x: nx, y: ny };
     if (!wheel.timer) wheel.timer = setTimeout(flushWheel, 80);
   }, { passive: false });
+
+  // Hand-off gestures: the human's own press-and-hold and drag, relayed as they
+  // happen ('down' → 'move'… → 'up', see qxHoldStep). Two fingers = pinch zoom.
+  function hoGestures() { return !!HO && !ho.ended && ho.mode === 'hold' && state.takeover; }
+  function syncHoldTimer() {
+    if (hold.down && !holdTimer) holdTimer = setInterval(function () { relayHold(qxHoldStep(hold, { kind: 'tick' }, Date.now())); }, 500);
+    else if (!hold.down && holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+  }
+  function relayHold(evs) {
+    for (var i = 0; i < evs.length; i++) sendInput(evs[i]);
+    if (hold.capped) { hold.capped = false; liveMsg(t('hoHoldCapped')); }
+    syncHoldTimer();
+  }
+  function holdAbort() { relayHold(qxHoldStep(hold, { kind: 'abort' }, Date.now())); }
+  function clampedPoint(e) {
+    var r = frameImg.getBoundingClientRect();
+    var fw = frameImg.naturalWidth || state.frameW, fh = frameImg.naturalHeight || state.frameH;
+    if (!state.live || !r.width || !r.height || !fw || !fh) return null;
+    var x = (e.clientX - r.left) / r.width * fw, y = (e.clientY - r.top) / r.height * fh;
+    return { x: Math.round(Math.max(0, Math.min(fw, x))), y: Math.round(Math.max(0, Math.min(fh, y))), frameWidth: fw, frameHeight: fh };
+  }
+  screen.addEventListener('pointerdown', function (e) {
+    if (!hoGestures() || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    var evs = qxHoldStep(hold, { kind: 'down', id: e.pointerId, p: framePoint(e) }, Date.now());
+    if (hold.down && hold.id === e.pointerId) {
+      e.preventDefault();
+      try { screen.setPointerCapture(e.pointerId); } catch (x) {}
+      flushType();
+    }
+    relayHold(evs);
+  });
+  screen.addEventListener('pointermove', function (e) {
+    if (!hold.down || e.pointerId !== hold.id) return;
+    e.preventDefault();
+    relayHold(qxHoldStep(hold, { kind: 'move', id: e.pointerId, p: clampedPoint(e) }, Date.now()));
+  });
+  function pointerEnd(kind) {
+    return function (e) { relayHold(qxHoldStep(hold, { kind: kind, id: e.pointerId, p: kind === 'up' ? clampedPoint(e) : null }, Date.now())); };
+  }
+  screen.addEventListener('pointerup', pointerEnd('up'));
+  screen.addEventListener('pointercancel', pointerEnd('cancel'));
+  screen.addEventListener('lostpointercapture', pointerEnd('cancel'));
+  window.addEventListener('blur', function () { if (hold.down) holdAbort(); });
+
+  // ── hand-off banner ─────────────────────────────────────────────────────────
+  function hoMeta() { return ho.info && ho.info.meta ? ho.info.meta : null; }
+  function endedText(o) {
+    return o === 'cleared' || o === 'done' ? t('hoCleared') : o === 'cancelled' ? t('hoCancelled') : o === 'timeout' ? t('hoTimeout') : t('hoEnded');
+  }
+  function applyZoom() {
+    var img = $('frame'), m = HO && ho.zoom && !ho.ended ? hoMeta() : null, box = m && m.frameBox;
+    var fw = img.naturalWidth || state.frameW, lw = img.offsetWidth, lh = img.offsetHeight;
+    var tf = '';
+    if (box && state.live && fw && lw && lh) {
+      var k = lw / fw, pad = 12;
+      var bx = box.x * k, by = box.y * k, bw = box.width * k, bh = box.height * k;
+      var s = Math.max(1, Math.min(4, lw / (bw + 2 * pad), lh / (bh + 2 * pad)));
+      var tx = Math.min(0, Math.max(lw - lw * s, lw / 2 - (bx + bw / 2) * s));
+      var ty = Math.min(0, Math.max(lh - lh * s, lh / 2 - (by + bh / 2) * s));
+      tf = 'translate(' + Math.round(tx) + 'px,' + Math.round(ty) + 'px) scale(' + s.toFixed(3) + ')';
+    }
+    if (img.style.transform !== tf) img.style.transform = tf;
+  }
+  window.addEventListener('resize', function () { if (HO) applyZoom(); });
+  function renderHandoff() {
+    if (!HO) return;
+    $('handoffBar').classList.remove('hidden');
+    var m = hoMeta(), info = ho.info, parts = [];
+    if (m && m.vendor) parts.push(String(m.vendor));
+    if (m && m.host) parts.push(String(m.host));
+    $('hoInfo').textContent = parts.join(' · ');
+    $('hoNote').classList.toggle('hidden', !HO.scoped);
+    $('hoZoomBtn').textContent = ho.zoom ? t('hoZoomOut') : t('hoZoomIn');
+    $('hoZoomBtn').classList.toggle('hidden', !(m && m.frameBox));
+    $('hoModeBtn').textContent = ho.mode === 'hold' ? t('hoModeHold') : t('hoModeScroll');
+    document.body.classList.toggle('hoscroll', ho.mode !== 'hold');
+    if (!ho.ended && info && info.active === false) { handoffEnded(info.outcome || 'ended'); return; }
+    var txt, cls = '';
+    if (ho.ended) { txt = endedText(ho.ended); cls = ho.ended === 'cleared' || ho.ended === 'done' ? 'ok' : (ho.ended === 'ended' ? '' : 'err'); }
+    else if (info && !info.pending) txt = t('hoChecking');
+    else if (ho.answered === 'done') txt = t('hoStill');
+    else txt = t('hoWaiting');
+    var st = $('hoStatus');
+    st.textContent = txt; st.className = 'hostatus' + (cls ? ' ' + cls : '');
+    $('hoDoneBtn').disabled = !!ho.ended; $('hoCantBtn').disabled = !!ho.ended;
+    applyZoom();
+    // A hand-off link holds the browser through its hand-off's own takeover (never the owner's).
+    if (HO.scoped && !ho.ended && info && info.active && state.browser && !state.browser.takeover && !ho.autoTook) {
+      ho.autoTook = true;
+      api('POST', '/api/takeover', { on: true }).then(function (j) { if (j.browser) setBrowser(j.browser); }).catch(function () {});
+    }
+  }
+  function handoffEnded(outcome) {
+    if (!HO || ho.ended) return;
+    ho.ended = outcome || 'ended';
+    holdAbort();
+    if (HO.scoped) { state.takeover = false; renderTakeover(); closeFrames(); }
+    else document.body.classList.remove('handoff');
+    renderHandoff();
+    try { if (navigator.vibrate) navigator.vibrate([60, 60, 60]); } catch (x) {}
+  }
+  function enterHandoff() {
+    document.body.classList.add('handoff');
+    if (HO.scoped) document.body.classList.add('scoped');
+    renderHandoff();
+  }
+  function openHandoff(id) {
+    HO = { id: id, scoped: false };
+    ho = { info: null, zoom: true, mode: 'hold', answered: '', ended: '', autoTook: false };
+    try { window.history.replaceState(null, '', '?handoff=' + encodeURIComponent(id)); } catch (e) {}
+    enterHandoff();
+    refreshState();
+    try { $('livePanel').scrollIntoView({ block: 'start' }); } catch (e) {}
+  }
+  function hoAnswer(answer) {
+    if (!HO || ho.ended) return;
+    if (answer === 'cancel' && !window.confirm(t('hoConfirmCant'))) return;
+    var b1 = $('hoDoneBtn'), b2 = $('hoCantBtn');
+    b1.disabled = true; b2.disabled = true;
+    holdAbort(); flushType();
+    api('POST', '/api/handoff/' + encodeURIComponent(HO.id), { answer: answer }).then(function () {
+      ho.answered = answer;
+      if (ho.info) ho.info.pending = false;
+      renderHandoff(); scheduleState();
+    }).catch(function (e) {
+      if (e && e.status === 404) handoffEnded('ended');
+      else if (!ho.ended) { var st = $('hoStatus'); st.textContent = e && e.status === 409 ? t('hoChecking') : errText(e); st.className = 'hostatus' + (e && e.status === 409 ? '' : ' err'); }
+    }).then(function () { if (!ho.ended) { b1.disabled = false; b2.disabled = false; } });
+  }
+  $('hoDoneBtn').addEventListener('click', function () { hoAnswer('done'); });
+  $('hoCantBtn').addEventListener('click', function () { hoAnswer('cancel'); });
+  $('hoZoomBtn').addEventListener('click', function () { ho.zoom = !ho.zoom; renderHandoff(); });
+  $('hoModeBtn').addEventListener('click', function () { holdAbort(); ho.mode = ho.mode === 'hold' ? 'scroll' : 'hold'; renderHandoff(); });
+  $('hoKbBtn').addEventListener('click', function () {
+    var tb = $('typeBox');
+    try { tb.focus(); tb.scrollIntoView({ block: 'center' }); } catch (e) {}
+  });
 
   // Keyboard: characters are batched into one "type" event; everything else becomes
   // a Playwright key name ("Enter", "ControlOrMeta+a", "Shift+Tab") — see qxKeyAction.
@@ -762,6 +1039,13 @@ const SCRIPT = String.raw`
       });
       opts.appendChild(b);
     });
+    var hid = !isMission && a.meta && a.meta.handoff && typeof a.meta.handoff.id === 'string' ? a.meta.handoff.id : '';
+    if (hid && HO_ID_RE.test(hid) && !(HO && HO.id === hid)) {
+      var ob = el('button', 'btn primary', t('hoOpen'));
+      ob.type = 'button';
+      ob.addEventListener('click', function () { openHandoff(hid); });
+      opts.appendChild(ob);
+    }
     card.appendChild(opts);
     card.appendChild(msg);
     return card;
@@ -973,11 +1257,12 @@ const SCRIPT = String.raw`
       var a; try { a = JSON.parse(e.data); } catch (x) { return; }
       if (!a || !a.id) return;
       state.approvals[a.id] = a; renderApprovals();
+      if (HO) scheduleState();
       try { if (navigator.vibrate) navigator.vibrate(150); } catch (x) {}
     });
     es.addEventListener('approval-retract', function (e) {
       var d; try { d = JSON.parse(e.data); } catch (x) { return; }
-      if (d && d.id) { delete state.approvals[d.id]; renderApprovals(); }
+      if (d && d.id) { delete state.approvals[d.id]; renderApprovals(); if (HO) scheduleState(); }
     });
     es.addEventListener('actions', function (e) {
       var d = {}; try { d = JSON.parse(e.data); } catch (x) {}
@@ -1000,9 +1285,11 @@ const SCRIPT = String.raw`
   // ── periodic state refresh (authoritative snapshot) ─────────────────────────
   var stateTimer = null;
   function refreshState() {
-    return api('GET', '/api/state?recent=0').then(function (j) {
+    if (HO && HO.scoped && ho.ended) return Promise.resolve();
+    return api('GET', '/api/state?recent=0' + (HO ? '&handoff=' + encodeURIComponent(HO.id) : '')).then(function (j) {
       setAuthLost(false);
       setBrowser(j.browser);
+      if (HO && j.handoff) { ho.info = j.handoff; renderHandoff(); }
       var next = {};
       (Array.isArray(j.approvals) ? j.approvals : []).forEach(function (a) { if (a && a.id) next[a.id] = a; });
       state.approvals = next; renderApprovals();
@@ -1016,10 +1303,13 @@ const SCRIPT = String.raw`
   function scheduleState() { clearTimeout(stateTimer); stateTimer = setTimeout(refreshState, 300); }
 
   applyLang();
-  connectEvents();
+  if (HO) enterHandoff();
+  // A hand-off link sees only the live view of its hand-off (no event stream).
+  if (!(HO && HO.scoped)) connectEvents();
   openFrames();
   refreshState();
   setInterval(function () { if (!document.hidden) { refreshState(); if (hasAction('missions.approvals')) refreshMissions(); } }, 5000);
+  setInterval(function () { if (HO && !ho.ended && !document.hidden) refreshState(); }, 1500);
 })();
 `;
 
@@ -1041,7 +1331,10 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
   const customTitle = typeof opts.title === 'string' && opts.title.trim() ? opts.title.trim().slice(0, 120) : '';
   const title = customTitle || S.title;
   const tx = (k: string) => escapeHtml(S[k] ?? DASHBOARD_STRINGS.en[k] ?? k);
-  const boot = { lang, title: customTitle || null, strings: DASHBOARD_STRINGS };
+  const ho = opts.handoff && typeof opts.handoff.id === 'string' && HANDOFF_BOOT_ID_RE.test(opts.handoff.id)
+    ? { id: opts.handoff.id, scoped: !!opts.handoff.scoped }
+    : null;
+  const boot = { lang, title: customTitle || null, strings: DASHBOARD_STRINGS, handoff: ho };
 
   return `<!doctype html>
 <html lang="${lang}" dir="${lang === 'fa' ? 'rtl' : 'ltr'}">
@@ -1068,6 +1361,20 @@ export function renderDashboard(opts: DashboardOptions = {}): string {
 <main>
   <section id="livePanel" class="panel">
     <h2><span data-i18n="live">${tx('live')}</span><span id="browserInfo" class="badge"></span></h2>
+    <div id="handoffBar" class="hobar hidden" role="region" aria-live="polite">
+      <div id="hoTitle" class="hotitle" data-i18n="hoBanner">${tx('hoBanner')}</div>
+      <div id="hoInfo" class="hoinfo" dir="auto"></div>
+      <div class="hosub" data-i18n="hoSub">${tx('hoSub')}</div>
+      <div id="hoStatus" class="hostatus" role="status"></div>
+      <div class="opts">
+        <button id="hoDoneBtn" class="btn ok big" type="button" data-i18n="hoDone">${tx('hoDone')}</button>
+        <button id="hoCantBtn" class="btn no big" type="button" data-i18n="hoCant">${tx('hoCant')}</button>
+        <button id="hoZoomBtn" class="btn" type="button">${tx('hoZoomOut')}</button>
+        <button id="hoModeBtn" class="btn" type="button">${tx('hoModeHold')}</button>
+        <button id="hoKbBtn" class="btn" type="button" data-i18n="hoKeyboard">${tx('hoKeyboard')}</button>
+      </div>
+      <div id="hoNote" class="hoinfo hidden" data-i18n="hoScopedNote">${tx('hoScopedNote')}</div>
+    </div>
     <div class="toolbar">
       <button id="backBtn" class="btn icon" type="button" data-i18n-title="back" title="${tx('back')}" aria-label="${tx('back')}" disabled>&#8592;</button>
       <button id="fwdBtn" class="btn icon" type="button" data-i18n-title="forward" title="${tx('forward')}" aria-label="${tx('forward')}" disabled>&#8594;</button>
