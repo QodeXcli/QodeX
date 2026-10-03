@@ -1,5 +1,6 @@
 import * as os from 'os';
 import { isStrictMode, STRICT_MODE_SYSTEM_ADDENDUM } from '../../safety/strict-mode.js';
+import { getApprovalMode, type ApprovalMode } from '../../security/permissions.js';
 import { systemAddendumFor, type TaskClass } from './task-addenda.js';
 
 export interface SystemPromptContext {
@@ -43,6 +44,35 @@ export interface SystemPromptContext {
   identityBlock?: string;
   /** Per-turn compiled brief (kind / effort / named files). Volatile tail. */
   taskBrief?: string;
+  /**
+   * Session approval mode the prompt is built for. 'auto' (autonomous) swaps in the
+   * "Autonomous mode" section; omitted = the live process-wide mode.
+   */
+  approvalMode?: ApprovalMode;
+}
+
+/**
+ * Heading of the autonomous-mode section. The agent loop looks for it to know whether a
+ * conversation's system prompt already told the model it runs autonomously.
+ */
+export const AUTONOMOUS_SECTION_TITLE = '## Autonomous mode';
+
+/**
+ * The "Autonomous mode" section for the 'auto' approval mode. Kept small on purpose: it
+ * REPLACES the permission-flow paragraph (normal / sub-agent) so the prompt stays inside
+ * the eval budgets (src/eval/suites/harness.ts). PURE.
+ */
+export function buildAutonomousSection(mode: SystemPromptContext['mode']): string {
+  if (mode === 'plan') {
+    return `${AUTONOMOUS_SECTION_TITLE}
+Auto mode is on: don't ask clarifying questions — note assumptions instead. Your plan is approved automatically: after \`present_plan\` every tool unlocks and you carry the plan out in this same turn.`;
+  }
+  if (mode === 'subagent') {
+    return `${AUTONOMOUS_SECTION_TITLE}
+Auto mode is on: tools run without prompts. Don't ask questions — decide, note assumptions in your report, and finish the task.`;
+  }
+  return `${AUTONOMOUS_SECTION_TITLE}
+Auto mode is on: the user is not reviewing each step and tools run without prompts. Don't ask clarifying or permission questions — pick sensible defaults, note each assumption and list them in your final answer. Only purchases, payments, passwords, sending messages and destructive actions outside the project still stop for the user; if one is declined, skip it and report it.`;
 }
 
 export function detectModelFamily(modelId: string): SystemPromptContext['modelFamily'] {
@@ -70,6 +100,7 @@ export function isHighCapacityModel(modelId: string): boolean {
 
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
   const sections: string[] = [];
+  const autonomous = (ctx.approvalMode ?? getApprovalMode()) === 'auto';
   const isQwen = ctx.modelFamily === 'qwen' || ctx.modelFamily === 'deepseek';
   // Capable families (frontier-class) follow terse guidance reliably, so they get a
   // compressed prompt — real token savings on turn-1 prefill and cloud input billing.
@@ -172,6 +203,7 @@ ${ctx.identityBlock.trim()}`);
   if (ctx.mode === 'plan') {
     sections.push(`## IMPORTANT — PLAN MODE
 You are in PLAN MODE. Mutating tools (write_file, edit_symbol, edit_text, bash) are DISABLED. Use only read tools (read_file, ls, glob, grep) to understand the situation, then produce a structured plan. End your turn by calling \`present_plan\` with the steps. Do not attempt to write anything.`);
+    if (autonomous) sections.push(buildAutonomousSection('plan'));
   }
 
   if (ctx.mode === 'subagent') {
@@ -280,11 +312,11 @@ If you ever catch yourself about to say:
 The user runs QodeX so the AGENT does the work, not so the user copy-pastes. Refusing to use tools
 defeats the entire purpose of the product.
 
-## Permission flow
+${autonomous ? buildAutonomousSection(ctx.mode) : `## Permission flow
 
 Some tools (write_file, edit_*, bash, git_*) may prompt the user for permission before running.
 That's fine — the prompt is built into the tool. You don't need to ask for permission in prose
-first. Just CALL the tool. If the user denies, the tool returns an error; adapt then.
+first. Just CALL the tool. If the user denies, the tool returns an error; adapt then.`}
 
 ## Non-interactive shell (CRITICAL for SSH, REPLs, remote devices)
 The bash tool has NO interactive stdin — it captures output and kills the command on timeout.
@@ -462,7 +494,12 @@ tools actually returned — not background education and not a pitch.
 
   // Skill-provisioning policy — applies whether or not any skills are installed
   // (the list above may be empty). The decision to pull a repo stays with the user.
-  if (ctx.mode !== 'subagent') {
+  if (ctx.mode !== 'subagent' && autonomous) {
+    // Auto mode: the user isn't answering "built-in knowledge or install a skill?" — take
+    // the no-install branch (never auto-install from a search hit) and say so at the end.
+    sections.push(`## Skills — provisioning policy
+If an installed skill clearly matches, load it with use_skill. If one you DON'T have would help, proceed with your built-in knowledge (auto mode: don't ask, don't install) and name that skill in your final answer.`);
+  } else if (ctx.mode !== 'subagent') {
     sections.push(`## Skills — provisioning policy
 A "skill" is an installable playbook (any installed ones are listed under "Available Skills" above — that list may be empty).
 - If a clearly-matching skill is ALREADY installed, just load it with use_skill — no need to ask.
@@ -477,6 +514,9 @@ A "skill" is an installable playbook (any installed ones are listed under "Avail
   // when the user has enabled /strict for production work.
   if (ctx.mode === 'normal' && isStrictMode()) {
     sections.push(STRICT_MODE_SYSTEM_ADDENDUM);
+    // Strict + auto: keep the plan / impact / dry-run discipline, but nobody answers
+    // "wait for approval" — the plan is the record, then the work continues.
+    if (autonomous) sections.push('Strict + auto mode: do the planning, impact and dry-run steps above, but do not wait for approval or a next message between them — record the plan, then continue.');
   }
 
   // NB: the PROMPT-DEPENDENT addenda (task-class + stack) are pushed LAST, after the Directory

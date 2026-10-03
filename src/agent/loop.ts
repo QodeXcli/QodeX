@@ -22,7 +22,7 @@ import { isTrivialMessage } from './trivial-message.js';
 import { buildSteerMessage } from './steering.js';
 import { userWantsExecution, isExecutionAction } from './scope-guard.js';
 import { ModelRouter, computeCost, type TaskClass } from '../llm/router.js';
-import { buildSystemPrompt, detectModelFamily } from '../llm/prompts/system.js';
+import { buildAutonomousSection, buildSystemPrompt, detectModelFamily } from '../llm/prompts/system.js';
 import { findCustomProviderPromptConfig } from '../llm/providers/custom-config.js';
 import { filterSchemasByRelevance } from './tool-relevance.js';
 import { evaluateCompletion } from './completion-gate.js';
@@ -40,7 +40,9 @@ import { ToolRegistry, expandToolPatterns, type ToolExecutionMode } from '../too
 import type { ToolContext, ToolUIEvent } from '../tools/base.js';
 import { getJournal, type Transaction } from '../filesystem/transaction.js';
 import { resolveRuntime } from '../runtime/exec.js';
-import type { PermissionEngine } from '../security/permissions.js';
+import { getApprovalMode, isAutonomousMode, type PermissionEngine } from '../security/permissions.js';
+import type { AskMeta, AskUserFn } from './ask-meta.js';
+import { approvalModeNote, conversationSaysAutonomous } from './approval-note.js';
 import { BudgetTracker } from './budget.js';
 import { decideIterationPressure, nextIterationCap } from './iteration-pressure.js';
 import {
@@ -49,7 +51,7 @@ import {
   readLoopAbortMessage, readLoopSummarizeMessage, stuckLoopMessage,
 } from './recovery.js';
 import { looksLikeBuildTask, isPlanningToolCall, PREFLIGHT_MESSAGE } from './preflight-gate.js';
-import { getSentinel, scanInjection } from '../sentinel/index.js';
+import { getSentinel, isSentinelPrompt, scanInjection } from '../sentinel/index.js';
 import { classifyPromptClass, compileTaskBrief, formatTaskBrief, readNamedFileSnippets } from './task-brief.js';
 import { setActiveAgent, getActiveAgent } from './active.js';
 export { setActiveAgent, getActiveAgent } from './active.js';
@@ -103,7 +105,12 @@ export interface AgentOptions {
   mode?: ToolExecutionMode;
   explicitModel?: string;
   signal?: AbortSignal;
-  askUser: (prompt: string, options?: string[]) => Promise<string>;
+  /**
+   * Ask the human. The optional third argument says what the prompt is about (a
+   * permission for tool + operation, a Sentinel approval, the agent's own question) so a
+   * surface can re-check it against the approval mode; askers may ignore it.
+   */
+  askUser: AskUserFn;
   /** Called immediately when a tool emits a UI event (diff preview, shell output, etc). */
   onToolUI?: (event: ToolUIEvent) => void;
   /**
@@ -865,7 +872,13 @@ export class AgentLoop {
         taskBrief: briefBlock,
         skillsBlock: buildSkillsSystemBlock({ prompt: userPrompt }),
         identityBlock: identity.block,
+        approvalMode: getApprovalMode(),
       });
+    }
+    // Role / provider-override prompts skip buildSystemPrompt: give them the same
+    // autonomous-mode section (sub-agents inherit the session's approval mode).
+    if ((customSysPromptOverride || providerPromptCfg?.override) && isAutonomousMode()) {
+      sysPrompt += `\n\n${buildAutonomousSection(customSysPromptOverride ? 'subagent' : mode)}`;
     }
 
     // Provider-specific guidance, appended on top of whatever base prompt was built
@@ -1322,7 +1335,9 @@ export class AgentLoop {
     options: AgentOptions,
   ): AsyncGenerator<AgentEvent> {
     await this.refreshMutableConfig();   // pick up dashboard toggles written since the last run
-    const mode = options.mode ?? { mode: 'normal' };
+    // `let`: auto mode approves a plan mid-run (present_plan) and lifts plan mode for the
+    // rest of this run — `mode` and `options.mode` then switch to normal together.
+    let mode = options.mode ?? { mode: 'normal' };
     // Sub-agents spawned during (or after) this run inherit this asker.
     if (typeof options.askUser === 'function') this.lastAskUser = options.askUser;
     // An explicit allow-list (role sub-agent, custom command `allowed-tools`) is a hard
@@ -1479,9 +1494,14 @@ export class AgentLoop {
     let statefulRan = false;
     let statefulMaxRepeat = 0;
     let statefulMaxTool = '';
-    const afterResult = (tc: ToolCall, r: { content: string; isError?: boolean }) => {
+    // Plans presented this iteration (present_plan); auto mode approves them in-run.
+    const presentedPlans: Array<{ plan: unknown; autoApproved: boolean }> = [];
+    const afterResult = (tc: ToolCall, r: { content: string; isError?: boolean; metadata?: Record<string, unknown> }) => {
       noteResult(tc.function.name, r);
       if (r.isError && tc.id) failedToolCallIds.add(tc.id);
+      if (tc.function.name === 'present_plan' && !r.isError && r.metadata?.plan) {
+        presentedPlans.push({ plan: r.metadata.plan, autoApproved: r.metadata.autoApproved === true });
+      }
       const p = pendingStateful.get(tc);
       if (!p) return;
       pendingStateful.delete(tc);
@@ -1731,6 +1751,31 @@ export class AgentLoop {
         for (const note of notes) {
           newMessages.push({ role: 'user', content: buildSteerMessage(note) });
           yield { type: 'steer_injected', data: { note } };
+        }
+      }
+
+      // ── Approval mode changed since the model was last told (Shift+Tab, /auto, an
+      // "always yes" answer)? The system prompt was built once for this conversation, so
+      // say it now — appended to the trailing user message when there is one (never two
+      // user messages in a row).
+      {
+        const autonomousNow = isAutonomousMode();
+        if (conversationSaysAutonomous(messages.concat(newMessages)) !== autonomousNow) {
+          const note = approvalModeNote(autonomousNow, getApprovalMode());
+          const lastNew = newMessages[newMessages.length - 1];
+          const lastOld = messages[messages.length - 1];
+          if (lastNew && lastNew.role === 'user' && typeof lastNew.content === 'string') {
+            newMessages[newMessages.length - 1] = { ...lastNew, content: `${lastNew.content}\n\n${note}` };
+          } else if (!lastNew && lastOld && lastOld.role === 'user' && typeof lastOld.content === 'string') {
+            // First iteration: the trailing message is this turn's prompt (a copy — the
+            // caller's array is never mutated).
+            messages = [...messages.slice(0, -1), { ...lastOld, content: `${lastOld.content}\n\n${note}` }];
+          } else {
+            const m: Message = { role: 'user', content: note };
+            newMessages.push(m);
+            sessionStore.recordTurn(sessionId, [m], { input: 0, output: 0, costUsd: 0 });
+          }
+          logger.info('Approval mode note injected', { mode: getApprovalMode() });
         }
       }
       this.turnSnapshotTaken = false; // reset — each iteration gets at most one auto-snapshot
@@ -2925,6 +2970,21 @@ export class AgentLoop {
       const postToolNotes: string[] = [];
       if (deferredNote && typeof deferredNote.content === 'string') postToolNotes.push(deferredNote.content);
 
+      // ── Plans: tell the UI; in auto mode the plan is approved here and plan mode ends
+      // for the rest of this run (nobody is there to type /normal), so the model carries
+      // it out in the same turn with the full tool set.
+      for (const pp of presentedPlans.splice(0)) {
+        const lift = pp.autoApproved && mode.mode === 'plan';
+        yield { type: 'plan_ready', data: { plan: pp.plan, autoApproved: pp.autoApproved, modeLifted: lift } };
+        if (lift) {
+          mode = { ...mode, mode: 'normal' };
+          options = { ...options, mode };
+          postToolNotes.push(PLAN_MODE_LIFTED_NOTE);
+          yield { type: 'notice', data: { message: '✓ Plan approved automatically (auto mode) — carrying it out now.' } };
+          logger.info('Plan auto-approved; plan mode lifted for this run');
+        }
+      }
+
       // Consecutive-failure detection — same tool returning empty / error multiple
       // times in a row, even if args differ each time. This catches the pattern of
       // a model retrying web_search with rephrased queries when the underlying
@@ -2949,7 +3009,9 @@ export class AgentLoop {
             `[SYSTEM] The \`${thisTool}\` tool has returned empty results / errors ` +
             `${consecutiveFailures.count} times in a row this turn. The underlying service ` +
             `is unavailable or has no data for the query. STOP retrying. Either: ` +
-            `(1) tell the user the tool can't reach the data and ask what to do, or ` +
+            (isAutonomousMode()
+              ? `(1) say in your final answer that the tool can't reach the data and continue without it, or `
+              : `(1) tell the user the tool can't reach the data and ask what to do, or `) +
             `(2) answer from your own knowledge if you can. Do not call ${thisTool} again ` +
             `for this user request.`,
           );
@@ -3129,6 +3191,11 @@ export class AgentLoop {
 
     const boundAsk = askUserBoundTo(options.askUser, toolAbort.signal);
     let inPreflight = false;
+    // What the next prompt of this call is about (see ask-meta.ts): a tool announces a
+    // permission prompt with a 'permission-request' UI event (shell, mission_start) or an
+    // edit diff right before it asks. Consumed by the very next askUser of this call.
+    const callTool = this.registry.get(tc.function.name)?.name ?? tc.function.name;
+    let announced: AskMeta | undefined;
     const ctx: ToolContext = {
       cwd: this.effectiveCwd ?? this.cwd,
       sessionId,
@@ -3139,15 +3206,19 @@ export class AgentLoop {
       // must never let a cancelled write / command / purchase go ahead. Time the human
       // takes to answer is excused from the run's wall budget (preflight measures its own
       // span; a delegated tool's whole run is excused already — never count twice).
-      askUser: async (prompt: string, opts?: string[]) => {
+      askUser: async (prompt: string, opts?: string[], meta?: AskMeta) => {
         const asked = Date.now();
+        const tagged = describeAsk(prompt, meta, announced, callTool);
+        announced = undefined;
         try {
-          return await boundAsk(prompt, opts);
+          return await boundAsk(prompt, opts, tagged);
         } finally {
           if (!inPreflight && !delegatedTool) excusedMs += Date.now() - asked;
         }
       },
       emit: (ev) => {
+        if (ev.type === 'permission-request') announced = { kind: 'permission', tool: ev.tool, operation: ev.operation };
+        else if (ev.type === 'diff' && EDIT_PROMPT_TOOLS.has(callTool)) announced = { kind: 'permission', tool: callTool, operation: ev.path };
         uiEvents.push(ev);
         if (options.onToolUI) options.onToolUI(ev);
       },
@@ -3752,6 +3823,29 @@ export class AgentLoop {
 }
 
 
+/** Injected after present_plan when auto mode approved the plan and lifted plan mode. */
+export const PLAN_MODE_LIFTED_NOTE =
+  '[SYSTEM] Plan mode has ended: auto mode approved your plan. Every tool (write_file, edit_*, shell, …) ' +
+  'is enabled now — ignore the earlier plan-mode restriction and execute the plan in this turn.';
+
+/** Edit tools whose approval prompt follows a 'diff' event for the evaluated path. */
+const EDIT_PROMPT_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_text', 'multi_edit', 'multi_file_edit', 'edit_symbol']);
+
+/**
+ * What a prompt raised inside a tool call is about. A caller-supplied tag wins (a
+ * sub-agent's prompt arrives already tagged, ask_user tags its question); a Sentinel
+ * prompt is always 'sentinel' whatever was announced (its own rules — and the human-only
+ * critical class — decide it); otherwise the permission the tool announced just before
+ * asking; otherwise unknown (undefined), which surfaces must treat as the strictest
+ * kind. PURE.
+ */
+export function describeAsk(prompt: string, meta: AskMeta | undefined, announced: AskMeta | undefined, tool?: string): AskMeta | undefined {
+  if (isSentinelPrompt(prompt)) return { kind: 'sentinel' };
+  if (meta) return meta;
+  if (tool === 'ask_user') return { kind: 'question' };
+  return announced;
+}
+
 /**
  * `ask` raced against `signal`: once the signal aborts, a pending (or later) question
  * resolves to the safe option of its own options (else 'no') — the late answer is ignored.
@@ -3760,14 +3854,14 @@ export function askUserBoundTo(
   ask: AgentOptions['askUser'],
   signal: AbortSignal,
 ): AgentOptions['askUser'] {
-  return (prompt: string, options?: string[]) => {
+  return (prompt: string, options?: string[], meta?: AskMeta) => {
     const safe = safeOption(Array.isArray(options) && options.length > 0 ? options : ['yes', 'no']) ?? 'no';
     if (signal.aborted) return Promise.resolve(safe);
     return new Promise<string>((resolve, reject) => {
       const onAbort = () => resolve(safe);
       signal.addEventListener('abort', onAbort, { once: true });
       Promise.resolve()
-        .then(() => ask(prompt, options))
+        .then(() => (meta ? ask(prompt, options, meta) : ask(prompt, options)))
         .then(
           (a) => { signal.removeEventListener('abort', onAbort); resolve(a); },
           (e) => { signal.removeEventListener('abort', onAbort); reject(e); },

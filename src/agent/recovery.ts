@@ -1,3 +1,4 @@
+import { isAutonomousMode } from '../security/permissions.js';
 import { createHash } from 'crypto';
 import type { ToolCall } from '../session/store.js';
 
@@ -138,7 +139,10 @@ export function transformError(err: any, toolCall?: ToolCall): string {
     return `[BUDGET_EXCEEDED] ${msg}. Stop and summarize what you did so far.`;
   }
   if (code === 'PERMISSION_DENIED') {
-    return `[USER_DENIED] ${msg}. The user explicitly rejected. Do not retry the same action — try a different approach or ask the user.`;
+    // Auto mode: the user is not answering questions — the denial itself was their answer.
+    return isAutonomousMode()
+      ? `[USER_DENIED] ${msg}. The user explicitly rejected. Do not retry the same action — try a different approach, or skip it and say so in your final answer.`
+      : `[USER_DENIED] ${msg}. The user explicitly rejected. Do not retry the same action — try a different approach or ask the user.`;
   }
 
   // JSON parse error
