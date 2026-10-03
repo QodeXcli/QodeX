@@ -31,6 +31,8 @@ const REQUEST_CHARS = 1500
 const MAX_ERRORS = 8
 const KEEP_SHOWN = 30
 const EDIT_TOOL = /write|edit/i
+const DIFF_CHARS = 1500
+const DIFF_LINES = 25
 
 // Bumped when a turn starts or is stopped: an answer for an older turn is dropped.
 let turnGen = 0
@@ -40,6 +42,7 @@ let lastLookAt = 0
 let toolsSinceLook = 0
 let toolErrors = []
 let edited = new Set()
+let toolsThisTurn = 0
 const shown = []
 
 function clip(s, n) {
@@ -48,8 +51,8 @@ function clip(s, n) {
 }
 
 // What the fast model reads: the last request, the recent transcript, this turn's tool
-// errors and edited files, then the question. Null when there is no request to judge.
-export function buildPrompt(entries, errors, files) {
+// errors, edited files and diff summary, then the question. Null when there is no request.
+export function buildPrompt(entries, errors, files, diff) {
   const list = Array.isArray(entries) ? entries : []
   const lastUser = [...list].reverse().find((m) => m && m.role === 'user' && String(m.text || '').trim())
   if (!lastUser) return null
@@ -63,6 +66,7 @@ export function buildPrompt(entries, errors, files) {
   ]
   if (errors.length) parts.push('Tool errors in this turn:\n' + errors.slice(-MAX_ERRORS).map((x) => '- ' + x).join('\n'))
   if (files.length) parts.push('Files written or edited in this turn: ' + files.slice(0, 20).join(', '))
+  if (diff) parts.push('Uncommitted changes (git diff --stat HEAD):\n' + diff)
   // Fenced as data; a fence tag inside the text cannot close the fence early.
   const body = parts.join('\n\n').replace(/<\s*\/?\s*transcript\s*>/gi, '[transcript tag]')
   return '<transcript>\n' + body + '\n</transcript>\n\n' + QUESTION
@@ -87,8 +91,28 @@ function editedPaths(args) {
   if (!args || typeof args !== 'object') return []
   const out = []
   for (const k of ['path', 'file_path', 'file']) if (typeof args[k] === 'string') out.push(args[k])
-  if (Array.isArray(args.edits)) for (const x of args.edits) if (x && typeof x.path === 'string') out.push(x.path)
+  // multi_file_edit: { files: [{ path, edits }] }; other tools: { edits: [{ path }] }
+  for (const list of [args.files, args.edits]) {
+    if (Array.isArray(list)) for (const x of list) if (x && typeof x.path === 'string') out.push(x.path)
+  }
   return out
+}
+
+// The diff summary: `git diff --stat HEAD` (file names and line counts only), or '' when
+// this is not a git repository, git is missing or slow, or nothing changed. The repo's
+// own config must not run anything: no fsmonitor hook, no external diff, no textconv.
+export const DIFF_ARGV = ['git', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', '--stat', '--no-color', 'HEAD']
+
+async function diffSummary($) {
+  try {
+    const r = await $.process.run(DIFF_ARGV, { timeoutMs: 5_000 })
+    if (!r || r.exitCode !== 0) return ''
+    const lines = String(r.stdout || '').split('\n').map((l) => l.trimEnd()).filter(Boolean)
+    const text = lines.slice(-DIFF_LINES).join('\n')
+    return text.length > DIFF_CHARS ? text.slice(-DIFF_CHARS) : text
+  } catch {
+    return ''
+  }
 }
 
 // One look, off the event's own time: the turn (or the tool result) goes on at once.
@@ -96,7 +120,9 @@ function look($, gen) {
   looking = true
   const run = async () => {
     try {
-      const prompt = buildPrompt(await $.session.messages(), toolErrors, [...edited])
+      // git only when the turn ran tools (an answer alone changes no file).
+      const diff = toolsThisTurn > 0 ? await diffSummary($) : ''
+      const prompt = buildPrompt(await $.session.messages(), toolErrors, [...edited], diff)
       if (!prompt) return
       const res = await $.model.complete({ model: 'fast', system: SYSTEM, prompt, maxTokens: 120, timeoutMs: 45_000 })
       if (gen !== turnGen || !res || !res.isAnswered) return // stopped, or a new turn began
@@ -130,6 +156,7 @@ export function register(on) {
     toolErrors = []
     edited = new Set()
     toolsSinceLook = 0
+    toolsThisTurn = 0
     lastLookAt = await $.clock.now()
     return next(e)
   })
@@ -137,6 +164,7 @@ export function register(on) {
   on('tool.result', async ($, e, next) => {
     const result = await next(e)
     toolsSinceLook++
+    toolsThisTurn++
     if (e.isError) toolErrors.push(e.tool + ': ' + clip(e.result, 200))
     if (EDIT_TOOL.test(e.tool)) for (const p of editedPaths(e.args)) edited.add(p)
     const now = await $.clock.now()

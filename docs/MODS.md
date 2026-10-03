@@ -209,7 +209,7 @@ go to stderr and drawing is skipped.
 | Mod | Default | What it does |
 | --- | --- | --- |
 | `context-bar` | on (bar hidden) | `/context-bar [on\|off]` toggles a stacked bar above the prompt: one color per kind of context (system, tools, rules, memory, messages, tool results, free), a legend and `<pct>% of <window>`. The choice is kept in its store. |
-| `you-should-know` | off — `/mods enable you-should-know` | After each turn (and at most every 3 minutes during a long one) a fast model reads the recent transcript and answers: did the user or the agent miss something — an ignored failing test or command, an unverified claim, the wrong file edited, a secret printed, an instruction not followed, a TODO left? `NONE`, or one `💡` line. Never starts a turn, 120 output tokens per look, repeats dropped, silent after `/stop`. |
+| `you-should-know` | off — `/mods enable you-should-know` | After each turn (and at most every 3 minutes during a long one) a fast model reads the recent transcript (last request, recent entries, tool errors, edited files and a `git diff --stat` summary) and answers: did the user or the agent miss something — an ignored failing test or command, an unverified claim, the wrong file edited, a secret printed, an instruction not followed, a TODO left? `NONE`, or one `💡` line. Never starts a turn, 120 output tokens per look, repeats dropped, silent after `/stop`. |
 | `sample-hello` | off (docs only) | `/hello-tabs` opens a pane with two tabs and a counter kept in `$.store` — Claude Code's hello-tabs example, unchanged. |
 
 Their source (`qodex mod path`) uses the public API only — copy them.

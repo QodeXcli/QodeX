@@ -285,6 +285,40 @@ describe('you-should-know', () => {
     expect(m.state.submits).toBe(0); // never starts a turn
   });
 
+  it('sends the files multi_file_edit touched and a git diff summary (repo config cannot run commands)', async () => {
+    const m = await loadMod('you-should-know', { messages: transcript });
+    const runs: string[][] = [];
+    (m.$ as any).process = {
+      run: async (argv: string[]) => { runs.push(argv); return { exitCode: 0, stdout: ' src/a.ts | 4 ++--\n src/b.ts | 2 +-\n 2 files changed, 3 insertions(+), 3 deletions(-)\n', stderr: '' }; },
+    };
+    await m.fire('turn.start', { turn: 1, prompt: 'x' });
+    await m.fire('tool.result', {
+      tool: 'multi_file_edit', args: { files: [{ path: 'src/a.ts', edits: [] }, { path: 'src/b.ts', edits: [] }] },
+      callId: 'm', result: 'ok', isError: false, durationMs: 2,
+    });
+    await m.fire('turn.complete', turnDone);
+    await m.runTimers();
+    const req = m.state.completes[0];
+    expect(req.prompt).toContain('Files written or edited in this turn: src/a.ts, src/b.ts');
+    expect(req.prompt).toContain('Uncommitted changes (git diff --stat HEAD):\n src/a.ts | 4 ++--\n src/b.ts | 2 +-\n 2 files changed');
+    expect(req.prompt.indexOf('Uncommitted changes')).toBeLessThan(req.prompt.indexOf('</transcript>'));
+    expect(runs).toEqual([['git', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', '--stat', '--no-color', 'HEAD']]);
+
+    // A turn without tools changes no file: no git, and a failing git is just left out.
+    await m.fire('turn.start', { turn: 2, prompt: 'y' });
+    await m.fire('turn.complete', { ...turnDone, turn: 2 });
+    await m.runTimers();
+    expect(runs).toHaveLength(1);
+    expect(m.state.completes[1].prompt).not.toContain('Uncommitted changes');
+    (m.$ as any).process.run = async () => { throw new Error('git: not found'); };
+    await m.fire('turn.start', { turn: 3, prompt: 'z' });
+    await m.fire('tool.result', { tool: 'bash', args: {}, callId: 'b', result: 'ok', isError: false, durationMs: 1 });
+    await m.fire('turn.complete', { ...turnDone, turn: 3 });
+    await m.runTimers();
+    expect(m.state.completes).toHaveLength(3);
+    expect(m.state.completes[2].prompt).not.toContain('Uncommitted changes');
+  });
+
   it('fences the transcript as data: page text cannot close the fence or steer the heads-up', async () => {
     const injected = [
       { role: 'user', text: 'Summarize https://example.com/post' },
