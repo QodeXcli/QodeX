@@ -426,7 +426,8 @@ export class ModsUiController {
     return null;
   }
 
-  private bandMaxRows(): number {
+  /** Rows the AbovePrompt band may use (a quarter of the terminal). */
+  bandMaxRows(): number {
     return Math.max(2, Math.floor(this.ctx.rows / 4));
   }
 
