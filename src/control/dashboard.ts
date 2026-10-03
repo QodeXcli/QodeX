@@ -567,7 +567,12 @@ const SCRIPT = String.raw`
     if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock', 'Fn', 'OS'].indexOf(key) >= 0) return;
     var mod = e.ctrlKey || e.metaKey;
     if (mod && !e.altKey && key.toLowerCase() === 'v') return; // let the paste event carry the text
-    if (key.length === 1 && !mod && !e.altKey) {
+    // One CHARACTER (code points, so emoji count as one) that the keyboard composed:
+    // plain keys, AltGr layouts (reported as Ctrl+Alt) and macOS Option characters
+    // (non-ASCII with Alt) are text; Alt+ASCII letter stays a shortcut (accesskeys).
+    var single = Array.from(key).length === 1;
+    var altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
+    if (single && (altGr || (!mod && (!e.altKey || key.charCodeAt(0) > 127)))) {
       e.preventDefault();
       typeBuf += key;
       clearTimeout(typeTimer); typeTimer = setTimeout(flushType, 120);
@@ -650,7 +655,12 @@ const SCRIPT = String.raw`
           renderApprovals();
         }).catch(function (e) {
           msg.textContent = errText(e); msg.classList.add('err');
-          if (e && e.status === 404) { delete state.approvals[a.id]; setTimeout(renderApprovals, 1500); return; }
+          // 404 = gone, 409 = answered elsewhere meanwhile: drop the card (from the right list).
+          if (e && (e.status === 404 || e.status === 409)) {
+            if (isMission) delete state.missionApprovals[String(a.id)]; else delete state.approvals[a.id];
+            setTimeout(renderApprovals, 1500);
+            return;
+          }
           for (var j = 0; j < all.length; j++) all[j].disabled = false;
         });
       });
@@ -812,8 +822,13 @@ const SCRIPT = String.raw`
       if (ev.type === 'takeover') {
         var on = d.on !== undefined ? d.on : (d.takeover !== undefined ? d.takeover : d.active);
         if (typeof on === 'boolean') { state.takeover = on; if (state.browser) state.browser.takeover = on; renderTakeover(); }
-      } else if (ev.type === 'navigated' && typeof d.url === 'string' && document.activeElement !== $('url')) {
-        $('url').value = d.url;
+      } else if (ev.type === 'navigated' && typeof d.url === 'string') {
+        // Every tab reports its navigations: only the ACTIVE tab drives the URL bar.
+        var act = activeTab(state.browser);
+        if (!(act && act.id && d.tab && d.tab !== act.id)) {
+          if (act) act.url = d.url;
+          if (document.activeElement !== $('url')) $('url').value = d.url;
+        }
       }
       if (ev.type === 'launched' || ev.type === 'closed' || ev.type === 'tab') scheduleState();
     } else if (ev.kind === 'mission') {

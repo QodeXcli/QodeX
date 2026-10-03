@@ -25,7 +25,11 @@
  *   - state-changing requests need `Content-Type: application/json`, a body of
  *     at most 64KB, and an Origin/Referer (when present) matching the Host;
  *   - the token is never echoed back except in the startup URL returned to the
- *     caller of startControlCenter().
+ *     caller of startControlCenter();
+ *   - the agent must never answer its OWN approvals: requests are refused while
+ *     the agent's browser has this control center open (its tab is sent back to
+ *     about:blank), control-center login cookies are swept out of the agent's
+ *     profile, and the live view's URL bar won't open any control link there.
  *
  * One control center per process (a singleton): the TUI's `/control`, the
  * standalone `qodex control` command and a detached mission worker each run
@@ -34,6 +38,7 @@
 
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
+import * as os from 'node:os';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getBus, type BusEvent, type BusEventInput } from './bus.js';
 import { getApprovalBroker, type ApprovalChannel, type ApprovalResult, type PendingApproval } from './approvals.js';
@@ -69,6 +74,10 @@ const FRAME_POLL_MS = 1500;
 const FRAME_RETRY_MS = 5000;
 const COOKIE_PREFIX = 'qx_ctl';
 const COOKIE_MAX_AGE_S = 7 * 24 * 3600;
+/** Default grace before an orphaned control-center takeover is handed back. */
+const DEFAULT_TAKEOVER_RELEASE_MS = 5 * 60_000;
+/** How often control-center cookies are swept out of the agent's browser profile. */
+const COOKIE_SWEEP_MS = 20_000;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -95,6 +104,13 @@ export interface ControlCenterOptions {
   /** Screencast JPEG quality / fps (default: config control.screencastQuality / screencastMaxFps). */
   screencastQuality?: number;
   screencastMaxFps?: number;
+  /**
+   * A takeover held by the control center is handed back to the agent after this
+   * long with NO dashboard connected (the human closed the tab / lost the phone
+   * connection) — otherwise an unattended run would wait forever. Default 5 min;
+   * 0 disables.
+   */
+  takeoverReleaseMs?: number;
 }
 
 export interface ControlCenterInfo {
@@ -245,7 +261,14 @@ export function stripTokenFromUrl(raw: string): string {
   const safePath = path.startsWith('/') && !path.startsWith('//') && !path.includes('\\') && !/[\u0000-\u001f\u007f]/.test(path)
     ? path
     : '/';
-  const kept = query.split('&').filter(part => part && !/^k(=|$)/.test(part) && !/[\u0000-\u001f\u007f]/.test(part));
+  // Compare DECODED keys, exactly like authenticateRequest/queryParam does: a raw
+  // check would keep `%6B=<token>` in the bounce target — leaking the token into
+  // the address bar/history and bouncing forever (the kept param re-authenticates).
+  const kept = query.split('&').filter(part => {
+    if (!part || /[\u0000-\u001f\u007f]/.test(part)) return false;
+    const eq = part.indexOf('=');
+    return safeDecode(eq >= 0 ? part.slice(0, eq) : part, true) !== 'k';
+  });
   return kept.length ? `${safePath}?${kept.join('&')}` : safePath;
 }
 
@@ -418,6 +441,8 @@ export function busEventJson(ev: BusEvent): string {
  */
 export function maskSecrets(text: string): string {
   return String(text ?? '')
+    // Control-center links (`…/?k=<token>`, e.g. a mission's live URL) are login links.
+    .replace(/([?&]k=)[A-Za-z0-9._~-]{16,}/g, '$1***')
     .replace(/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '$1-***')
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, 'gh*_***')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***')
@@ -735,6 +760,14 @@ interface Running {
   tunnelError?: string;
   unregisterChannel: () => void;
   unsubscribeBus: () => void;
+  takeoverReleaseMs: number;
+  /** Since when a 'control' takeover has had no viewer (0 = not orphaned). */
+  orphanSince: number;
+  watchdog: NodeJS.Timeout | null;
+  /** Last time agent-browser tabs on this control center were evicted (rate limit). */
+  lastEviction: number;
+  /** Periodic removal of control-center logins from the agent's browser profile. */
+  cookieSweep: NodeJS.Timeout | null;
 }
 
 let current: Running | null = null;
@@ -862,6 +895,8 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
   const token = resolveToken(opts.token);
   const quality = Math.round(Math.min(100, Math.max(1, opts.screencastQuality ?? cfg.screencastQuality)));
   const maxFps = Math.min(30, Math.max(1, opts.screencastMaxFps ?? cfg.screencastMaxFps));
+  const releaseRaw = opts.takeoverReleaseMs ?? DEFAULT_TAKEOVER_RELEASE_MS;
+  const takeoverReleaseMs = Number.isFinite(releaseRaw) && releaseRaw > 0 ? Math.floor(releaseRaw) : 0;
 
   const server = createServer();
   const rt: Running = {
@@ -881,6 +916,11 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
     frames: new FrameHub({ quality, maxFps }),
     unregisterChannel: () => {},
     unsubscribeBus: () => {},
+    takeoverReleaseMs,
+    orphanSince: 0,
+    watchdog: null,
+    lastEviction: 0,
+    cookieSweep: null,
   };
 
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
@@ -919,13 +959,55 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
     if (ev.kind === 'browser') rt.frames.onBrowserEvent(ev.type);
   });
 
+  if (takeoverReleaseMs > 0) {
+    rt.watchdog = setInterval(() => checkOrphanedTakeover(rt), Math.max(100, Math.min(30_000, Math.floor(takeoverReleaseMs / 4))));
+    rt.watchdog.unref?.();
+  }
+
+  // A control link opened in the agent's browser (this server's or another QodeX
+  // process's) plants a login cookie there; sweep such cookies out regularly.
+  rt.cookieSweep = setInterval(() => scrubAgentCookies(rt, 0), COOKIE_SWEEP_MS);
+  rt.cookieSweep.unref?.();
+
   if (opts.tunnel) await openTunnel(rt);
   installExitHook();
   logger.info('Control center started', { host: rt.host, port: rt.port, tunnel: !!rt.tunnelUrl });
   return rt;
 }
 
+/**
+ * Hand a control-center takeover back to the agent once no dashboard stream has
+ * been connected for `takeoverReleaseMs` (the human closed the tab or the phone
+ * dropped off). A takeover held by anyone else (terminal, Telegram) is untouched.
+ */
+function checkOrphanedTakeover(rt: Running): void {
+  let held = false;
+  let mgr: BrowserManager | null = null;
+  try {
+    mgr = peekBrowserManager();
+    held = !!mgr && mgr.isTakeover() && mgr.status().takeoverBy === 'control';
+  } catch {
+    held = false;
+  }
+  if (!held || streamCount(rt) > 0) { rt.orphanSince = 0; return; }
+  const now = Date.now();
+  if (!rt.orphanSince) { rt.orphanSince = now; return; }
+  if (now - rt.orphanSince < rt.takeoverReleaseMs) return;
+  rt.orphanSince = 0;
+  try {
+    mgr!.setTakeover(false, 'control');
+    const mins = Math.max(1, Math.round(rt.takeoverReleaseMs / 60_000));
+    getBus().publish({
+      kind: 'notice', level: 'warn',
+      message: `Browser control handed back to the agent: nobody had the control center open for ${rt.takeoverReleaseMs < 60_000 ? `${Math.round(rt.takeoverReleaseMs / 1000)}s` : `${mins} min`}.`,
+    });
+    logger.info('Control center released an orphaned takeover', { port: rt.port });
+  } catch { /* the manager went away */ }
+}
+
 async function shutdown(rt: Running, releaseTakeover: boolean): Promise<void> {
+  if (rt.watchdog) { clearInterval(rt.watchdog); rt.watchdog = null; }
+  if (rt.cookieSweep) { clearInterval(rt.cookieSweep); rt.cookieSweep = null; }
   try { rt.unregisterChannel(); } catch { /* ignore */ }
   try { rt.unsubscribeBus(); } catch { /* ignore */ }
   await rt.frames.close().catch(() => {});
@@ -972,9 +1054,12 @@ export function startControlCenter(opts: ControlCenterOptions = {}): Promise<Con
           onSteer: rt.onSteer,
           screencastQuality: rt.quality,
           screencastMaxFps: rt.maxFps,
+          takeoverReleaseMs: rt.takeoverReleaseMs,
           tunnel: !!rt.tunnel,
         };
-        const next: ControlCenterOptions = { ...keep, ...opts, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: !!opts.tunnel || !!rt.tunnel };
+        // (explicitly-undefined fields in `opts` must not wipe the kept settings)
+        const given = Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) as ControlCenterOptions;
+        const next: ControlCenterOptions = { ...keep, ...given, host: '0.0.0.0', lan: true, port: rt.port, token: rt.token, tunnel: !!opts.tunnel || !!rt.tunnel };
         current = null;
         await shutdown(rt, false);
         try {
@@ -1082,6 +1167,110 @@ function unauthorizedPage(): string {
     + '<p>Open the full private link printed by <code>qodex control</code> (or <code>/control</code>) — it ends with <code>?k=…</code>.</p>'
     + '<p dir="rtl" lang="fa">دسترسی ممنوع است. لینک خصوصی کاملی را که <code>qodex control</code> چاپ کرده باز کنید (با <code>?k=…</code> تمام می‌شود).</p>'
     + '</body></html>';
+}
+
+function agentBrowserPage(): string {
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>QodeX Control Center — not in the agent\'s browser</title></head>'
+    + '<body style="background:#0b0f14;color:#e5e7eb;font-family:system-ui,Tahoma,sans-serif;padding:24px;line-height:1.7">'
+    + '<h1 style="font-size:20px">⛔ Not available in the agent\'s browser</h1>'
+    + '<p>This page is open in QodeX\'s own browser. The agent must never see or answer its own approvals, so the control center refuses it here. Open the link in your own browser instead.</p>'
+    + '<p dir="rtl" lang="fa">این صفحه در مرورگر خودِ QodeX باز شده است. عامل نباید تأییدهای خودش را ببیند یا پاسخ دهد؛ لینک را در مرورگر خودتان باز کنید.</p>'
+    + '</body></html>';
+}
+
+/**
+ * Is one of the agent browser's tabs on THIS control center? Matches the request's
+ * Host (or tunnel X-Forwarded-Host) against each tab's host — so any alias that
+ * reaches us counts — plus every loopback/LAN/tunnel address of our port. Only
+ * looks at an already-created manager (never launches anything).
+ */
+function agentBrowserOnControlCenter(rt: Running, req: IncomingMessage): boolean {
+  let tabs: Array<{ url: string }> = [];
+  let mgr: BrowserManager | null = null;
+  try {
+    mgr = peekBrowserManager();
+    if (!mgr || !mgr.isRunning()) return false;
+    tabs = mgr.tabs();
+  } catch {
+    return false;
+  }
+  if (!tabs.length) return false;
+  const normHost = (h: string) => h.trim().toLowerCase().replace(/\.$/, '').replace(/:(80|443)$/, '');
+  const fwdRaw = req.headers['x-forwarded-host'];
+  const hosts = new Set([
+    normHost(String(req.headers.host ?? '')),
+    normHost(String(Array.isArray(fwdRaw) ? fwdRaw[0] : fwdRaw ?? '').split(',')[0] ?? ''),
+  ].filter(Boolean));
+  const ours = (url: string): boolean => {
+    if (!/^https?:/i.test(url)) return false;
+    if (pointsAtControlCenter(url, rt.port, rt.tunnelUrl)) return true;
+    try { return hosts.has(normHost(new URL(url).host)); } catch { return false; }
+  };
+  if (!tabs.some(t => ours(String(t?.url ?? '')))) return false;
+  evictAgentBrowser(rt, mgr, ours);
+  return true;
+}
+
+/**
+ * Send the agent's tabs that sit on the control center back to about:blank, so
+ * the human's own dashboard (refused meanwhile) works again. Only for a
+ * QodeX-launched browser — an attached Chrome ('cdp') is the user's own browser
+ * and is never navigated; the refusal page explains instead.
+ */
+function evictAgentBrowser(rt: Running, mgr: BrowserManager, ours: (url: string) => boolean): void {
+  const now = Date.now();
+  if (now - rt.lastEviction < 1000) return;
+  rt.lastEviction = now;
+  try {
+    if (mgr.status().mode !== 'launch') return;
+    const pages: any[] = mgr.context()?.pages?.() ?? [];
+    let n = 0;
+    for (const p of pages) {
+      let u = '';
+      try { u = String(p.url()); } catch { u = ''; }
+      if (!u || !ours(u)) continue;
+      n++;
+      void Promise.resolve().then(() => p.goto('about:blank')).catch(() => {});
+    }
+    if (n) {
+      getBus().publish({
+        kind: 'notice', level: 'warn',
+        message: 'The agent\'s browser opened the control center — it was sent back to a blank page (the agent must never see or answer its own approvals).',
+      });
+      logger.warn('Agent browser opened the control center; evicted', { port: rt.port, tabs: n });
+    }
+  } catch { /* best effort */ }
+  scrubAgentCookies(rt, 0);
+}
+
+/**
+ * Remove control-center login cookies (this server's and any other QodeX
+ * process's, `qx_ctl[_<port>]`) from the agent's browser profile if one got there
+ * (the agent opened a leaked `?k=` link) — otherwise the agent could later read a
+ * dashboard API by simply navigating to it. QodeX-launched browser only (an
+ * attached Chrome is the user's own browser). Best effort, async.
+ */
+function scrubAgentCookies(rt: Running, delayMs: number): void {
+  const t = setTimeout(() => {
+    void (async () => {
+      try {
+        const mgr = peekBrowserManager();
+        if (!mgr || !mgr.isRunning() || mgr.status().mode !== 'launch') return;
+        const ctx = mgr.context();
+        if (!ctx || typeof ctx.cookies !== 'function' || typeof ctx.clearCookies !== 'function') return;
+        // Any control-center login (this one's, a mission worker's, another terminal's):
+        // the agent's browser must never hold one.
+        const planted = ((await ctx.cookies()) as Array<{ name?: string; value?: string }>)
+          .filter(c => /^qx_ctl(_\d{1,5})?$/.test(String(c?.name)));
+        if (!planted.length) return;
+        for (const name of new Set(planted.map(c => String(c.name)))) await ctx.clearCookies({ name });
+        getBus().publish({ kind: 'notice', level: 'warn', message: 'Removed the control-center login from the agent\'s browser (it had opened the private link).' });
+        logger.warn('Removed a control-center cookie from the agent browser', { port: rt.port });
+      } catch { /* best effort */ }
+    })();
+  }, Math.max(0, delayMs));
+  t.unref?.();
 }
 
 function drainAndIgnore(req: IncomingMessage): void {
@@ -1210,6 +1399,17 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
     return;
   }
 
+  // 1b. Never serve the agent's OWN browser: with a tab on this control center it
+  //     could read the pending approvals and click "Yes" on its own critical
+  //     actions (a prompt-injected page only needs to get it there once).
+  if (agentBrowserOnControlCenter(rt, req)) {
+    if (!isRead) drainAndIgnore(req);
+    const msg = '[AGENT_BROWSER] The control center refuses requests while the agent\'s own browser has it open (the agent must not answer its own approvals). Open the link in your own browser.';
+    if (isRead && wantsHtml(req)) sendHtml(res, 403, agentBrowserPage());
+    else sendError(res, 403, msg, { Connection: 'close' });
+    return;
+  }
+
   // 2. `?k=` login: set the cookie and bounce to the same URL without the token.
   if (auth.via === 'query' && isRead) {
     const target = stripTokenFromUrl(rawUrl);
@@ -1223,6 +1423,8 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
       res.writeHead(302, { ...BASE_HEADERS, 'Set-Cookie': cookie, Location: target, 'Content-Length': '0' });
       res.end();
     }
+    // If that login came from the agent's own browser, take the cookie back out.
+    scrubAgentCookies(rt, 1500);
     return;
   }
 
@@ -1262,7 +1464,7 @@ async function handleRequest(rt: Running, req: IncomingMessage, res: ServerRespo
 
   const body = await readJsonBody(req, res);
   if (!body.ok) return;
-  if (path === '/api/input') return routeInput(res, body.value);
+  if (path === '/api/input') return routeInput(rt, res, body.value);
   if (path === '/api/takeover') return routeTakeover(res, body.value);
   if (path === '/api/steer') return routeSteer(rt, res, body.value);
   if (approvalMatch) return routeApproval(res, approvalMatch[1] ?? '', body.value);
@@ -1340,9 +1542,54 @@ async function routeFrameJpg(rt: Running, res: ServerResponse): Promise<void> {
   res.end(buf);
 }
 
-async function routeInput(res: ServerResponse, body: unknown): Promise<void> {
+/**
+ * Does `url` point at THIS control center (any loopback / local-interface address
+ * on our port, or our tunnel host)? Opening it inside the agent's browser would
+ * plant the control cookie in the agent's profile — after which the agent (or a
+ * page steering it) could open the dashboard and answer its own approvals.
+ */
+export function pointsAtControlCenter(url: string, port: number, tunnelUrl?: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
+  if (tunnelUrl) {
+    try { if (new URL(tunnelUrl).hostname.toLowerCase() === host) return true; } catch { /* ignore */ }
+  }
+  const p = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+  if (p !== port) return false;
+  const v4 = host.replace(/^::ffff:/, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || isLoopbackHost(v4) || isWildcardHost(v4) || host === '::1' || host === '::') return true;
+  if (host === os.hostname().toLowerCase()) return true;
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs ?? []) if (String(a.address).toLowerCase() === host || String(a.address).toLowerCase() === v4) return true;
+  }
+  return false;
+}
+
+/**
+ * A private link to ANY QodeX control center (this one, a mission worker's, another
+ * terminal's): a local / LAN / quick-tunnel address carrying a `k=<token>`. PURE.
+ */
+export function looksLikeControlLink(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const k = u.searchParams.get('k');
+  if (!k || !/^[A-Za-z0-9._~-]{16,256}$/.test(k)) return false;
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/^::ffff:/, '');
+  return isLoopbackHost(host) || isWildcardHost(host) || host === '::1' || host.endsWith('.localhost')
+    || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host) || /^f[cd][0-9a-f]{2}:/.test(host)
+    || /\.(local|lan|internal|home\.arpa)$/.test(host)
+    || /\.(trycloudflare\.com|ngrok-free\.app|ngrok\.app|ngrok\.io|ngrok-free\.dev)$/.test(host);
+}
+
+async function routeInput(rt: Running, res: ServerResponse, body: unknown): Promise<void> {
   const v = validateHumanInput(body);
   if (!v.ok) { sendError(res, 400, `[INVALID_INPUT] ${v.error}`); return; }
+  if (v.event.type === 'navigate' && (pointsAtControlCenter(v.event.url, rt.port, rt.tunnelUrl) || looksLikeControlLink(v.event.url))) {
+    sendError(res, 400, '[CONTROL_CENTER_URL] The control center must not be opened inside the agent\'s browser (it would hand the agent your control login). Open it in your own browser instead.');
+    return;
+  }
   const mgr = peekBrowserManager();
   if (!mgr || !mgr.isTakeover()) {
     sendError(res, 409, '[TAKEOVER_REQUIRED] Take over control first (POST /api/takeover {"on":true}); input is ignored while the agent is in control.');
@@ -1435,6 +1682,16 @@ async function routeAction(res: ServerResponse, rawName: string, body: unknown):
     sendJson(res, 200, { ok: true, result: result === undefined ? null : result });
   } catch (e) {
     const msg = errMessage(e);
-    sendError(res, 500, msg.startsWith('[') ? msg : `[ACTION_FAILED] ${name}: ${msg}`);
+    sendError(res, actionErrorStatus(msg), msg.startsWith('[') ? msg : `[ACTION_FAILED] ${name}: ${msg}`);
   }
+}
+
+/** HTTP status for a control action's `[CODE] …` error: bad input → 400, unknown id → 404. PURE. */
+export function actionErrorStatus(message: string): number {
+  const code = /^\[([A-Z0-9_]+)\]/.exec(String(message ?? ''))?.[1] ?? '';
+  if (!code) return 500;
+  if (/(^|_)NOT_FOUND$/.test(code)) return 404;
+  if (/(^|_)(NOT_PENDING|CONFLICT)$/.test(code)) return 409;
+  if (/^(BAD_REQUEST|INVALID_[A-Z0-9_]+|[A-Z0-9]+_INVALID|[A-Z0-9]+_BAD_[A-Z0-9_]+)$/.test(code)) return 400;
+  return 500;
 }
