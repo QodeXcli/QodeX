@@ -37,7 +37,20 @@ export interface TelegramCommandDeps {
   /** Returns the merged QodexConfig. Default: load ~/.qodex/.env + loadConfig(cwd) + setActiveConfig. */
   loadConfig?: () => Promise<unknown>;
   exit?: (code: number) => void;
+  /** Is a human at a terminal? Default: stdin is a TTY. Gates printing pairing codes. */
+  isInteractive?: () => boolean;
 }
+
+/**
+ * A pairing code hands a Telegram account the power to approve purchases, start
+ * missions and see the browser. QodeX's own shell tool runs commands with piped
+ * stdio, so codes are only ever printed when stdin is a terminal: a
+ * prompt-injected agent running `qodex telegram pair --json` (or `start`) gets
+ * nothing to exfiltrate. (`qodex telegram pair --json | jq` in a terminal still works.)
+ */
+const PAIR_NEEDS_TERMINAL =
+  '✗ [TELEGRAM_PAIR_NEEDS_TERMINAL] Run `qodex telegram pair` yourself in a terminal (or /telegram pair in the QodeX UI). ' +
+  'Pairing codes are never printed when stdin is not a terminal, so an automated agent or script cannot mint one.';
 
 interface Ctx {
   cfg: TelegramConfig;
@@ -122,6 +135,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
   const print = deps.print ?? ((l: string) => console.log(l));
   const printErr = deps.printErr ?? ((l: string) => console.error(l));
   const exit = deps.exit ?? ((code: number) => process.exit(code));
+  const interactive = deps.isInteractive ?? (() => Boolean(process.stdin.isTTY));
 
   const loadCtx = async (): Promise<Ctx> => {
     let raw: unknown;
@@ -212,6 +226,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
     .option('--json', 'Machine-readable output')
     .action(async (opts: { json?: boolean }) => {
       try {
+        if (!interactive()) { printErr(PAIR_NEEDS_TERMINAL); exit(1); return; }
         const { cfg, env } = await loadCtx();
         const store = await pairingStore();
         const { code, expiresAt } = await store.createPairingCode();
