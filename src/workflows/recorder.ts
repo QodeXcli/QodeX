@@ -37,6 +37,7 @@ import {
   type BrowserManager,
   type ElementInfo,
 } from '../tools/browser/types.js';
+import { isChallengeElement, isChallengeFrameUrl } from '../tools/browser/challenge.js';
 import { getBus } from '../control/bus.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -1134,6 +1135,7 @@ let activeRecorder: WorkflowRecorder | null = null;
 const MAX_RECORDS = 10_000;
 const TOO_MANY = `recording reached ${MAX_RECORDS} raw events — later events were dropped; stop and split the task into smaller workflows`;
 const CROSS_ORIGIN_FRAME = 'ignored input inside a cross-origin frame (embedded widget / ad) — it cannot be replayed; do that part by hand';
+const CHALLENGE_SKIPPED = 'skipped steps on a CAPTCHA / bot check — those are never recorded or replayed; a human passes them at replay time';
 
 /** Same web origin? about:blank / about:srcdoc frames inherit their parent's origin. */
 function sameOrigin(frameUrl: string, mainUrl: string): boolean {
@@ -1334,9 +1336,25 @@ export class WorkflowRecorder {
     this.pending.add(q);
   }
 
+  /**
+   * Steps on a CAPTCHA / bot check are never recorded: a replay would click the widget
+   * automatically. That covers anything inside a challenge frame or widget, and every
+   * human step while a hand-off (browser_request_human) owns the browser.
+   */
+  private skipChallenge(element: ElementInfo | undefined, actor: 'agent' | 'human', frameUrl?: string): boolean {
+    let handoff = false;
+    if (actor === 'human') {
+      try { handoff = /^handoff:/.test(String(this.mgr?.status().takeoverBy ?? '')); } catch { handoff = false; }
+    }
+    const hit = handoff || isChallengeElement(element) || (!!frameUrl && isChallengeFrameUrl(frameUrl));
+    if (hit && !this.warnings.includes(CHALLENGE_SKIPPED)) this.warnings.push(CHALLENGE_SKIPPED);
+    return hit;
+  }
+
   private onAction(rec: BrowserActionRecord): void {
     if (this.state !== 'recording' || !rec || typeof rec.tool !== 'string') return;
     const actor = rec.actor === 'human' ? 'human' : 'agent';
+    if (this.skipChallenge(rec.element, actor)) return;
     if (this.opts.source === 'agent' && actor !== 'agent') return;
     // A human demonstration keeps the agent's navigations: they set up where the demo starts.
     if (this.opts.source === 'human' && actor !== 'human' && !isNavigational(rec.tool, rec.args)) return;
@@ -1490,6 +1508,9 @@ export class WorkflowRecorder {
     } catch {
       crossOrigin = frame === 'child';
     }
+    let frameUrl = '';
+    try { frameUrl = String(source?.frame?.url?.() ?? ''); } catch { frameUrl = ''; }
+    if (this.skipChallenge(undefined, 'human', frameUrl)) return;
     if (crossOrigin) {
       // An embedded third-party frame (ad, widget, tracker) can post forged events
       // whose selectors would replay against the MAIN page; and real input there
@@ -1499,6 +1520,7 @@ export class WorkflowRecorder {
     }
     const rec = captureToRecord(payload, { frame });
     if (!rec) return;
+    if (this.skipChallenge(rec.element, 'human')) return;
     if (page && this.lastCapturePage && page !== this.lastCapturePage) {
       // The human moved to another tab (popup or manual switch).
       let index = -1;

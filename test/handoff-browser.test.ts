@@ -9,6 +9,54 @@ import {
   type ChallengeMarkers, type ChallengeInfo,
 } from '../src/tools/browser/challenge.js';
 import { DESCRIBE_ELEMENT_JS } from '../src/tools/browser/snapshot.js';
+import { WorkflowRecorder } from '../src/workflows/recorder.js';
+import { BrowserEvaluateTool, BrowserWaitForTool, CHALLENGE_SCRIPT_RE } from '../src/tools/browser/tools.js';
+import { setBrowserManagerForTests } from '../src/tools/browser/types.js';
+import { FakeManager } from './workflows-fakes.js';
+
+describe('recorder never records challenge steps', () => {
+  it('skips steps on challenge elements and every human step during a hand-off', async () => {
+    const mgr = new FakeManager();
+    mgr.page.currentUrl = 'https://shop.example/login';
+    const rec = new WorkflowRecorder();
+    try {
+      await rec.start({ name: 'login', mgr, source: 'mixed' });
+      const url = mgr.activeUrl();
+      mgr.recordAction({ tool: 'browser_fill', args: { selector: '#user', value: 'me' }, url, actor: 'agent', element: { selector: '#user', role: 'textbox', name: 'User', tag: 'input' } });
+      mgr.recordAction({ tool: 'browser_click', args: { x: 10, y: 10 }, url, actor: 'human', element: { selector: 'div', role: 'checkbox', name: "I'm not a robot", challenge: true } });
+      mgr.recordAction({ tool: 'browser_click', args: { x: 20, y: 20 }, url, actor: 'human', element: { selector: '#px-captcha', role: 'button', name: 'Press & Hold' } });
+      const status = mgr.status.bind(mgr);
+      (mgr as any).status = () => ({ ...status(), takeover: true, takeoverBy: 'handoff:abc' });
+      mgr.recordAction({ tool: 'browser_type', args: { text: '123456' }, url, actor: 'human', element: { selector: '#code', role: 'textbox', name: 'Code' } });
+      (mgr as any).status = status;
+      mgr.recordAction({ tool: 'browser_click', args: { selector: '#go' }, url, actor: 'human', element: { selector: '#go', role: 'button', name: 'Continue' } });
+      const wf = await rec.stop();
+      expect(wf.steps.map(s => `${s.kind}:${s.selector ?? s.url ?? ''}`)).toEqual(['navigate:https://shop.example/login', 'fill:#user', 'click:#go']);
+      expect(rec.status().warnings.join(' ')).toMatch(/CAPTCHA \/ bot check/);
+    } finally {
+      await rec.discard();
+    }
+  });
+});
+
+describe('page scripts may not reach into a CAPTCHA', () => {
+  it('browser_evaluate / wait_for function refuse widget- or token-touching scripts before running', async () => {
+    const mgr = new FakeManager();
+    setBrowserManagerForTests(mgr);
+    try {
+      const ctx: any = { cwd: '/tmp', signal: new AbortController().signal, emit: () => {}, askUser: async () => 'yes' };
+      const r = await new BrowserEvaluateTool().execute({ script: "return document.querySelector('[name=g-recaptcha-response]').value" }, ctx);
+      expect(r.isError).toBe(true);
+      expect(r.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+      const w = await new BrowserWaitForTool().execute({ kind: 'function', value: "document.querySelector('.cf-turnstile input').value.length > 0" }, ctx);
+      expect(w.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+      expect(mgr.page.log).toEqual([]);
+      expect(CHALLENGE_SCRIPT_RE.test('return document.title')).toBe(false);
+    } finally {
+      setBrowserManagerForTests(null);
+    }
+  });
+});
 
 function markers(over: Partial<ChallengeMarkers> = {}): ChallengeMarkers {
   return {

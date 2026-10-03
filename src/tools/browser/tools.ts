@@ -42,7 +42,7 @@ import {
   isProtectedQodexPath, isProtectedFileUrl, isProtectedQodexPathReal, isProtectedFileUrlReal,
 } from './session.js';
 import { snapshotWithBoxes, selectDrawableMarks, drawMarks, clearMarks, maskPageSecrets } from './snapshot.js';
-import { challengeHint, challengeLabel, type ChallengeInfo } from './challenge.js';
+import { challengeHint, challengeLabel, isChallengeElement, isChallengeFrameUrl, type ChallengeInfo } from './challenge.js';
 import { QODEX_SCREENSHOTS_DIR } from '../../config/paths.js';
 import { VisionAnalyzeTool } from '../vision/vision-analyze.js';
 import { logger } from '../../utils/logger.js';
@@ -170,6 +170,54 @@ export function browserErrorResult(e: unknown, what: string): ToolResult {
   }
   const details = clues.length ? `\n  ${clues.join('\n  ')}` : '';
   return { content: `[BROWSER_ERROR] ${what} failed: ${first}${details}${hint ? `\nHint: ${hint}` : ''}`, isError: true };
+}
+
+/** The refusal for any agent action on a CAPTCHA / bot-check widget. */
+export function humanOnlyMessage(what: string): string {
+  return `[CHALLENGE_HUMAN_ONLY] ${what} is part of a CAPTCHA / bot check — only a human may act on it. ` +
+    'Do not click, type into, drag or analyze it, and do not script around it. Call browser_request_human (it hands the browser to the user and resumes by itself), or tell the user.';
+}
+
+/** A page script that reaches into a CAPTCHA widget or its token (refused like a click on it). PURE. */
+export const CHALLENGE_SCRIPT_RE = /captcha|turnstile|_cf_chl|cf-chl|challenge-platform|geetest|arkose|funcaptcha|captcha-delivery|awswaf|px-captcha/i;
+
+function withTimeoutValue<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    (t as any).unref?.();
+    p.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
+
+/**
+ * Refuse ([CHALLENGE_HUMAN_ONLY]) when a resolved target belongs to a challenge: the
+ * in-page describer flagged it, or — when it could not be described — the frame it lives
+ * in is a challenge vendor's frame. A frame ref that cannot be resolved at all while the
+ * tab shows a challenge is refused too (fail closed). Human input (dispatchInput) is
+ * never checked here.
+ */
+export async function assertNotChallenge(
+  mgr: BrowserManager,
+  loc: any,
+  el: ElementInfo | null,
+  target: { ref?: string; selector?: string } | null,
+): Promise<void> {
+  if (isChallengeElement(el)) throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  if (el) return;
+  let frameUrl: string | null = null;
+  const handle: any = await withTimeoutValue(Promise.resolve().then(() => loc?.elementHandle?.({ timeout: 500 })), 1500, null);
+  if (handle) {
+    try {
+      const frame = await withTimeoutValue(Promise.resolve().then(() => handle.ownerFrame()), 1000, null);
+      frameUrl = frame ? String(frame.url()) : null;
+    } catch { frameUrl = null; }
+    void Promise.resolve(handle.dispose?.()).catch(() => {});
+  }
+  if (frameUrl && isChallengeFrameUrl(frameUrl)) throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  const qm = asQodex(mgr);
+  if (!frameUrl && target?.ref && /^f\d+e/.test(target.ref) && qm?.challengeOf()) {
+    throw new Error(humanOnlyMessage(describeTarget(el, target)));
+  }
 }
 
 /** Error when an observation tool is called before the browser was opened. */
@@ -325,10 +373,17 @@ export async function runBrowserAction(spec: BrowserActionSpec): Promise<ToolRes
       locator = await mgr.locator(target);
       element = qm ? await qm.describeLocator(locator) : (target.ref ? await mgr.describeRef(target.ref) : null);
       if (element && target.ref) element = { ...element, ref: target.ref };
+      // Never on a CAPTCHA / bot-check widget: that is the human's part.
+      await assertNotChallenge(mgr, locator, element, target);
     } else if (spec.focusTarget && qm) {
       const f = await qm.focusedElement(page);
       if (f === 'unknown') focusUnknown = true;
       else element = f;
+      // Typing / keys go to the focused element — refuse when that is inside a challenge
+      // (or focus is in a frame we cannot inspect while the tab shows one).
+      if (isChallengeElement(element) || (focusUnknown && qm.challengeOf(page))) {
+        throw new Error(humanOnlyMessage(element ? `the focused ${describeTarget(element, null)}` : 'the focused element'));
+      }
     }
 
     // A dialog opened by the action blocks the page; stop waiting for the action then.
@@ -621,6 +676,17 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
       const bad = await checkOutputPath(dest, ['.png', '.jpg', '.jpeg'], mgr);
       if (bad) return { content: `[BROWSER_ERROR] screenshot: ${bad}`, isError: true };
       const page = await mgr.activePage();
+      if (args.analyze && qm) {
+        // A vision model must never read a CAPTCHA (that would be automated solving).
+        const ch = await qm.detectChallengeNow();
+        if (ch) {
+          return {
+            content: `[CHALLENGE_HUMAN_ONLY] No screenshot analysis while a ${challengeLabel(ch.vendor)} is on this tab — a vision model must never read it. ` +
+              'Call browser_request_human (it hands the browser to the user and resumes by itself), or tell the user.',
+            isError: true,
+          };
+        }
+      }
       await fs.mkdir(path.dirname(dest), { recursive: true });
       const target = targetOf({ ref: args.ref, selector: args.selector });
       const legend: string[] = [];
@@ -748,6 +814,7 @@ export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
     try {
       const mgr = await getBrowserManager();
       if (!mgr.isRunning()) return notRunningResult();
+      if (CHALLENGE_SCRIPT_RE.test(args.script)) return { content: humanOnlyMessage('What this script touches'), isError: true };
       await waitForHuman(mgr, ctx);
       const page = await mgr.activePage();
       let fn: (...a: unknown[]) => Promise<unknown>;
@@ -887,6 +954,7 @@ export class BrowserWaitForTool extends Tool<z.infer<typeof WaitForArgs>> {
         msg = '✓ Network idle reached';
       } else {
         const miss = need('function'); if (miss) return miss;
+        if (CHALLENGE_SCRIPT_RE.test(args.value!)) return { content: humanOnlyMessage('What this predicate touches'), isError: true };
         await withAbort(page.waitForFunction(args.value, undefined, { timeout }), ctx.signal);
         msg = `✓ Predicate satisfied: ${args.value!.slice(0, 80)}`;
       }

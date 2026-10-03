@@ -16,8 +16,8 @@ import { resolveBrowserExecutable } from '../src/tools/browser/launcher.js';
 import { QodexBrowserManager } from '../src/tools/browser/session.js';
 import { setBrowserManagerForTests } from '../src/tools/browser/types.js';
 import { detectChallenge } from '../src/tools/browser/challenge.js';
-import { BrowserNavigateTool } from '../src/tools/browser/tools.js';
-import { BrowserSnapshotTool } from '../src/tools/browser/tools-extra.js';
+import { BrowserNavigateTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool } from '../src/tools/browser/tools.js';
+import { BrowserSnapshotTool, BrowserFillFormTool, BrowserDragTool, BrowserTypeTool, BrowserPressTool } from '../src/tools/browser/tools-extra.js';
 import { getBus } from '../src/control/bus.js';
 
 let pw: any = null;
@@ -51,8 +51,8 @@ const ANCHOR_FRAME = `<!doctype html><html><head><title>reCAPTCHA</title></head>
   style="position:absolute;left:0;top:0;width:300px;height:40px;background:#eee"
   onclick="this.setAttribute('aria-checked','true'); parent.postMessage({ qx: 'solved' }, '*')">I'm not a robot</div>
 <input id="rc-answer" aria-label="Answer" style="position:absolute;top:44px;left:0;width:120px">
-<div id="slider" draggable="true" style="position:absolute;top:44px;left:130px;width:30px;height:20px;background:#99f">slide</div>
-<div id="slot" style="position:absolute;top:44px;left:200px;width:60px;height:20px;border:1px solid #000">slot</div>
+<div id="slider" role="slider" aria-label="Slide to verify" aria-valuenow="0" tabindex="0" draggable="true" style="position:absolute;top:44px;left:130px;width:30px;height:20px;background:#99f">slide</div>
+<div id="slot" role="button" aria-label="Drop slot" style="position:absolute;top:44px;left:200px;width:60px;height:20px;border:1px solid #000">slot</div>
 </body></html>`;
 
 const TURNSTILE_FRAME = `<!doctype html><title>Turnstile</title><body><input type="checkbox" aria-label="Verify you are human"></body>`;
@@ -224,6 +224,54 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     expect((r.metadata as any).challenge).toEqual({ vendor: 'recaptcha', state: 'needs-human', host: '127.0.0.1' });
     const s = await run(new BrowserSnapshotTool(), { interactive_only: true });
     expect(s.content).toContain('[CHALLENGE]');
+  }, 60_000);
+
+  it('the agent can never click / fill / type / drag into the challenge — [CHALLENGE_HUMAN_ONLY]; the rest of the page still works', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const snap = (await run(new BrowserSnapshotTool(), {})).content;
+    const refIn = (re: RegExp) => { const m = re.exec(snap); if (!m) throw new Error(`no match for ${re} in\n${snap}`); return m[1]!; };
+    const box = refIn(/- checkbox "I'm not a robot"[^\n]*\[ref=(f\d+e\d+)\]/);
+    const answer = refIn(/- textbox "Answer"[^\n]*\[ref=(f\d+e\d+)\]/);
+    const slider = refIn(/- slider "Slide to verify"[^\n]*\[ref=(f\d+e\d+)\]/);
+    const slot = refIn(/- button "Drop slot"[^\n]*\[ref=(f\d+e\d+)\]/);
+    const user = refIn(/- textbox "Username"[^\n]*\[ref=(e\d+)\]/);
+    const go = refIn(/- button "Continue"[^\n]*\[ref=(e\d+)\]/);
+
+    const click = await run(new BrowserClickTool(), { ref: box });
+    expect(click.isError).toBe(true);
+    expect(click.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const asSelector = await run(new BrowserClickTool(), { selector: box });
+    expect(asSelector.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const fill = await run(new BrowserFillTool(), { ref: answer, value: 'abc' });
+    expect(fill.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const drag = await run(new BrowserDragTool(), { from_ref: slider, to_ref: go });
+    expect(drag.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const dragInto = await run(new BrowserDragTool(), { from_ref: go, to_ref: slot });
+    expect(dragInto.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const form = await run(new BrowserFillFormTool(), { fields: [{ ref: user, value: 'alice' }, { ref: answer, value: 'x' }], snapshot: false });
+    expect(form.isError).toBe(true);
+    expect(form.content).toContain('✓ textbox "Username"');
+    expect(form.content).toMatch(/✗ \[CHALLENGE_HUMAN_ONLY\]/);
+
+    // Focus inside the challenge frame: typing / keys without a target are refused too.
+    const page = await mgr.activePage();
+    const anchor = page.frames().find((f: any) => /\/recaptcha\/api2\/anchor/.test(f.url()));
+    await anchor.focus('#rc-answer');
+    const typed = await run(new BrowserTypeTool(), { text: 'zzz' });
+    expect(typed.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+    const pressed = await run(new BrowserPressTool(), { key: 'Space' });
+    expect(pressed.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
+
+    // Nothing in the widget changed.
+    expect(await anchor.evaluate("document.querySelector('#recaptcha-anchor').getAttribute('aria-checked')")).toBe('false');
+    expect(await anchor.evaluate("document.querySelector('#rc-answer').value")).toBe('');
+    // A vision model never sees it.
+    const shot = await run(new BrowserScreenshotTool(), { analyze: 'what does the captcha say?', path: path.join(tmp, 'c.png') });
+    expect(shot.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\] No screenshot analysis/);
+    // The page outside the widget is still the agent's.
+    const ok = await run(new BrowserFillTool(), { selector: '#user', value: 'bob', snapshot: false });
+    expect(ok.isError).toBeFalsy();
+    expect(await page.evaluate("document.querySelector('#user').value")).toBe('bob');
   }, 60_000);
 
   it('navigate waits out a self-clearing interstitial without the human', async () => {

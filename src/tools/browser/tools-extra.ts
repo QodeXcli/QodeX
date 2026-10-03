@@ -27,6 +27,7 @@ import { extractContent, type ExtractFormat } from './snapshot.js';
 import { QODEX_BROWSER_DOWNLOADS_DIR } from '../../config/paths.js';
 import {
   asQodex,
+  assertNotChallenge,
   browserErrorResult,
   challengeGate,
   checkOutputPath,
@@ -199,6 +200,8 @@ export class BrowserFillFormTool extends Tool<z.infer<typeof FillFormArgs>> {
           try {
             const loc = await mgr.locator(target);
             const el: ElementInfo | null = qm ? await qm.describeLocator(loc) : null;
+            // Each field resolves its own locator: the challenge guard runs per field.
+            await assertNotChallenge(mgr, loc, el, target);
             const role = el?.role ?? '';
             const tag = el?.tag ?? '';
             const type = el?.inputType ?? '';
@@ -437,6 +440,8 @@ export class BrowserDragTool extends Tool<z.infer<typeof DragArgs>> {
       perform: async ({ mgr, locator, element, timeout }) => {
         const toLoc = await mgr.locator(to);
         const toEl = asQodex(mgr) ? await asQodex(mgr)!.describeLocator(toLoc) : null;
+        // A slider CAPTCHA's drop target is as off-limits as its handle.
+        await assertNotChallenge(mgr, toLoc, toEl, to);
         await locator.dragTo(toLoc, { timeout });
         return `✓ Dragged ${describeTarget(element, from)} onto ${describeTarget(toEl, to)}`;
       },
