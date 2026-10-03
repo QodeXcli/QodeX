@@ -81,6 +81,38 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         action: { type: 'submit_prompt', prompt: `${goal.objective}\n\n${goalKickoffPrompt(goal)}`, commandName: 'goal', rawInput: trimmed },
       };
     }
+    case 'mod': {
+      // /mod new <description> — QodeX writes a mod for you with the bundled mod-writing
+      // playbook (the modsmith skill). The write into ~/.qodex/mods asks you in every
+      // approval mode (agent instruction files): that answer is your consent to install it.
+      const sub = (args[0] ?? '').toLowerCase();
+      const description = args.slice(1).join(' ').trim();
+      if (sub !== 'new' || !description) {
+        return {
+          handled: true,
+          message:
+            'Usage: /mod new <what the mod should do>\n' +
+            '  QodeX writes the mod to ~/.qodex/mods/<name>/ (you approve the write), validates it and reloads mods.\n' +
+            '  e.g. /mod new show the time and how full the context is under the prompt\n' +
+            'See docs/MODS.md for what a mod can do.',
+        };
+      }
+      const playbook = await modsmithPlaybook();
+      if (!playbook) {
+        return { handled: true, message: 'The modsmith skill (the mod-writing playbook) is missing. Reinstall QodeX, or /skill reload if you removed it.' };
+      }
+      return {
+        handled: true,
+        action: {
+          type: 'submit_prompt',
+          prompt: buildSkillRunPrompt('modsmith', playbook.body, `Write a QodeX mod that does this: ${description}`),
+          commandName: '/mod new',
+          rawInput: trimmed,
+          ...(playbook.allowedTools?.length ? { allowedTools: playbook.allowedTools } : {}),
+          ...(playbook.model ? { model: playbook.model } : {}),
+        },
+      };
+    }
     case 'learn': {
       // /learn [name] — turn the task you just finished into a reusable skill.
       const { getSessionStore } = await import('../session/store.js');
@@ -355,6 +387,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
                                    Generate release notes from a git range
     /schedule                      List scheduled tasks (add/rm/install via shell: \`qodex schedule …\`)
     /mcp-build <name> [desc]       Guided 4-stage scaffold of a new MCP server
+    /mod new <description>         Have QodeX write a mod (status line, pane, guard…) — docs/MODS.md
 
   Agent platform — your own browser, desktop, missions
     /browser [status|open [url]|headed|headless|close|profile <name>]
@@ -1619,6 +1652,27 @@ Never invent commits. If the range is empty, say so and stop.`;
         },
       };
     }
+  }
+}
+
+/**
+ * The mod-writing playbook for /mod new: the installed modsmith skill (the user may have
+ * edited their copy), else the copy bundled with QodeX (examples/skills/modsmith).
+ */
+async function modsmithPlaybook(): Promise<{ body: string; allowedTools?: string[]; model?: string } | null> {
+  const installed = getSkill('modsmith');
+  if (installed?.body) return installed;
+  try {
+    const { promises: fsp } = await import('fs');
+    const path = await import('path');
+    const { fileURLToPath } = await import('url');
+    const { parseSkill } = await import('../skills/loader.js');
+    // <root>/src/cli or <root>/dist/cli → <root>/examples/skills/modsmith
+    const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'examples', 'skills', 'modsmith');
+    const spec = parseSkill(await fsp.readFile(path.join(dir, 'SKILL.md'), 'utf8'), 'modsmith', dir, 'builtin');
+    return spec?.body ? spec : null;
+  } catch {
+    return null;
   }
 }
 

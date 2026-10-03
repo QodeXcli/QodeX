@@ -51,6 +51,7 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'iterations', args: '<n>', description: 'Set iteration cap (0 = none)' },
   { name: 'network', description: 'Diagnose connectivity' },
   { name: 'commands', description: 'List custom slash commands' },
+  { name: 'mod', args: 'new <description>', description: 'Have QodeX write a mod for you' },
   { name: 'exit', description: 'Quit QodeX' },
 ];
 
