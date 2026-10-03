@@ -819,8 +819,25 @@ function isLoopbackHost(h: string): boolean {
   return h === '127.0.0.1' || h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
 
+/**
+ * $QODEX_CONTROL_TOKEN, read once and then REMOVED from process.env: tools spawn
+ * children with this environment (not all of them sanitize it), and whoever holds
+ * the token can answer Sentinel approvals — the agent must never be able to approve
+ * its own purchase. Later starts in this process reuse the remembered value.
+ */
+let envToken: string | undefined;
+function takeEnvToken(): string | undefined {
+  const v = process.env.QODEX_CONTROL_TOKEN;
+  if (v !== undefined) {
+    envToken = v;
+    delete process.env.QODEX_CONTROL_TOKEN;
+  }
+  return envToken;
+}
+
 function resolveToken(t: string | undefined): string {
-  const v = String(t ?? process.env.QODEX_CONTROL_TOKEN ?? '').trim();
+  const fromEnv = takeEnvToken();
+  const v = String(t ?? fromEnv ?? '').trim();
   if (!v) return makeAccessToken();
   if (!/^[A-Za-z0-9._~-]{16,256}$/.test(v)) {
     throw new Error('[CONTROL_WEAK_TOKEN] The control-center token must be 16-256 URL-safe characters (A-Z a-z 0-9 . _ ~ -).');
