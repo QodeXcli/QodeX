@@ -60,6 +60,8 @@ export interface ElementInfo {
   formAction?: string;
   /** Stable selector usable for replay (role+name, #id, data-testid, css). */
   selector?: string;
+  /** Part of a CAPTCHA / bot check (inside a challenge frame or widget): only a human may act on it. */
+  challenge?: boolean;
 }
 
 /** One agent- or human-performed browser action (fed to the workflow recorder). */

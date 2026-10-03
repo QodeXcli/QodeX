@@ -16,6 +16,8 @@
  * in the page with the element/argument.
  */
 
+import { CHALLENGE_ELEMENT_JS } from './challenge.js';
+
 // ── pure helpers (unit-tested on sample strings) ────────────────────────────
 
 /** Roles the agent can act on — kept by the interactive-only filter. */
@@ -352,6 +354,8 @@ export async function maskPageSecrets(page: any, text: string): Promise<string> 
  * `function (el) → ElementInfo-like | null`, evaluated IN THE PAGE. Shared by
  * describeRef/describeSelector, human-click introspection and the DOM walker.
  * Never returns the value of an input (passwords, card numbers stay in the page).
+ * `challenge: true` marks a CAPTCHA / bot-check part (challenge.ts) — agent tools
+ * refuse to act on it ([CHALLENGE_HUMAN_ONLY]).
  */
 export const DESCRIBE_ELEMENT_JS = String.raw`function describeElement(el) {
   if (!el || el.nodeType !== 1) return null;
@@ -459,6 +463,7 @@ export const DESCRIBE_ELEMENT_JS = String.raw`function describeElement(el) {
     return parts.join(' > ');
   }
   var info = { role: role, name: name, tag: tag, isPassword: isPassword, selector: buildSelector() };
+  if (${CHALLENGE_ELEMENT_JS}) info.challenge = true;
   if (type) info.inputType = type;
   if (ac) info.autocomplete = ac;
   if (href) info.href = href;
