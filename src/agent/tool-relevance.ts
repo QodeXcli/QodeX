@@ -40,6 +40,8 @@ export const CORE_TOOLS = new Set<string>([
   'task', 'orchestrate', 'gather',
   'use_skill', 'search_skills',
   'diagnostics',
+  // The agent's clarifying question (answers itself in auto mode) — useful on any task.
+  'ask_user',
 ]);
 
 /** Sent for ANY non-trivial task (language-agnostic — keyed off task-vs-greeting,

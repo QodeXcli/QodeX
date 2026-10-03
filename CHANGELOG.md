@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — a real auto mode
+
+**Auto mode now means "work without asking me" — except for money, passwords, messages and
+damage outside the project.** The approval modes are `manual` (default), `edits` (the old
+"auto": file edits run, shell asks) and `auto` (replaces "always yes"). Shift+Tab cycles them.
+
+1. **What auto mode asks.** Purchases, payments, passwords / credentials, sending messages and
+   QodeX's own safety settings (Sentinel-critical — a human answers in every mode), and
+   destructive actions outside the project: deleting or overwriting paths outside the workspace
+   roots, force-push and remote branch deletes, deleting remote data (cloud, Kubernetes,
+   `terraform destroy`, databases on other hosts, package unpublish), publishing (`npm publish`,
+   `docker push`, production deploys), system-level commands (`sudo`, `shutdown`, disks), and on
+   the web deleting data or changing an account on a non-local site. With nobody at the
+   terminal these go to the control center / Telegram / the mission queue, or are refused —
+   never auto-answered.
+2. **What it doesn't.** Everything inside the project: edits, shell, installs, commits, rebases,
+   ordinary pushes, deleting project files, browser and desktop work Sentinel rates
+   non-critical. The agent's own questions are not asked either: the new `ask_user` tool and
+   plan approval (`present_plan`) answer "decide yourself" in auto mode, so the model picks a
+   sensible default, keeps going and lists its assumptions at the end; a plan presented in plan
+   mode is approved and carried out in the same turn. The system prompt gets a short
+   "Autonomous mode" section, and when the mode changes mid-task the running agent is told.
+   Sub-agents, side runs and missions started from an auto session follow the same policy.
+3. **Turning it on.** Shift+Tab; `/auto on` (`/auto manual|edits|auto`, alias `/mode`);
+   `qodex --auto` or `qodex --approval-mode <manual|edits|auto>` for the TUI and `-p` runs
+   (`-y`/`--yes` on a `-p` run now means auto mode); `qodex mission start … --auto`; or
+   `approval.defaultMode: auto` in `~/.qodex/config.yaml` — only the user config counts, a
+   project's `.qodex/config.yaml` cannot switch you into auto. `approval.extraRoots` lists more
+   folders auto mode treats as the project (cwd and the temp dir always count).
+4. **TUI.** The status bar shows the mode as a badge (`manual` · `✎ accept edits` ·
+   `⏵⏵ auto`); `/status` prints it. The first time auto is on, a one-line banner says what
+   still asks. Switching into auto with a prompt on screen answers it only when it is an
+   ordinary permission the auto policy allows — never a Sentinel prompt, never one the policy
+   still asks about, never with a standing "always". A Sentinel "always" answer keeps its
+   category-on-this-site scope instead of switching the whole session.
+5. **Still in force.** `security.denyRules`, the hard-deny patterns and every budget
+   (`--budget-usd`, per-task caps) apply in auto mode exactly as before.
+
 ## v3.0.0 — 2026-10-03
 
 **QodeX gets its own computer: a dedicated browser, desktop control on every OS, background

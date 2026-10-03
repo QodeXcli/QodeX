@@ -13,6 +13,7 @@
  */
 
 import { appendAudit } from '../security/audit-log.js';
+import type { AskMeta } from '../agent/ask-meta.js';
 
 export const TUI_LANE = 'tui';
 export const TUI_ORIGIN = 'tui';
@@ -28,6 +29,8 @@ export interface ApprovalRequest {
   options: string[];
   lane: string;
   origin: string;
+  /** What the prompt is about (permission tool + operation, Sentinel, question), when known. */
+  meta?: AskMeta;
 }
 
 export interface ApprovalOpts {
@@ -41,6 +44,8 @@ export interface ApprovalOpts {
    * answered the same question first.
    */
   signal?: AbortSignal;
+  /** What the prompt is about (src/agent/ask-meta.ts) — lets the surface re-check it on a mode switch. */
+  meta?: AskMeta;
 }
 
 export type LiveStream = 'out' | 'err' | 'progress';
@@ -58,8 +63,8 @@ interface LaneState {
 }
 
 function snapshot(w: ApprovalWaiter): ApprovalRequest {
-  const { id, source, prompt, options, lane, origin } = w;
-  return { id, source, prompt, options, lane, origin };
+  const { id, source, prompt, options, lane, origin, meta } = w;
+  return meta ? { id, source, prompt, options, lane, origin, meta } : { id, source, prompt, options, lane, origin };
 }
 
 export class OperatorHub {
@@ -114,6 +119,7 @@ export class OperatorHub {
         options: options.length ? options : ['yes', 'no'],
         lane,
         origin,
+        ...(opts.meta ? { meta: opts.meta } : {}),
         resolve,
       });
       this.pump(lane);

@@ -23,6 +23,7 @@
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { logger } from '../../utils/logger.js';
+import type { AskUserFn } from '../../agent/ask-meta.js';
 
 /** Per-run budget override for a sub-agent (0 = unlimited for that dimension). */
 export interface SubAgentBudgetOverride {
@@ -43,7 +44,7 @@ export interface SubAgentRunOptions {
   role?: string;
   /** Approval asker for the sub-agent's permission prompts. Pass the calling tool's
    *  `ctx.askUser`; when omitted the runner falls back to the parent run's asker. */
-  askUser?: (prompt: string, options?: string[]) => Promise<string>;
+  askUser?: AskUserFn;
   /** Wall/token/cost caps for this run (browser/computer roles have sensible defaults). */
   budgetOverride?: SubAgentBudgetOverride;
   /**

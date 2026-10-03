@@ -51,6 +51,9 @@ import { BootSplash } from './prompts/boot-splash.js';
 import { GradientText, AURORA, useShimmer } from './prompts/gradient.js';
 import { describeToolActivity, extractTarget, formatTarget } from './prompts/tool-display.js';
 import { getApprovalBroker, setInteractiveHuman } from '../control/approvals.js';
+import type { AskMeta } from '../agent/ask-meta.js';
+import { isSentinelPrompt } from '../sentinel/guard.js';
+import { autoAnswerForMode, autoAnsweredLine, autoModeBannerOnce, modeBadge } from './approval-ui.js';
 import { forwardAgentEvent } from '../control/forward.js';
 import { getOperatorHub } from '../operator/hub.js';
 import { pickWorkingCwd } from '../session/handoff.js';
@@ -79,6 +82,11 @@ interface PendingPrompt {
   resolve: (answer: string) => void;
   diff?: { path: string; before: string | null; after: string };
   hubId?: string;
+  /** What the prompt is about (tool + operation for a permission) — lets a switch into
+   *  auto re-check it against the policy instead of guessing from the text. */
+  meta?: AskMeta;
+  lane?: string;
+  origin?: string;
 }
 
 export interface AppProps {
@@ -360,27 +368,28 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
-    // Shift+Tab cycles approval: manual → auto → always yes → manual.
-    // If a prompt is already on screen, auto-answer it when the new mode would
-    // have skipped the ask (always yes; or auto + a file-edit diff).
+    // Shift+Tab cycles approval: manual → edits → auto → manual.
+    // A prompt already on screen is re-checked under the new mode: a permission prompt
+    // the new mode's policy allows (the engine is asked again for the same tool +
+    // operation) is answered "yes" once. Sentinel prompts (purchases, payments,
+    // passwords, sending — and Sentinel's own auto-mode asks), the auto policy's "ask"
+    // (destructive outside the project), questions and unknown prompts stay for you.
     if ((key.tab && key.shift) || _input === '\u001b[Z') {
       const next = cycleApprovalMode();
       setApprovalMode(next);
       const meta = APPROVAL_MODE_META[next];
       setHistory(h => [...h, {
         type: 'system',
-        text: `Approval: ${meta.label} — ${meta.hint}  (Shift+Tab to cycle)`,
+        text: `Approval: ${modeBadge(next).label} — ${meta.hint}  (Shift+Tab to cycle)`,
         id: nextId(),
       }]);
       const pending = pendingPromptRef.current as PendingPrompt | null;
       if (pending) {
-        // Only a pending file-edit diff is accepted on a mode switch; a shell, Sentinel or
-        // purchase prompt is never answered by pressing Shift+Tab.
-        const shouldAccept = (next === 'edits' || next === 'auto') && !!pending.diff;
-        const answer = shouldAccept ? pickAutoAnswer(pending.options) : null;
+        const answer = autoAnswerForMode(pending, next, req => props.permissions.evaluate(req));
         if (answer) {
           setPendingPrompt(null);
           pending.resolve(answer);
+          setHistory(h => [...h, { type: 'system', text: autoAnsweredLine(pending, answer, next), id: nextId() }]);
         }
       }
       return;
@@ -455,6 +464,16 @@ export function App(props: AppProps): React.ReactElement {
       if (ev.kind === 'approval') {
         const diff = pendingDiffRef.current ?? undefined;
         pendingDiffRef.current = null;
+        // Asked under the old mode and still queued when the mode changed (e.g. a side
+        // run's prompt behind the one Shift+Tab just answered): same re-check as Shift+Tab.
+        const view = { prompt: ev.prompt, options: ev.options, meta: ev.meta, lane: ev.lane, origin: ev.origin };
+        const now = getApprovalMode();
+        const preAnswer = autoAnswerForMode(view, now, req => props.permissions.evaluate(req));
+        if (preAnswer) {
+          queueMicrotask(() => { hub.answer(ev.id, preAnswer); });
+          setHistory(h => [...h, { type: 'system', text: autoAnsweredLine(view, preAnswer, now), id: nextId() }]);
+          return;
+        }
         const tag = ev.origin && ev.origin !== 'tui' ? ev.origin : ev.source;
         const label = tag === 'main' ? ev.prompt : `[${tag}] ${ev.prompt}`;
         setPendingPrompt(p => {
@@ -465,6 +484,9 @@ export function App(props: AppProps): React.ReactElement {
             options: ev.options,
             hubId: ev.id,
             diff,
+            meta: ev.meta,
+            lane: ev.lane,
+            origin: ev.origin,
             resolve: (a) => { hub.answer(ev.id, a); },
           };
         });
@@ -503,6 +525,14 @@ export function App(props: AppProps): React.ReactElement {
     return () => { unsubSide(); unsubHub(); };
   }, [nextId]);
 
+  // The first time auto mode is on (startup flag/config, Shift+Tab, /auto, "always yes"),
+  // say once what it still asks.
+  useEffect(() => {
+    if (approvalMode !== 'auto') return;
+    const banner = autoModeBannerOnce();
+    if (banner) setHistory(h => [...h, { type: 'system', text: banner, id: nextId() }]);
+  }, [approvalMode, nextId]);
+
   // A human is at this terminal: Sentinel-critical actions may be approved here.
   useEffect(() => {
     setInteractiveHuman(true);
@@ -512,10 +542,10 @@ export function App(props: AppProps): React.ReactElement {
   // Terminal approvals are shown by the operator hub (FIFO per lane). They also go
   // through the ApprovalBroker, so the control center or Telegram can answer the same
   // question — the first answer wins and the terminal prompt is withdrawn.
-  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+  const askUser = useCallback((prompt: string, options: string[] = ['yes', 'no'], meta?: AskMeta): Promise<string> => {
     return getApprovalBroker()
       .request({ prompt, options, source: 'terminal' }, (p, o, signal) =>
-        getOperatorHub().requestApproval('main', p, o, { signal }))
+        getOperatorHub().requestApproval('main', p, o, { signal, ...(meta ? { meta } : {}) }))
       .then(r => r.answer);
   }, []);
 
@@ -760,6 +790,8 @@ export function App(props: AppProps): React.ReactElement {
           case 'tool_result': {
             liveShellRef.current = [];
             setLiveShell([]);
+            // A tool may have switched the session mode ("always yes" → auto): follow it.
+            setApprovalMode(getApprovalMode());
             setActiveTools(prev => prev.filter(t => t.id !== event.data.id));
             const diff = EDIT_DIFF_TOOLS.has(event.data.name) ? pendingDiffRef.current : null;
             if (diff) pendingDiffRef.current = null;
@@ -801,6 +833,15 @@ export function App(props: AppProps): React.ReactElement {
             break;
           case 'notice':
             setHistory(h => [...h, { type: 'system', text: event.data.message, id: nextId() }]);
+            break;
+          case 'plan_ready':
+            // Auto mode approved the plan and the run carried on in normal mode: so does
+            // the session. Otherwise say how to go ahead.
+            if (event.data?.modeLifted) {
+              setMode('normal');
+            } else if (!event.data?.autoApproved) {
+              setHistory(h => [...h, { type: 'system', text: 'Plan ready. Review it, then /normal and tell me to go ahead (or Shift+Tab to auto mode to approve plans automatically).', id: nextId() }]);
+            }
             break;
           case 'steer_injected': {
             const note = String(event.data?.note ?? '');
@@ -965,7 +1006,12 @@ export function App(props: AppProps): React.ReactElement {
             prompt={pendingPrompt.prompt}
             options={pendingPrompt.options}
             onAnswer={(a) => {
-              if (isAlwaysYesAnswer(a)) {
+              // "always yes" switches this session to auto mode (its policy: critical and
+              // outside-project destructive actions still ask). A Sentinel "always" keeps
+              // the scope its prompt states — that category on that site — not the session.
+              const sentinel = isSentinelPrompt(pendingPrompt.prompt) || pendingPrompt.meta?.kind === 'sentinel';
+              const otherLane = (pendingPrompt.lane && pendingPrompt.lane !== 'tui') || (pendingPrompt.origin && pendingPrompt.origin !== 'tui');
+              if (isAlwaysYesAnswer(a) && !sentinel && !otherLane) {
                 setApprovalModeGlobal('auto');
                 setApprovalMode('auto');
               }
@@ -975,7 +1021,8 @@ export function App(props: AppProps): React.ReactElement {
             }}
           />
           <Box paddingX={1}>
-            <Text dimColor>Shift+Tab cycles approval · now {APPROVAL_MODE_META[approvalMode].label}</Text>
+            <Text dimColor>Shift+Tab cycles approval · now </Text>
+            <Text color={modeBadge(approvalMode).color} bold={modeBadge(approvalMode).bold}>{modeBadge(approvalMode).label}</Text>
           </Box>
         </Box>
       )}
@@ -1076,7 +1123,6 @@ function LiveHeader(props: {
   motion: boolean;
 }): React.ReactElement {
   const phase = useShimmer(props.motion);
-  const approval = APPROVAL_MODE_META[props.approvalMode];
   const thinkTok = props.thinkingChars && props.thinkingChars > 0
     ? Math.max(1, Math.round(props.thinkingChars / 4))
     : 0;
@@ -1091,8 +1137,8 @@ function LiveHeader(props: {
           ? <Text color="yellow">  ·  plan mode</Text>
           : <Text dimColor>  ·  ready</Text>}
       {props.mode !== 'plan' && (
-        <Text color={approvalColor(props.approvalMode)} dimColor={props.approvalMode === 'manual'}>
-          {'  ·  '}{approval.label}
+        <Text color={modeBadge(props.approvalMode).color} bold={modeBadge(props.approvalMode).bold} dimColor={props.approvalMode === 'manual'}>
+          {'  ·  '}{modeBadge(props.approvalMode).label}
         </Text>
       )}
     </Box>
@@ -1104,21 +1150,6 @@ function LiveHeader(props: {
  * key hints on the right. "credit" reads "local · free" for on-device models (cost $0) and
  * the running dollar amount once a paid API is in play. Updates live as budget events land.
  */
-function pickAutoAnswer(options: string[]): string | null {
-  const lower = options.map(o => o.toLowerCase());
-  for (const want of ['accept', 'yes', 'y', 'always yes', 'always']) {
-    const i = lower.indexOf(want);
-    if (i !== -1) return options[i]!;
-  }
-  return null;
-}
-
-function approvalColor(mode: ApprovalMode): 'green' | 'cyan' | 'yellow' {
-  if (mode === 'auto') return 'yellow';
-  if (mode === 'edits') return 'cyan';
-  return 'green';
-}
-
 function StatusBar(props: {
   width: number;
   model: string;
@@ -1171,7 +1202,7 @@ function StatusBar(props: {
         <Text dimColor>  ·  </Text>
         <Text color={mode === 'plan' ? 'yellow' : 'green'}>{mode}</Text>
         <Text dimColor>  ·  </Text>
-        <Text color={approvalColor(approvalMode)}>{APPROVAL_MODE_META[approvalMode].label}</Text>
+        <Text color={modeBadge(approvalMode).color} bold={modeBadge(approvalMode).bold}>{modeBadge(approvalMode).label}</Text>
         {ctxMeter !== '' && (
           <>
             <Text dimColor>  ·  </Text>

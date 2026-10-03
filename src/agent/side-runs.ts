@@ -99,9 +99,10 @@ export function startSideRun(prompt: string, parentSessionId: string): SideRun |
         signal: ac.signal,
         sessionId,
         executionMode: 'normal',
-        askUser: (prompt, options) => hub.requestApproval(id, prompt, options ?? ['yes', 'no'], {
+        askUser: (prompt, options, meta) => hub.requestApproval(id, prompt, options ?? ['yes', 'no'], {
           lane: 'tui',
           origin: 'tui',
+          ...(meta ? { meta } : {}),
         }),
         onToolUI: (ev) => {
           if (ev.type === 'shell-stdout') hub.emitLive(id, 'out', ev.line);
