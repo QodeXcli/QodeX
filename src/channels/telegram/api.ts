@@ -254,6 +254,15 @@ export interface SendPhotoOptions {
   signal?: AbortSignal;
 }
 
+export interface GetUpdatesOptions {
+  offset?: number;
+  /** Long-poll seconds. Default 25; 0 = return immediately (also confirms `offset`). */
+  timeout?: number;
+  limit?: number;
+  allowedUpdates?: string[];
+  signal?: AbortSignal;
+}
+
 interface CallOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -310,8 +319,12 @@ export class TelegramApi {
    * Long-poll for updates. Resolves after at most `timeout` seconds with
    * whatever arrived (possibly []). The HTTP timeout is set a bit above the
    * poll timeout so a slow proxy doesn't cut a healthy long-poll short.
+   * Accepts an options object, or the positional `(offset, timeout = 25, signal)`.
    */
-  getUpdates(opts: { offset?: number; timeout?: number; limit?: number; allowedUpdates?: string[]; signal?: AbortSignal } = {}): Promise<TgUpdate[]> {
+  getUpdates(opts?: GetUpdatesOptions): Promise<TgUpdate[]>;
+  getUpdates(offset: number | undefined, timeout?: number, signal?: AbortSignal): Promise<TgUpdate[]>;
+  getUpdates(a?: GetUpdatesOptions | number, timeoutArg?: number, signalArg?: AbortSignal): Promise<TgUpdate[]> {
+    const opts: GetUpdatesOptions = typeof a === 'object' && a !== null ? a : { offset: a, timeout: timeoutArg, signal: signalArg };
     const timeout = Math.max(0, Math.floor(opts.timeout ?? 25));
     return this.call<TgUpdate[]>('getUpdates', {
       offset: opts.offset,
