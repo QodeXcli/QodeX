@@ -8,9 +8,8 @@
  *
  * No bootstrap(): this command loads ~/.qodex/.env + config and calls
  * setActiveConfig itself, and never imports the agent loop. It does install ONE
- * SIGINT listener, and that listener always exits: the CLI entry (src/index.ts)
- * statically imports the tool registry, whose process-registry module adds a
- * non-exiting SIGINT listener — without ours Ctrl+C would be ignored here.
+ * SIGINT listener, and that listener always exits (after a graceful stop) — a
+ * listener that didn't would turn Ctrl+C into a no-op.
  *
  * Note: the root program owns `-p/--print`, `--json`, `-m`, `-y`, `-r`, `-c`, and
  * commander parses those anywhere on the line, so this subcommand deliberately has
@@ -161,10 +160,10 @@ async function runControlCommand(opts: ControlCliOptions, flags: { json: boolean
  * takeover it holds) and close the agent browser so its persistent profile is
  * flushed — bounded by STOP_TIMEOUT_MS. A second Ctrl+C exits at once.
  *
- * Why a SIGINT listener here at all: the CLI entry imports the tool registry,
- * whose process-registry module installs a SIGINT listener that does NOT exit —
- * with any listener present Node no longer exits on SIGINT by itself, so Ctrl+C
- * was silently ignored. This listener always exits, so it can't cause that trap.
+ * Why a SIGINT listener here at all: Node's default Ctrl+C exit kills the process
+ * without even an 'exit' event, so the takeover release and the profile flush above
+ * would be skipped. With any listener present Node no longer exits on SIGINT by
+ * itself — this one always exits, so it can't turn Ctrl+C into a no-op.
  */
 function installStopHandlers(): (code: number) => Promise<void> {
   let stopping = false;

@@ -70,7 +70,7 @@ import { BROWSER_TOOL_CLASSES } from './browser/index.js';
 import { VAULT_TOOL_CLASSES } from '../vault/index.js';
 import { MISSION_TOOL_CLASSES } from '../missions/tools.js';
 import { WORKFLOW_TOOL_CLASSES } from '../workflows/tools.js';
-import { getSentinel } from '../sentinel/index.js';
+import { getSentinel, redactForAudit } from '../sentinel/index.js';
 import {
   DevServerStartTool,
   DevServerLogTool,
@@ -447,13 +447,16 @@ export class ToolRegistry {
       const errMsg = e.errors
         ? e.errors.map((err: any) => `${err.path.join('.')}: ${err.message}`).join('; ')
         : e.message;
+      // Echo the args' shape, never typed text / password values (they land in the
+      // session transcript): text/value/body/... become "[hidden N chars]".
       return {
-        content: `[ARGUMENT_VALIDATION_ERROR] ${errMsg}\nProvided args: ${JSON.stringify(args)}\nFix your tool arguments and try again.`,
+        content: `[ARGUMENT_VALIDATION_ERROR] ${errMsg}\nProvided args: ${JSON.stringify(redactForAudit(args, { hideTyped: true }))}\nFix your tool arguments and try again.`,
         isError: true,
       };
     }
 
-    logger.debug('Executing tool', { name, args: parsed });
+    // Same redaction for qodex.log (debug mode): typed passwords must not reach the disk.
+    logger.debug('Executing tool', { name, args: redactForAudit(parsed, { hideTyped: true }) });
 
     // Sentinel sits at this single choke point, so the main loop, sub-agents,
     // missions and the MCP server are all guarded the same way. It reviews the

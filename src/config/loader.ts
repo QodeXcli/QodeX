@@ -84,6 +84,32 @@ function isMergeableConfig(parsed: unknown): parsed is Partial<QodexConfig> {
   return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
 }
 
+/**
+ * Keys that route a secret or expose a local service: honored only from the user's own
+ * ~/.qodex/config.yaml. A cloned repo's .qodex/config.yaml could otherwise point
+ * telegram.apiBase at its server (`qodex telegram status` would send the real bot token
+ * there), aim telegram.botTokenEnv at another env secret, or bind the control center
+ * to 0.0.0.0.
+ */
+const USER_ONLY_KEYS: ReadonlyArray<readonly [section: string, key: string]> = [
+  ['telegram', 'apiBase'],
+  ['telegram', 'botTokenEnv'],
+  ['control', 'host'],
+];
+
+/** `projCfg` without USER_ONLY_KEYS (warns per dropped key). Doesn't mutate its input. */
+function withoutUserOnlyKeys(projCfg: Record<string, any>, file: string): Record<string, any> {
+  let out = projCfg;
+  for (const [section, key] of USER_ONLY_KEYS) {
+    const sec = out[section];
+    if (!sec || typeof sec !== 'object' || Array.isArray(sec) || !(key in sec)) continue;
+    const { [key]: _dropped, ...rest } = sec;
+    out = { ...out, [section]: rest };
+    logger.warn(`Ignoring ${section}.${key} from the project config — only ~/.qodex/config.yaml may set it`, { file });
+  }
+  return out;
+}
+
 export interface LoadConfigOpts {
   /** `--profile` / test override. Wins over QODEX_PROFILE and defaults.profile. */
   profile?: string;
@@ -114,18 +140,21 @@ export async function loadConfig(cwd: string = process.cwd(), opts: LoadConfigOp
     }
   }
 
-  // Project-level config
+  // Project-level config (untrusted: it comes with whatever repo is checked out). Running
+  // in ~ makes it the user config itself, which was merged above.
   const projectConfig = path.join(cwd, '.qodex', 'config.yaml');
-  try {
-    const projectYaml = await fs.readFile(projectConfig, 'utf-8');
-    const projCfg = yaml.load(projectYaml);
-    if (isMergeableConfig(projCfg)) config = deepMerge(config, projCfg);
-    else if (projCfg != null) {
-      logger.warn('Ignoring project config: top-level value is not a mapping', { file: projectConfig, got: Array.isArray(projCfg) ? 'array' : typeof projCfg });
-    }
-  } catch (err: any) {
-    if (err.code !== 'ENOENT') {
-      logger.warn('Failed to load project config', { err: err.message });
+  if (path.resolve(projectConfig) !== path.resolve(userConfigFile)) {
+    try {
+      const projectYaml = await fs.readFile(projectConfig, 'utf-8');
+      const projCfg = yaml.load(projectYaml);
+      if (isMergeableConfig(projCfg)) config = deepMerge(config, withoutUserOnlyKeys(projCfg as Record<string, any>, projectConfig));
+      else if (projCfg != null) {
+        logger.warn('Ignoring project config: top-level value is not a mapping', { file: projectConfig, got: Array.isArray(projCfg) ? 'array' : typeof projCfg });
+      }
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') {
+        logger.warn('Failed to load project config', { err: err.message });
+      }
     }
   }
 

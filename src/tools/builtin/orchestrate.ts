@@ -35,6 +35,9 @@ export class OrchestrateTool extends Tool<z.infer<typeof Args>> {
     'Requires sub-agents to be enabled.';
   isReadOnly = false;
   isDestructive = true; // commits files to disk after QA
+  /** Runs sub-agents: same budget as `task` (not the global 300s tool timeout), so the
+   *  loop also excuses its run time from the parent's wall-clock budget. */
+  timeoutSeconds = 2400;
   argsSchema = Args;
 
   async execute(args: z.infer<typeof Args>, ctx: ToolContext): Promise<ToolResult> {

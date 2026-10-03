@@ -38,9 +38,28 @@ export function stripUntrustedFence(text: string): string {
     .replace(/\n[ \t]*<\/untrusted_content\b[^>\n]*>\s*$/, '');
 }
 
+/**
+ * Display-only: lift Sentinel's one-line injection banner off the top of a fenced result
+ * (fenceUntrusted puts it in front of the fence) so the display starts with the tool's own
+ * first line; the banner comes back, clipped, as `warning`. PURE.
+ */
+export function splitInjectionBanner(text: string): { body: string; warning: string } {
+  const t = String(text ?? '');
+  const m = /^\s*(⚠ \[SENTINEL\] possible prompt injection:[^\n]*)(?:\n|$)/.exec(t);
+  if (!m) return { body: t, warning: '' };
+  return { body: t.slice(m[0].length), warning: clip(m[1]!, 120) };
+}
+
 /** Build a compact display for a settled tool result. */
 export function summarizeToolResult(name: string, result: string, isError: boolean): ToolDisplay {
-  const raw = stripUntrustedFence(result ?? '').replace(/\s+$/, '');
+  const { body, warning } = splitInjectionBanner(stripUntrustedFence(result ?? ''));
+  const shown = summarizeBody(name, body, isError);
+  // The warning stays visible, after the tool's own lines.
+  return warning ? { headline: shown.headline, lines: [...shown.lines, warning] } : shown;
+}
+
+function summarizeBody(name: string, result: string, isError: boolean): ToolDisplay {
+  const raw = result.replace(/\s+$/, '');
   const allLines = raw.length ? raw.split('\n') : [];
   const n = norm(name);
 

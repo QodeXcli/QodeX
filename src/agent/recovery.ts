@@ -16,15 +16,22 @@ export function isGateExemptTool(name: string): boolean {
   return GATE_EXEMPT_PREFIXES.some(p => name.startsWith(p));
 }
 
+/** Status pollers: called with identical args while a mission / job / server progresses. */
+const STATUS_POLL_TOOLS = new Set([
+  'mission_status', 'mission_list',
+  'background_job_status', 'background_job_list', 'background_job_log',
+  'dev_server_log',
+]);
+
 /**
- * Tools whose result depends on live external state (a web page, the screen). Calling
- * them repeatedly with identical args is NORMAL when the state changes in between
- * (scroll → snapshot while reading a long page), so the loop guards key them by
- * name + args + a hash of the RESULT: only a truly identical call+result repeat counts
- * as "stuck". PURE.
+ * Tools whose result depends on live external state (a web page, the screen, a running
+ * mission / job). Calling them repeatedly with identical args is NORMAL when the state
+ * changes in between (scroll → snapshot while reading a long page; polling a mission's
+ * status), so the loop guards key them by name + args + a hash of the RESULT: only a
+ * truly identical call+result repeat counts as "stuck". PURE.
  */
 export function isStateDependentTool(name: string): boolean {
-  return name.startsWith('browser_') || name.startsWith('computer_use_');
+  return name.startsWith('browser_') || name.startsWith('computer_use_') || STATUS_POLL_TOOLS.has(name);
 }
 
 /** Short stable hash of a tool result (8 hex chars). PURE. */

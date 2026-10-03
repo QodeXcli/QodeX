@@ -3102,29 +3102,28 @@ export class AgentLoop {
       && (declaredTimeout === 0 || (globalTimeoutSec > 0 && declaredTimeout > globalTimeoutSec));
     let excusedMs = 0;
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    // With no timeout, the race is settled by the tool itself — or by cancellation: a
-    // no-timeout tool that ignores ctx.signal must still not hang the loop after Ctrl+C.
+    // Cancellation settles the race too: a tool that ignores ctx.signal (vision_analyze,
+    // computer_use_locate, a no-timeout sub-agent) must not keep the loop waiting after
+    // Ctrl+C — up to its timeout, or forever without one. Cleared with the timeout.
     let onToolAbort: (() => void) | undefined;
     // Armed lazily, right before the tool runs: Sentinel's human approval (preflight,
     // below) may legitimately wait longer than the tool timeout (remote approvals via
     // the control center / Telegram wait up to sentinel.remoteApprovalTimeoutSec).
     const armTimeout = (): Promise<never> => new Promise<never>((_, reject) => {
-      if (timeoutSec <= 0) {
-        onToolAbort = () => {
-          const err: any = new Error(`Tool '${tc.function.name}' was cancelled`);
-          err.code = 'CANCELLED';
-          reject(err);
-        };
-        if (toolAbort.signal.aborted) onToolAbort();
-        else toolAbort.signal.addEventListener('abort', onToolAbort, { once: true });
-        return;
-      }
+      onToolAbort = () => {
+        const err: any = new Error(`Tool '${tc.function.name}' was cancelled`);
+        err.code = 'CANCELLED';
+        reject(err);
+      };
+      if (toolAbort.signal.aborted) { onToolAbort(); return; }
+      toolAbort.signal.addEventListener('abort', onToolAbort, { once: true });
+      if (timeoutSec <= 0) return;
       timeoutHandle = setTimeout(() => {
-        // CRITICAL: abort the tool's inner signal so spawn'd processes actually die.
-        toolAbort.abort('TOOL_TIMEOUT');
         const err: any = new Error(`Tool '${tc.function.name}' exceeded ${timeoutSec}s timeout`);
         err.code = 'TOOL_TIMEOUT';
-        reject(err);
+        reject(err); // before the abort, whose listener would settle the race as CANCELLED
+        // CRITICAL: abort the tool's inner signal so spawn'd processes actually die.
+        toolAbort.abort('TOOL_TIMEOUT');
       }, timeoutSec * 1000);
     });
 

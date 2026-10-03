@@ -67,14 +67,32 @@ export function diagnoseDevEnv(cwd: string | undefined, output: string): string 
   ].join('\n');
 }
 
+// .describe() goes BEFORE .optional(): the zod→JSON converter reads the description off
+// the inner type. env is a list of pairs (the converter would advertise z.record as a
+// string); coerceArgs still accepts the older {NAME: value} object form.
 const StartArgs = z.object({
   name: z.string().min(1).max(64).describe('Short id for later reference. e.g. "frontend", "api", "watcher".'),
   command: z.string().min(1).describe('Command to run. Shell-interpreted. e.g. "npm run dev", "php -S localhost:8000 -t public".'),
-  cwd: z.string().optional().describe('Working directory. Defaults to current cwd.'),
-  env: z.record(z.string()).optional().describe('Extra environment variables.'),
-  replace: z.boolean().optional().describe('If a process with this name is running, kill+restart. Default false (errors instead).'),
-  wait_ms: z.number().int().min(0).max(15_000).optional().describe('Wait this long after spawning, then return initial log. Default 2000.'),
+  cwd: z.string().describe('Working directory. Defaults to current cwd.').optional(),
+  env: z.array(z.object({ key: z.string().min(1), value: z.string() }))
+    .describe('Extra environment variables as {key, value} pairs, e.g. [{"key":"PORT","value":"3000"}].').optional(),
+  replace: z.boolean().describe('If a process with this name is running, kill+restart. Default false (errors instead).').optional(),
+  wait_ms: z.number().int().min(0).max(15_000).describe('Wait this long after spawning, then return initial log. Default 2000.').optional(),
 });
+
+/** {NAME: value} (or its JSON string) → [{key, value}]; anything else unchanged. */
+function envPairs(env: unknown): unknown {
+  let v = env;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return env; }
+  }
+  if (Array.isArray(v)) return v;
+  if (!v || typeof v !== 'object') return env;
+  return Object.entries(v as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : String(value),
+  }));
+}
 
 export class DevServerStartTool extends Tool<z.infer<typeof StartArgs>> {
   name = 'dev_server_start';
@@ -83,13 +101,20 @@ export class DevServerStartTool extends Tool<z.infer<typeof StartArgs>> {
   isDestructive = false;
   argsSchema = StartArgs;
 
+  coerceArgs(raw: unknown): unknown {
+    if (raw && typeof raw === 'object' && (raw as any).env !== undefined) {
+      return { ...(raw as any), env: envPairs((raw as any).env) };
+    }
+    return raw;
+  }
+
   async execute(args: z.infer<typeof StartArgs>, _ctx: ToolContext): Promise<ToolResult> {
     try {
       const info = await registry.start({
         name: args.name,
         command: args.command,
         cwd: args.cwd,
-        env: args.env,
+        env: args.env ? Object.fromEntries(args.env.map(e => [e.key, e.value])) : undefined,
         replace: args.replace,
       });
       const waitMs = args.wait_ms ?? 2000;
@@ -125,8 +150,8 @@ export class DevServerStartTool extends Tool<z.infer<typeof StartArgs>> {
 
 const LogArgs = z.object({
   name: z.string().min(1),
-  source: z.enum(['stdout', 'stderr', 'combined']).optional().describe('Default "combined".'),
-  max_bytes: z.number().int().min(1).max(50_000).optional().describe('Truncate from front. Default 4000.'),
+  source: z.enum(['stdout', 'stderr', 'combined']).describe('Default "combined".').optional(),
+  max_bytes: z.number().int().min(1).max(50_000).describe('Truncate from front. Default 4000.').optional(),
 });
 
 export class DevServerLogTool extends Tool<z.infer<typeof LogArgs>> {
@@ -144,7 +169,7 @@ export class DevServerLogTool extends Tool<z.infer<typeof LogArgs>> {
 
 const StopArgs = z.object({
   name: z.string().min(1),
-  signal: z.enum(['SIGTERM', 'SIGINT', 'SIGKILL']).optional().describe('Default SIGTERM; escalates to SIGKILL after 5s.'),
+  signal: z.enum(['SIGTERM', 'SIGINT', 'SIGKILL']).describe('Default SIGTERM; escalates to SIGKILL after 5s.').optional(),
 });
 
 export class DevServerStopTool extends Tool<z.infer<typeof StopArgs>> {
