@@ -6,7 +6,9 @@
  *   - so does Wayland (grim is often installed where the compositor can't
  *     serve it: GNOME, KDE);
  *   - the Wayland clipboard is read as a TEXT type (`wl-paste` alone prints a
- *     copied image's PNG bytes).
+ *     copied image's PNG bytes);
+ *   - Wayland screen_info notes that ydotool types through the active
+ *     keyboard layout (ASCII comes out wrong under a Persian layout).
  * Fakes only (setDesktopExec) — no real input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -152,6 +154,16 @@ describe('wayland: screenshots fall back to the next tool that works', () => {
     }, ['swaymsg', 'hyprctl']);
     await expect(wl(undefined, { signal: ac.signal }).screenshot({ path: path.join(tmp, 's.png') })).rejects.toThrow(/^\[ABORTED\]/);
     expect(calls.map(c => c.cmd)).toEqual(['grim']);
+  });
+});
+
+describe('wayland: screen_info warns about the keyboard layout', () => {
+  it('ydotool types key codes through the active layout: the notes say so and name the way out', async () => {
+    fakeExec(undefined, ['swaymsg', 'hyprctl']);
+    const av = await new WaylandBackend(deps({ env: { WAYLAND_DISPLAY: 'wayland-0' } })).available();
+    const note = av.notes.find(n => /keyboard layout/i.test(n));
+    expect(note).toMatch(/Persian/);
+    expect(note).toMatch(/English\/US layout|method "paste"/);
   });
 });
 

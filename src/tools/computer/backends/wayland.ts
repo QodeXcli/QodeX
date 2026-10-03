@@ -181,6 +181,7 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
     notes.push(wm ? `windows: ${wm}` : 'windows: not exposed by this compositor (only sway/Hyprland are supported) — use screenshot + computer_use_locate');
     notes.push('ydotool needs its daemon: `sudo systemctl enable --now ydotool` (or run `ydotoold`) and access to /dev/uinput.');
     notes.push('Pointer moves are emulated: if clicks land off-target, set a flat pointer-acceleration profile.');
+    notes.push('ydotool types raw key codes through the ACTIVE keyboard layout: with a Persian (or other non-US) layout active, ASCII text comes out wrong — switch to an English/US layout, or use computer_use_type method "paste".');
     const hintText = pkgs.length ? `${hint(this.deps, pkgs)}; then start the daemon: sudo systemctl enable --now ydotool` : '';
     return { ok: missing.length === 0, missing, hint: hintText, notes };
   }
