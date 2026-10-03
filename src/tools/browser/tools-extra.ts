@@ -31,8 +31,8 @@ import {
   checkOutputPath,
   composeActionResult,
   describeTarget,
-  isProtectedFileUrl,
-  isProtectedQodexPath,
+  isProtectedFileUrlReal,
+  isProtectedQodexPathReal,
   notRunningResult,
   redactForRecord,
   refField,
@@ -120,6 +120,7 @@ export class BrowserTypeTool extends Tool<z.infer<typeof TypeArgs>> {
       tool: 'browser_type',
       ctx,
       target,
+      focusTarget: true,
       snapshot: args.snapshot,
       timeoutMs: args.timeout_ms,
       recordArgs: { ...target, text: args.text, ...(args.submit ? { submit: true } : {}), ...(clear ? {} : { clear: false }) },
@@ -145,7 +146,9 @@ export class BrowserTypeTool extends Tool<z.infer<typeof TypeArgs>> {
           await page.keyboard.type(args.text, { delay: args.slowly ? 60 : 0 });
           if (args.submit) await page.keyboard.press('Enter');
         }
-        const where = locator ? describeTarget(element, target) : 'the focused element';
+        const where = locator
+          ? describeTarget(element, target)
+          : element?.role || element?.name ? `the focused ${describeTarget(element, null)}` : 'the focused element';
         return `✓ Typed ${args.text.length} char(s)${element?.isPassword ? ' (hidden)' : ''} into ${where}${args.submit ? ' and pressed Enter' : ''}`;
       },
     });
@@ -332,6 +335,7 @@ export class BrowserPressTool extends Tool<z.infer<typeof PressArgs>> {
       tool: 'browser_press',
       ctx,
       target,
+      focusTarget: true,
       snapshot: args.snapshot,
       recordArgs: { ...target, key },
       perform: async ({ page, locator, element, timeout }) => {
@@ -459,9 +463,12 @@ export class BrowserUploadTool extends Tool<z.infer<typeof UploadArgs>> {
 
   async execute(args: z.infer<typeof UploadArgs>, ctx: ToolContext): Promise<ToolResult> {
     const files: string[] = [];
+    let extraDirs: string[] = [];
+    try { const qm = asQodex(await getBrowserManager()); if (qm) extraDirs = [qm.profilesDir]; } catch { /* no manager */ }
     for (const p of args.paths) {
       const abs = resolveUserPath(p, ctx.cwd);
-      if (isProtectedQodexPath(abs)) {
+      // Real path too: a symlink must not smuggle the vault key / a profile out.
+      if (await isProtectedQodexPathReal(abs, extraDirs)) {
         return { content: `[BROWSER_ERROR] Refusing to upload QodeX credential / browser-profile files (${p}).`, isError: true };
       }
       try {
@@ -589,7 +596,7 @@ export class BrowserTabsTool extends Tool<z.infer<typeof TabsArgs>> {
       let line: string;
       if (args.action === 'new') {
         const url = args.url ? normalizeUrl(args.url) : undefined;
-        if (url && isProtectedFileUrl(url)) return { content: '[BROWSER_ERROR] Refusing to open QodeX browser-profile / vault files in the browser.', isError: true };
+        if (url && await isProtectedFileUrlReal(url, qm ? [qm.profilesDir] : [])) return { content: '[BROWSER_ERROR] Refusing to open QodeX browser-profile / vault files in the browser.', isError: true };
         const info = await withAbort(mgr.newTab(url), ctx.signal);
         if (url) mgr.recordAction({ tool: 'browser_navigate', args: { url, new_tab: true }, url: info.url, title: info.title, actor: 'agent' });
         line = `✓ Opened tab [${info.index}]${url ? ` at ${info.url}` : ''} (now active)`;
@@ -794,11 +801,11 @@ export class BrowserPdfTool extends Tool<z.infer<typeof PdfArgs>> {
       if (!mgr.isRunning()) return notRunningResult();
       const st = mgr.status();
       if (!st.headless) return { content: '[BROWSER_ERROR] PDF export only works in a headless browser. Use browser_screenshot full_page=true instead, or run headless.', isError: true };
-      const page = await mgr.activePage();
       const dir = asQodex(mgr)?.downloadsDir ?? QODEX_BROWSER_DOWNLOADS_DIR;
       const dest = args.path ? resolveUserPath(args.path, ctx.cwd) : path.join(dir, `page-${Date.now()}.pdf`);
-      const bad = checkOutputPath(dest, ['.pdf']);
+      const bad = await checkOutputPath(dest, ['.pdf'], mgr);
       if (bad) return { content: `[BROWSER_ERROR] pdf: ${bad}`, isError: true };
+      const page = await mgr.activePage();
       await fs.mkdir(path.dirname(dest), { recursive: true });
       await withAbort(page.pdf({ path: dest, printBackground: true }), ctx.signal);
       const stat = await fs.stat(dest);
