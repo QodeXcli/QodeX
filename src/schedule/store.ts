@@ -172,7 +172,9 @@ export class ScheduleStore {
     const byName = this.db.prepare(`SELECT * FROM schedules WHERE name = ?`).get(idOrName) as ScheduleEntry | undefined;
     if (byName) return byName;
     if (idOrName.length >= 4) {
-      const matches = this.db.prepare(`SELECT * FROM schedules WHERE id LIKE ?`).all(`${idOrName}%`) as ScheduleEntry[];
+      // Escape LIKE wildcards: `schedule rm %%%%` must not match (and delete) an arbitrary entry.
+      const prefix = idOrName.replace(/[\\%_]/g, m => '\\' + m);
+      const matches = this.db.prepare(`SELECT * FROM schedules WHERE id LIKE ? ESCAPE '\\' LIMIT 2`).all(`${prefix}%`) as ScheduleEntry[];
       if (matches.length === 1) return matches[0];
     }
     return undefined;

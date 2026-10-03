@@ -140,7 +140,8 @@ export async function tick(opts: TickOptions = {}): Promise<TickResult> {
   const lockPath = opts.lockPath ?? LOCK_PATH;
   const logDir = opts.logDir ?? RUN_LOG_DIR;
   await fs.mkdir(path.dirname(lockPath), { recursive: true });
-  await fs.mkdir(logDir, { recursive: true });
+  // Run logs hold the prompt and the agent's full output: owner-only.
+  await fs.mkdir(logDir, { recursive: true, mode: 0o700 });
 
   const lockFd = await acquireLock(lockPath, opts.staleMs ?? LOCK_STALE_MS);
   if (!lockFd) {
@@ -184,7 +185,7 @@ async function runOne(entry: ScheduleEntry, opts: TickOptions & { logDir: string
   const startMs = Date.now();
   const runId = store.recordRunStart(entry.id);
   const logPath = path.join(opts.logDir, `${entry.id}.${runId}.log`);
-  const logStream = fsSync.createWriteStream(logPath, { flags: 'w' });
+  const logStream = fsSync.createWriteStream(logPath, { flags: 'w', mode: 0o600 });
   logStream.write(`# schedule: ${entry.name} (${entry.id})\n# kind:     ${kind}\n# cron:     ${entry.cron}\n# cwd:      ${entry.cwd}\n# started:  ${new Date().toISOString()}\n# prompt:   ${entry.prompt.replace(/\n/g, '\n#           ')}\n\n`);
 
   // cwd must exist; otherwise mark errored and bail (no point retrying every minute)

@@ -24,7 +24,7 @@ import { resolveMissionsConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { logger } from '../utils/logger.js';
 import {
-  getMissionStore, isProcessAlive, isActiveStatus, isTerminalStatus, approvalOptions,
+  getMissionStore, isWorkerAlive, isActiveStatus, isTerminalStatus, approvalOptions,
   type MissionStore, type MissionRow, type ApprovalMode, type MissionApprovalRow, type ApprovalStatus,
 } from './store.js';
 
@@ -89,9 +89,10 @@ export interface SpawnWorkerOptions {
 export function spawnMissionWorker(id: string, opts: SpawnWorkerOptions): { pid: number; logFile: string } {
   const store = opts.store ?? getMissionStore();
   const logFile = opts.logFile ?? missionLogPath(id);
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  // The log holds the goal, step output and the final report: owner-only.
+  fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
   const { command, args } = resolveWorkerCommand(id, opts);
-  const fd = fs.openSync(logFile, 'a');
+  const fd = fs.openSync(logFile, 'a', 0o600);
   try {
     fs.writeSync(fd, `\n# ${new Date().toISOString()} starting mission worker ${id}\n# cwd: ${opts.cwd}\n`);
     const child = (spawner ?? (nodeSpawn as unknown as WorkerSpawner))(command, args, {
@@ -116,7 +117,14 @@ export function spawnMissionWorker(id: string, opts: SpawnWorkerOptions): { pid:
       throw new Error(`[MISSION_SPAWN_FAILED] Could not start the mission worker (${command}).`);
     }
     child.unref();
-    store.update(id, { pid: child.pid, log_file: logFile });
+    if (!store.claimWorker(id, child.pid)) {
+      // Another live worker won a race (e.g. two `resume`s at once). Leave it in
+      // charge; the extra child sees that on boot and exits ([MISSION_BUSY]).
+      const holder = store.get(id)?.pid;
+      store.appendEvent(id, 'worker-duplicate', { pid: child.pid, holder });
+      throw new Error(`[MISSION_BUSY] Mission ${id} is already being run by pid ${holder}.`);
+    }
+    store.update(id, { log_file: logFile });
     store.appendEvent(id, 'worker-spawned', { pid: child.pid, logFile });
     return { pid: child.pid, logFile };
   } finally {
@@ -229,9 +237,13 @@ export function cancelMission(
   store.requestCancel(m.id);
   store.appendEvent(m.id, 'cancel-requested', { by: opts.by ?? 'cli' });
   const kill = opts.kill ?? ((pid: number, sig: NodeJS.Signals) => { process.kill(pid, sig); });
-  const live = !!m.pid && isProcessAlive(m.pid);
-  if (live && m.pid === process.pid) {
-    // Runs in this very process (foreground / inline): the runner's poller sees the flag.
+  // Only an ACTIVE mission has a runner to stop. (A paused one may still name the
+  // process that last ran it — never signal that.) A booting worker of a resumed
+  // mission sees cancel_requested on its own.
+  const live = isActiveStatus(m.status) && !!m.pid && isWorkerAlive(m);
+  if (live && (m.pid === process.pid || m.worker_shared)) {
+    // Runs inline in this process or in another shared host (a TUI): never signal
+    // the host — its runner polls the flag and stops within a second.
     return { ok: true, signalled: false, mission: store.get(m.id), message: `Cancelling mission ${m.id}…` };
   }
   if (live) {
@@ -265,7 +277,7 @@ export function prepareResume(
   const m = store.reconcile(m0.id) ?? m0;
   // Any live worker — even one still booting (status not yet 'running') — owns it.
   // (In this very process it only counts while the mission is active — inline runs.)
-  if (m.pid && isProcessAlive(m.pid) && (m.pid !== process.pid || isActiveStatus(m.status))) {
+  if (m.pid && isWorkerAlive(m) && (m.pid !== process.pid || isActiveStatus(m.status))) {
     return { ok: false, mission: m, message: `Mission ${m.id} is already running (worker pid ${m.pid}).` };
   }
   if (m.status === 'completed') {
@@ -321,8 +333,10 @@ export function answerMissionApproval(
   opts: { store?: MissionStore; by?: string } = {},
 ): ApprovalAnswerResult {
   const store = opts.store ?? getMissionStore();
-  const m = store.resolve(missionIdOrPrefix);
-  if (!m) return { ok: false, message: `[MISSION_NOT_FOUND] No mission matches "${missionIdOrPrefix}".` };
+  const m0 = store.resolve(missionIdOrPrefix);
+  if (!m0) return { ok: false, message: `[MISSION_NOT_FOUND] No mission matches "${missionIdOrPrefix}".` };
+  // A worker that died can't act on an answer: its approvals expire first.
+  const m = store.reconcile(m0.id) ?? m0;
   const pending = store.listPendingApprovals(m.id);
   let target: MissionApprovalRow | undefined;
   if (approvalIdOrPrefix) {
@@ -344,8 +358,11 @@ export function answerMissionApproval(
 /** Answer an approval by its (globally unique) id. */
 export function answerApprovalById(approvalId: string, answer: string, opts: { store?: MissionStore; by?: string } = {}): ApprovalAnswerResult {
   const store = opts.store ?? getMissionStore();
-  const a = store.getApproval(approvalId);
-  if (!a) return { ok: false, message: `[APPROVAL_NOT_FOUND] No approval ${approvalId}.` };
+  const a0 = store.getApproval(approvalId);
+  if (!a0) return { ok: false, message: `[APPROVAL_NOT_FOUND] No approval ${approvalId}.` };
+  // Approving for a dead worker would look accepted but nothing would ever act on it.
+  if (a0.status === 'pending') store.reconcile(a0.mission_id);
+  const a = store.getApproval(approvalId) ?? a0;
   const r = store.resolveApproval(a.id, answer, opts.by ?? 'cli');
   const mission = store.get(a.mission_id);
   if (!r.ok) return { ok: false, mission, approval: a, status: r.status, answer: r.answer, message: r.reason ?? 'Could not answer the approval.' };
@@ -413,7 +430,7 @@ export function summarizeMission(store: MissionStore, idOrRow: string | MissionR
     error: m.error,
     approvalMode: m.approval_mode,
     workerPid: m.pid,
-    workerAlive: isProcessAlive(m.pid),
+    workerAlive: isWorkerAlive(m),
     logFile: m.log_file,
   };
 }

@@ -134,6 +134,10 @@ export interface MissionWorkerOptions {
   /** Default true. Tests pass false to keep process listeners untouched. */
   installSignalHandlers?: boolean;
   pollIntervalMs?: number;
+  /** A human sits at this terminal (default: foreground run with a TTY stdin). */
+  interactive?: boolean;
+  /** The terminal prompt used when `interactive` (default: a readline prompt on stdin). */
+  localAsker?: LocalAsker;
 }
 
 /**
@@ -143,7 +147,7 @@ export interface MissionWorkerOptions {
  */
 export async function runMissionWorker(id: string, boot: MissionBootFn, opts: MissionWorkerOptions = {}): Promise<number> {
   const print = opts.print ?? ((l: string) => console.log(l));
-  const { getMissionStore, isProcessAlive } = await import('./store.js');
+  const { getMissionStore } = await import('./store.js');
   const store = opts.store ?? getMissionStore();
   const m0 = store.resolve(id);
   if (!m0) { print(`[MISSION_NOT_FOUND] No mission matches "${id}".`); return 2; }
@@ -153,11 +157,11 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
     return 0;
   }
   // Another live process owns it (e.g. a second worker spawned by a duplicate resume).
-  if (m0.pid && m0.pid !== process.pid && isProcessAlive(m0.pid)) {
-    print(`[MISSION_BUSY] Mission ${missionId} is already being run by pid ${m0.pid}.`);
+  // The claim is atomic, so two workers racing here can't both win.
+  if (!store.claimWorker(missionId, process.pid)) {
+    print(`[MISSION_BUSY] Mission ${missionId} is already being run by pid ${store.get(missionId)?.pid}.`);
     return 3;
   }
-  store.update(missionId, { pid: process.pid });
 
   const { installWorkerSignalHandlers } = await import('./daemon.js');
   const ac = new AbortController();
@@ -168,6 +172,7 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
     b = await boot();
   } catch (e: any) {
     store.setStatus(missionId, 'failed', { error: `[MISSION_BOOT_FAILED] ${e?.message ?? e}` });
+    store.releaseWorker(missionId, process.pid);
     print(`[MISSION_BOOT_FAILED] ${e?.message ?? e}`);
     disposeSignals();
     return 1;
@@ -192,9 +197,21 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
   const host = newAgent();
   taskMod.setSubAgentRunner((p, o) => host.runSubagent(p, o));
   loopMod.setActiveAgent(host);
-  const interactive = !!opts.foreground && !!process.stdin.isTTY;
-  approvals.setInteractiveHuman(interactive);
-  const local = interactive ? makeTtyAsker(print) : undefined;
+  const approvalMode = store.get(missionId)?.approval_mode === 'auto' ? 'auto' : 'ask';
+  const tty = opts.interactive ?? (!!opts.foreground && !!process.stdin.isTTY);
+  const terminal: LocalAsker | undefined = tty ? (opts.localAsker ?? makeTtyAsker(print)) : undefined;
+  // Sentinel sends CRITICAL actions (purchases, payments, sending, credentials)
+  // through ctx.askUser only when a human sits at this process's askUser. With
+  // `--yes` ('auto') the step's askUser auto-answers ordinary prompts, so it must
+  // NOT count as a human — otherwise a critical action would be auto-approved too.
+  // In that mode the terminal is just another approval channel next to the
+  // mission queue (and the control center / Telegram).
+  const humanAtAskUser = !!terminal && approvalMode !== 'auto';
+  approvals.setInteractiveHuman(humanAtAskUser);
+  const local = humanAtAskUser ? terminal : undefined;
+  const unregisterTerminal = terminal && !humanAtAskUser
+    ? approvals.getApprovalBroker().registerChannel(new runnerMod.TerminalApprovalChannel(terminal, missionId))
+    : () => {};
 
   let hookDispose: (() => void | Promise<void>) | undefined;
   if (opts.onStart) {
@@ -211,10 +228,14 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
   print(`QodeX mission ${missionId} — worker pid ${process.pid}`);
   print(`Goal: ${m.goal}`);
   print(`Dir:  ${m.cwd}${m.model ? `   Model: ${m.model}` : ''}   Approvals: ${m.approval_mode}`);
-  if (store.get(missionId)?.live_url) print(`Live: ${store.get(missionId)!.live_url}`);
+  // The log is readable by the mission's own agents: never print the live view's token there.
+  if (store.get(missionId)?.live_url) {
+    print(`Live: ${toolsMod.redactLiveUrl(store.get(missionId)!.live_url)}  (open it with: qodex mission status ${missionId})`);
+  }
 
   const stepAgents = new Map<string, InstanceType<typeof loopMod.AgentLoop>>();
   let result: MissionRunResult | null = null;
+  let busy = false;
   try {
     result = await runnerMod.runMission(missionId, {
       store,
@@ -227,7 +248,8 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
         approvalMode: store.get(missionId)?.approval_mode,
         signal,
         local,
-        audit: (prompt, answer) => store.appendEvent(missionId, 'auto-approved', { stepId, prompt: prompt.slice(0, 500), answer }),
+        // The timeline is shown remotely: mask secrets in e.g. an approved shell command line.
+        audit: (prompt, answer) => store.appendEvent(missionId, 'auto-approved', { stepId, prompt: runnerMod.safeLine(prompt, 500), answer }),
       }),
       humanApproval: local
         ? async (req, signal) => (await approvals.getApprovalBroker().request({
@@ -253,10 +275,17 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
       notify: opts.notify,
     });
   } catch (e: any) {
-    print(`[MISSION_ERROR] ${e?.message ?? e}`);
-    try { store.setStatus(missionId, 'failed', { error: `[MISSION_ERROR] ${e?.message ?? e}` }); } catch { /* ignore */ }
+    const msg = String(e?.message ?? e);
+    busy = /^\[MISSION_BUSY\]/.test(msg);
+    print(busy ? msg : `[MISSION_ERROR] ${msg}`);
+    // Lost the mission to another worker: it is not ours to fail.
+    if (!busy) {
+      try { store.setStatus(missionId, 'failed', { error: `[MISSION_ERROR] ${msg}` }); } catch { /* ignore */ }
+      try { store.releaseWorker(missionId, process.pid); } catch { /* ignore */ }
+    }
   } finally {
     disposeSignals();
+    unregisterTerminal();
     taskMod.setSubAgentRunner(null);
     loopMod.setActiveAgent(null);
     approvals.setInteractiveHuman(false);
@@ -264,6 +293,7 @@ export async function runMissionWorker(id: string, boot: MissionBootFn, opts: Mi
     try { await b.mcpManager?.stopAll(); } catch { /* ignore */ }
   }
 
+  if (busy) return 3;
   const final = store.get(missionId);
   print('');
   print(`Mission ${missionId} finished: ${final?.status ?? result?.status ?? 'unknown'}${final?.error ? ` — ${final.error}` : ''}`);
@@ -321,6 +351,31 @@ async function loadActiveConfig(cwd: string): Promise<void> {
   } catch { /* defaults apply */ }
 }
 
+/**
+ * True when this CLI runs inside a mission worker's process tree — i.e. a step's
+ * agent ran `qodex mission …` through its shell tool (the worker's env, including
+ * QODEX_MISSION_ID, is inherited). Approvals must come from a human, never from the
+ * agent that asked for them.
+ */
+function insideMission(): boolean {
+  return !!process.env.QODEX_MISSION_ID?.trim();
+}
+
+/**
+ * A subcommand's options merged with the root program's. `qodex` itself declares
+ * `--json`, `-y/--yes` and `-m/--model` globally, and commander lets the root
+ * consume those even when they FOLLOW `mission start …` — without this,
+ * `qodex mission start --yes --model x --json` silently ran in 'ask' mode on the
+ * default model, and scheduled mission routines (`mission start --yes …`) lost
+ * their flags too.
+ */
+function flags(cmd: Command): Record<string, any> {
+  const own = cmd.opts();
+  const merged: Record<string, any> = { ...own };
+  for (const [k, v] of Object.entries(cmd.optsWithGlobals())) if (merged[k] === undefined) merged[k] = v;
+  return merged;
+}
+
 function fail(message: string): void {
   console.error(message);
   process.exitCode = 1;
@@ -367,7 +422,8 @@ export function buildMissionCommand(
     .option('--budget <usd>', 'Cost cap in USD before the mission pauses for approval (default: missions.maxCostUsd)')
     .option('--json', 'Print the result as JSON')
     .addOption(new Option('--from-schedule <id>', 'Started by a scheduled routine').hideHelp())
-    .action(async (goalParts: string[], o: any) => {
+    .action(async (goalParts: string[], _o: any, cmd: Command) => {
+      const o = flags(cmd);
       const goal = (goalParts ?? []).join(' ').trim();
       if (!goal) { fail('[MISSION_INVALID] Give the mission a goal: qodex mission start "<goal>"'); return; }
       const cwd = path.resolve(o.cwd ?? process.cwd());
@@ -400,7 +456,8 @@ export function buildMissionCommand(
     .option('-n, --limit <n>', 'How many to show', '20')
     .option('--active', 'Only missions that are running or waiting for approval')
     .option('--json', 'Print as JSON')
-    .action(async (o: any) => {
+    .action(async (_o: any, cmd: Command) => {
+      const o = flags(cmd);
       const { listMissionSummaries } = await import('./daemon.js');
       const { formatMissionLine } = await import('./tools.js');
       const list = listMissionSummaries({ limit: parseInt(o.limit, 10) || 20, activeOnly: !!o.active });
@@ -415,15 +472,20 @@ export function buildMissionCommand(
     .command('status <id>')
     .description('Show a mission: steps, milestones, pending approvals, cost and report')
     .option('--json', 'Print as JSON')
-    .action(async (id: string, o: any) => {
+    .action(async (id: string, _o: any, cmd: Command) => {
+      const o = flags(cmd);
       const r = await resolveOrFail(id);
       if (!r) return;
       const { summarizeMission } = await import('./daemon.js');
       const { formatMissionStatus } = await import('./tools.js');
       const s = summarizeMission(r.store, r.m);
       if (!s) { fail(`[MISSION_NOT_FOUND] ${id}`); return; }
-      if (o.json) console.log(JSON.stringify({ ...s, report: r.store.get(s.id)?.report ?? null, steps_detail: r.store.steps(s.id) }, null, 2));
-      else console.log(formatMissionStatus(r.store, s));
+      // From inside a mission (an agent's shell) the live view's token stays hidden.
+      const reveal = !insideMission();
+      const { redactLiveUrl } = await import('./tools.js');
+      const view = reveal ? s : { ...s, liveUrl: s.liveUrl ? redactLiveUrl(s.liveUrl) : null };
+      if (o.json) console.log(JSON.stringify({ ...view, report: r.store.get(s.id)?.report ?? null, steps_detail: r.store.steps(s.id) }, null, 2));
+      else console.log(formatMissionStatus(r.store, view, { revealLiveUrl: reveal }));
     });
 
   mission
@@ -451,6 +513,10 @@ export function buildMissionCommand(
     });
 
   const answer = (verb: 'approve' | 'deny') => async (id: string, approvalId: string | undefined, o: any) => {
+    if (verb === 'approve' && insideMission()) {
+      fail(`[MISSION_APPROVAL_FORBIDDEN] Mission approvals must come from a human (qodex mission approve in your own terminal, the control center or Telegram) — not from inside mission ${process.env.QODEX_MISSION_ID}.`);
+      return;
+    }
     const { answerMissionApproval } = await import('./daemon.js');
     let ans = verb === 'deny' ? 'no' : (o.answer ?? (o.always ? 'always' : 'yes'));
     let res = answerMissionApproval(id, approvalId, ans, { by: 'cli' });
@@ -481,6 +547,11 @@ export function buildMissionCommand(
     .command('steer <id> <note...>')
     .description('Send a steering note to the running mission (picked up within a second)')
     .action(async (id: string, note: string[]) => {
+      // A steering note reaches the mission's agents with the USER's authority.
+      if (insideMission()) {
+        fail(`[MISSION_STEER_FORBIDDEN] Steering notes must come from a human, not from inside mission ${process.env.QODEX_MISSION_ID}.`);
+        return;
+      }
       const { steerMission } = await import('./daemon.js');
       const res = steerMission(id, (note ?? []).join(' '), { by: 'cli' });
       if (res.ok) console.log(res.message); else fail(res.message);
@@ -501,7 +572,8 @@ export function buildMissionCommand(
     .option('--foreground', 'Run in this terminal instead of a detached worker')
     .option('-y, --yes', 'Switch to auto-approving ordinary permission prompts')
     .option('--budget <usd>', 'New cost cap in USD')
-    .action(async (id: string, o: any) => {
+    .action(async (id: string, _o: any, cmd: Command) => {
+      const o = flags(cmd);
       const r = await resolveOrFail(id);
       if (!r) return;
       await loadActiveConfig(r.m.cwd);
@@ -528,9 +600,9 @@ export function buildMissionCommand(
     .action(async (id: string) => {
       const r = await resolveOrFail(id);
       if (!r) return;
-      const { isActiveStatus, isProcessAlive } = await import('./store.js');
+      const { isActiveStatus, isWorkerAlive } = await import('./store.js');
       const m = r.store.reconcile(r.m.id) ?? r.m;
-      if (isActiveStatus(m.status) && isProcessAlive(m.pid)) { fail(`Mission ${m.id} is running — cancel it first: qodex mission cancel ${m.id}`); return; }
+      if (isActiveStatus(m.status) && isWorkerAlive(m)) { fail(`Mission ${m.id} is running — cancel it first: qodex mission cancel ${m.id}`); return; }
       r.store.remove(m.id);
       if (m.log_file) { try { fs.unlinkSync(m.log_file); } catch { /* already gone */ } }
       console.log(`✓ Removed mission ${m.id}.`);
@@ -580,7 +652,9 @@ export async function attachToMission(
       const text = line.trim();
       if (!text) return;
       const pending = store.listPendingApprovals(missionId);
-      if (pending.length) {
+      if (pending.length && insideMission()) {
+        print('  [MISSION_APPROVAL_FORBIDDEN] approvals must come from a human, not from inside a mission');
+      } else if (pending.length) {
         const res = answerApprovalById(pending[0]!.id, text, { store, by: 'attach' });
         print(res.ok ? res.message : `  ${res.message}`);
       } else {

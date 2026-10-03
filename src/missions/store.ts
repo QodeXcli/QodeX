@@ -22,6 +22,7 @@
  */
 import type Database from 'better-sqlite3';
 import { randomBytes } from 'crypto';
+import * as fs from 'fs';
 import { openDatabase } from '../utils/sqlite.js';
 import { QODEX_SESSION_DB } from '../config/defaults.js';
 import { normalizeAnswer, safeOption, isApproval } from '../control/approvals.js';
@@ -82,6 +83,10 @@ export interface MissionRow {
   /** Who started it: 'cli', 'tool', 'schedule:<id>', 'telegram', 'control', ... */
   source: string | null;
   log_file: string | null;
+  /** Start identity of the `pid` process (Linux: start time since boot) — guards against pid reuse. */
+  pid_start: string | null;
+  /** 1 = `pid` is a shared host running the mission inline (a TUI): never signal it. */
+  worker_shared: 0 | 1;
 }
 
 export interface MissionStepRow {
@@ -221,10 +226,12 @@ const LATE_COLUMNS: Array<[string, string, string]> = [
   ['mission_steps', 'error', 'TEXT'],
   ['mission_steps', 'cost_usd', 'REAL NOT NULL DEFAULT 0'],
   ['mission_approvals', 'risk', 'TEXT'],
+  ['missions', 'pid_start', 'TEXT'],
+  ['missions', 'worker_shared', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
 const MISSION_PATCH_KEYS = [
-  'goal', 'cwd', 'model', 'plan_json', 'report', 'live_url', 'pid', 'error',
+  'goal', 'cwd', 'model', 'plan_json', 'report', 'live_url', 'pid', 'pid_start', 'worker_shared', 'error',
   'approval_mode', 'cost_cap_usd', 'source', 'log_file', 'started_at', 'finished_at',
 ] as const;
 export type MissionPatch = Partial<Pick<MissionRow, typeof MISSION_PATCH_KEYS[number]>>;
@@ -244,6 +251,36 @@ export function isProcessAlive(pid: number | null | undefined): boolean {
   } catch (e: any) {
     return e?.code === 'EPERM';
   }
+}
+
+/**
+ * Identity of a process beyond its pid, so a pid the OS reused after the worker
+ * died (crash, kill -9, power loss) is not mistaken for the worker. Linux: the
+ * start time in clock ticks since boot (/proc/<pid>/stat field 22, fixed at fork,
+ * unchanged by exec). Null where unknown (other platforms, process gone).
+ */
+export function processStartToken(pid: number | null | undefined): string | null {
+  if (!pid || !Number.isInteger(pid) || pid <= 0 || process.platform !== 'linux') return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // "pid (comm) state ppid …" — comm may contain spaces/parens, so split after the LAST ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const start = fields[19]; // field 22 overall; fields[0] is field 3 (state)
+    return start && /^\d+$/.test(start) ? start : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the mission's recorded worker still runs AND is the same process that
+ * claimed the mission (its start identity matches, where the platform tells us).
+ */
+export function isWorkerAlive(m: { pid: number | null; pid_start?: string | null }): boolean {
+  if (!isProcessAlive(m.pid)) return false;
+  if (!m.pid_start) return true;
+  const now = processStartToken(m.pid);
+  return now === null || now === m.pid_start;
 }
 
 export function stepDeps(step: Pick<MissionStepRow, 'depends_on_json'>): string[] {
@@ -382,10 +419,40 @@ export class MissionStore {
     for (const k of MISSION_PATCH_KEYS) {
       if (k in patch) { sets.push(`${k} = ?`); params.push((patch as any)[k] ?? null); }
     }
+    if ('pid' in patch && !('pid_start' in patch)) {
+      // A pid is only meaningful together with the identity of that process.
+      sets.push('pid_start = ?');
+      params.push(processStartToken(patch.pid));
+    }
     if (!sets.length) return;
     sets.push('updated_at = ?');
     params.push(this.iso(), id);
     this.db.prepare(`UPDATE missions SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  /**
+   * Record `pid` as the process running the mission — atomically, and only if no
+   * OTHER live process holds it (two racing `resume`s must not start two workers).
+   * `shared` marks a host that runs the mission inline (TUI): it is never signalled.
+   * Returns false when another live worker owns the mission.
+   */
+  claimWorker(id: string, pid: number, opts: { shared?: boolean } = {}): boolean {
+    const m = this.get(id);
+    if (!m) return false;
+    const holder = m.pid ?? null;
+    if (holder && holder !== pid && isWorkerAlive(m)) return false;
+    // Compare-and-set on the holder we saw, so a concurrent claim can't be overwritten.
+    const r = this.db.prepare(`
+      UPDATE missions SET pid = ?, pid_start = ?, worker_shared = ?, updated_at = ? WHERE id = ? AND pid IS ?
+    `).run(pid, processStartToken(pid), opts.shared ? 1 : 0, this.iso(), id, holder);
+    return r.changes === 1;
+  }
+
+  /** `pid` stopped running the mission: forget it (no-op if another process claimed it since). */
+  releaseWorker(id: string, pid: number): void {
+    this.db.prepare(`
+      UPDATE missions SET pid = NULL, pid_start = NULL, worker_shared = 0, updated_at = ? WHERE id = ? AND pid = ?
+    `).run(this.iso(), id, pid);
   }
 
   /**
@@ -462,7 +529,7 @@ export class MissionStore {
   reconcile(id: string): MissionRow | undefined {
     const m = this.get(id);
     if (!m) return undefined;
-    if (!isActiveStatus(m.status) || !m.pid || isProcessAlive(m.pid)) return m;
+    if (!isActiveStatus(m.status) || !m.pid || isWorkerAlive(m)) return m;
     this.resetRunningSteps(id);
     this.expirePendingApprovals(id, 'worker-exited');
     if (m.cancel_requested) {

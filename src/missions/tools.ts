@@ -20,6 +20,9 @@ import { getBus } from '../control/bus.js';
 import { resolveMissionsConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
 import { notifyDesktop } from '../utils/notify.js';
+import { isApproval } from '../control/approvals.js';
+import { maskSecrets } from '../sentinel/policy.js';
+import { fenceUntrusted, scanInjection } from '../sentinel/injection.js';
 import { getMissionStore, type MissionEvent, type MissionStore } from './store.js';
 import { getMissionContext, type AskUser, type MissionRunResult } from './runner.js';
 import {
@@ -62,8 +65,24 @@ export function formatMissionLine(s: MissionSummary, now: number = Date.now()): 
 
 const STEP_MARK: Record<string, string> = { pending: '·', running: '▶', done: '✓', failed: '✗', skipped: '⤼' };
 
-/** Multi-line status report of one mission. */
-export function formatMissionStatus(store: MissionStore, s: MissionSummary, opts: { milestones?: number; now?: number } = {}): string {
+/**
+ * A mission's live view URL carries its control center's access token, which
+ * grants everything the dashboard can do — including answering approvals. Text
+ * an agent can read (tool results, the worker log) gets it without the token, so
+ * an agent can never open the dashboard in its own browser and approve its own
+ * critical actions.
+ */
+export function redactLiveUrl(url: string | null | undefined): string {
+  const u = String(url ?? '');
+  return u.replace(/([?&#](?:k|token|key)=)[^&#\s]+/gi, '$1…');
+}
+
+/** Multi-line status report of one mission (the live view's token only with revealLiveUrl). */
+export function formatMissionStatus(
+  store: MissionStore,
+  s: MissionSummary,
+  opts: { milestones?: number; now?: number; /** Show the live URL with its token (human-only output). */ revealLiveUrl?: boolean } = {},
+): string {
   const now = opts.now ?? Date.now();
   const lines: string[] = [];
   const prog = s.steps.total ? ` (${s.steps.done}/${s.steps.total} steps done)` : '';
@@ -73,7 +92,11 @@ export function formatMissionStatus(store: MissionStore, s: MissionSummary, opts
   const cap = s.costCapUsd > 0 ? ` (cap $${s.costCapUsd.toFixed(2)})` : '';
   lines.push(`Created ${relTime(s.createdAt, now)}${s.startedAt ? ` · started ${relTime(s.startedAt, now)}` : ''}${s.finishedAt ? ` · finished ${relTime(s.finishedAt, now)}` : ''} · Cost $${s.costUsd.toFixed(4)}${cap} · Tokens ${s.tokensIn} in / ${s.tokensOut} out`);
   if (s.workerPid) lines.push(`Worker: pid ${s.workerPid} (${s.workerAlive ? 'alive' : 'not running'})${s.logFile ? ` · Log: ${s.logFile}` : ''}`);
-  if (s.liveUrl) lines.push(`Live view: ${s.liveUrl}`);
+  if (s.liveUrl) {
+    lines.push(opts.revealLiveUrl
+      ? `Live view: ${s.liveUrl}`
+      : `Live view: ${redactLiveUrl(s.liveUrl)} (the user opens it with: qodex mission status ${s.id})`);
+  }
 
   const steps = store.steps(s.id);
   if (steps.length) {
@@ -192,6 +215,43 @@ function err(content: string): ToolResult {
   return { content, isError: true };
 }
 
+/**
+ * Starting a mission launches autonomous work that outlives this session and
+ * spends model budget, so it goes through the permission flow exactly like the
+ * equivalent shell command (`qodex mission start …`) would: allowed by `/auto` or
+ * an autoApprove rule, refused by autoReject, otherwise the user is asked. Without
+ * this, text planted in a web page could make the agent start detached work the
+ * user never sees being created.
+ */
+async function confirmMissionStart(goal: string, cwd: string, detach: boolean, ctx: ToolContext): Promise<ToolResult | null> {
+  const operation = `mission_start ${oneLine(goal, 400)}`;
+  const description = detach ? 'start a background mission' : 'run a mission in this session';
+  let decision: 'allow' | 'ask' | 'deny' = 'ask';
+  try {
+    decision = ctx.permissions ? ctx.permissions.evaluate({ tool: 'mission_start', operation, description }) : 'ask';
+  } catch {
+    decision = 'ask';
+  }
+  if (decision === 'allow') return null;
+  if (decision === 'deny') {
+    return err('[PERMISSION_DENIED] Starting this mission was blocked by your security.autoReject rules.');
+  }
+  try { ctx.emit({ type: 'permission-request', tool: 'mission_start', operation, description }); } catch { /* UI only */ }
+  const options = ['yes', 'no'];
+  let answer = 'no';
+  try {
+    answer = await ctx.askUser(
+      `Start a ${detach ? 'background ' : ''}mission?\n  Goal: ${oneLine(goal, 400)}\n  Dir: ${cwd}` +
+      (detach ? '\n  It keeps working after this session ends; its approvals reach you via qodex mission approve, the control center or Telegram.' : ''),
+      options,
+    );
+  } catch {
+    answer = 'no';
+  }
+  if (isApproval(answer, options)) return null;
+  return err('[USER_REJECTED] The user declined to start this mission. Do not retry; ask the user how to proceed.');
+}
+
 function errMessage(e: any, code: string): string {
   const m = String(e?.message ?? e);
   return /^\[[A-Z_]+\]/.test(m) ? m : `[${code}] ${m}`;
@@ -231,6 +291,8 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
     }
     const cwd = args.cwd ? path.resolve(ctx.cwd, args.cwd) : ctx.cwd;
     const detach = args.detach ?? true;
+    const refused = await confirmMissionStart(args.goal, cwd, detach, ctx);
+    if (refused) return refused;
     const store = getMissionStore();
 
     if (!detach) {
@@ -252,8 +314,11 @@ export class MissionStartTool extends Tool<z.infer<typeof StartArgs>> {
       });
       const summary = summarizeMission(store, id);
       const body = summary ? formatMissionStatus(store, summary) : `Mission ${id}: ${r.status}`;
+      // The status/report relays what the mission's steps read (web pages, emails…):
+      // hand it to the model as data, keeping our own first line trusted.
+      const data = fenceUntrusted(body, `mission ${id} status and report`, scanInjection(body));
       return {
-        content: `[MISSION_${r.status.toUpperCase()}] Mission ${id} finished with status ${r.status}.\n\n${body}`,
+        content: `[MISSION_${r.status.toUpperCase()}] Mission ${id} finished with status ${r.status}.\n\n${data}`,
         isError: r.status === 'failed',
         metadata: { missionId: id, status: r.status },
       };
@@ -290,6 +355,8 @@ export class MissionStatusTool extends Tool<z.infer<typeof StatusArgs>> {
     'live-view URL and, when finished, the final report. Without an id: the current/latest mission.';
   isReadOnly = true;
   isDestructive = false;
+  /** Step results, milestones and the report relay web pages / emails / files. */
+  untrustedOutput = true;
   argsSchema = StatusArgs;
 
   async execute(args: z.infer<typeof StatusArgs>, ctx: ToolContext): Promise<ToolResult> {
@@ -378,8 +445,10 @@ export class MissionMilestoneTool extends Tool<z.infer<typeof MilestoneArgs>> {
       const running = store.steps(mission.id).filter(s => s.status === 'running');
       if (running.length === 1) stepId = running[0]!.id;
     }
-    const title = oneLine(args.title, 200);
-    const detail = args.detail ? args.detail.trim().slice(0, 2000) : undefined;
+    // Milestones fan out to the timeline, the control center, Telegram and desktop
+    // notifications: mask anything secret-looking the agent put in them.
+    const title = oneLine(maskSecrets(args.title.slice(0, 2000)), 200);
+    const detail = args.detail ? maskSecrets(args.detail.trim().slice(0, 2000)) : undefined;
     const progress = typeof args.progress === 'number' && Number.isFinite(args.progress)
       ? Math.max(0, Math.min(100, args.progress)) : undefined;
     const payload = { stepId: stepId ?? undefined, title, detail, progress };
