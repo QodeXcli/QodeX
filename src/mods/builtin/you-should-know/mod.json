@@ -1,0 +1,6 @@
+{
+  "name": "you-should-know",
+  "description": "After each turn a fast model looks over the recent work and leaves a one-line heads-up when something was missed (a failing test, an unverified claim, a TODO left)",
+  "version": "1.0.0",
+  "enabledByDefault": false
+}

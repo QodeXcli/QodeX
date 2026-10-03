@@ -1,0 +1,6 @@
+{
+  "name": "sample-hello",
+  "description": "Sample mod (docs only): /hello-tabs opens a pane with two tabs and a counter, like Claude Code's hello-tabs",
+  "version": "1.0.0",
+  "enabledByDefault": false
+}
