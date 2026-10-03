@@ -34,10 +34,10 @@ export function isStateDependentTool(name: string): boolean {
   return name.startsWith('browser_') || name.startsWith('computer_use_') || STATUS_POLL_TOOLS.has(name);
 }
 
-/** Short stable hash of a tool result (8 hex chars). PURE. */
+/** Short stable hash of a tool result (8 hex chars; a dedupe key, not a security boundary). PURE. */
 export function resultHash(content: unknown): string {
   const s = typeof content === 'string' ? content : JSON.stringify(content ?? '');
-  return createHash('md5').update(s).digest('hex').slice(0, 8);
+  return createHash('sha256').update(s).digest('hex').slice(0, 8);
 }
 
 /**
