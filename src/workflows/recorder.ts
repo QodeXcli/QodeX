@@ -1354,10 +1354,10 @@ export class WorkflowRecorder {
   private onAction(rec: BrowserActionRecord): void {
     if (this.state !== 'recording' || !rec || typeof rec.tool !== 'string') return;
     const actor = rec.actor === 'human' ? 'human' : 'agent';
-    if (this.skipChallenge(rec.element, actor)) return;
     if (this.opts.source === 'agent' && actor !== 'agent') return;
     // A human demonstration keeps the agent's navigations: they set up where the demo starts.
     if (this.opts.source === 'human' && actor !== 'human' && !isNavigational(rec.tool, rec.args)) return;
+    if (this.skipChallenge(rec.element, actor)) return;
     const raw: RawRecord = {
       origin: 'action',
       tool: rec.tool,
