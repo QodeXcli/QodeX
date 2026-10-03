@@ -8,13 +8,13 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import * as srv from '../src/control/server.js';
 import {
   startControlCenter,
   stopControlCenter,
   stripTokenFromUrl,
   busEventJson,
   setTunnelStarterForTests,
+  controlServerForTests,
   type ControlCenterInfo,
 } from '../src/control/server.js';
 import { getBus } from '../src/control/bus.js';
@@ -170,7 +170,7 @@ describe('salvaged control hardening — headers', () => {
 
 describe('salvaged control hardening — robustness', () => {
   it('survives a server error emitted after listening (e.g. EMFILE on accept)', async () => {
-    const server = (srv as unknown as { controlServerForTests?: () => import('node:http').Server | null }).controlServerForTests?.() ?? null;
+    const server = controlServerForTests();
     expect(server).not.toBeNull();
     const err = Object.assign(new Error('accept EMFILE'), { code: 'EMFILE' });
     // Without a persistent 'error' listener this throws (and would crash the process).

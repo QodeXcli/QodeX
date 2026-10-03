@@ -944,6 +944,11 @@ async function launch(opts: ControlCenterOptions): Promise<Running> {
   });
 
   rt.port = await listenWithFallback(server, port, host);
+  // A listening net.Server still emits 'error' (e.g. EMFILE on accept). Unhandled,
+  // that would crash the whole QodeX process (TUI, mission worker) it runs in.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    logger.warn('Control center server error', { err: errMessage(err), code: err?.code });
+  });
 
   // Human approvals: make this a remote channel so unattended runs can ask here.
   const channel: ApprovalChannel = {
@@ -1101,6 +1106,11 @@ export function stopControlCenter(): Promise<boolean> {
 /** Info about the running control center, or null. */
 export function getControlCenter(): ControlCenterInfo | null {
   return current ? infoOf(current) : null;
+}
+
+/** Test hook: the running node:http server (or null). */
+export function controlServerForTests(): Server | null {
+  return current?.server ?? null;
 }
 
 // ── request handling ──────────────────────────────────────────────────────────
