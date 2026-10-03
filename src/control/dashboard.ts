@@ -662,7 +662,9 @@ const SCRIPT = String.raw`
     e.preventDefault();
     if (a.kind === 'text') {
       typeBuf += a.text;
-      clearTimeout(typeTimer); typeTimer = setTimeout(flushType, 120);
+      clearTimeout(typeTimer);
+      // (flush long bursts early: the server takes at most 10000 characters per event)
+      if (typeBuf.length >= 2000) flushType(); else typeTimer = setTimeout(flushType, 120);
       return;
     }
     flushType();

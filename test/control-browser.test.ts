@@ -352,6 +352,16 @@ describe('control center dashboard in a real browser', () => {
     expect(await target.evaluate('document.getElementById("i").value')).toBe('😀@');
     await target.close();
 
+    // A long burst of typing is flushed in chunks (the server takes at most 10000 characters per event).
+    fake.inputs = [];
+    await page.evaluate(`(function () {
+      var s = document.getElementById('screen');
+      for (var i = 0; i < 2500; i++) s.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true }));
+    })()`);
+    const typedLen = () => fake.inputs.reduce((n, e) => n + (e.type === 'type' ? e.text.length : 0), 0);
+    expect(await waitUntil(() => typedLen() === 2500)).toBe(true);
+    expect(fake.inputs.map(e => (e.type === 'type' ? e.text.length : -1))).toEqual([2000, 500]);
+
     expect(pageErrors).toEqual([]);
     await handBack(page);
   }, 60_000);
