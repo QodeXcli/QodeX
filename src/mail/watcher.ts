@@ -349,9 +349,13 @@ export class MailWatcher {
             const f = a.folders[this.folder];
             if (f) seen = f.lastUid + 1;
           }).catch(() => {});
+          // stop() may have landed during that await: a listener added to an already
+          // aborted signal never fires, so the wait would run to its timeout.
+          if (signal.aborted) break;
           await source.waitForChange(this.folder, idleMax, signal, seen);
         } else {
           await this.state.update(account, a => { a.mode = 'poll'; }).catch(() => {});
+          if (signal.aborted) break;
           await sleep(pollMs, signal);
         }
       } catch (e: any) {

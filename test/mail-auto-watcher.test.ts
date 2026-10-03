@@ -55,6 +55,7 @@ class FakeMailbox {
         self.waitedSince.push(sinceUidNext);
         // Like a real IMAP SELECT before IDLE: mail already past what the caller saw ends the wait at once.
         if (sinceUidNext !== undefined && self.messages.some(m => m.uid >= sinceUidNext)) { resolve(); return; }
+        if (signal.aborted) { resolve(); return; }
         const t = setTimeout(done, maxMs);
         function done() { clearTimeout(t); signal.removeEventListener('abort', done); resolve(); }
         self.waiters.push(done);
@@ -244,6 +245,37 @@ describe('MailWatcher loop', () => {
     await waitFor(() => events.filter(e => e.type === 'new-mail').length >= 2); // far below the 60 s IDLE timeout
     await w.stop();
     expect(box.waitedSince.every(v => typeof v === 'number')).toBe(true);
+  }, 30_000);
+
+  it('stop() during the step before the IDLE wait ends the loop at once (no wait on an already aborted signal)', async () => {
+    const box = new FakeMailbox(false);
+    let waits = 0;
+    const src: WatchSource = {
+      ...box.source(),
+      // A source that, like a real IDLE connection, only listens for 'abort' events.
+      waitForChange: (_f, maxMs, signal) => new Promise<void>((resolve) => {
+        waits++;
+        const t = setTimeout(resolve, maxMs);
+        signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      }),
+    };
+    let w: MailWatcher;
+    let stopAt: Promise<void> | null = null;
+    class StopDuringUpdate extends WatchStateStore {
+      override async update(account: string, fn: Parameters<WatchStateStore['update']>[1]) {
+        const r = await super.update(account, fn);
+        const st = (await this.read()).accounts[account];
+        if (st?.mode === 'idle' && !stopAt) stopAt = w.stop(); // aborts while the loop awaits this update
+        return r;
+      }
+    }
+    w = new MailWatcher({ accounts: ['work'], factory: async () => src, state: new StopDuringUpdate(path.join(tmp, 'state2.json')), index, rules, startRun, publish: () => {}, idleMaxMs: 60_000 });
+    const t0 = Date.now();
+    await w.start();
+    await waitFor(() => stopAt !== null);
+    await stopAt;
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(waits).toBe(0);
   }, 30_000);
 
   it('polling fallback when the source has no IDLE', async () => {

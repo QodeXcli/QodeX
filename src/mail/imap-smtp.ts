@@ -524,6 +524,9 @@ export class ImapSmtpTransport implements MailTransport {
     let lock: any;
     try {
       lock = await c.getMailboxLock(path, { readOnly: true });
+      // Aborted while connecting: a listener added now would never fire (the wait would run
+      // to its timeout and hold up stop()).
+      if (opts.signal?.aborted) return { changed: false, reason: 'abort' };
       // Mail that arrived between the caller's last check and this SELECT raises no EXISTS
       // during IDLE: the folder's UIDNEXT already shows it.
       const uidNext = Number(c.mailbox?.uidNext ?? 0);
