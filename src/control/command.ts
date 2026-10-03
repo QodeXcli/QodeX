@@ -128,6 +128,12 @@ async function runControlCommand(opts: ControlCliOptions, flags: { json: boolean
     console.error(`✗ Could not start the control center: ${(e as Error)?.message ?? String(e)}`);
     process.exit(1);
   }
+  // mail.watch on in the config: make sure the mail watcher daemon runs (its events reach this timeline).
+  try {
+    const { maybeStartMailWatchFromConfig } = await import('../mail/watcher.js');
+    const note = await maybeStartMailWatchFromConfig();
+    if (note && !flags.json) console.log(`   ${note}`);
+  } catch { /* mail automation unavailable */ }
 
   if (flags.json) {
     console.log(JSON.stringify(info));
