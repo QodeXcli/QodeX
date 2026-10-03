@@ -2150,6 +2150,8 @@ function endedHandoffResponse(rt: Running, req: IncomingMessage, res: ServerResp
   const clear = { 'Set-Cookie': `${handoffCookieName(rt.port)}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` };
   if (isRead && wantsHtml(req)) sendHtml(res, 410, handoffEndedPage(outcome), "'none'", clear);
   else sendJson(res, 410, { ok: false, error: '[HANDOFF_ENDED] This hand-off is over — QodeX continues by itself.', outcome }, clear);
+  // An expired token has said its last word; an ended one is kept (until its TTL) to explain itself.
+  if (r.status === 'expired') getHandoffLinks().revokeToken(candidate);
   return true;
 }
 

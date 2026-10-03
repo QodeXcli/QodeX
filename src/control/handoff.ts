@@ -263,17 +263,18 @@ export class HandoffLinkStore {
 
   /**
    * What `token` opens right now. `isActive` says whether its hand-off is still
-   * running; a token of an ended hand-off is revoked on the spot.
+   * running. Read-only: a dead token stays known (so its page can say "this
+   * hand-off is over") until `revokeToken` or `prune` drops it — it never opens
+   * anything again either way.
    */
   lookup(token: string | null | undefined, isActive: (handoffId: string) => boolean, now = Date.now()): HandoffLinkLookup {
     if (typeof token !== 'string' || !HANDOFF_TOKEN_RE.test(token)) return { status: 'unknown' };
-    const key = hashHandoffToken(token);
-    const e = this.byHash.get(key);
+    const e = this.byHash.get(hashHandoffToken(token));
     if (!e) return { status: 'unknown' };
-    if (now >= e.expiresAt) { this.byHash.delete(key); return { status: 'expired', handoffId: e.handoffId }; }
+    if (now >= e.expiresAt) return { status: 'expired', handoffId: e.handoffId };
     let active = false;
     try { active = isActive(e.handoffId); } catch { active = false; }
-    if (!active) { this.byHash.delete(key); return { status: 'ended', handoffId: e.handoffId }; }
+    if (!active) return { status: 'ended', handoffId: e.handoffId };
     return { status: 'active', handoffId: e.handoffId, expiresAt: e.expiresAt };
   }
 
