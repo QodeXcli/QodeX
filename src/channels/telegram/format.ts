@@ -30,9 +30,17 @@ export function langOf(code?: string | null): Lang {
   return typeof code === 'string' && code.trim().toLowerCase().startsWith('fa') ? 'fa' : 'en';
 }
 
+/** A UTF-16 surrogate without its partner. Telegram rejects such text ("must be encoded in UTF-8"). */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Replace lone surrogates (broken page titles, cut emoji) with U+FFFD. PURE. */
+export function wellFormed(s: string): string {
+  return s.replace(LONE_SURROGATE, '�');
+}
+
 /** Escape text for Telegram HTML parse mode (& < > and " for attribute safety). */
 export function escapeHtml(s: unknown): string {
-  return String(s ?? '')
+  return wellFormed(String(s ?? ''))
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
