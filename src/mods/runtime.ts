@@ -9,6 +9,7 @@
 import * as fsSync from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger.js';
+import { registerModInstructionDirs } from '../security/instruction-files.js';
 import type { QodexConfig } from '../config/defaults.js';
 import type { ModelRouter } from '../llm/router.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -230,6 +231,8 @@ export class ModsRuntime {
   private watchers: fsSync.FSWatcher[] = [];
   private reloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private unsubscribeStderr: (() => void) | null = null;
+  /** Undo of the --mod-dir dirs registered as agent instruction files. */
+  private unregisterModDirs: (() => void) | null = null;
 
   constructor(opts: ModsInitOptions) {
     this.surface = opts.surface;
@@ -237,6 +240,9 @@ export class ModsRuntime {
     this.bindings = { ...(opts.bindings ?? {}) };
     this.extraDirs = [...new Set([...(opts.extraDirs ?? []), ...envModDirs()])];
     this.noBuiltins = opts.noBuiltins === true;
+    // Code in --mod-dir / QODEX_MOD_DIRS runs (and reloads on save): a write there asks in
+    // every approval mode, like ~/.qodex/mods — even when the dir is inside the project.
+    if (this.extraDirs.length) this.unregisterModDirs = registerModInstructionDirs(this.extraDirs.map(d => path.resolve(this.cwd, d)));
     this.host = new RuntimeHost(this);
     this.engine.onHookError = (f: HookFailure) => {
       const text = `${f.event} hook skipped: ${f.message}`;
@@ -621,6 +627,8 @@ export class ModsRuntime {
     for (const n of [...this.loaded.keys()]) this.unload(n);
     this.unsubscribeStderr?.();
     this.unsubscribeStderr = null;
+    this.unregisterModDirs?.();
+    this.unregisterModDirs = null;
   }
 }
 

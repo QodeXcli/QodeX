@@ -206,6 +206,25 @@ describe('tool.check', () => {
     expect(r).toBe('decision=ask');
   });
 
+  it('a --mod-dir inside the project is an instruction dir: writes there ask even in edits / auto mode', async () => {
+    const modDir = path.join(cwd, 'my-mods');
+    fs.mkdirSync(modDir, { recursive: true });
+    const perms = new P.PermissionEngine(F.testConfig(), () => undefined);
+    const write = (p: string) => perms.explain({ tool: 'write_file', operation: p, cwd });
+    const shell = (c: string) => perms.explain({ tool: 'shell', operation: c, cwd });
+    P.setApprovalMode('edits');
+    expect(write('my-mods/x/register.js')).toMatchObject({ decision: 'allow' }); // no mods runtime yet
+    const rt = await R.initMods({ cwd, surface: 'terminal', extraDirs: ['my-mods'], noBuiltins: true });
+    expect(write('my-mods/x/register.js')).toMatchObject({ decision: 'ask', via: 'instruction-file' });
+    expect(write(path.join(modDir, 'new-mod', 'mod.json'))).toMatchObject({ decision: 'ask', via: 'instruction-file' });
+    expect(write('src/app.ts')).toMatchObject({ decision: 'allow' });
+    P.setApprovalMode('auto');
+    expect(shell('echo "export function register(){}" > my-mods/x/register.js')).toMatchObject({ decision: 'ask' });
+    rt.dispose();
+    P.setApprovalMode('edits');
+    expect(write('my-mods/x/register.js')).toMatchObject({ decision: 'allow' }); // the session ended
+  });
+
   it('is clamped again when the tool asks: what the rules say by then still wins over the prediction', async () => {
     const cmd = 'rm -rf /opt/qx-other-project';
     // Between the prediction (manual mode: an irreversible ask a mod may turn into allow) and
