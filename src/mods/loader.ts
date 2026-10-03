@@ -337,9 +337,8 @@ export async function discoverMods(opts: DiscoverOptions): Promise<DiscoveredMod
 
 // ── import ───────────────────────────────────────────────────────────────────
 
-// Node's own import(): bypasses bundler/test-runner transforms so a mod loads the same
-// way under vitest, tsx and the built CLI.
-const nativeImport = new Function('u', 'return import(u)') as (u: string) => Promise<any>;
+/** import() of a prepared file URL (a fresh URL per load, so nothing is served from cache). */
+const importUrl = (u: string): Promise<any> => import(/* @vite-ignore */ u);
 
 let loadSeq = 0;
 
@@ -430,7 +429,7 @@ async function prepareModule(file: string, loadId: string, seen: Map<string, str
 export async function importModFile(file: string): Promise<any> {
   const loadId = `${Date.now().toString(36)}-${++loadSeq}`;
   const url = await prepareModule(path.resolve(file), loadId, new Map());
-  return nativeImport(url);
+  return importUrl(url);
 }
 
 /** Import a mod's entry and return its register function. */
