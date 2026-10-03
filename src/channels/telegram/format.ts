@@ -394,6 +394,17 @@ export function buildCallbackData(id: string, index: number): string | null {
   return Buffer.byteLength(data, 'utf-8') <= MAX_CALLBACK_BYTES ? data : null;
 }
 
+/** Loosen a typed reply for answer matching: Arabic ي/ك → Persian ی/ک, no diacritics/ZWNJ, no trailing "." / "!" / "؛". PURE. */
+export function normalizeReplyText(text: string): string {
+  return String(text ?? '')
+    .replace(/ي/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/[ً-ٰ‌]/g, '')
+    .trim()
+    .replace(/[.!؛]+$/u, '')
+    .trim();
+}
+
 /**
  * Callback alias for approval ids that don't fit `ap:<id>:<i>` in 64 bytes (or
  * contain ':'). Derived from the id itself, NOT a counter: a counter restarts

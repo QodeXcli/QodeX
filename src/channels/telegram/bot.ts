@@ -954,7 +954,7 @@ export class TelegramBot {
   /** A text reply to an approval card ("yes", "بله", "no"...). */
   private async answerByText(entry: DeliveredApproval, text: string, chat: PairedChat, lang: F.Lang): Promise<void> {
     const S = F.strings(lang);
-    const option = normalizeAnswer(text, entry.options);
+    const option = normalizeAnswer(F.normalizeReplyText(text), entry.options);
     if (!option) { await this.send(chat.chatId, S.approvalAnswerHint(entry.options)); return; }
     const found = await this.findApproval(entry.id);
     if (!found) { await this.send(chat.chatId, S.approvalExpired); return; }
