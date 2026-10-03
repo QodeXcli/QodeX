@@ -427,12 +427,47 @@ export function safeStringify(value: unknown): string {
   }
 }
 
-/** Wire form of a bus event (truncated when huge, so one event can't flood viewers). */
+/**
+ * Copy of `value` with maskSecrets() applied to every string inside it. Works on
+ * values (never on serialized JSON, so an escaped quote can't corrupt the output);
+ * cycles and very deep nesting are replaced by markers instead of being copied.
+ */
+export function maskSecretsDeep(value: unknown): unknown {
+  const stack = new Set<object>();
+  const walk = (v: unknown, depth: number): unknown => {
+    if (typeof v === 'string') return maskSecrets(v);
+    if (!v || typeof v !== 'object') return v;
+    if (typeof AbortSignal !== 'undefined' && v instanceof AbortSignal) return undefined;
+    const withJson = v as { toJSON?: () => unknown };
+    if (typeof withJson.toJSON === 'function') {
+      try { return walk(withJson.toJSON(), depth); } catch { return '[unserializable]'; }
+    }
+    if (stack.has(v)) return '[circular]';
+    if (depth > 12) return '[…]';
+    stack.add(v);
+    try {
+      if (Array.isArray(v)) return v.map(x => walk(x, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = walk(x, depth + 1);
+      return out;
+    } finally {
+      stack.delete(v);
+    }
+  };
+  return walk(value, 0);
+}
+
+/**
+ * Wire form of a bus event for (possibly remote) viewers: secret-looking strings are
+ * masked — bus events carry page URLs, typed text and tool summaries from every
+ * producer — and huge events are truncated so one event can't flood viewers.
+ */
 export function busEventJson(ev: BusEvent): string {
-  const s = safeStringify(ev);
+  const masked = maskSecretsDeep(ev) as Record<string, unknown>;
+  const s = safeStringify(masked);
   if (s.length <= MAX_EVENT_JSON) return s;
   const head: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(ev as unknown as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(masked)) {
     if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
       head[k] = typeof v === 'string' && v.length > 2000 ? v.slice(0, 2000) + '…' : v;
     }

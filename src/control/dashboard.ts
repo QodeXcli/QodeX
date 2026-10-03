@@ -829,8 +829,13 @@ const SCRIPT = String.raw`
         // Every tab reports its navigations: only the ACTIVE tab drives the URL bar.
         var act = activeTab(state.browser);
         if (!(act && act.id && d.tab && d.tab !== act.id)) {
-          if (act) act.url = d.url;
-          if (document.activeElement !== $('url')) $('url').value = d.url;
+          // Bus copies are secret-masked: a masked URL must not land in the URL bar;
+          // the authoritative /api/state snapshot carries the real one.
+          if (d.url.indexOf('***') >= 0) scheduleState();
+          else {
+            if (act) act.url = d.url;
+            if (document.activeElement !== $('url')) $('url').value = d.url;
+          }
         }
       }
       if (ev.type === 'launched' || ev.type === 'closed' || ev.type === 'tab') scheduleState();

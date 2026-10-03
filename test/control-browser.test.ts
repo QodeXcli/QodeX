@@ -297,6 +297,37 @@ describe('control center dashboard in a real browser', () => {
     await page.close();
   }, 60_000);
 
+  it.skipIf(!chromiumPath)('masks secrets in forwarded bus events but never puts a masked URL into the URL bar', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    const realUrl = 'https://shop.example/oauth/cb?access_token=abcdefghijklmnopqrstuvwxyz';
+    const originalTabs = fake.tabs;
+    fake.tabs = () => [{ index: 0, id: 't1', url: realUrl, title: 'Callback', active: true }];
+    try {
+      getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: 't1', index: 0, url: realUrl } });
+      getBus().publish({ kind: 'notice', level: 'info', message: 'after-secret-nav' });
+      await page.locator('#activityList li', { hasText: 'after-secret-nav' }).waitFor({ timeout: 10_000 });
+      // The timeline copy is masked...
+      expect(await page.locator('#activityList').textContent()).not.toContain('abcdefghijklmnopqrstuvwxyz');
+      // ...and the URL bar shows the real (authoritative /api/state) URL, never the masked one.
+      let seen = '';
+      for (let i = 0; i < 80 && seen !== realUrl; i++) {
+        seen = await page.locator('#url').inputValue();
+        expect(seen).not.toContain('***');
+        if (seen !== realUrl) await new Promise(r => setTimeout(r, 50));
+      }
+      expect(seen).toBe(realUrl);
+    } finally {
+      fake.tabs = originalTabs;
+    }
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('shows an access message instead of the dashboard without the token', async () => {
     const page = await browser.newPage();
     const r = await page.goto(`http://127.0.0.1:${info.port}/`);
