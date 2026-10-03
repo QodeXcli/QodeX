@@ -173,6 +173,10 @@ function readVersion(): string {
 }
 
 program
+  // Options written after a subcommand belong to that subcommand. Without this the
+  // root's --json/-m/-y swallowed them, so `qodex mission status <id> --json`,
+  // `qodex vault list --json` and `qodex schedule tick --json` silently printed text.
+  .enablePositionalOptions()
   .name('qodex')
   .description('QodeX — local-first autonomous agent: coding, its own dedicated browser, desktop control, background missions')
   .version(readVersion())
@@ -1116,14 +1120,18 @@ import { buildTelegramCommand } from './channels/telegram/command.js';
 import { buildVaultCommand } from './vault/command.js';
 
 program.addCommand(buildBrowserCommand());
-program.addCommand(buildControlCommand({
+const controlCommand = buildControlCommand({
   // `qodex control` shows this process's browser; mission actions read the shared DB,
   // so detached missions (and their approvals) are visible and controllable too.
   setup: async () => {
     const { registerMissionControl } = await import('./control/missions-bridge.js');
     await registerMissionControl({ defaultCwd: process.cwd() });
   },
-}));
+});
+// The control command reads --json via optsWithGlobals(); with positional options it
+// must declare the flag itself.
+controlCommand.option('--json', 'Print the control-center info as JSON');
+program.addCommand(controlCommand);
 program.addCommand(buildMissionCommand(
   async () => {
     const b = await bootstrap();
