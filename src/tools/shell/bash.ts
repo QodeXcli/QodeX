@@ -4,6 +4,7 @@ import { logger } from '../../utils/logger.js';
 import { formatExecResult, resolveRuntime } from '../../runtime/exec.js';
 import { isAutonomousMode } from '../../security/permissions.js';
 import { confirmShellCommand } from './confirm.js';
+import { movedResult, runForeground } from './send-now.js';
 
 const ArgsSchema = z.object({
   command: z.string().describe('Shell command to run. Use sparingly — prefer dedicated tools for file ops, git ops, etc.'),
@@ -53,14 +54,21 @@ export class BashTool extends Tool<z.infer<typeof ArgsSchema>> {
     }
 
     const exec = ctx.exec ?? ((req) => resolveRuntime().exec(req));
-    const ran = await exec({
+    // "Send now" in the TUI may move this command to a background job instead of killing it
+    // with the turn (send-now.ts): the call then returns [MOVED_TO_BACKGROUND] right away.
+    const run = await runForeground(exec, {
       command: cmd,
       cwd: ctx.cwd,
       timeoutMs,
       signal: ctx.signal,
       onStdoutLine: line => ctx.emit({ type: 'shell-stdout', line }),
       onStderrLine: line => ctx.emit({ type: 'shell-stderr', line }),
-    });
+    }, { description: args.description, sessionId: ctx.sessionId });
+    if (run.kind === 'moved') {
+      const moved = movedResult(run);
+      return { content: snapshotWarning ? `${snapshotWarning}\n${moved}` : moved, metadata: { movedToBackground: run.jobId, pid: run.pid } };
+    }
+    const ran = run.ran;
     const formatted = formatExecResult(cmd, ran);
     const result: ToolResult = {
       ...formatted,
