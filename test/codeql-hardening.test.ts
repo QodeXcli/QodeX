@@ -31,3 +31,15 @@ describe('control center login bounce stays on the server', () => {
     }
   });
 });
+
+describe('Sentinel navigation schemes', () => {
+  it('vbscript: and data: URLs are high-risk navigations like javascript:', async () => {
+    const { classifyNavigation } = await import('../src/sentinel/policy.js');
+    const { DEFAULT_SENTINEL_CONFIG } = await import('../src/config/agent-config.js');
+    const ctx: any = { config: { ...DEFAULT_SENTINEL_CONFIG } };
+    for (const url of ['vbscript:msgbox(1)', 'data:text/html,<b>x</b>', 'javascript:void(0)']) {
+      const c = classifyNavigation(url, ctx);
+      expect(['high', 'critical']).toContain(c.risk);
+    }
+  });
+});

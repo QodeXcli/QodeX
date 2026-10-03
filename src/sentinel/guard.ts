@@ -376,7 +376,7 @@ export class Sentinel implements SentinelGuard {
       return { via: 'needs-human', decision: { action: 'ask', classification: cls, prompt: this.buildPrompt(toolName, cls, true) } };
     }
     const operation = this.operation(toolName, cls);
-    let perm: 'allow' | 'ask' | 'deny' = 'ask';
+    let perm: 'allow' | 'ask' | 'deny';
     try {
       perm = ctx?.permissions ? ctx.permissions.evaluate({ tool: toolName, operation, description: cls.reason }) : 'ask';
     } catch {
@@ -480,7 +480,7 @@ export class Sentinel implements SentinelGuard {
 
   private async askHuman(toolName: string, args: Record<string, unknown>, ctx: ToolContext, cls: PolicyClassification, prompt: string, cfg: SentinelConfig): Promise<ToolResult | null> {
     this.progress(ctx, `🛡 Sentinel: waiting for a human to approve — ${cls.summary}`);
-    let answer = 'no';
+    let answer: string;
     let by = 'local';
     if (this.interactive()) {
       answer = await raceAbort(Promise.resolve().then(() => ctx.askUser(prompt, CRITICAL_OPTIONS)), ctx.signal, 'no');

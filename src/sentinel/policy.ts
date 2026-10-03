@@ -1168,7 +1168,7 @@ function controlBlock(toolName: string, what: string, reason: string, domain?: s
 
 // ── navigation ──────────────────────────────────────────────────────────────
 
-const HIGH_SCHEMES = new Set(['file', 'javascript', 'data', 'chrome', 'chrome-extension', 'chrome-untrusted', 'devtools', 'edge', 'brave', 'opera', 'vivaldi', 'view-source', 'blob', 'filesystem']);
+const HIGH_SCHEMES = new Set(['file', 'javascript', 'vbscript', 'data', 'chrome', 'chrome-extension', 'chrome-untrusted', 'devtools', 'edge', 'brave', 'opera', 'vivaldi', 'view-source', 'blob', 'filesystem']);
 
 /** Classify opening `rawUrl` in the browser. PURE. */
 export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'open'): PolicyClassification {
@@ -1213,13 +1213,16 @@ export function classifyNavigation(rawUrl: string, ctx: PolicyContext, verb = 'o
     const local = !!host && isPrivateHost(host);
     return make('credential', riskFor('credential', cfg, { escalate: !local }), `${verb} ${shown}`, `the URL carries ${describeSecret(secrets[0].kind)} (possible exfiltration)`, host || undefined);
   }
-  if (scheme === 'javascript') {
-    // A javascript: URL runs in the CURRENT page, exactly like browser_evaluate
-    // (Playwright's goto reports ERR_ABORTED but the script has already run).
-    let body = rawUrl.trim().replace(/^javascript:/i, '');
-    try { body = decodeURIComponent(body); } catch { /* keep as is */ }
-    const sc = classifyScript(body, ctx, `${verb} a javascript: URL`);
-    if (sc.category && sc.category !== 'other') return sc;
+  if (scheme === 'javascript' || scheme === 'vbscript' || scheme === 'data') {
+    // Script-capable URLs. A javascript: URL runs in the CURRENT page, exactly like
+    // browser_evaluate (Playwright's goto reports ERR_ABORTED but the script has already
+    // run), so its script is classified; data:/vbscript: get the high-risk rule below.
+    if (scheme === 'javascript') {
+      let body = rawUrl.trim().replace(/^javascript:/i, '');
+      try { body = decodeURIComponent(body); } catch { /* keep as is */ }
+      const sc = classifyScript(body, ctx, `${verb} a javascript: URL`);
+      if (sc.category && sc.category !== 'other') return sc;
+    }
   }
   if (HIGH_SCHEMES.has(scheme) || HIGH_SCHEMES.has(t.scheme)) {
     return make('navigation', riskFor('navigation', cfg, { base: 'high' }), `${verb} ${shown}`, `${t.scheme}: URLs can read local files or run code in the page`, host || undefined);
