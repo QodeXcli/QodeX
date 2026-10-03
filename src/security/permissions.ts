@@ -253,8 +253,9 @@ export class PermissionEngine {
 }
 
 /**
- * Tools known to be read-only, used when the engine has no registry lookup (the MCP
- * server's and the workflow CLI's engines are built as `new PermissionEngine(config)`).
+ * Tools known to be read-only, used when the engine has no registry lookup (or the
+ * lookup does not know the tool). Every engine QodeX builds passes `(n) => registry.get(n)`
+ * (src/index.ts, the MCP server's tool context, the workflow CLI).
  * Every entry MUST be `isReadOnly` in the real registry (test/core-review.test.ts checks
  * this): Sentinel's permission step auto-allows "pure reads", so a mutating or
  * Sentinel-guarded tool listed here would skip the user's approval. Page/screen tools that

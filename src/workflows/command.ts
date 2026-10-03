@@ -66,12 +66,15 @@ function readLine(prompt?: string): Promise<string> {
 const interactive = (): boolean => !!process.stdin.isTTY && !!process.stdout.isTTY;
 
 /** A ToolContext for CLI replays: real permissions + journal, terminal prompts when a human is present. */
-async function makeCliContext(config: QodexConfig): Promise<ToolContext & { cleanup: () => Promise<void> }> {
+export async function makeCliContext(config: QodexConfig): Promise<ToolContext & { cleanup: () => Promise<void> }> {
   const { getJournal } = await import('../filesystem/transaction.js');
   const { PermissionEngine } = await import('../security/permissions.js');
+  const { ToolRegistry } = await import('../tools/registry.js');
   const sessionId = `workflow-cli-${Date.now().toString(36)}`;
   const transaction = await getJournal().begin(sessionId);
-  const permissions = new PermissionEngine(config);
+  // Read-only status from the registry, as the agent's engine does (src/index.ts).
+  const registry = new ToolRegistry();
+  const permissions = new PermissionEngine(config, (n) => registry.get(n));
   const human = interactive();
   // Sentinel asks the local human first when one is present; otherwise it routes to remote channels or refuses.
   setInteractiveHuman(human);

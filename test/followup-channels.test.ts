@@ -22,6 +22,12 @@ import { TelegramApi, type FetchLike, type TgUpdate } from '../src/channels/tele
 import { TelegramPairingStore } from '../src/channels/telegram/pairing.js';
 import { TelegramBot } from '../src/channels/telegram/bot.js';
 import { handlePlatformSlash } from '../src/cli/platform-slash.js';
+import { makeCliContext } from '../src/workflows/command.js';
+import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { QodexMcpServer } from '../src/mcp/server/server.js';
+import { ToolRegistry } from '../src/tools/registry.js';
+import { Tool, type ToolContext, type ToolResult } from '../src/tools/base.js';
+import { z } from 'zod';
 
 const DEAD_PID = 2 ** 22 + 777;
 
@@ -222,4 +228,42 @@ describe('/control mission actions', () => {
     await handlePlatformSlash('control', ['stop'], dir);
     expect(listControlActions()).not.toContain('missions.list');
   }, 20_000);
+});
+
+// ── workflows CLI ────────────────────────────────────────────────────────────
+
+describe('qodex workflow', () => {
+  it('replays with a permission engine that knows the registry\'s read-only tools', async () => {
+    const ctx = await makeCliContext(structuredClone(DEFAULT_CONFIG));
+    try {
+      // pdf_read is read-only in the registry but not in the engine's fallback list.
+      expect(ctx.permissions.evaluateDetailed({ tool: 'pdf_read', operation: 'report.pdf' }).via).toBe('read-only');
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it('the MCP server\'s tool calls (and qodex_sandbox_run) get an engine that knows the registry\'s read-only tools', async () => {
+    const verdicts: string[] = [];
+    // A plugin-style read-only tool (not in the engine's fallback list), and a stand-in code_run.
+    class Probe extends Tool<Record<string, unknown>> {
+      description = 'probe';
+      argsSchema = z.object({}).passthrough();
+      isDestructive = false;
+      constructor(public name: string, public isReadOnly: boolean) { super(); }
+      async execute(_a: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+        verdicts.push(`${this.name}:${ctx.permissions.evaluate({ tool: 'my_plugin_reader', operation: 'x' })}`);
+        return { content: 'ok' };
+      }
+    }
+    const registry = new ToolRegistry();
+    registry.register(new Probe('my_plugin_reader', true));
+    registry.register(new Probe('code_run', false));
+    const server = new QodexMcpServer({ registry, config: structuredClone(DEFAULT_CONFIG), cwd: dir, exposeTools: ['my_plugin_reader'] });
+    const call = (name: string, args: unknown) => server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } as any);
+    await call('my_plugin_reader', {});
+    await call('qodex_sandbox_run', { command: 'echo hi' });
+    expect(verdicts).toEqual(['my_plugin_reader:allow', 'code_run:allow']);
+  });
+
 });
