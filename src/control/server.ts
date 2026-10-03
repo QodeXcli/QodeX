@@ -1158,6 +1158,8 @@ async function shutdown(rt: Running, o: ShutdownOptions): Promise<void> {
 export function startControlCenter(opts: ControlCenterOptions = {}): Promise<ControlCenterInfo> {
   // While a control center runs, its secure form can take a vault_request_login.
   getSecretRequestBroker().setSurfaceProbe('control', () => current !== null);
+  // Takeover lives here: offer to save a login the human types in the live view.
+  void import('../vault/capture.js').then(m => m.installLoginCapture()).catch(() => {});
   return serialize(async () => {
     if (current) {
       const rt = current;

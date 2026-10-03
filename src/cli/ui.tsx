@@ -555,6 +555,15 @@ export function App(props: AppProps): React.ReactElement {
     return () => setInteractiveHuman(false);
   }, []);
 
+  // Save-login capture (src/vault/capture.ts): a login the human types during a
+  // control-center takeover is offered for the vault here too ("Save the login for
+  // <host> (user <masked>)?" — never the secret).
+  useEffect(() => {
+    void import('../vault/capture.js')
+      .then(m => m.installLoginCapture({ localAsk: (p, o, signal) => getOperatorHub().requestApproval('main', p, o, { signal }) }))
+      .catch(() => {});
+  }, []);
+
   // Terminal approvals are shown by the operator hub (FIFO per lane). They also go
   // through the ApprovalBroker, so the control center or Telegram can answer the same
   // question — the first answer wins and the terminal prompt is withdrawn.

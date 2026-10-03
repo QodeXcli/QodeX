@@ -527,6 +527,35 @@ function languagesFor(locale: string): string[] {
 
 // ── manager ─────────────────────────────────────────────────────────────────
 
+// ── human-input observers (V2 save-login capture; additive) ────────────────
+
+/**
+ * Sees the HUMAN's input while they hold takeover (control-center live view) — never
+ * the agent's own actions, which do not go through dispatchInput. Used by the vault's
+ * save-login capture (src/vault/capture.ts) to read a submitted login host-side.
+ */
+export interface HumanInputObserver {
+  /** Before a human click (viewport point) or Enter is dispatched. Bounded wait. */
+  beforeInput?(ctx: { page: Page; tabId: string; kind: 'click' | 'enter'; point?: { x: number; y: number } }): void | Promise<void>;
+  /** A tab's main frame navigated (human or not). */
+  navigated?(tabId: string, page: Page): void;
+  /** Takeover switched on / off. */
+  takeover?(on: boolean): void;
+}
+
+const humanInputObservers = new Set<HumanInputObserver>();
+
+export function addHumanInputObserver(o: HumanInputObserver): () => void {
+  humanInputObservers.add(o);
+  return () => { humanInputObservers.delete(o); };
+}
+
+function notifyObservers(fn: (o: HumanInputObserver) => void): void {
+  for (const o of [...humanInputObservers]) {
+    try { fn(o); } catch (e) { logger.debug('human input observer failed', { err: firstLine(e) }); }
+  }
+}
+
 export interface QodexBrowserManagerOptions {
   /** Base dir of persistent profiles (tests pass a tmp dir). Default ~/.qodex/browser/profiles. */
   profilesDir?: string;
@@ -864,6 +893,7 @@ export class QodexBrowserManager implements BrowserManager {
       } catch { return; }
       st.refMode = null;
       getBus().publish({ kind: 'browser', type: 'navigated', data: { tab: st.id, index: this.tabList.indexOf(st), url: safeUrl(page) } });
+      notifyObservers(o => o.navigated?.(st.id, page));
     });
     page.on('domcontentloaded', () => { void this.refreshTitle(st); });
     page.on('load', () => { void this.refreshTitle(st); });
@@ -1483,6 +1513,7 @@ export class QodexBrowserManager implements BrowserManager {
     this.takeoverOn = on;
     this.takeoverWho = on ? by : undefined;
     if (changed) getBus().publish({ kind: 'browser', type: 'takeover', data: { on, by } });
+    if (changed) notifyObservers(o => o.takeover?.(on));
     if (!on) {
       const waiters = [...this.takeoverWaiters];
       this.takeoverWaiters.clear();
@@ -1533,6 +1564,7 @@ export class QodexBrowserManager implements BrowserManager {
       case 'click': {
         const p = await toViewport(ev.x, ev.y, ev.frameWidth, ev.frameHeight);
         const element = await this.describeAtPoint(page, p.x, p.y);
+        await this.beforeHumanInput(page, 'click', p);
         await page.mouse.click(p.x, p.y, { button: ev.button ?? 'left', clickCount: ev.clickCount ?? 1 });
         this.recordAction({ tool: 'browser_click', args: { x: Math.round(p.x), y: Math.round(p.y), button: ev.button ?? 'left', click_count: ev.clickCount ?? 1 }, url: safeUrl(page), title: await safeTitle(page), element: element ?? undefined, actor: 'human' });
         return;
@@ -1551,6 +1583,7 @@ export class QodexBrowserManager implements BrowserManager {
       case 'key': {
         const { el, unknown } = await focused();
         const key = normalizeKey(ev.key);
+        if (key === 'Enter') await this.beforeHumanInput(page, 'enter');
         await page.keyboard.press(key);
         this.recordAction({ tool: 'browser_press', args: redactTypedArgs({ key }, el, unknown), url: safeUrl(page), title: await safeTitle(page), element: el ?? undefined, actor: 'human' });
         return;
@@ -1579,6 +1612,14 @@ export class QodexBrowserManager implements BrowserManager {
         return;
       }
     }
+  }
+
+  /** Let observers (save-login capture) look at the page before a human submit-like input. */
+  private async beforeHumanInput(page: Page, kind: 'click' | 'enter', point?: { x: number; y: number }): Promise<void> {
+    if (!this.takeoverOn || !this.activeTab || !humanInputObservers.size) return;
+    const tabId = this.activeTab.id;
+    const runs = [...humanInputObservers].map(o => Promise.resolve().then(() => o.beforeInput?.({ page, tabId, kind, ...(point ? { point } : {}) })).catch(() => {}));
+    await withTimeoutValue(Promise.all(runs).then(() => undefined), 1500, undefined);
   }
 
   // ── action feed ───────────────────────────────────────────────────────────
