@@ -15,7 +15,7 @@
  */
 
 import { z } from 'zod';
-import { promises as fs } from 'fs';
+import { promises as fs, constants as fsConstants } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Tool, type ToolContext, type ToolResult } from '../tools/base.js';
@@ -123,13 +123,22 @@ async function loadAttachments(paths: string[], cwd: string): Promise<{ files: O
     if (await isQodexPrivate(abs, cwd, true)) return { error: `${p} is QodeX's private state (vault, keys, mail accounts, config) — it can never be attached` };
     const real = await realish(abs);
     if (isSecretFile(abs) || isSecretFile(real)) return { error: `${p} looks like a credentials file (keys, .env, tokens) — refusing to attach it` };
-    let st;
-    try { st = await fs.stat(real); } catch { return { error: `attachment ${p} does not exist` }; }
-    if (!st.isFile()) return { error: `attachment ${p} is not a file` };
-    if (st.size > MAX_ATTACH_FILE) return { error: `attachment ${p} is ${(st.size / 1048576).toFixed(1)} MB (max ${MAX_ATTACH_FILE / 1048576} MB)` };
-    total += st.size;
-    if (total > MAX_ATTACH_TOTAL) return { error: `attachments total more than ${MAX_ATTACH_TOTAL / 1048576} MB` };
-    files.push({ filename: path.basename(abs), content: await fs.readFile(real) });
+    // Check and read through ONE handle (no symlink at the last step), so the file that was
+    // checked is the file that is read.
+    let fh;
+    try { fh = await fs.open(real, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)); } catch { return { error: `attachment ${p} does not exist` }; }
+    try {
+      const st = await fh.stat();
+      if (!st.isFile()) return { error: `attachment ${p} is not a file` };
+      if (st.size > MAX_ATTACH_FILE) return { error: `attachment ${p} is ${(st.size / 1048576).toFixed(1)} MB (max ${MAX_ATTACH_FILE / 1048576} MB)` };
+      total += st.size;
+      if (total > MAX_ATTACH_TOTAL) return { error: `attachments total more than ${MAX_ATTACH_TOTAL / 1048576} MB` };
+      const content = await fh.readFile();
+      if (content.length > MAX_ATTACH_FILE) return { error: `attachment ${p} grew past ${MAX_ATTACH_FILE / 1048576} MB while it was read` };
+      files.push({ filename: path.basename(abs), content });
+    } finally {
+      await fh.close().catch(() => {});
+    }
     absList.push(abs);
   }
   return { files, abs: absList };

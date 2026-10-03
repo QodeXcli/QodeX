@@ -266,6 +266,8 @@ describe('IMAP mapping (imapflow double + real mailparser)', () => {
     await t.folders();
     expect(log[0]).toMatch(/auth=token/);
     expect(htmlToText('<style>x{}</style><p>a&amp;b</p><br>c')).toBe('a&b\n\nc');
+    // Decoded once: an escaped entity stays an entity, it never turns into markup.
+    expect(htmlToText('<p>&amp;lt;script&amp;gt; &amp;amp;</p>')).toBe('&lt;script&gt; &amp;');
     expect(hasAttachmentPart({ childNodes: [{ childNodes: [{ disposition: 'ATTACHMENT' }] }] })).toBe(true);
     expect(hasAttachmentPart({ childNodes: [{ disposition: 'inline' }] })).toBe(false);
   });

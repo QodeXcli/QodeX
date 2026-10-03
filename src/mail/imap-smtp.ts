@@ -89,6 +89,8 @@ const NAME_HINTS: Record<SpecialFolder, RegExp> = {
   junk: /(^|[/.])(junk|spam|junk e-?mail|bulk mail)$/i,
 };
 
+const HTML_ENTITIES: Record<string, string> = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+
 /** Minimal HTML → text fallback (mailparser normally provides text). PURE. */
 export function htmlToText(html: string): string {
   return String(html ?? '')
@@ -96,7 +98,8 @@ export function htmlToText(html: string): string {
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    // One pass, so '&amp;lt;' decodes to '&lt;' and not on to '<'.
+    .replace(/&(nbsp|amp|lt|gt|quot|#39);/gi, (_m, e: string) => HTML_ENTITIES[e.toLowerCase()] ?? _m)
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .trim();
