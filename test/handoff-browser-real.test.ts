@@ -24,6 +24,7 @@ import {
 } from '../src/tools/browser/tools-extra.js';
 import { getBus } from '../src/control/bus.js';
 import { BrowserRequestHumanTool, pendingHandoffs, resolveHandoff } from '../src/tools/browser/handoff.js';
+import { getApprovalBroker } from '../src/control/approvals.js';
 
 let pw: any = null;
 try { pw = await import('playwright'); } catch { pw = null; }
@@ -137,6 +138,9 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
   let tmp = '';
   let mgr: QodexBrowserManager;
   let ctx: ReturnType<typeof makeCtx>;
+  /** A stand-in for the control center: a human channel the hand-off can reach (cards are delivered here). */
+  const delivered: any[] = [];
+  let unregisterChannel: () => void = () => {};
 
   beforeAll(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qx-handoff-'));
@@ -176,9 +180,11 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     });
     setBrowserManagerForTests(mgr);
     ctx = makeCtx(tmp);
+    unregisterChannel = getApprovalBroker().registerChannel({ name: 'control', deliver: p => { delivered.push(p); } });
   }, 60_000);
 
   afterAll(async () => {
+    unregisterChannel();
     await mgr?.close();
     setBrowserManagerForTests(null);
     await new Promise<void>(r => server?.close(() => r()));
@@ -322,6 +328,8 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     expect(ap.meta.handoff).toMatchObject({ host: '127.0.0.1', vendor: 'recaptcha', state: 'needs-human', tabIndex: 0, linkTtlSec: 60 });
     expect(ap.meta.handoff.frameBox.w).toBeGreaterThan(200);
     expect(ap.prompt).toContain('reCAPTCHA on 127.0.0.1');
+    for (let i = 0; i < 20 && !delivered.some(d => d.id === ap.id); i++) await new Promise(r => setTimeout(r, 50));
+    expect(delivered.find(d => d.id === ap.id)?.meta?.handoff?.id).toBe(ap.meta.handoff.id);
     // Agent tools wait while the human has the browser.
     expect(mgr.isTakeover()).toBe(true);
 
@@ -338,7 +346,7 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     const resolved = getBus().recent(300).find((e: any) => e.kind === 'approval.resolved' && e.id === ap.id);
     expect(resolved).toMatchObject({ answer: 'done', by: 'challenge-cleared' });
     // Nothing secret anywhere: no site key, no frame URL / query string.
-    const all = JSON.stringify(getBus().recent(300)) + r.content + JSON.stringify(r.metadata) + ctx.events.join('\n');
+    const all = JSON.stringify(getBus().recent(300)) + JSON.stringify(delivered) + r.content + JSON.stringify(r.metadata) + ctx.events.join('\n');
     expect(all).not.toContain(SITEKEY);
     expect(all).not.toMatch(/recaptcha\/api2/);
   }, 60_000);
@@ -352,6 +360,23 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     expect(ctx.events.some(e => /still there/.test(e))).toBe(true);
     const again = await waitForHandoff();
     expect(again.prompt).toContain('is still there');
+    const page = await mgr.activePage();
+    await page.evaluate("document.getElementById('rc').remove()");
+    const r = await pending;
+    expect(r.content).toMatch(/^✓ /);
+    expect(mgr.isTakeover()).toBe(false);
+  }, 60_000);
+
+  it('a human handing the browser back mid-hand-off counts as "done": re-checked, takeover taken again while it is still up', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    const pending = run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 60 });
+    const first = await waitForHandoff();
+    mgr.setTakeover(false, 'terminal'); // TUI /takeover off
+    for (let i = 0; i < 60 && !ctx.events.some(e => /still there/.test(e)); i++) await new Promise(r => setTimeout(r, 100));
+    expect(ctx.events.some(e => /still there/.test(e))).toBe(true);
+    const second = await waitForHandoff();
+    expect(second.id).not.toBe(first.id);
+    expect(mgr.status().takeoverBy).toBe(`handoff:${first.meta.handoff.id}`);
     const page = await mgr.activePage();
     await page.evaluate("document.getElementById('rc').remove()");
     const r = await pending;
@@ -387,6 +412,20 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
       mgr.setTakeover(false, 'control');
     }
   }, 60_000);
+
+  it('with no human reachable (no terminal, no channel, headless) it fails fast instead of blocking', async () => {
+    await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });
+    unregisterChannel();
+    try {
+      const t0 = Date.now();
+      const r = await run(new BrowserRequestHumanTool(), { reason: 'solve the CAPTCHA', timeout_sec: 60 });
+      expect(Date.now() - t0).toBeLessThan(5000);
+      expect(r.content).toMatch(/^\[CHALLENGE_UNSOLVED\] No human can be reached for the reCAPTCHA on 127\.0\.0\.1/);
+      expect(mgr.isTakeover()).toBe(false);
+    } finally {
+      unregisterChannel = getApprovalBroker().registerChannel({ name: 'control', deliver: p => { delivered.push(p); } });
+    }
+  }, 30_000);
 
   it('aborting the run stops the hand-off with [ABORTED] and releases the takeover', async () => {
     await run(new BrowserNavigateTool(), { url: `${base}/recaptcha`, snapshot: false });

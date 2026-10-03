@@ -51,7 +51,7 @@ export interface HandoffMeta {
   linkTtlSec: number;
 }
 
-export type HandoffOutcome = 'cleared' | 'self-cleared' | 'done' | 'cancelled' | 'timeout' | 'aborted' | 'blocked' | 'refused';
+export type HandoffOutcome = 'cleared' | 'self-cleared' | 'done' | 'cancelled' | 'timeout' | 'aborted' | 'blocked' | 'refused' | 'unreachable';
 
 export interface HandoffResult {
   id: string;
@@ -172,13 +172,24 @@ export async function runHandoff(opts: HandoffOptions): Promise<HandoffResult> {
     if (ch.state === 'blocked') return result('blocked', 'detector', ch);
   }
 
+  // Nobody could ever see or answer it: no terminal, no remote channel (control center,
+  // Telegram, mission queue) and no visible window. Fail fast instead of blocking.
+  const broker = getApprovalBroker();
+  const local = localAsker();
+  if (!local && broker.channelNames().length === 0 && mgr.status().headless) return result('unreachable', 'fallback', ch);
+
   // 3. Show that tab to the human (live view, screenshots and input follow the active tab).
   const tabIndex = mgr.indexOfPage(page);
   if (tabIndex >= 0 && !mgr.tabs()[tabIndex]?.active) await mgr.switchTab(tabIndex);
 
   // 4. Owned takeover — never stolen from a human who already holds it.
-  const takeOver = () => mgr.setTakeover(true, owner) && mgr.status().takeoverBy === owner;
-  let owned = takeOver();
+  let owned = false;
+  const takeOver = (): boolean => {
+    const ok = mgr.setTakeover(true, owner) && mgr.status().takeoverBy === owner;
+    if (ok) owned = true;
+    return ok;
+  };
+  takeOver();
 
   const host = ch?.host || hostOfUrl(mgr.activeUrl());
   const meta: HandoffMeta = {
@@ -186,9 +197,6 @@ export async function runHandoff(opts: HandoffOptions): Promise<HandoffResult> {
     ...(ch ? { vendor: ch.vendor, state: ch.state } : {}),
     ...(ch?.frameBox ? { frameBox: ch.frameBox } : {}),
   };
-  const broker = getApprovalBroker();
-  const local = localAsker();
-
   // 5. Auto-resume: watch for the challenge to disappear while the human works.
   let cleared = false;
   let approvalId: string | null = null;
@@ -209,8 +217,9 @@ export async function runHandoff(opts: HandoffOptions): Promise<HandoffResult> {
         }
       })()
     : Promise.resolve();
-  // A human handing the browser back (TUI /takeover off, control center) means "done": re-check.
-  const unwatchTakeover = watchTakeoverRelease(mgr, owner, () => { if (approvalId) broker.resolve(approvalId, 'done', 'takeover-released'); }, watchSignal);
+  // A human handing the browser back (TUI /takeover off, control center) means "done":
+  // re-check. A takeover that went off is taken again so agent tools keep waiting.
+  const unwatchTakeover = watchTakeover(mgr, owner, takeOver, () => { if (approvalId) broker.resolve(approvalId, 'done', 'takeover-released'); }, watchSignal);
 
   ctx.emit({
     type: 'progress',
@@ -227,7 +236,7 @@ export async function runHandoff(opts: HandoffOptions): Promise<HandoffResult> {
       const left = deadline - Date.now();
       if (left <= 0) { outcome = 'timeout'; by = 'timeout'; break; }
       if (ctx.signal?.aborted) { outcome = 'aborted'; by = 'abort'; break; }
-      if (!mgr.isTakeover()) owned = takeOver() || owned;
+      if (!mgr.isTakeover()) takeOver();
       const pending = broker.request({
         prompt: handoffPrompt(opts.reason, ch, host, timeoutMs, repeat),
         options: [...HANDOFF_OPTIONS],
@@ -284,18 +293,23 @@ function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal {
   return ac.signal;
 }
 
-/** Call `onRelease` once when the takeover `owner` held ends by someone else's hand-back. */
-function watchTakeoverRelease(mgr: QodexBrowserManager, owner: string, onRelease: () => void, signal: AbortSignal): () => void {
+/**
+ * While the hand-off runs: when the takeover it owned is handed back by a human, call
+ * `onRelease` ("done" — re-check); whenever no takeover is on, take it again so agent
+ * tools keep waiting while the human works.
+ */
+function watchTakeover(mgr: QodexBrowserManager, owner: string, reacquire: () => boolean, onRelease: () => void, signal: AbortSignal): () => void {
   let stopped = false;
-  const loop = async () => {
+  void (async () => {
+    let wasOwner = mgr.status().takeoverBy === owner;
     while (!stopped && !signal.aborted) {
-      if (mgr.status().takeoverBy !== owner) { await sleepUnref(250); continue; }
-      try { await mgr.waitForTakeoverEnd(signal); } catch { return; }
-      if (stopped || signal.aborted) return;
-      onRelease();
+      const isOwner = mgr.status().takeoverBy === owner;
+      if (wasOwner && !isOwner) onRelease();
+      if (!mgr.isTakeover()) reacquire();
+      wasOwner = mgr.status().takeoverBy === owner;
+      await sleepUnref(250);
     }
-  };
-  void loop();
+  })();
   return () => { stopped = true; };
 }
 
@@ -336,6 +350,11 @@ export class BrowserRequestHumanTool extends Tool<z.infer<typeof RequestHumanArg
       switch (r.outcome) {
         case 'refused':
           return unsolved('Hand-off is off (browser.challengeHandoff: report).');
+        case 'unreachable':
+          return unsolved(
+            `No human can be reached for ${what}: no terminal, control center or Telegram is connected and the browser is headless. ` +
+            'The user can start the control center (`qodex control`) or run QodeX in the TUI.',
+          );
         case 'blocked':
           return unsolved(`${r.challenge?.host || 'The site'} blocked this browser (${r.challenge ? challengeLabel(r.challenge.vendor) : 'access denied'}) — a human cannot solve this here.`);
         case 'cancelled':

@@ -130,7 +130,12 @@ export function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 export async function waitForHuman(mgr: BrowserManager, ctx: ToolContext): Promise<void> {
   if (!mgr.isTakeover()) return;
   const by = mgr.status().takeoverBy;
-  ctx.emit({ type: 'progress', message: `Waiting: ${by ? `${by} has` : 'a human has'} taken over the QodeX browser — continuing when it is handed back.` });
+  ctx.emit({
+    type: 'progress',
+    message: /^handoff:/.test(String(by ?? ''))
+      ? 'Waiting: a human is passing a check in the QodeX browser (hand-off) — continuing when it is done.'
+      : `Waiting: ${by ? `${by} has` : 'a human has'} taken over the QodeX browser — continuing when it is handed back.`,
+  });
   await mgr.waitForTakeoverEnd(ctx.signal);
 }
 

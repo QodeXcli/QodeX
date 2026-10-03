@@ -13,6 +13,15 @@ import { WorkflowRecorder } from '../src/workflows/recorder.js';
 import { BrowserEvaluateTool, BrowserWaitForTool, CHALLENGE_SCRIPT_RE } from '../src/tools/browser/tools.js';
 import { setBrowserManagerForTests } from '../src/tools/browser/types.js';
 import { FakeManager } from './workflows-fakes.js';
+import * as os from 'os';
+import * as path from 'path';
+import { QodexBrowserManager } from '../src/tools/browser/session.js';
+import { BROWSER_TOOL_CLASSES } from '../src/tools/browser/index.js';
+import { BrowserRequestHumanTool, cleanReason, handoffPrompt, HANDOFF_OPTIONS } from '../src/tools/browser/handoff.js';
+import { classifyAction, isGuardedTool } from '../src/sentinel/policy.js';
+import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
+import { selectRelevantToolNames } from '../src/agent/tool-relevance.js';
+import { normalizeAnswer, safeOption } from '../src/control/approvals.js';
 
 describe('recorder never records challenge steps', () => {
   it('skips steps on challenge elements and every human step during a hand-off', async () => {
@@ -229,16 +238,6 @@ describe('challenge helpers', () => {
 });
 
 // ── item 5: takeover ownership, the tool's shape, Sentinel, relevance ─────────
-
-import * as os from 'os';
-import * as path from 'path';
-import { QodexBrowserManager } from '../src/tools/browser/session.js';
-import { BROWSER_TOOL_CLASSES } from '../src/tools/browser/index.js';
-import { BrowserRequestHumanTool, cleanReason, handoffPrompt, HANDOFF_OPTIONS } from '../src/tools/browser/handoff.js';
-import { classifyAction, isGuardedTool } from '../src/sentinel/policy.js';
-import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
-import { selectRelevantToolNames } from '../src/agent/tool-relevance.js';
-import { normalizeAnswer, safeOption } from '../src/control/approvals.js';
 
 describe('takeover ownership (compare-and-release, never stolen)', () => {
   it('setTakeover(true) never steals; releaseTakeover only by the owner; timed wait', async () => {
