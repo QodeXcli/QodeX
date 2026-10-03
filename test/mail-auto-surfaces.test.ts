@@ -80,3 +80,10 @@ describe('secrets never reach prompts or classifications', () => {
     expect(c.details?.join('\n')).toMatch(/⚠ The email would send/);
   });
 });
+
+describe('slash catalog', () => {
+  it('lists /allow and /mail (help, Tab completion, unknown-command suggestions)', async () => {
+    const { SLASH_CATALOG } = await import('../src/cli/slash-catalog.js');
+    expect(SLASH_CATALOG.map(c => c.name)).toEqual(expect.arrayContaining(['allow', 'mail']));
+  });
+});

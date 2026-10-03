@@ -51,6 +51,8 @@ export const SLASH_CATALOG: readonly SlashCatalogEntry[] = [
   { name: 'iterations', args: '<n>', description: 'Set iteration cap (0 = none)' },
   { name: 'network', description: 'Diagnose connectivity' },
   { name: 'commands', description: 'List custom slash commands' },
+  { name: 'allow', args: 'mail-replies [--account a] [--from @domain] | list | revoke <id>', description: 'Standing grants: replies QodeX may send without asking' },
+  { name: 'mail', args: 'status | watch [start|stop] | rule … | reply-all', description: 'Mail watcher, rules for incoming mail, auto-reply' },
   { name: 'exit', description: 'Quit QodeX' },
 ];
 
