@@ -282,7 +282,8 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
     /model <id>        Override model for this conversation (bare /model lists models)
     /effort <level>    Reasoning effort: low|medium|high|off (for models that support it)
     /trellis [init]    Show Trellis harness status, or scaffold .trellis/ (spec+tasks+journals)
-    /auto [manual|auto|always]  Approval mode (or Shift+Tab). on=always, off=manual
+    /auto [manual|edits|auto]  Approval mode (or Shift+Tab; also /mode). on=auto, off=manual
+    /status            Approval mode, strict mode, session and model at a glance
     /network           Diagnose internet + local backend connectivity
     /tools [--all]     List all registered tools by category
     /memory            Show / manage persisted project facts
@@ -1281,9 +1282,28 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
       return handlePlatformSlash(cmd, args, cwd);
     }
 
+    case 'status': {
+      const { getApprovalMode, APPROVAL_MODE_META } = await import('../security/permissions.js');
+      const { isStrictMode } = await import('../safety/strict-mode.js');
+      const mode = getApprovalMode();
+      const meta = APPROVAL_MODE_META[mode];
+      const model = (config as { defaults?: { model?: string } } | undefined)?.defaults?.model;
+      return {
+        handled: true,
+        message: [
+          `Approval: ${meta.label} — ${meta.hint}`,
+          '  change: Shift+Tab · /auto manual|edits|auto · qodex --auto / --approval-mode <mode>',
+          `Strict mode: ${isStrictMode() ? 'ON' : 'OFF'}`,
+          `Session: ${sessionId.slice(0, 8)}  ·  cwd: ${cwd}`,
+          ...(model ? [`Default model: ${model}  (the status bar shows the live one; /model to switch)`] : []),
+        ].join('\n'),
+      };
+    }
+
+    case 'mode':
     case 'auto': {
       // /auto [manual|edits|auto] — session approval mode. on=auto, off=manual.
-      // Shift+Tab in the TUI cycles the same three modes.
+      // /mode is an alias. Shift+Tab in the TUI cycles the same three modes.
       const { parseApprovalMode, setApprovalMode, getApprovalMode, APPROVAL_MODE_META } =
         await import('../security/permissions.js');
       const sub = args[0]?.toLowerCase();
@@ -1294,11 +1314,14 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
           handled: true,
           message:
             `Approval: ${meta.label} — ${meta.hint}\n` +
-            'Usage: /auto manual | edits | auto\n' +
+            'Usage: /auto manual | edits | auto   (also /mode)\n' +
             '  manual  — ask before edits and shell (default)\n' +
             '  edits   — file edits run without asking; shell still asks\n' +
             '  auto    — autonomous: nothing asks except purchases, payments, passwords,\n' +
-            '            sending messages and destructive actions outside the project\n' +
+            '            sending messages and destructive actions outside the project;\n' +
+            '            the agent decides its own questions and lists its assumptions\n' +
+            'Start in a mode: qodex --auto | --approval-mode <mode>, or approval.defaultMode\n' +
+            '  in ~/.qodex/config.yaml (approval.extraRoots: folders auto treats as the project).\n' +
             'Safe shell can skip the hub without /auto: execution.allow in config.yaml\n' +
             '  (e.g. `git status`, `npm test`). Deny rules always win.\n' +
             'Aliases: /auto off = manual, /auto on = auto. Shift+Tab cycles the three.',
