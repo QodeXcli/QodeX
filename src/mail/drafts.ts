@@ -187,6 +187,11 @@ export class DraftStore {
     }
   }
 
+  /** Undo markSent (the send it claimed failed). */
+  async unmarkSent(id: string): Promise<void> {
+    try { await fs.unlink(this.sentFile(id)); } catch { /* none */ }
+  }
+
   async sentInfo(id: string): Promise<SentMarker | null> {
     try { return JSON.parse(await fs.readFile(this.sentFile(id), 'utf-8')) as SentMarker; } catch { return null; }
   }

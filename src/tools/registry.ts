@@ -71,6 +71,7 @@ import { BROWSER_TOOL_CLASSES } from './browser/index.js';
 import { VAULT_TOOL_CLASSES } from '../vault/index.js';
 import { MISSION_TOOL_CLASSES } from '../missions/tools.js';
 import { WORKFLOW_TOOL_CLASSES } from '../workflows/tools.js';
+import { MAIL_TOOL_CLASSES } from '../mail/tools.js';
 import { getSentinel, redactForAudit } from '../sentinel/index.js';
 import {
   DevServerStartTool,
@@ -269,6 +270,7 @@ export class ToolRegistry {
       ...VAULT_TOOL_CLASSES.map(T => new T()),
       ...MISSION_TOOL_CLASSES.map(T => new T()),
       ...WORKFLOW_TOOL_CLASSES.map(T => new T()),
+      ...MAIL_TOOL_CLASSES.map(T => new T()),
       new DevServerStartTool(),
       new DevServerLogTool(),
       new DevServerStopTool(),

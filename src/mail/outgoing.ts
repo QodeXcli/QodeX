@@ -169,7 +169,7 @@ export function formatOutgoingPrompt(d: OutgoingMailDescription): string[] {
     lines.push(`Reply to: ${d.isReplyTo.threadSender} (same thread)${d.isReplyTo.injectionFlagged ? ' ⚠ that email contained instructions aimed at the AI' : ''}`);
     if (d.extraRecipients.length) lines.push(`⚠ Also to people outside the thread: ${d.extraRecipients.join(', ')}`);
   }
-  if (d.attachments.length) lines.push(`Attachments: ${d.attachments.map(x => x.name).join(', ')}`);
+  if (d.attachments.length) lines.push(`Attachments (from disk): ${d.attachments.map(x => x.path).join(', ')}`);
   lines.push(`Body (${d.bodyChars} chars): ${d.bodyPreview || '(empty)'}`);
   return lines;
 }
