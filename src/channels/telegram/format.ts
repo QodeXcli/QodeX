@@ -15,6 +15,7 @@
  * user chose it with /lang), else English.
  */
 
+import { createHash } from 'crypto';
 import type { InlineKeyboardMarkup } from './api.js';
 import { detectSecrets } from '../../sentinel/policy.js';
 
@@ -30,20 +31,36 @@ export function langOf(code?: string | null): Lang {
   return typeof code === 'string' && code.trim().toLowerCase().startsWith('fa') ? 'fa' : 'en';
 }
 
+/** A UTF-16 surrogate without its partner. Telegram rejects such text ("must be encoded in UTF-8"). */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Replace lone surrogates (broken page titles, cut emoji) with U+FFFD. PURE. */
+export function wellFormed(s: string): string {
+  return s.replace(LONE_SURROGATE, '�');
+}
+
 /** Escape text for Telegram HTML parse mode (& < > and " for attribute safety). */
 export function escapeHtml(s: unknown): string {
-  return String(s ?? '')
+  return wellFormed(String(s ?? ''))
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
 
-/** Truncate to `max` chars with an ellipsis (counts UTF-16 units, like Telegram). */
+/**
+ * Truncate to `max` chars with an ellipsis (counts UTF-16 units, like
+ * Telegram). Never splits a surrogate pair: half an emoji is invalid UTF-8 and
+ * Telegram would reject the WHOLE message — for an approval card that means the
+ * human never sees it.
+ */
 export function truncate(s: unknown, max: number): string {
   const t = String(s ?? '');
   if (t.length <= max) return t;
-  return t.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
+  let cut = Math.max(0, max - 1);
+  const c = t.charCodeAt(cut - 1);
+  if (cut > 0 && c >= 0xd800 && c <= 0xdbff) cut--;
+  return t.slice(0, cut).trimEnd() + '…';
 }
 
 /** Escape + truncate in one step (truncate first so we never cut an entity). */
@@ -51,9 +68,9 @@ export function esc(s: unknown, max = 500): string {
   return escapeHtml(truncate(s, max));
 }
 
-/** Convert our HTML back to plain text (fallback when Telegram rejects the markup). */
+/** Convert our HTML back to plain text (fallback when Telegram rejects the markup); always well-formed UTF-16. */
 export function htmlToPlain(html: string): string {
-  let text = String(html ?? '').replace(/<br\s*\/?>/gi, '\n');
+  let text = wellFormed(String(html ?? '')).replace(/<br\s*\/?>/gi, '\n');
   // Repeat until stable: removing one tag must not splice a new one together ("<<b>b>").
   for (let prev = ''; prev !== text;) { prev = text; text = text.replace(/<[^<>]*>/g, ''); }
   // Our markup escapes every literal < and >, so any left over is a stray tag fragment.
@@ -190,6 +207,9 @@ const EN = {
   approvalRetry: 'Could not record your answer — please try again.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'en'), 60)}`,
   notAuthorized: 'Not authorized.',
+  newChatPaired: (who: string, chatId: number) =>
+    `🔔 A new chat was just paired with this QodeX: <b>${esc(who, 80)}</b>.\n` +
+    `If that wasn't you, run <code>qodex telegram unpair ${chatId}</code> on your computer now.`,
   outcomeApproved: 'Approved',
   outcomeDenied: 'Denied',
   outcomeAnswered: 'Answered',
@@ -277,6 +297,9 @@ const FA: Catalog = {
   approvalRetry: 'ثبت پاسخ شما ممکن نشد — لطفاً دوباره امتحان کنید.',
   approvalRecorded: (opt: string) => `✓ ${truncate(optionLabelText(opt, 'fa'), 60)}`,
   notAuthorized: 'اجازهٔ دسترسی ندارید.',
+  newChatPaired: (who: string, chatId: number) =>
+    `🔔 یک گفتگوی تازه همین حالا به این QodeX متصل شد: <b>${esc(who, 80)}</b>.\n` +
+    `اگر کار شما نبود، همین الان روی کامپیوترتان <code>qodex telegram unpair ${chatId}</code> را اجرا کنید.`,
   outcomeApproved: 'تأیید شد',
   outcomeDenied: 'رد شد',
   outcomeAnswered: 'پاسخ داده شد',
@@ -377,6 +400,27 @@ export function buildCallbackData(id: string, index: number): string | null {
   return Buffer.byteLength(data, 'utf-8') <= MAX_CALLBACK_BYTES ? data : null;
 }
 
+/** Loosen a typed reply for answer matching: Arabic ي/ك → Persian ی/ک, no diacritics/ZWNJ, no trailing "." / "!" / "؛". PURE. */
+export function normalizeReplyText(text: string): string {
+  return String(text ?? '')
+    .replace(/ي/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/[ً-ٰ‌]/g, '')
+    .trim()
+    .replace(/[.!؛]+$/u, '')
+    .trim();
+}
+
+/**
+ * Callback alias for approval ids that don't fit `ap:<id>:<i>` in 64 bytes (or
+ * contain ':'). Derived from the id itself, NOT a counter: a counter restarts
+ * at 1 in a new process, so a button on a card from a previous run (`ap:~1:0`)
+ * would silently answer whatever approval got `~1` this time. PURE.
+ */
+export function approvalAlias(id: string): string {
+  return '~' + createHash('sha256').update(id).digest('base64url').slice(0, 20);
+}
+
 export function parseCallbackData(data: string | undefined): { id: string; index: number } | null {
   const m = /^ap:([^:]{1,60}):(\d{1,3})$/.exec(String(data ?? ''));
   if (!m) return null;
@@ -389,7 +433,8 @@ export function approvalKeyboard(callbackId: string, options: string[], lang: La
     text: optionLabel(o, lang),
     callback_data: buildCallbackData(callbackId, i) ?? `ap:invalid:${i}`,
   }));
-  const rows = buttons.length <= 3 ? [buttons] : chunk(buttons, 2);
+  // Telegram rejects an empty row, which would make the card undeliverable.
+  const rows = buttons.length === 0 ? [] : buttons.length <= 3 ? [buttons] : chunk(buttons, 2);
   return { inline_keyboard: rows };
 }
 
@@ -495,27 +540,35 @@ export function formatMissionList(list: MissionSummaryView[], lang: Lang): strin
   return [S.missionsHeader, ...list.slice(0, 15).map((m) => formatMissionLine(m, lang))].join('\n');
 }
 
+/**
+ * Full mission status. Every section is capped so that, even with all of them
+ * at their maximum, the message stays under Telegram's 4096-char limit (an
+ * over-long one would only arrive as unformatted plain text); the report gets
+ * whatever room is left.
+ */
 export function formatMissionStatus(m: MissionStatusView, lang: Lang): string {
   const S = strings(lang);
   const lines = [
     `${statusIcon(m.status)} <b>${esc(statusLabel(m.status, lang), 30)}</b> · <code>${esc(m.id, 60)}</code>`,
-    `<i>${esc(maskOutbound(m.goal), 600)}</i>`,
+    `<i>${esc(maskOutbound(m.goal), 400)}</i>`,
   ];
   if (m.steps?.length) {
+    const shown = 12;
     lines.push('', `<b>${S.stepsHeader}</b>`);
-    m.steps.slice(0, 15).forEach((s, i) => {
-      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(maskOutbound(s.title), 120)}`);
+    m.steps.slice(0, shown).forEach((s, i) => {
+      lines.push(`${statusIcon(s.status)} ${num(lang, i + 1)}. ${esc(maskOutbound(s.title), 80)}`);
     });
+    if (m.steps.length > shown) lines.push(`… +${num(lang, m.steps.length - shown)}`);
   }
   if (m.milestones?.length) {
     lines.push('', `<b>${S.lastMilestones}</b>`);
-    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(maskOutbound(ms), 200)}`);
+    for (const ms of m.milestones.slice(-5)) lines.push(`🏁 ${esc(maskOutbound(ms), 150)}`);
   }
   if (m.pendingApprovals) lines.push('', S.approvalsPending(m.pendingApprovals));
   if (typeof m.costUsd === 'number' && m.costUsd > 0) lines.push(`${S.cost}: $${m.costUsd.toFixed(m.costUsd < 1 ? 4 : 2)}`);
   // The live-view link carries the control center's access key: never send that to Telegram.
-  if (m.liveUrl) lines.push(`${S.live}: ${esc(redactUrlSecrets(m.liveUrl), 300)}`);
-  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(maskOutbound(m.error), 800)}`);
+  if (m.liveUrl) lines.push(`${S.live}: ${esc(redactUrlSecrets(m.liveUrl), 200)}`);
+  if (m.error) lines.push('', `<b>${S.error}:</b> ${esc(maskOutbound(m.error), 600)}`);
   if (m.report) {
     // The report gets whatever room is left under Telegram's 4096-character limit.
     const used = htmlToPlain(lines.join('\n')).length + S.report.length + 8;
@@ -642,14 +695,17 @@ export function formatMissionNotice(missionId: string, type: string, data: unkno
 export function formatSentinelNotice(type: string, data: unknown, lang: Lang): NoticeView | null {
   const S = strings(lang);
   const d = (data && typeof data === 'object' ? data : {}) as Record<string, any>;
-  const action = String(d.action ?? d.decision ?? '').toLowerCase();
+  // Tolerate both flat payloads ({action, classification}) and a SentinelDecision nested under `decision`.
+  const dec = (d.decision && typeof d.decision === 'object' ? d.decision : {}) as Record<string, any>;
+  const action = String(d.action ?? dec.action ?? (typeof d.decision === 'string' ? d.decision : '')).toLowerCase();
   const t = String(type ?? '').toLowerCase();
   const blocked = t === 'blocked' || t === 'deny' || t === 'denied'
     || (t === 'decision' && (action === 'deny' || action === 'blocked' || action === 'denied'));
   if (!blocked) return null;
+  const classification = d.classification ?? dec.classification;
   const summary = pickStr(d, 'summary', 'message', 'reason')
-    ?? pickStr(d.classification, 'summary', 'reason') ?? '';
-  const category = pickStr(d, 'category') ?? pickStr(d.classification, 'category');
+    ?? pickStr(classification, 'summary', 'reason') ?? pickStr(dec, 'message') ?? '';
+  const category = pickStr(d, 'category') ?? pickStr(classification, 'category');
   const tool = pickStr(d, 'tool', 'toolName');
   const head = `🛡 <b>${S.sentinelBlocked}</b>${category ? ` · <i>${esc(categoryLabel(category, lang), 40)}</i>` : ''}`;
   const lines = [head];

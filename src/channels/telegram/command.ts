@@ -37,7 +37,20 @@ export interface TelegramCommandDeps {
   /** Returns the merged QodexConfig. Default: load ~/.qodex/.env + loadConfig(cwd) + setActiveConfig. */
   loadConfig?: () => Promise<unknown>;
   exit?: (code: number) => void;
+  /** Is a human at a terminal? Default: stdin is a TTY. Gates printing pairing codes. */
+  isInteractive?: () => boolean;
 }
+
+/**
+ * A pairing code hands a Telegram account the power to approve purchases, start
+ * missions and see the browser. QodeX's own shell tool runs commands with piped
+ * stdio, so codes are only ever printed when stdin is a terminal: a
+ * prompt-injected agent running `qodex telegram pair --json` (or `start`) gets
+ * nothing to exfiltrate. (`qodex telegram pair --json | jq` in a terminal still works.)
+ */
+const PAIR_NEEDS_TERMINAL =
+  '✗ [TELEGRAM_PAIR_NEEDS_TERMINAL] Run `qodex telegram pair` yourself in a terminal (or /telegram pair in the QodeX UI). ' +
+  'Pairing codes are never printed when stdin is not a terminal, so an automated agent or script cannot mint one.';
 
 interface Ctx {
   cfg: TelegramConfig;
@@ -48,16 +61,41 @@ interface Ctx {
 /**
  * Read a line without echoing it (raw TTY). When stdin is not a TTY (piped),
  * reads the first line of stdin instead: `echo "$TOKEN" | qodex telegram setup`.
+ * The piped case returns as soon as a newline arrives — waiting for EOF would
+ * hang forever on a pipe that is never closed (supervisors, IDE terminals).
  */
-export async function readHiddenLine(prompt: string): Promise<string> {
-  const stdin = process.stdin as NodeJS.ReadStream;
+export async function readHiddenLine(
+  prompt: string,
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+): Promise<string> {
+  const stdin = input as NodeJS.ReadStream;
   if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
-    const chunks: Buffer[] = [];
-    for await (const c of stdin) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)));
-    return Buffer.concat(chunks).toString('utf-8').split(/\r?\n/)[0] ?? '';
+    return new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const firstLine = () => Buffer.concat(chunks).toString('utf-8').split(/\r?\n/)[0] ?? '';
+      const done = (fn: () => void) => {
+        stdin.removeListener('data', onData);
+        stdin.removeListener('end', onEnd);
+        stdin.removeListener('error', onError);
+        stdin.pause();
+        fn();
+      };
+      function onData(c: string | Buffer) {
+        const b = Buffer.isBuffer(c) ? c : Buffer.from(String(c));
+        chunks.push(b);
+        if (b.includes(0x0a)) done(() => resolve(firstLine()));
+      }
+      function onEnd() { done(() => resolve(firstLine())); }
+      function onError(err: Error) { done(() => reject(err)); }
+      stdin.on('data', onData);
+      stdin.once('end', onEnd);
+      stdin.once('error', onError);
+      stdin.resume();
+    });
   }
   return new Promise<string>((resolve, reject) => {
-    process.stdout.write(prompt);
+    output.write(prompt);
     let buf = '';
     const wasRaw = stdin.isRaw;
     stdin.setRawMode(true);
@@ -67,7 +105,7 @@ export async function readHiddenLine(prompt: string): Promise<string> {
       stdin.removeListener('data', onData);
       try { stdin.setRawMode(wasRaw); } catch { /* ignore */ }
       stdin.pause();
-      process.stdout.write('\n');
+      output.write('\n');
       fn();
     };
     function onData(chunk: string | Buffer) {
@@ -97,6 +135,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
   const print = deps.print ?? ((l: string) => console.log(l));
   const printErr = deps.printErr ?? ((l: string) => console.error(l));
   const exit = deps.exit ?? ((code: number) => process.exit(code));
+  const interactive = deps.isInteractive ?? (() => Boolean(process.stdin.isTTY));
 
   const loadCtx = async (): Promise<Ctx> => {
     let raw: unknown;
@@ -187,6 +226,7 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
     .option('--json', 'Machine-readable output')
     .action(async (opts: { json?: boolean }) => {
       try {
+        if (!interactive()) { printErr(PAIR_NEEDS_TERMINAL); exit(1); return; }
         const { cfg, env } = await loadCtx();
         const store = await pairingStore();
         const { code, expiresAt } = await store.createPairingCode();
@@ -278,10 +318,12 @@ export function buildTelegramCommand(deps: TelegramCommandDeps = {}): Command {
         print(`✓ QodeX Telegram bot @${handle.username} is running (pid ${process.pid}). Press Ctrl+C to stop.`);
         const store = handle.bot.pairing;
         const chats = await store.listChats();
-        if (!chats.length) {
+        if (!chats.length && interactive()) {
           const { code: pairCode } = await store.createPairingCode();
           print(`No chats paired yet. Open https://t.me/${handle.username}?start=${pairCode}`);
           print(`  — or send  /pair ${pairCode}  to @${handle.username} in a private chat (valid 10 minutes).`);
+        } else if (!chats.length) {
+          print('No chats paired yet. Run `qodex telegram pair` in a terminal to get a one-time code.');
         } else {
           print(`Paired chats: ${chats.map((c) => (c.username ? '@' + c.username : String(c.chatId))).join(', ')}`);
         }

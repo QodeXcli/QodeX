@@ -47,6 +47,7 @@ function harness(over: Partial<TelegramCommandDeps> = {}) {
     saveSecret: async (k, v) => { saved.push([k, v]); return '/home/u/.qodex/.env'; },
     loadConfig: async () => ({}),
     readSecret: async () => TOKEN,
+    isInteractive: () => true,
     ...over,
   };
   const run = (...args: string[]) => buildTelegramCommand(deps).parseAsync(args, { from: 'user' });

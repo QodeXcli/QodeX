@@ -108,8 +108,13 @@ export function getTelegramBot(): RunningTelegramBot | null {
   return current;
 }
 
-/** Stop the running bot (no-op when none). */
+/**
+ * Stop the running bot (no-op when none). A bot that is still STARTING is
+ * waited for and then stopped — otherwise `/telegram stop` issued during
+ * start-up would return while the bot comes up and keeps polling.
+ */
 export async function stopTelegramBot(): Promise<void> {
+  if (starting) await starting.catch(() => {});
   const c = current;
   current = null;
   if (c) await c.stop();
@@ -164,10 +169,10 @@ export async function telegramSlashCommand(arg: string, opts: TelegramSlashOptio
     }
     case 'stop':
     case 'off': {
-      if (!current) return 'Telegram bot is not running in this session.';
-      const name = current.username;
+      if (!current && !starting) return 'Telegram bot is not running in this session.';
+      const name = current?.username;
       await stopTelegramBot();
-      return `✓ Telegram bot @${name} stopped.`;
+      return name ? `✓ Telegram bot @${name} stopped.` : '✓ Telegram bot stopped.';
     }
     case 'pair': {
       const { code, expiresAt } = await pairing().createPairingCode();

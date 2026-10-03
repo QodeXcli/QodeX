@@ -150,6 +150,8 @@ interface DeliveredApproval {
   messages: Array<{ chatId: number; messageId: number; lang: F.Lang }>;
   ready: Promise<void>;
   createdAt: number;
+  /** Chats whose card could not be sent (network, 5xx, 429...) → retried from tick() with backoff. */
+  failed: Map<number, { attempts: number; nextTry: number }>;
 }
 
 type FoundApproval = { source: 'broker' | 'mission'; options: string[]; card: F.ApprovalCardInput };
@@ -191,6 +193,8 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const MAX_DELIVERED = 500;
 const MAX_HANDLED = 2000;
 const MAX_OUTCOMES = 200;
+/** Send attempts per (approval, chat) before giving up (the user can still pull it with /approvals). */
+const MAX_DELIVERY_ATTEMPTS = 8;
 /** Replies to one unpaired chat: at most this many per window (a stranger can't make the bot spam). */
 const UNPAIRED_REPLIES_PER_CHAT = 5;
 const UNPAIRED_WINDOW_MS = 10 * 60_000;
@@ -241,11 +245,11 @@ export class TelegramBot {
   private ticking = false;
   private busUnsub: (() => void) | null = null;
   private channelUnregister: (() => void) | null = null;
+  private detachCallerSignal: (() => void) | null = null;
 
   private delivered = new Map<string, DeliveredApproval>();
   private aliasToId = new Map<string, string>();
   private idToAlias = new Map<string, string>();
-  private aliasSeq = 0;
   private handledMission = new Set<string>();
   /** Mission approvals whose answer is being written right now (the tick must not retract them). */
   private answering = new Set<string>();
@@ -306,28 +310,44 @@ export class TelegramBot {
     if (this.running || this.controller) throw new Error('[TELEGRAM_ALREADY_RUNNING] This bot is already running.');
     const ac = new AbortController();
     this.controller = ac;
+    this.loopDone = null; // a previous run's settled promise must not stand in for this one
     if (signal) {
+      // Removed again in cleanup(): a long-lived caller signal must not collect one listener per start.
+      const onCallerAbort = () => ac.abort();
       if (signal.aborted) ac.abort();
-      else signal.addEventListener('abort', () => ac.abort(), { once: true });
+      else signal.addEventListener('abort', onCallerAbort, { once: true });
+      this.detachCallerSignal = () => signal.removeEventListener('abort', onCallerAbort);
     }
+    let me: TgUser;
     try {
-      this.me = await this.api.getMe(ac.signal);
+      me = await this.api.getMe(ac.signal);
+      if (ac.signal.aborted) throw new TelegramAbortError('start');
     } catch (err) {
+      this.detachCallerSignal?.(); this.detachCallerSignal = null;
       this.controller = null;
       throw err;
     }
+    this.me = me;
     // Message dates are Telegram's clock: measure staleness against it (from the
     // HTTP Date header), so a local clock running ahead doesn't drop fresh commands.
     this.startedAt = this.api.serverNow() ?? this.now();
     this.running = true;
     this.busUnsub = this.bus.subscribe((ev) => this.onBusEvent(ev));
-    await this.tick();
-    this.tickTimer = setInterval(() => { void this.tick(); }, this.tickMs);
-    this.tickTimer.unref?.();
-    this.loopDone = this.pollLoop(ac.signal).finally(() => this.cleanup());
+    // The whole lifecycle (first tick → polling → cleanup) is ONE promise, set
+    // before anything awaits, so stop() at any point waits for a full detach.
+    let firstTick: Promise<void> = Promise.resolve();
+    this.loopDone = (async () => {
+      firstTick = this.tick();
+      await firstTick;
+      if (ac.signal.aborted) return;
+      this.tickTimer = setInterval(() => { void this.tick(); }, this.tickMs);
+      this.tickTimer.unref?.();
+      this.log('info', `Telegram bot @${me.username ?? me.id} started`);
+      await this.pollLoop(ac.signal);
+    })().finally(() => this.cleanup());
     this.loopDone.catch(() => { /* surfaced via done() */ });
-    this.log('info', `Telegram bot @${this.me.username ?? this.me.id} started`);
-    return this.me;
+    await firstTick;
+    return me;
   }
 
   /** Settles when polling stops. Rejects on fatal errors (e.g. revoked token). */
@@ -360,6 +380,8 @@ export class TelegramBot {
           allowedUpdates: ['message', 'callback_query'],
           signal,
         });
+        // A broken mirror/proxy answering `{ok:true, result:{}}` must neither kill the loop nor make it spin.
+        if (!Array.isArray(updates)) throw new TelegramApiError({ method: 'getUpdates', status: 502, description: 'malformed result (not an array)' });
         if (failures > 0) this.log('info', 'Telegram polling recovered');
         failures = 0;
         this.conflictWarned = false;
@@ -409,6 +431,7 @@ export class TelegramBot {
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     this.busUnsub?.(); this.busUnsub = null;
     this.channelUnregister?.(); this.channelUnregister = null;
+    this.detachCallerSignal?.(); this.detachCallerSignal = null;
     // Confirm handled updates so a quick restart doesn't replay e.g. /mission.
     if (this.offset !== undefined) {
       const ac = new AbortController();
@@ -529,12 +552,25 @@ export class TelegramBot {
       await this.send(chatId, `${S.pairOk}\n\n${S.help}`);
       this.bus.publish({ kind: 'notice', level: 'info', message: `Telegram: chat ${describeChat(res.chat)} paired` });
       this.log('info', `Telegram: paired chat ${describeChat(res.chat)}`);
+      if (!res.alreadyPaired) await this.alertOtherChats(res.chat);
       return;
     }
     if (res.reason === 'locked') await this.hint(chatId, S.pairLocked);
     else if (res.reason === 'malformed') await this.replyUnpaired(chatId, S.pairUsage);
     else await this.replyUnpaired(chatId, S.pairInvalid);
     this.log('warn', `Telegram: rejected pairing attempt from chat ${chatId} (${res.reason})`);
+  }
+
+  /**
+   * A paired chat can approve purchases and see the browser, so every OTHER
+   * paired chat hears about a new one at once — a leaked code is noticed and
+   * revoked instead of silently gaining control.
+   */
+  private async alertOtherChats(paired: PairedChat): Promise<void> {
+    let others: PairedChat[] = [];
+    try { others = (await this.pairing.listChats()).filter((c) => c.chatId !== paired.chatId); } catch { return; }
+    const who = paired.username ? `@${paired.username} (${paired.chatId})` : `${paired.firstName ?? ''} (${paired.chatId})`.trim();
+    for (const c of others) await this.send(c.chatId, F.strings(F.langOf(c.lang)).newChatPaired(who, paired.chatId));
   }
 
   /** At most one "you're not paired" hint per chat per 10 minutes (no spam amplification). */
@@ -730,7 +766,7 @@ export class TelegramBot {
     for (const a of missionPending) {
       if (seen.has(a.id)) continue;
       seen.add(a.id);
-      const entry = this.delivered.get(a.id) ?? this.createEntry(a.id, 'mission', missionCard(a), a.options);
+      const entry = this.delivered.get(a.id) ?? this.createEntry(a.id, 'mission', missionCard(a), missionOptions(a));
       await this.deliverTo(entry, [chat]);
     }
   }
@@ -750,7 +786,7 @@ export class TelegramBot {
   // ── approvals ──────────────────────────────────────────────────────────────
 
   private createEntry(id: string, source: 'broker' | 'mission', card: F.ApprovalCardInput, options: string[]): DeliveredApproval {
-    const entry: DeliveredApproval = { id, source, card, options: [...options], messages: [], ready: Promise.resolve(), createdAt: this.now() };
+    const entry: DeliveredApproval = { id, source, card, options: [...options], messages: [], ready: Promise.resolve(), createdAt: this.now(), failed: new Map() };
     this.delivered.set(id, entry);
     if (this.delivered.size > MAX_DELIVERED) {
       const oldest = this.delivered.keys().next().value as string;
@@ -760,16 +796,36 @@ export class TelegramBot {
     return entry;
   }
 
-  /** Send the approval card to `chats`; recorded on the entry for later retraction. */
+  /** Still worth showing: not retracted, and (for broker approvals) still pending. */
+  private isLive(entry: DeliveredApproval): boolean {
+    if (!this.running || this.delivered.get(entry.id) !== entry) return false;
+    return entry.source !== 'broker' || this.broker.get(entry.id) !== undefined;
+  }
+
+  /**
+   * Send the approval card to `chats`; recorded on the entry for later retraction.
+   * Stops once the approval is answered/retracted. Failed sends are remembered and
+   * retried from tick() with backoff (retryFailedDeliveries).
+   */
   private deliverTo(entry: DeliveredApproval, chats: PairedChat[]): Promise<void> {
     const run = async () => {
       const cbId = this.callbackIdFor(entry.id);
       for (const chat of chats) {
+        if (!this.isLive(entry)) return;
         const lang = F.langOf(chat.lang);
         const msg = await this.send(chat.chatId, F.formatApprovalWithHint(entry.card, lang), {
           replyMarkup: F.approvalKeyboard(cbId, entry.options, lang),
         });
-        if (msg) entry.messages.push({ chatId: chat.chatId, messageId: msg.message_id, lang });
+        if (msg) {
+          entry.messages.push({ chatId: chat.chatId, messageId: msg.message_id, lang });
+          entry.failed.delete(chat.chatId);
+          continue;
+        }
+        const attempts = (entry.failed.get(chat.chatId)?.attempts ?? 0) + 1;
+        entry.failed.set(chat.chatId, { attempts, nextTry: this.now() + Math.min(60_000, this.tickMs * 2 ** (attempts - 1)) });
+        if (attempts === MAX_DELIVERY_ATTEMPTS) {
+          this.log('warn', `Telegram: giving up delivering approval ${entry.id} to chat ${chat.chatId} after ${attempts} attempts (/approvals re-sends it)`);
+        }
       }
     };
     const prev = entry.ready;
@@ -792,14 +848,29 @@ export class TelegramBot {
         this.dropAlias(p.id);
         return;
       }
-      await this.deliverTo(entry, chats);
-      if (!entry.messages.length && this.delivered.get(p.id) === entry) {
-        // Nothing went out (Telegram unreachable): forget it so the next tick retries.
-        this.delivered.delete(p.id);
-        this.dropAlias(p.id);
-      }
+      await this.deliverTo(entry, chats); // failed sends are retried by retryFailedDeliveries()
     } catch (err) {
       this.log('warn', `Telegram: delivering approval ${p.id} failed: ${this.api.redact(errMsg(err))}`);
+    }
+  }
+
+  /**
+   * Re-send cards that could not be delivered to some chat (Telegram briefly
+   * unreachable, 5xx, 429...), with exponential backoff and at most
+   * MAX_DELIVERY_ATTEMPTS tries per chat — a chat that blocked the bot is not
+   * hit (and logged) every tick for as long as the approval stays pending.
+   */
+  private async retryFailedDeliveries(): Promise<void> {
+    const now = this.now();
+    const dueChats = (e: DeliveredApproval) => new Set([...e.failed].filter(([, f]) => f.attempts < MAX_DELIVERY_ATTEMPTS && f.nextTry <= now).map(([id]) => id));
+    const due = [...this.delivered.values()].filter((e) => e.failed.size > 0 && this.isLive(e) && dueChats(e).size > 0);
+    if (!due.length) return;
+    const chats = await this.pairing.listChats();
+    for (const entry of due) {
+      for (const id of entry.failed.keys()) if (!chats.some((c) => c.chatId === id)) entry.failed.delete(id); // unpaired meanwhile
+      const ids = dueChats(entry);
+      const retry = chats.filter((c) => ids.has(c.chatId));
+      if (retry.length) await this.deliverTo(entry, retry);
     }
   }
 
@@ -834,7 +905,7 @@ export class TelegramBot {
     if (this.missions && !this.handledMission.has(id)) {
       try {
         const a = (await this.missions.pendingApprovals()).find((x) => x.id === id);
-        if (a) return { source: 'mission', options: a.options, card: missionCard(a) };
+        if (a) return { source: 'mission', options: missionOptions(a), card: missionCard(a) };
       } catch { /* treat as unknown */ }
     }
     return null;
@@ -937,7 +1008,7 @@ export class TelegramBot {
   /** A text reply to an approval card ("yes", "بله", "no"...). */
   private async answerByText(entry: DeliveredApproval, text: string, chat: PairedChat, lang: F.Lang): Promise<void> {
     const S = F.strings(lang);
-    const option = normalizeAnswer(text, entry.options);
+    const option = normalizeAnswer(F.normalizeReplyText(text), entry.options);
     if (!option) { await this.send(chat.chatId, S.approvalAnswerHint(entry.options)); return; }
     const found = await this.findApproval(entry.id);
     if (!found) { await this.send(chat.chatId, S.approvalExpired); return; }
@@ -963,7 +1034,7 @@ export class TelegramBot {
     if (!id.startsWith('~') && !id.includes(':') && F.buildCallbackData(id, 999) !== null) return id;
     const existing = this.idToAlias.get(id);
     if (existing) return existing;
-    const alias = `~${(++this.aliasSeq).toString(36)}`;
+    const alias = F.approvalAlias(id); // stable across restarts: an old card can't hit another approval
     this.aliasToId.set(alias, id);
     this.idToAlias.set(id, alias);
     return alias;
@@ -985,10 +1056,12 @@ export class TelegramBot {
 
   /** Pairing refresh (channel registration), mission approvals, mission events. Never throws. */
   async tick(): Promise<void> {
-    if (this.ticking) return;
+    if (this.ticking || !this.running) return;
     this.ticking = true;
     try {
       await this.refreshChannel();
+      if (!this.running) return;
+      await this.retryFailedDeliveries();
       if (this.channelUnregister) {
         // Broker approvals whose card could not be sent yet (a Sentinel prompt must not
         // silently wait out its timeout because Telegram was briefly unreachable).
@@ -996,9 +1069,9 @@ export class TelegramBot {
           if (!this.delivered.has(p.id)) await this.deliverBrokerApproval(p);
         }
       }
-      if (this.missions) {
+      if (this.missions && this.running) {
         await this.pollMissionApprovals();
-        if (this.missions.eventsSince && this.notifyEnabled) await this.pollMissionEvents();
+        if (this.missions.eventsSince && this.notifyEnabled && this.running) await this.pollMissionEvents();
       }
       if (this.lastTickError) {
         this.lastTickError = null;
@@ -1023,6 +1096,9 @@ export class TelegramBot {
   private async refreshChannel(): Promise<void> {
     if (!this.running) return;
     const chats = await this.pairing.listChats();
+    // stop() may have run meanwhile: a channel registered now would outlive the bot
+    // (hasRemoteChannel() stuck at true → unattended approvals wait for a dead bot).
+    if (!this.running) return;
     if (chats.length && !this.channelUnregister) {
       this.channelUnregister = this.broker.registerChannel(this.channel);
     } else if (!chats.length && this.channelUnregister) {
@@ -1043,9 +1119,8 @@ export class TelegramBot {
           // Re-check after the awaits: the broker may have delivered the same id meanwhile
           // (an in-process mission mirrors its broker approval into the DB).
           if (this.delivered.has(a.id) || this.handledMission.has(a.id) || this.answering.has(a.id)) continue;
-          const entry = this.createEntry(a.id, 'mission', missionCard(a), a.options);
-          await this.deliverTo(entry, chats);
-          if (!entry.messages.length) this.delivered.delete(a.id); // retry next tick
+          const entry = this.createEntry(a.id, 'mission', missionCard(a), missionOptions(a));
+          await this.deliverTo(entry, chats); // failed sends are retried by retryFailedDeliveries()
         }
       }
     }
@@ -1210,8 +1285,14 @@ function brokerCard(p: PendingApproval): F.ApprovalCardInput {
   return { id: p.id, prompt: p.prompt, options: p.options, category: p.category, risk: p.risk, source: p.source, missionId };
 }
 
+/** A mission approval row without usable options gets the broker's default ['yes','no'] (never an empty keyboard). */
+function missionOptions(a: TelegramMissionApproval): string[] {
+  const opts = Array.isArray(a.options) ? a.options.filter((o) => typeof o === 'string' && o.trim() !== '') : [];
+  return opts.length ? opts : ['yes', 'no'];
+}
+
 function missionCard(a: TelegramMissionApproval): F.ApprovalCardInput {
-  return { id: a.id, prompt: a.prompt, options: a.options, category: a.category, risk: a.risk, missionId: a.missionId };
+  return { id: a.id, prompt: a.prompt, options: missionOptions(a), category: a.category, risk: a.risk, missionId: a.missionId };
 }
 
 function describeChat(c: Pick<PairedChat, 'chatId' | 'username'>): string {
