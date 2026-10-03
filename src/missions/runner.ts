@@ -305,14 +305,17 @@ export class TerminalApprovalChannel implements ApprovalChannel {
   }
 }
 
-const APPROVING_OPTION = /^(y|accept|approve|allow)/i;
-
 /**
  * askUser for a mission step. Every prompt is tagged with the mission so the
- * mission-db channel (and remote channels) can show it. With approvalMode 'auto'
- * ordinary permission prompts get the approving option immediately (like `--yes`)
- * and are recorded via `audit`; Sentinel-critical actions bypass askUser and go
- * to the broker directly, so they still need a human.
+ * mission-db channel (and remote channels) can show it, and waits for a human.
+ *
+ * approvalMode 'auto' runs the worker under the session's autonomous policy
+ * (runMissionWorker sets the process approval mode to 'auto'): the permission engine
+ * and Sentinel let ordinary steps run without ever calling askUser, so whatever still
+ * reaches it — destructive actions outside the project, remote deletes, purchases,
+ * payments, passwords, sending — is exactly what auto mode keeps for a human. It is
+ * brokered like in 'ask' mode, never auto-answered. `audit` records that such a prompt
+ * was raised in auto mode, with its answer.
  */
 export function missionAskUser(
   missionId: string,
@@ -329,24 +332,16 @@ export function missionAskUser(
   // Equivalent to brokeredAskUser(local, {source, meta, signal}), but hands the
   // local asker its dismissal signal so a terminal prompt closes when the answer
   // arrives from the mission queue, the control center or Telegram.
-  const brokered: AskUser = async (prompt: string, options: string[] = ['yes', 'no']) => {
+  return async (prompt: string, options: string[] = ['yes', 'no']) => {
     const r = await getApprovalBroker().request({
       prompt,
       options,
       source: `mission:${missionId}`,
-      meta: { missionId, stepId },
+      meta: { missionId, stepId, ...(opts.approvalMode === 'auto' ? { autoMode: 'auto mode still asks a human for this' } : {}) },
       signal: opts.signal,
     }, opts.local);
+    if (opts.approvalMode === 'auto') { try { opts.audit?.(prompt, r.answer); } catch { /* ignore */ } }
     return r.answer;
-  };
-  if (opts.approvalMode !== 'auto') return brokered;
-  return async (prompt: string, options: string[] = ['yes', 'no']) => {
-    const yes = options.find(o => APPROVING_OPTION.test(o.trim()));
-    if (yes) {
-      try { opts.audit?.(prompt, yes); } catch { /* ignore */ }
-      return yes;
-    }
-    return brokered(prompt, options);
   };
 }
 

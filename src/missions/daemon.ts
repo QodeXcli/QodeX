@@ -22,6 +22,7 @@ import * as path from 'path';
 import { QODEX_MISSIONS_DIR } from '../config/paths.js';
 import { resolveMissionsConfig } from '../config/agent-config.js';
 import { getActiveConfig } from '../config/loader.js';
+import { isAutonomousMode } from '../security/permissions.js';
 import { logger } from '../utils/logger.js';
 import {
   getMissionStore, isWorkerAlive, isActiveStatus, isTerminalStatus, approvalOptions,
@@ -190,12 +191,22 @@ export interface StartMissionInput {
   goal: string;
   cwd?: string;
   model?: string | null;
+  /** Default: inherit this process's session — 'auto' when it runs in the autonomous auto mode. */
   approvalMode?: ApprovalMode;
   /** 0/undefined = the missions.maxCostUsd config value. */
   costCapUsd?: number;
   source?: string;
   /** false = only create the row (the caller runs it in-process). Default true. */
   spawn?: boolean;
+}
+
+/**
+ * The approval mode a new mission inherits from this process's session: 'auto' when the
+ * session runs in the autonomous auto mode (the worker then applies the same policy —
+ * critical and outside-project destructive actions still go to a human), else 'ask'.
+ */
+export function sessionMissionApprovalMode(): ApprovalMode {
+  return isAutonomousMode() ? 'auto' : 'ask';
 }
 
 /** Create a mission (and by default spawn its detached worker). Throws [MISSION_*]. */
@@ -213,7 +224,7 @@ export function startMission(
     goal: input.goal,
     cwd,
     model: input.model ?? null,
-    approvalMode: input.approvalMode,
+    approvalMode: input.approvalMode ?? sessionMissionApprovalMode(),
     costCapUsd: input.costCapUsd && input.costCapUsd > 0 ? input.costCapUsd : cfg.maxCostUsd,
     source: input.source ?? null,
   });

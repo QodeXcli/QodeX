@@ -286,21 +286,28 @@ describe('runMission', () => {
     expect(store.getApproval(ap.id)!.status).toBe('expired');
   });
 
-  it('auto approval mode answers ordinary prompts immediately and audits them', async () => {
+  it('auto approval mode never auto-answers: what still reaches askUser waits for a human in the queue', async () => {
+    // In auto mode the worker's engine / Sentinel let ordinary steps run without calling
+    // askUser at all; a prompt that still arrives is one auto mode keeps for a human.
     const m = store.create({ goal: 'g', cwd: dir, approvalMode: 'auto' });
+    const other = new MissionStore(dbPath);
     const audited: string[] = [];
-    const r = await runMission(m.id, deps(m.id, {
+    const run = runMission(m.id, deps(m.id, {
       s1: async function* (c) {
-        const a = await c.options.askUser('Edit file x.ts', ['accept', 'edit', 'continue', 'reject']);
+        const a = await c.options.askUser('Run: rm -rf ~/old-project', ['yes', 'no', 'always yes']);
         yield { type: 'final', data: { content: `got ${a}` } };
       },
     }, planOf([{ id: 's1' }]), {
-      askUserFactory: (stepId, signal) => missionAskUser(m.id, stepId, { approvalMode: 'auto', signal, audit: (p) => audited.push(p) }),
+      askUserFactory: (stepId, signal) => missionAskUser(m.id, stepId, { approvalMode: 'auto', signal, audit: (p, a) => audited.push(`${p} → ${a}`) }),
     }));
+    await waitFor(() => other.listPendingApprovals(m.id).length === 1);
+    const ap = other.listPendingApprovals(m.id)[0]!;
+    expect(ap.prompt).toBe('Run: rm -rf ~/old-project');
+    expect(other.resolveApproval(ap.id, 'no', 'telegram').ok).toBe(true);
+    const r = await run;
     expect(r.status).toBe('completed');
-    expect(store.getStep(m.id, 's1')!.result).toBe('got accept');
-    expect(audited).toEqual(['Edit file x.ts']);
-    expect(store.listApprovals(m.id)).toHaveLength(0);
+    expect(store.getStep(m.id, 's1')!.result).toBe('got no');
+    expect(audited).toEqual(['Run: rm -rf ~/old-project → no']);
   });
 
   it('mission_milestone records milestones with the right step (parallel steps) and errors outside a mission', async () => {
