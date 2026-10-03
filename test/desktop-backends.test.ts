@@ -671,16 +671,19 @@ describe('Wayland backend', () => {
   });
 
   it('pastes non-ASCII text through wl-copy', async () => {
-    const { calls } = fakeExec(c => { if (c.cmd === 'wl-paste') return { stdout: 'prev' }; });
+    const { calls } = fakeExec(c => {
+      if (c.cmd === 'wl-paste') return { stdout: c.args.includes('--list-types') ? 'text/plain;charset=utf-8\nTEXT\n' : 'prev' };
+    });
     expect((await wl().type('سلام')).method).toBe('paste');
     expect(calls.map(c => `${c.cmd} ${c.args.join(' ')}`)).toEqual([
-      'wl-paste --no-newline',
+      'wl-paste --list-types',
+      'wl-paste --no-newline --type text/plain;charset=utf-8',
       'wl-copy ',
       'ydotool key 29:1 47:1 47:0 29:0',
       'wl-copy ',
     ]);
-    expect(calls[1]!.opts?.stdin).toBe('سلام');
-    expect(calls[3]!.opts?.stdin).toBe('prev');
+    expect(calls[2]!.opts?.stdin).toBe('سلام');
+    expect(calls[4]!.opts?.stdin).toBe('prev');
   });
 
   it('types ASCII with ydotool type, the text on stdin', async () => {

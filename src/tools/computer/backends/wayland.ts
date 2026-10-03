@@ -146,6 +146,17 @@ export function parseHyprClients(json: string, activeAddress?: string): WindowIn
   }));
 }
 
+/** Best plain-text MIME type among those the clipboard offers (`wl-paste --list-types`), or null. PURE. */
+export function pickTextMime(types: string[]): string | null {
+  const lower = types.map(t => t.toLowerCase());
+  for (const want of ['text/plain;charset=utf-8', 'text/plain', 'utf8_string', 'string', 'text']) {
+    const i = lower.indexOf(want);
+    if (i >= 0) return types[i]!;
+  }
+  const i = lower.findIndex(t => t.startsWith('text/plain'));
+  return i >= 0 ? types[i]! : null;
+}
+
 /** Screen sizes are expensive to probe on Wayland (no xdotool) — cache briefly. */
 let sizeCache: { size: Size; at: number } | null = null;
 
@@ -418,8 +429,15 @@ export class WaylandBackend extends CommandBackend implements DesktopBackend {
 
   async clipboardGet(): Promise<string> {
     if (!(await which('wl-paste'))) throw this.unavailable('wl-paste', hint(this.deps, ['wl-clipboard']));
-    const r = await this.run('wl-paste', ['--no-newline'], { timeoutMs: 5000 });
-    return r.code === 0 ? r.stdout : ''; // non-zero = empty clipboard
+    // Ask for a TEXT type explicitly: plain `wl-paste` outputs whatever was copied —
+    // PNG bytes for a copied image — which would reach the model as garbage and be
+    // "restored" as text after a paste.
+    const types = await this.run('wl-paste', ['--list-types'], { timeoutMs: 5000 });
+    if (types.code !== 0) return ''; // "Nothing is copied"
+    const mime = pickTextMime(types.stdout.split('\n').map(s => s.trim()).filter(Boolean));
+    if (!mime) return '';
+    const r = await this.run('wl-paste', ['--no-newline', '--type', mime], { timeoutMs: 5000 });
+    return r.code === 0 ? r.stdout : '';
   }
 
   async clipboardSet(text: string): Promise<void> {

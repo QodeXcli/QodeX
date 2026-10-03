@@ -4,7 +4,9 @@
  *   - X11 full-screen capture uses the first screenshot tool that WORKS, not
  *     the first one installed (a broken scrot no longer blocks `import`);
  *   - so does Wayland (grim is often installed where the compositor can't
- *     serve it: GNOME, KDE).
+ *     serve it: GNOME, KDE);
+ *   - the Wayland clipboard is read as a TEXT type (`wl-paste` alone prints a
+ *     copied image's PNG bytes).
  * Fakes only (setDesktopExec) — no real input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -13,6 +15,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { setDesktopExec, type ExecOptions, type ExecResult } from '../src/tools/computer/exec.js';
 import { X11Backend, WaylandBackend, type BackendDeps } from '../src/tools/computer/backends/index.js';
+import { pickTextMime } from '../src/tools/computer/backends/wayland.js';
 
 interface Call { cmd: string; args: string[]; opts?: ExecOptions }
 type Responder = (c: Call) => Partial<ExecResult> | void | Promise<Partial<ExecResult> | void>;
@@ -149,5 +152,49 @@ describe('wayland: screenshots fall back to the next tool that works', () => {
     }, ['swaymsg', 'hyprctl']);
     await expect(wl(undefined, { signal: ac.signal }).screenshot({ path: path.join(tmp, 's.png') })).rejects.toThrow(/^\[ABORTED\]/);
     expect(calls.map(c => c.cmd)).toEqual(['grim']);
+  });
+});
+
+describe('wayland: the clipboard is read as text, never as image bytes', () => {
+  const wl = () => new WaylandBackend(deps({ env: { WAYLAND_DISPLAY: 'wayland-0' } }));
+  const PNG_BYTES = '\x89PNG\r\n\x1a\n\0\0\0\rIHDR';
+
+  it('pickTextMime prefers UTF-8 plain text, accepts X11 atoms, and rejects non-text', () => {
+    expect(pickTextMime(['image/png', 'text/plain', 'text/plain;charset=utf-8'])).toBe('text/plain;charset=utf-8');
+    expect(pickTextMime(['image/png', 'TEXT', 'UTF8_STRING'])).toBe('UTF8_STRING');
+    expect(pickTextMime(['text/plain;charset=ISO-8859-1'])).toBe('text/plain;charset=ISO-8859-1');
+    expect(pickTextMime(['image/png', 'image/bmp'])).toBeNull();
+    expect(pickTextMime([])).toBeNull();
+  });
+
+  it('a copied image reads as "no text" instead of PNG bytes', async () => {
+    const calls = fakeExec(c => {
+      if (c.cmd !== 'wl-paste') return;
+      if (c.args.includes('--list-types')) return { stdout: 'image/png\nimage/bmp\n' };
+      return { stdout: PNG_BYTES }; // what a plain `wl-paste` would print
+    });
+    expect(await wl().clipboardGet()).toBe('');
+    expect(calls.map(c => [c.cmd, ...c.args])).toEqual([['wl-paste', '--list-types']]);
+  });
+
+  it('text is read with the chosen type; an empty clipboard reads as ""', async () => {
+    const calls = fakeExec(c => {
+      if (c.args.includes('--list-types')) return { stdout: 'text/html\ntext/plain\nimage/png\n' };
+      return { stdout: 'سلام' };
+    });
+    expect(await wl().clipboardGet()).toBe('سلام');
+    expect(calls[1]!.args).toEqual(['--no-newline', '--type', 'text/plain']);
+    fakeExec(() => ({ code: 1, stderr: 'Nothing is copied' }));
+    expect(await wl().clipboardGet()).toBe('');
+  });
+
+  it('a paste over a copied image clears the clipboard afterwards instead of "restoring" PNG bytes as text', async () => {
+    const calls = fakeExec(c => {
+      if (c.cmd === 'wl-paste') return c.args.includes('--list-types') ? { stdout: 'image/png\n' } : { stdout: PNG_BYTES };
+    });
+    await wl().type('رمز', { method: 'paste' });
+    const copies = calls.filter(c => c.cmd === 'wl-copy');
+    expect(copies.map(c => c.args)).toEqual([[], ['--clear']]);
+    expect(copies[0]!.opts?.stdin).toBe('رمز');
   });
 });
