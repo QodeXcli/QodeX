@@ -6,6 +6,7 @@ import type { MCPToolDef } from './types.js';
 import { logger } from '../utils/logger.js';
 import { redactValue } from '../utils/redact.js';
 import { interpretPermissionAnswer, setApprovalMode } from '../security/permissions.js';
+import { isAutonomousContext, takeSentinelApproval } from '../sentinel/auto-mode.js';
 
 /**
  * Wraps an MCP-exposed tool as a QodeX Tool so the agent loop can call it through the
@@ -60,11 +61,18 @@ export class MCPToolWrapper extends Tool<Record<string, unknown>> {
       operation: this.name,
       description: this.description,
     };
+    // Sentinel reviews every mcp:* call before this runs (ToolRegistry.execute). When a
+    // human just approved THIS call in Sentinel's prompt, asking "Run MCP tool …?" again
+    // is the same question twice. Taken unconditionally so a mark never goes stale.
+    const sentinelApproved = takeSentinelApproval(ctx, this.name);
     const decision = ctx.permissions.evaluate(permReq);
     if (decision === 'deny') {
       return { content: `[PERMISSION_DENIED] Blocked by policy: ${this.name}`, isError: true };
     }
-    if (decision === 'ask') {
+    // Auto mode: Sentinel's verdict IS the policy for MCP tools (read verbs run; deleting /
+    // publishing through a remote server and critical names — send, pay, credentials —
+    // already asked a human there), so the wrapper never asks a second time.
+    if (decision === 'ask' && !sentinelApproved && !isAutonomousContext(ctx)) {
       const summary = this.summarizeArgs(args);
       const answer = await ctx.askUser(
         `Run MCP tool ${this.name}${summary ? `\n  args: ${summary}` : ''}?`,
