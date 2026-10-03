@@ -399,6 +399,28 @@ describe('control center dashboard in a real browser', () => {
     }
   }, 60_000);
 
+  it.skipIf(!chromiumPath)('drops mission approval cards when the missions integration goes away', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e: Error) => pageErrors.push(e.message));
+    await page.goto(info.url);
+    await page.waitForURL(`http://127.0.0.1:${info.port}/`);
+    await page.locator('#connText', { hasText: 'Live' }).waitFor({ timeout: 10_000 });
+    const offList = registerControlAction('missions.list', () => []);
+    const offApprovals = registerControlAction('missions.approvals', () => [{ id: 'ap_gone', missionId: 'm_7', prompt: 'Book the flight for $310?', options: ['yes', 'no'], category: 'payment', createdAt: new Date().toISOString() }]);
+    try {
+      const card = page.locator('#approvalList .card', { hasText: 'Book the flight' });
+      await card.waitFor({ timeout: 10_000 });
+      offApprovals();
+      await card.waitFor({ state: 'detached', timeout: 5000 });
+    } finally {
+      offApprovals();
+      offList();
+    }
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
+
   it.skipIf(!chromiumPath)('masks secrets in forwarded bus events but never puts a masked URL into the URL bar', async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const pageErrors: string[] = [];

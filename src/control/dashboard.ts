@@ -839,6 +839,8 @@ const SCRIPT = String.raw`
   }
   var missionsTimer = null;
   function refreshMissions() {
+    // The missions integration went away: its approval cards can't be answered any more.
+    if (!hasAction('missions.approvals') && Object.keys(state.missionApprovals).length) { state.missionApprovals = {}; renderApprovals(); }
     if (!hasAction('missions.list')) { renderMissions(); return Promise.resolve(); }
     var p1 = api('POST', '/api/actions/missions.list', { limit: 20 }).then(function (j) { state.missions = missionsFrom(j.result); renderMissions(); }).catch(function () {});
     var p2 = !hasAction('missions.approvals') ? Promise.resolve() : api('POST', '/api/actions/missions.approvals', {}).then(function (j) {
