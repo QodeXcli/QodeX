@@ -303,6 +303,8 @@ describe.skipIf(!chromium)('H1 hand-off (real Chromium)', () => {
     // A vision model never sees it.
     const shot = await run(new BrowserScreenshotTool(), { analyze: 'what does the captcha say?', path: path.join(tmp, 'c.png') });
     expect(shot.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\] No screenshot analysis/);
+    const closeUp = await run(new BrowserScreenshotTool(), { ref: box, path: path.join(tmp, 'd.png') });
+    expect(closeUp.content).toMatch(/^\[CHALLENGE_HUMAN_ONLY\]/);
     // The page outside the widget is still the agent's.
     const ok = await run(new BrowserFillTool(), { selector: '#user', value: 'bob', snapshot: false });
     expect(ok.isError).toBeFalsy();

@@ -17,7 +17,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { QodexBrowserManager } from '../src/tools/browser/session.js';
 import { BROWSER_TOOL_CLASSES } from '../src/tools/browser/index.js';
-import { BrowserRequestHumanTool, cleanReason, handoffPrompt, HANDOFF_OPTIONS } from '../src/tools/browser/handoff.js';
+import { BrowserRequestHumanTool, cleanReason, handoffPrompt, runHandoff, formatDuration, HANDOFF_OPTIONS } from '../src/tools/browser/handoff.js';
+import { formatChallengeLine } from '../src/tools/browser/tools.js';
 import { classifyAction, isGuardedTool } from '../src/sentinel/policy.js';
 import { DEFAULT_SENTINEL_CONFIG } from '../src/config/agent-config.js';
 import { selectRelevantToolNames } from '../src/agent/tool-relevance.js';
@@ -312,6 +313,18 @@ describe('browser_request_human — shape, Sentinel, relevance', () => {
     expect(p).toContain('continues by itself');
     expect(p).toMatch(/"done".*"cancel"/);
     expect(handoffPrompt('approve the login on your phone', null, 'bank.example', 60_000)).toContain('On bank.example');
+  });
+
+  it("challengeHandoff 'report': no hand-off (refused before touching the browser); the [CHALLENGE] line says tell the user", async () => {
+    const mgr = new QodexBrowserManager({ profilesDir: path.join(os.tmpdir(), 'qx-ho-report'), config: { challengeHandoff: 'report' } });
+    const r = await runHandoff({ mgr, ctx: { cwd: '/tmp', signal: new AbortController().signal, emit: () => {} } as any, reason: 'x' });
+    expect(r.outcome).toBe('refused');
+    expect(mgr.isTakeover()).toBe(false);
+    const ch = { vendor: 'hcaptcha' as const, state: 'needs-human' as const, host: 'a.example', hint: '' };
+    expect(formatChallengeLine(ch, 'report')).toMatch(/^\[CHALLENGE\] hCaptcha on a\.example needs a human\..*Stop and tell the user/);
+    expect(formatChallengeLine(ch, 'auto')).toContain('browser_request_human');
+    expect(formatDuration(5_000)).toBe('5s');
+    expect(formatDuration(600_000)).toBe('10 min');
   });
 
   it('refuses to start when the browser is not open', async () => {

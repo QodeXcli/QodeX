@@ -718,6 +718,8 @@ export class BrowserScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> 
       const legend: string[] = [];
       if (target) {
         const loc = await mgr.locator(target);
+        // No close-up of a CAPTCHA either: an image of it is what a solver would read.
+        await assertNotChallenge(mgr, loc, qm ? await qm.describeLocator(loc) : null, target);
         await loc.screenshot({ path: dest, timeout: qm?.currentConfig().actionTimeoutMs ?? 8000 });
       } else if (args.marks) {
         const { marks } = qm ? await qm.boxes() : await snapshotWithBoxes(page);
