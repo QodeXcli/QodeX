@@ -2,10 +2,14 @@
  * Headless (`qodex --print`) driver: runs one agent task without the TUI and streams
  * plain text or NDJSON (`--json`) to stdout. Scheduled runs and scripts use it.
  *
- * Approvals here are UNATTENDED: no human sits at this process's terminal. Every
- * askUser prompt is answered by a fixed policy (`headlessAnswer`): deny by default,
- * approve only with `--yes`. Sentinel-critical actions never reach this asker — they
- * need a real human on a remote channel (control center / Telegram) or are refused.
+ * Approvals here are UNATTENDED: no human sits at this process's terminal. Without
+ * `--yes` every askUser prompt is denied (`headlessAnswer`). `--yes` / `--auto` is AUTO
+ * MODE, not "answer yes": the permission policy runs everything inside the project without
+ * asking, and whatever still asks (destructive outside the project, force push / publish /
+ * remote deletes, system-level) needs a human — a remote channel (control center /
+ * Telegram) can approve it, otherwise it is refused with [AUTO_MODE_NEEDS_HUMAN].
+ * Sentinel-critical actions never reach this asker — they need a real human on a remote
+ * channel or are refused.
  */
 import { forwardAgentEvent } from '../../control/forward.js';
 import { AgentLoop, setActiveAgent, getActiveAgent } from '../../agent/loop.js';
@@ -29,6 +33,14 @@ import {
 } from '../../agent/autonomy-contract.js';
 import { getApprovalBroker, isApproval, normalizeAnswer, setInteractiveHuman } from '../../control/approvals.js';
 import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.js';
+import { getApprovalMode, isAutonomousMode, setApprovalMode } from '../../security/permissions.js';
+import { needsHumanMessage } from '../../security/autonomy.js';
+import { resolveSentinelConfig } from '../../config/agent-config.js';
+
+/** A prompt condensed to one line for a refusal message (drops Sentinel's title line). */
+function firstLine(s: string): string {
+  return (s ?? '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('🛡')).join(' · ').slice(0, 300);
+}
 
 /**
  * The unattended answer to an approval prompt. PURE.
@@ -36,8 +48,9 @@ import { setSubAgentRunner, getSubAgentRunner } from '../../tools/builtin/task.j
  * Delegates to headlessAskChoice (headless-ask.ts), the single fail-safe policy:
  *   - without --yes: the deny option (reject / no / deny), never options[0] — the old
  *     code silently ACCEPTED the edit-approval prompt while logging "denied".
- *   - with --yes: the first affirmative option (accept / yes / approve / allow / ...);
- *     when there is none it still denies.
+ *   - with autoYes outside auto mode: the first affirmative option (accept / yes / approve /
+ *     allow / ...); when there is none it still denies. (runHeadless never uses this: its
+ *     --yes runs in auto mode, where a prompt that reaches the asker needs a human.)
  */
 export function headlessAnswer(options: string[] | undefined, autoYes: boolean): string {
   const opts = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
@@ -62,9 +75,38 @@ export function makeHeadlessAskUser(opts: {
   write?: (line: string) => void;
   /** stderr reporter for denials in text mode (default console.error). */
   warn?: (line: string) => void;
+  /** How long a remote human (control center / Telegram) gets in auto mode. Default 600 s. */
+  remoteTimeoutMs?: number;
 }): (prompt: string, options?: string[]) => Promise<string> {
   const write = opts.write ?? ((line: string) => { process.stdout.write(line); });
   const warn = opts.warn ?? ((line: string) => { console.error(line); });
+
+  /**
+   * `--yes` / `--auto` mean AUTO MODE, not "answer yes". In auto mode ordinary work never
+   * reaches askUser — the policy runs it. What does arrive needs a human (destructive
+   * outside the project, force push / publish / remote deletes, system-level, a Sentinel
+   * prompt about remote data). It is never answered yes here: a remote human can approve it
+   * (control center / Telegram, with a timeout), otherwise it is refused and the run says
+   * how to approve it.
+   */
+  const needsHuman = async (prompt: string, options: string[]): Promise<string> => {
+    const deny = headlessAnswer(options, false);
+    const broker = getApprovalBroker();
+    if (broker.hasRemoteChannel() && normalizeAnswer(deny, options) !== null) {
+      const r = await broker.request({
+        prompt, options, source: 'headless', category: 'auto-mode', risk: 'high',
+        timeoutMs: opts.remoteTimeoutMs ?? 600_000,
+      });
+      const approved = isApproval(r.answer, options);
+      if (opts.json) write(JSON.stringify({ type: 'permission_request', prompt, options, answer: r.answer, denied: !approved, by: r.by }) + '\n');
+      else if (!approved) warn(`Permission request: ${firstLine(prompt)} → ${r.by === 'timeout' ? 'no approval arrived in time' : 'declined'} (${r.by})`);
+      return r.answer;
+    }
+    const message = needsHumanMessage(firstLine(prompt));
+    if (opts.json) write(JSON.stringify({ type: 'permission_request', prompt, options, answer: deny, denied: true, needsHuman: true, message }) + '\n');
+    else warn(message);
+    return deny;
+  };
   const policyAsk = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
     const answer = headlessAnswer(options, opts.autoYes);
     const approved = isApproval(answer, options);
@@ -77,6 +119,7 @@ export function makeHeadlessAskUser(opts: {
   };
   return async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
     const opts2 = Array.isArray(options) && options.length > 0 ? options : ['yes', 'no'];
+    if (opts.autoYes || isAutonomousMode()) return needsHuman(prompt, opts2);
     const broker = getApprovalBroker();
     if (broker.hasRemoteChannel() && normalizeAnswer(headlessAnswer(opts2, opts.autoYes), opts2) !== null) {
       const r = await broker.request({ prompt, options: opts2, source: 'headless' }, (p, o) => policyAsk(p, o));
@@ -248,7 +291,15 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // The fixed unattended policy (see headlessAnswer / makeHeadlessAskUser). Approvals under
   // --yes stay quiet in text mode (as before); denials are always reported so the user knows
   // why a step failed. Brokered (published + audited) when a remote channel is attached.
-  const askUser = makeHeadlessAskUser({ autoYes: !!opts.autoApproveAll, json: opts.json });
+  let remoteTimeoutMs = 600_000;
+  try { remoteTimeoutMs = resolveSentinelConfig(opts.config).remoteApprovalTimeoutSec * 1000; } catch { /* default */ }
+  const askUser = makeHeadlessAskUser({ autoYes: !!opts.autoApproveAll, json: opts.json, remoteTimeoutMs });
+
+  // `--yes` is auto mode (index.ts sets it for --yes/--auto; set it here too so a direct
+  // caller gets the same semantics). The permission engine then runs everything inside the
+  // project and asks only for what needs a human — which the asker above never answers yes.
+  const modeBefore = getApprovalMode();
+  if (opts.autoApproveAll && modeBefore !== 'auto') setApprovalMode('auto');
 
   // SIGTERM (scheduler hard-kill, `kill`, a supervising process) cancels the run cleanly:
   // the loop sees the abort, rolls back the pending transaction and stops. SIGINT is
@@ -366,6 +417,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     if (getActiveAgent() === agent) setActiveAgent(null);
     // Scope root is module-global — never let it leak past this run.
     if (opts.contract?.scopePrefix) setWriteScopeRoot(null);
+    // Same for the approval mode this run switched on for --yes.
+    if (opts.autoApproveAll && modeBefore !== 'auto') setApprovalMode(modeBefore);
   }
 
   // ── Autonomy contract enforcement: verify → rollback-on-fail → RUN REPORT ──

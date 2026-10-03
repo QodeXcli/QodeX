@@ -106,7 +106,10 @@ describe('runHeadless', () => {
     expect(out.stderr.join('')).toContain('auto-denied in headless mode');
   });
 
-  it('approves with --yes and reports both outcomes in --json', async () => {
+  it('--yes is auto mode: a prompt that still reaches the asker needs a human, so it is refused (never yes) and says how to approve', async () => {
+    // Old expectation: answer=accept. Under auto mode ordinary work never reaches askUser;
+    // whatever does (outside-project destructive, force push, publish, system-level) must
+    // not be answered yes by an unattended run.
     const out = capture();
     const { provider } = await headless({
       tools: [approvalTool()],
@@ -114,10 +117,13 @@ describe('runHeadless', () => {
       yes: true,
       script: (_r, i) => (i === 0 ? { calls: [{ name: 'edit_like' }] } : { text: 'done' }),
     });
-    expect(F.toolResultsIn(provider.requests[1], 'edit_like')[0]).toBe('answer=accept');
+    expect(F.toolResultsIn(provider.requests[1], 'edit_like')[0]).toBe('answer=reject');
     const lines = out.stdout.join('').split('\n').filter(Boolean).map(l => JSON.parse(l));
     const perm = lines.find(l => l.type === 'permission_request');
-    expect(perm).toMatchObject({ prompt: 'Apply this edit to a.ts?', answer: 'accept', denied: false });
+    expect(perm).toMatchObject({ prompt: 'Apply this edit to a.ts?', answer: 'reject', denied: true, needsHuman: true });
+    expect(perm.message).toMatch(/^\[AUTO_MODE_NEEDS_HUMAN\].*control center.*Telegram/);
+    const { getApprovalMode } = await import('../src/security/permissions.js');
+    expect(getApprovalMode()).toBe('manual'); // the run restores the mode it switched on
   });
 
   it('registers the sub-agent runner + active agent for the run, marks the process unattended, and cleans up', async () => {
