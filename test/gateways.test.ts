@@ -27,7 +27,7 @@ console.log('— normalizeBaseUrl (strip pasted endpoint paths) —');
 
 console.log('— registry —');
 {
-  check('has openrouter, gemini, groq, atlascloud', !!findGateway('openrouter') && !!findGateway('gemini') && !!findGateway('groq') && !!findGateway('atlascloud'));
+  check('has openrouter, gemini, groq, atlascloud, cheaperinference', !!findGateway('openrouter') && !!findGateway('gemini') && !!findGateway('groq') && !!findGateway('atlascloud') && !!findGateway('cheaperinference'));
   check('lookup is case-insensitive', findGateway('OpenRouter')?.name === 'openrouter');
   check('unknown returns undefined', findGateway('nope') === undefined);
   check('lists several gateways', listGatewayIds().length >= 8);
@@ -42,6 +42,8 @@ console.log('— registry —');
   check('atlascloud uses ATLASCLOUD_API_KEY', findGateway('atlascloud')?.apiKeyEnv === 'ATLASCLOUD_API_KEY');
   check('atlascloud default model is a documented chat id, not a media/qwen guess', findGateway('atlascloud')?.suggestedModel === 'deepseek-v3');
   check('atlascloud key hint points at the real console', /console\.atlascloud\.ai/.test(findGateway('atlascloud')?.keyHint ?? ''));
+  check('cheaperinference uses the Cheaper Inference OpenAI-compatible endpoint', findGateway('cheaperinference')?.baseUrl === 'https://api.cheaperinference.com/v1');
+  check('cheaperinference uses CHEAPERINFERENCE_API_KEY', findGateway('cheaperinference')?.apiKeyEnv === 'CHEAPERINFERENCE_API_KEY');
 }
 
 console.log('— buildCustomEntry —');
@@ -54,6 +56,10 @@ console.log('— buildCustomEntry —');
   const atlas = buildCustomEntry({ spec: findGateway('atlascloud')! });
   check('builds Atlas Cloud from spec', atlas.name === 'atlascloud' && atlas.baseUrl === 'https://api.atlascloud.ai/v1');
   check('pins Atlas Cloud suggested model', atlas.models?.[0].id === 'deepseek-v3');
+
+  const ci = buildCustomEntry({ spec: findGateway('cheaperinference')! });
+  check('builds Cheaper Inference from spec', ci.name === 'cheaperinference' && ci.baseUrl === 'https://api.cheaperinference.com/v1');
+  check('pins Cheaper Inference suggested model', ci.models?.[0].id === 'gpt-5.4-mini' && ci.models?.[0].contextWindow === 400000);
 
   // explicit override for an unlisted gateway
   const c = buildCustomEntry({ name: 'mygw', baseUrl: 'https://x.example/v1', apiKeyEnv: 'MYGW_KEY' });
