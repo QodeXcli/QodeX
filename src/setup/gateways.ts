@@ -79,6 +79,17 @@ export const KNOWN_GATEWAYS: Record<string, GatewaySpec> = {
     suggestedToolCalls: true,
     note: 'OpenAI-compatible LLM endpoint (https://api.atlascloud.ai/v1). Image/video generation uses a separate Atlas API and is not this gateway. Browse models at https://www.atlascloud.ai/models/list.',
   },
+  cheaperinference: {
+    name: 'cheaperinference',
+    title: 'Cheaper Inference',
+    baseUrl: 'https://api.cheaperinference.com/v1',
+    apiKeyEnv: 'CHEAPERINFERENCE_API_KEY',
+    keyHint: 'Get a key at https://cheaperinference.com (starts with ci_live_).',
+    suggestedModel: 'gpt-5.4-mini',
+    suggestedContextWindow: 400000,
+    suggestedToolCalls: true,
+    note: 'OpenAI-compatible LLM gateway. One API key gives access to models from several labs. Docs: https://cheaperinference.com/docs.',
+  },
   moonshot: {
     name: 'moonshot',
     title: 'Moonshot AI (Kimi)',
