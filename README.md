@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.7.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.8.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -28,7 +28,7 @@ qodex setup && qodex
 - **`--profile studio` / `--profile cloud`** — named overlays, not a second product. Local Qwen on the Mac Studio in one file; a cloud model + Docker-isolated shell in another. `-p` is still `--print`.
 - **Shell in a box, not on bare metal** — `runtime.backend: docker` bind-mounts the project and drops host `$HOME`, `docker.sock`, privileged mode, and host networking. File edits stay in the repo (a coding agent that cannot touch files is a chatbot). The Mac outside `/workspace` stays out of reach.
 - **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.
-- **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills, an **independent judge model** promotes them, **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. Your agent next week is measurably better than today's — and it never overwrites a skill you wrote.
+- **It gets sharper the more you use it** — a real self-improvement loop captures the winning approach from *objectively-successful* tasks as quarantined skills. An **independent judge model** can promote them when you have a second model. On one local model (the default), **witnessed replay** re-applies the exact diff in a clean worktree and lets the compiler decide — `qodex skill witness`, no self-grade. **UCB1 A/B-tests** champion vs. challenger versions, **episodic memory** recalls how you solved similar tasks before, and it **learns from recurring failures**. It never overwrites a skill you wrote. Gap vs Hermes Agent: [docs/VS-HERMES.md](docs/VS-HERMES.md).
 - **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord / Slack service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
 - **Remembers across sessions** — a layered, **local** memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions) with a **human-readable Markdown mirror** you can edit and git-commit, and a **budget-aware Light Memory Mode** for small context windows. The agent builds real context about *you* and *this* codebase instead of starting every session cold.
 - **Live, shareable artifacts + a project dashboard** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel. `qodex dashboard` renders a live snapshot of providers, sessions, token/cost, memory, and skills.
@@ -709,4 +709,4 @@ Active development. The built-in tool set and the guardrail layer are stable; ex
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Copyright 2026 7 SEVEN.
+Copyright 2026 7 Seven.

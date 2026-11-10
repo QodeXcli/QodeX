@@ -12,12 +12,14 @@
  * (`provenance: machine`, `status: candidate`) and await the existing promote/reject
  * review flow — nothing here auto-promotes.
  *
- * Follow-up (phase 2): `evalCandidate` below is an honest stub — eval-gated promotion
- * (replay the draft in a clean worktree, score it, gate `skill.promote` on the score)
- * lands there. See ~/.qodex plans / the dashboard promotion UI, which displays the note.
+ * Follow-up (phase 2, landed): a draft may carry a **witness patch** — the exact diff from
+ * the verified session. `evalCandidate` scores whether that patch is replayable. The
+ * runtime gate is `replayWitness` (`qodex skill witness`), which re-applies it and runs
+ * the real verifier. No second model, no fake score.
  */
 import { skillIdFromPrompt } from './capture.js';
 import type { CandidateSkill } from './types.js';
+import { extractWitnessPatch, renderWitnessBlock, sanitizeWitnessPatch } from './witness.js';
 
 /** The session signals distillation needs — same family `captureEligible` already sees,
  *  plus the ORDERED tool sequence (not just distinct names) so steps keep their shape. */
@@ -27,6 +29,8 @@ export interface SessionDigest {
   /** Tool names in execution order (consecutive repeats expected — they get collapsed). */
   toolSequence: string[];
   filesChanged: string[];
+  /** Unified diff of the verified session, when the caller has one. Optional. */
+  patch?: string;
 }
 
 export interface DistillPolicy {
@@ -123,13 +127,16 @@ export function distillDraft(
   const tools = [...new Set(digest.toolSequence)].sort();
   const evidence = { files: [...digest.filesChanged], tools };
   const confidenceLine = typeof opts.confidence === 'number' ? `\nconfidence: ${opts.confidence}` : '';
+  const witness = renderWitnessBlock(digest.patch);
+  const draftTag = witness.replayable ? 'flywheel-v2' : 'flywheel-v1';
 
   const skillMd = `---
 name: ${name}
 description: ${description}
 provenance: machine
 status: candidate
-draft: flywheel-v1
+draft: ${draftTag}
+${witness.frontmatter}
 steps: ${steps.length}
 evidence: ${evidence.files.length + evidence.tools.length}${confidenceLine}
 allowed-tools:${yamlList(tools)}
@@ -161,14 +168,38 @@ ${evidence.files.map(f => `- ${f}`).join('\n')}
 
 Tools used:
 ${evidence.tools.map(t => `- \`${t}\``).join('\n')}
-`;
+${witness.body}`;
 
   return { name, description, skillMd, trigger, steps, evidence };
 }
 
-/** Phase-2 stub: eval-gated promotion. Honest — no fake score, just the labeled note the
- *  promotion UI can show next to a draft. Phase 2 replaces this with a real replay-eval
- *  (see src/skills/learning/eval.ts, which already knows how to replay a SKILL.md). */
-export function evalCandidate(_draft: DraftSkill): { score: null; note: string } {
-  return { score: null, note: 'eval-gated promotion lands in phase 2' };
+/**
+ * Structural gate for a distilled draft. This is NOT a verifier result and NOT a model
+ * opinion: `score` is null unless the draft carries a path-safe witness diff, in which
+ * case it is a readiness number (0–100) for the dashboard. Runtime promotion uses
+ * `replayWitness`, which is the only thing allowed to say the patch still works.
+ */
+export function evalCandidate(draft: DraftSkill): { score: number | null; replayable: boolean; note: string } {
+  const raw = extractWitnessPatch(draft.skillMd);
+  if (!raw) {
+    return {
+      score: null,
+      replayable: false,
+      note: 'no witness patch — promotion needs an independent judge or a replayable diff (`qodex skill witness`)',
+    };
+  }
+  const sanitized = sanitizeWitnessPatch(raw);
+  if (!sanitized.ok) {
+    return { score: null, replayable: false, note: `witness patch rejected: ${sanitized.reason}` };
+  }
+  let score = 40;
+  if (draft.steps.length >= 3) score += 20;
+  if (draft.evidence.files.length > 0) score += 20;
+  const covered = sanitized.files.filter(f => draft.evidence.files.includes(f)).length;
+  if (covered === sanitized.files.length) score += 20;
+  return {
+    score,
+    replayable: true,
+    note: `replayable witness (${sanitized.files.length} file(s)). Runtime gate is \`qodex skill witness\` — this score is structural, not a verifier result.`,
+  };
 }

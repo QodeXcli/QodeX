@@ -7,7 +7,8 @@
  *      returns null so the caller falls back to the minimal capture.
  *   3. The draft round-trips through the EXISTING candidate store byte-identically, and
  *      the listing surfaces the richer step/evidence counts for the dashboard.
- *   4. The phase-2 eval hook is an honest stub: score null + the labeled note.
+ *   4. Without a witness diff, evalCandidate reports no score (it does not invent one).
+ *      With a path-safe diff, the draft is marked replayable and the score is structural.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { promises as fs } from 'fs';
@@ -119,9 +120,51 @@ describe('draft round-trips through the existing candidate store', () => {
   });
 });
 
-describe('evalCandidate — honest phase-2 stub', () => {
-  it('returns no score and the clearly-labeled note', () => {
+describe('evalCandidate — structural witness gate, not a fake verifier score', () => {
+  it('returns no score when the draft has no witness patch', () => {
     const draft = distillDraft(plausible, { nowIso: 'T' })!;
-    expect(evalCandidate(draft)).toEqual({ score: null, note: 'eval-gated promotion lands in phase 2' });
+    expect(evalCandidate(draft)).toEqual({
+      score: null,
+      replayable: false,
+      note: 'no witness patch — promotion needs an independent judge or a replayable diff (`qodex skill witness`)',
+    });
+    expect(draft.skillMd).toContain('witness: none');
+    expect(draft.skillMd).toContain('draft: flywheel-v1');
+  });
+
+  it('embeds a path-safe diff and scores it as replayable, not as a pass', () => {
+    const patch = [
+      'diff --git a/src/http/client.ts b/src/http/client.ts',
+      '--- a/src/http/client.ts',
+      '+++ b/src/http/client.ts',
+      '@@ -1 +1,2 @@',
+      ' export const x = 1;',
+      '+export const retries = 3;',
+      '',
+    ].join('\n');
+    const draft = distillDraft({ ...plausible, patch }, { nowIso: 'T' })!;
+    expect(draft.skillMd).toContain('draft: flywheel-v2');
+    expect(draft.skillMd).toContain('witness: replayable');
+    expect(draft.skillMd).toContain('export const retries = 3;');
+    const gate = evalCandidate(draft);
+    expect(gate.replayable).toBe(true);
+    expect(gate.score).toBe(100);
+    expect(gate.note).toMatch(/structural/);
+  });
+
+  it('refuses to embed a diff that looks like a secret', () => {
+    const patch = [
+      'diff --git a/src/http/client.ts b/src/http/client.ts',
+      '--- a/src/http/client.ts',
+      '+++ b/src/http/client.ts',
+      '@@ -1 +1,2 @@',
+      ' export const x = 1;',
+      '+const key = "AKIAIOSFODNN7EXAMPLE";',
+      '',
+    ].join('\n');
+    const draft = distillDraft({ ...plausible, patch }, { nowIso: 'T' })!;
+    expect(draft.skillMd).toContain('witness: rejected');
+    expect(draft.skillMd).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    expect(evalCandidate(draft).replayable).toBe(false);
   });
 });

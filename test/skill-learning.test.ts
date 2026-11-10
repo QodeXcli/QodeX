@@ -109,6 +109,29 @@ describe('decidePromotion — independent judge + human-protection (the crux)', 
     // a prior machine capture of the same name MAY be replaced
     expect(decidePromotion({ authorModel: author, verdict: goodVerdict, activeSameName: { provenance: 'machine' } }).promote).toBe(true);
   });
+  it('PROMOTES a witnessed replay when there is no second model', () => {
+    const witness = { pass: true, replay: 'applied' as const, errorCount: 0, files: 2, checker: 'tsc', at: 't' };
+    const d = decidePromotion({ authorModel: author, verdict: null, witness });
+    expect(d.promote).toBe(true);
+    expect(d.reason).toMatch(/witnessed replay/);
+  });
+  it('does not let a witness overrule an independent rejection or a human skill', () => {
+    const witness = { pass: true, replay: 'applied' as const, errorCount: 0, files: 2, checker: 'tsc', at: 't' };
+    const rejected = decidePromotion({
+      authorModel: author,
+      verdict: { pass: false, judgeModel: 'other-model', reasons: ['redundant'] },
+      witness,
+    });
+    expect(rejected.promote).toBe(false);
+    expect(rejected.reason).toMatch(/independent judge rejected/);
+    const human = decidePromotion({ authorModel: author, verdict: null, witness, activeSameName: { provenance: 'user' } });
+    expect(human.promote).toBe(false);
+    expect(human.reason).toMatch(/human-authored/);
+  });
+  it('a witness that applied but was not checked is not a pass', () => {
+    const witness = { pass: false, replay: 'applied' as const, errorCount: 0, files: 1, note: 'no objective checker', at: 't' };
+    expect(decidePromotion({ authorModel: author, verdict: null, witness }).promote).toBe(false);
+  });
 });
 
 describe('parseJudgeVerdict — fails CLOSED (unknown ⇒ reject)', () => {

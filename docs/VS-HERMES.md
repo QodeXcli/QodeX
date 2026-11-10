@@ -28,7 +28,7 @@ flywheel flag was on, so learning often had nothing to encode.
 ## What 2.8 adds (the wedge, not a clone)
 
 **Witnessed replay.** A verified session stores the exact unified diff inside
-the quarantined skill (size-capped, path-checked, secret-rejected).
+the quarantined skill (size-capped, path-checked, secret-rejected). 
 
 ```
 qodex skill witness <name>

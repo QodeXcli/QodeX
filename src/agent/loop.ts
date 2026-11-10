@@ -1,6 +1,6 @@
 /*
  * QodeX — Local-first agentic coding CLI
- * Copyright 2026 7 SEVEN
+ * Copyright 2026 7 Seven
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -924,14 +924,23 @@ export class AgentLoop {
     } finally {
       this.activeSandbox = null;
       const commitMsg = `qodex: ${String(firstUserMsg).slice(0, 72).replace(/\n/g, ' ')}`;
-      // Capture the changed-file list from git BEFORE finishing (the sandbox
-      // branch still has the diff). Best-effort.
+      // Capture the changed-file list AND (when learning is on) the unified diff
+      // BEFORE finishing (the sandbox branch still has the diff). Best-effort.
+      // Learning used to see an empty file list unless the flywheel flag was also
+      // on, so a local self-improvement loop never captured anything.
       let changedFiles: string[] = [];
-      if ((flywheelEnabled || process.env.QODEX_RECEIPT_FILE) && reachedFinal) {
+      let witnessPatch = '';
+      const learningOn = (this.config as any).learning?.enabled === true;
+      if ((flywheelEnabled || process.env.QODEX_RECEIPT_FILE || learningOn) && reachedFinal) {
         try {
           const { git } = await import('../tools/git/git-runner.js');
-          const diff = await git(['diff', '--name-only', sandbox.baseCommitRef() ?? 'HEAD'], { cwd: this.cwd, signal: options.signal });
+          const base = sandbox.baseCommitRef() ?? 'HEAD';
+          const diff = await git(['diff', '--name-only', base], { cwd: this.cwd, signal: options.signal });
           if (diff.exitCode === 0) changedFiles = diff.stdout.split('\n').map(s => s.trim()).filter(Boolean);
+          if (learningOn) {
+            const full = await git(['diff', base], { cwd: this.cwd, signal: options.signal });
+            if (full.exitCode === 0) witnessPatch = full.stdout;
+          }
         } catch { /* ignore */ }
       }
       // Capture the branch name BEFORE finish() (it nulls internal state) so we
@@ -999,7 +1008,7 @@ export class AgentLoop {
               const { distillDraft } = await import('../skills/learning/distill.js');
               const nowIso = new Date().toISOString();
               const draft = distillDraft(
-                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolSequence: [...this.sessionToolSequence], filesChanged: changedFiles },
+                { prompt: String(firstUserMsg), finalSummary: finalContent.slice(0, 500), toolSequence: [...this.sessionToolSequence], filesChanged: changedFiles, patch: witnessPatch },
                 { nowIso, confidence },
               );
               const candidate = draft ?? buildCandidateSkill(
@@ -1020,7 +1029,7 @@ export class AgentLoop {
                   if (!fit.noSignal) fitSuffix = ` · codebase-fit ${Math.round(fit.score * 100)}%`;
                 }
               } catch { /* code graph optional */ }
-              const draftSuffix = draft ? ` · ${draft.steps.length}-step draft` : '';
+              const draftSuffix = draft ? ` · ${draft.steps.length}-step draft${draft.skillMd.includes('witness: replayable') ? ' · witness patch' : ''}` : '';
               yield { type: 'notice', data: { message: `🎓 Captured candidate skill "${candidate.name}" (confidence ${confidence}/100${fitSuffix}${draftSuffix}) — review with \`qodex skill candidates\`, promote with \`qodex skill promote ${candidate.name}\`.` } };
 
               // Auto-Evaluation (opt-in): immediately replay the captured skill in a clean

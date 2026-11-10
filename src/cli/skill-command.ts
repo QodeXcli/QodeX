@@ -192,6 +192,36 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('witness <name>')
+    .description('Re-apply a skill\'s witnessed diff in a clean git worktree and run the real verifier. No model call. A pass is what lets a single local model promote via `qodex skill curate`.')
+    .action(async (name: string) => {
+      const { readCandidate, candidatesDir } = await import('../skills/learning/candidate-store.js');
+      const { loadSkillByName } = await import('../skills/loader.js');
+      const { replayWitness, formatWitnessSection, upsertWitnessSection } = await import('../skills/learning/witness.js');
+      const { recordLearningEvent } = await import('../skills/learning/ledger.js');
+      const { promises: fs } = await import('fs');
+      const path = await import('path');
+
+      let md = await readCandidate(name);
+      let filePath: string | null = md ? path.join(candidatesDir(), name, 'SKILL.md') : null;
+      if (!md) {
+        const active = await loadSkillByName(name, process.cwd());
+        if (active) { md = await fs.readFile(path.join(active.dir, 'SKILL.md'), 'utf-8'); filePath = path.join(active.dir, 'SKILL.md'); }
+      }
+      if (!md || !filePath) { console.error(`✗ no candidate or active skill named "${name}"`); process.exit(1); }
+
+      console.log(`  Replaying witness for "${name}" (no model) …`);
+      const verdict = await replayWitness(process.cwd(), md);
+      await fs.writeFile(filePath, upsertWitnessSection(md, formatWitnessSection(verdict)), 'utf-8');
+      await recordLearningEvent({ event: 'eval', name, evalStatus: verdict.pass ? 'pass' : verdict.replay === 'applied' ? 'fail' : 'inconclusive', judge: 'witness' });
+      const icon = verdict.pass ? '✓' : verdict.replay === 'applied' ? '✗' : '◌';
+      console.log(`\n${icon} ${name}: ${verdict.pass ? 'pass' : verdict.replay}${verdict.note ? ` — ${verdict.note}` : ''}`);
+      if (verdict.checker) console.log(`  checker: ${verdict.checker} · new errors: ${verdict.errorCount} · files: ${verdict.files}`);
+      console.log(`  recorded in ${filePath}`);
+      if (!verdict.pass) process.exitCode = 1;
+    });
+
+  cmd
     .command('versions <name>')
     .description('Show a skill\'s version history, champion/challenger, and per-version stats (UCB1 A/B)')
     .action(async (name: string) => {

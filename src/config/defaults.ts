@@ -533,8 +533,18 @@ export interface QodexConfig {
     suggestSkills?: boolean;
     /** Auto-run `skill eval` immediately after a capture (replay in a clean worktree +
      *  objective verify, recorded into the candidate). Costs a model call + worktree per
-     *  capture, so it's opt-in. Default false; otherwise run `qodex skill eval` on demand. */
+     *  capture, so it's opt-in. Default false; otherwise run `qodex skill eval` on demand.
+     *  Prefer `qodex skill witness` when you only have one local model: it replays the
+     *  captured diff with no model call. */
     autoEval?: boolean;
+    /**
+     * When curation has no independent judge (single local model), replay each
+     * candidate's witness diff and promote only if the real verifier is clean.
+     * Default true. Set false to keep every single-model candidate quarantined.
+     * Never overrides an independent judge's rejection, and never overwrites a
+     * human-authored skill.
+     */
+    witnessFallback?: boolean;
     /** Minimum tool calls for a task to be capture-worthy. Default 5. */
     minToolCalls?: number;
     /** Require objective verification to have passed before capturing. Default true.

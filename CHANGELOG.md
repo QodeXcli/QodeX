@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.8.0 — 2026-11-10
+
+**Witnessed skill replay — self-improvement that works on one local model.**
+
+Hermes-style promotion needs a second model to grade a capture. QodeX already refuses that self-grade, so a single Qwen never promoted anything, and `evalCandidate` was still a stub. 2.8 stores the verified session's unified diff on the quarantined skill and replays it.
+
+1. **`qodex skill witness <name>`.** Re-applies the diff in a detached worktree and runs the real verifier (tsc / ruff / …). No model call. Secrets, oversized diffs, and `..` paths are dropped at capture time.
+
+2. **`qodex skill curate` fallback.** When there is no independent judge, a clean witness can promote (`learning.witnessFallback`, default on). An independent judge's rejection still wins. Human-authored skills are still immutable. A patch with no checker is not a pass.
+
+3. **Sandbox learning actually sees the diff.** Changed files (and the patch) are collected when `learning.enabled` is on, not only when the flywheel flag is on.
+
+4. **Author.** Package author, NOTICE, and copyright lines are **7 Seven**.
+
+```
+src/skills/learning/witness.ts
+src/skills/learning/distill.ts
+src/skills/learning/promotion.ts
+src/skills/learning/curator.ts
+src/agent/loop.ts
+src/cli/skill-command.ts
+docs/VS-HERMES.md
+```
+
+
 ## v2.7.0 — 2026-08-14
 
 **Raw telemetry from 2.6 becomes something you can act on — without a slower CLI start.**

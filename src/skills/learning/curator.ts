@@ -5,11 +5,13 @@
  *   1. Snapshot the whole skills dir (tar.gz) → a rollback point exists before any change.
  *   2. For each candidate, run an independent judge (the 'reflection'-role model). If it
  *      resolves to the SAME model that authors captures (config.defaults.model), there is
- *      NO independent judge available → the candidate is left quarantined, never promoted
- *      on a self-grade.
- *   3. `decidePromotion` (pure) makes the final call: independent + passing judge AND no
- *      human-authored skill of the same name. Only then `promoteCandidate` moves it, and
- *      that function re-checks the human-protection guard itself (defense in depth).
+ *      NO independent judge available. The candidate is NOT self-graded. Instead, when
+ *      `learning.witnessFallback` is on (the default), the curator replays the skill's
+ *      witness diff in a clean worktree and promotes only if the real verifier is clean.
+ *   3. `decidePromotion` (pure) makes the final call: independent + passing judge, OR a
+ *      passing witness when no independent judge exists, AND no human-authored skill of
+ *      the same name. Only then `promoteCandidate` moves it, and that function re-checks
+ *      the human-protection guard itself (defense in depth).
  *
  * Nothing here can overwrite a human skill, and nothing is promoted on the worker's own
  * say-so — the two halves of the anti-self-congratulation design.
@@ -92,16 +94,23 @@ export async function curateCandidates(
 
   // Explicit judge model (learning.judgeModel) wins; else the 'reflection' role.
   const explicitJudge = String((config as any).learning?.judgeModel ?? '').trim();
-  let judgeRoute;
+  let judgeRoute: ReturnType<ModelRouter['route']> | null = null;
   try {
     judgeRoute = router.route('reflection', 2000, explicitJudge ? { explicitModel: explicitJudge } : {});
   } catch (e: any) {
-    log(`No judge model available (${e?.message}); leaving all candidates quarantined.`);
-    for (const c of candidates) result.skipped.push({ name: c.name, reason: 'no judge model' });
-    return result;
+    log(`No judge model available (${e?.message}).`);
   }
 
-  const independent = !!judgeRoute.model && judgeRoute.model !== authorModel;
+  const witnessFallback = (config as any).learning?.witnessFallback !== false;
+  const independent = !!judgeRoute?.model && judgeRoute.model !== authorModel;
+  if (!independent && !witnessFallback) {
+    log('No independent judge and witness fallback is off; leaving all candidates quarantined.');
+    for (const c of candidates) result.skipped.push({ name: c.name, reason: 'no independent judge' });
+    return result;
+  }
+  if (!independent) {
+    log('No independent judge — only a witnessed diff that replays cleanly under the real verifier can promote.');
+  }
 
   // ── Merge pass: collapse near-duplicate candidates before promoting them ──
   // Semantic dedup so the library doesn't accumulate ten variants of one capability.
@@ -109,7 +118,7 @@ export async function curateCandidates(
   // decides whether to actually merge and writes the unified SKILL.md. Skipped entirely
   // if there's no independent judge (we never merge on a self-grade).
   const mergedAway = new Set<string>();
-  if (independent) {
+  if (independent && judgeRoute) {
     const threshold = (opts.similarityThreshold ?? 0.6);
     const texts = await Promise.all(candidates.map(async c => ({ name: c.name, text: candidateSimText((await readCandidate(c.name)) ?? '', c.name) })));
     const pairs = findSimilarPairs(texts, threshold);
@@ -144,7 +153,7 @@ export async function curateCandidates(
   // optional heavy model (learning.judgeModelTier2) we escalate to only when Tier 1 is unsure.
   const tier2Model = String((config as any).learning?.judgeModelTier2 ?? '').trim();
   let tier2Route: ReturnType<typeof router.route> | null = null;
-  if (tier2Model && tier2Model !== authorModel && tier2Model !== judgeRoute.model) {
+  if (tier2Model && tier2Model !== authorModel && tier2Model !== judgeRoute?.model) {
     try { tier2Route = router.route('reflection', 2000, { explicitModel: tier2Model }); } catch { tier2Route = null; }
   }
   // Calibration: if Tier 1 has been drifting from Tier 2, feed it the worst past corrections.
@@ -173,18 +182,42 @@ export async function curateCandidates(
     const md = await readCandidate(c.name);
     if (!md) { result.skipped.push({ name: c.name, reason: 'unreadable' }); continue; }
 
-    // Enforce independence up front: a judge model equal to the author model is a self-grade.
-    if (!judgeRoute.model || judgeRoute.model === authorModel) {
-      result.skipped.push({ name: c.name, reason: `judge model equals author model (${authorModel}) — configure a separate routing.reflection model` });
+    // No independent judge: do not self-grade. Replay the witness diff instead.
+    if (!independent) {
+      log(`No independent judge for "${c.name}" — replaying witness patch …`);
+      const { replayWitness } = await import('./witness.js');
+      const witness = await replayWitness(cwd, md);
+      const activeSameName = await loadSkillByName(c.name, cwd);
+      const decision = decidePromotion({ authorModel, verdict: null, activeSameName, witness });
+      if (!decision.promote) {
+        const soft = witness.replay === 'absent' || witness.replay === 'rejected';
+        (soft ? result.skipped : result.rejected).push({ name: c.name, reason: decision.reason });
+        if (!soft) await recordLearningEvent({ event: 'reject', name: c.name, judge: 'witness' });
+        log(`  ${soft ? '↷' : '✗'} ${c.name}: ${decision.reason}`);
+        continue;
+      }
+      const promo = await promoteCandidate(c.name, cwd);
+      if (promo.promoted) {
+        result.promoted.push(c.name);
+        await recordLearningEvent({ event: 'promote', name: c.name, judge: `witness:${witness.checker ?? 'verifier'}` });
+        log(`  ✓ promoted ${c.name} by witnessed replay`);
+      } else {
+        result.rejected.push({ name: c.name, reason: promo.reason });
+        await recordLearningEvent({ event: 'reject', name: c.name, judge: 'witness' });
+        log(`  ✗ ${c.name}: ${promo.reason}`);
+      }
       continue;
     }
+
+    // Independent judge exists (narrowed): it is a different model than the author.
+    const judge = judgeRoute!;
 
     // ── Escalating cascade: Tier 1 (light) scores; escalate to Tier 2 (heavy) only when unsure ──
     let verdict;
     try {
-      log(`Judging "${c.name}" with ${judgeRoute.model} (Tier 1) …`);
-      const t1 = await scoreWith(judgeRoute, md, calibration);
-      let finalScores = t1, finalModel = judgeRoute.model, reasons: string[] = [];
+      log(`Judging "${c.name}" with ${judge.model} (Tier 1) …`);
+      const t1 = await scoreWith(judge, md, calibration);
+      let finalScores = t1, finalModel = judge.model, reasons: string[] = [];
       // Escalate when Tier 1 couldn't score (null) or is in the grey/confused zone, and a Tier 2 exists.
       if (tier2Route && (!t1 || shouldEscalate(t1))) {
         log(`  ↑ escalating "${c.name}" to ${tier2Route.model} (Tier 2)${t1 ? ` — avg/variance unclear` : ' — Tier 1 unparseable'} …`);
@@ -207,7 +240,7 @@ export async function curateCandidates(
     const decision = decidePromotion({ authorModel, verdict, activeSameName });
     if (!decision.promote) {
       result.rejected.push({ name: c.name, reason: decision.reason });
-      await recordLearningEvent({ event: 'reject', name: c.name, judge: judgeRoute.model });
+      await recordLearningEvent({ event: 'reject', name: c.name, judge: judge.model });
       log(`  ✗ ${c.name}: ${decision.reason}`);
       continue;
     }
@@ -223,11 +256,11 @@ export async function curateCandidates(
     const promo = await promoteCandidate(c.name, cwd);
     if (promo.promoted) {
       result.promoted.push(c.name);
-      await recordLearningEvent({ event: 'promote', name: c.name, judge: judgeRoute.model });
+      await recordLearningEvent({ event: 'promote', name: c.name, judge: judge.model });
       log(`  ✓ promoted ${c.name}`);
     } else {
       result.rejected.push({ name: c.name, reason: promo.reason });
-      await recordLearningEvent({ event: 'reject', name: c.name, judge: judgeRoute.model });
+      await recordLearningEvent({ event: 'reject', name: c.name, judge: judge.model });
       log(`  ✗ ${c.name}: ${promo.reason}`);
     }
   }
