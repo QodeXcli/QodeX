@@ -23,9 +23,10 @@
  *     correct user-consent flow.
  *
  * Permission model:
- *   - All computer_use_* tools are DESTRUCTIVE (mutating the user's GUI state).
- *   - The permission gradient applies — first call asks, gradient picker lets
- *     user choose "always allow computer_use_screenshot" etc.
+ *   - Screenshot, list windows, and the active window are read-only.
+ *   - Click, type, and key ask every time — including under always-yes.
+ *     A click can send, pay, or delete, and nothing can roll a screen action back.
+ *   - `qodex desk run` denies that ask, so a desk does not drive the GUI on its own.
  *
  * Tools defined here:
  *   - computer_use_screenshot     — capture screen or specific window to PNG
@@ -42,6 +43,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
+import { interpretPermissionAnswer } from '../../security/permissions.js';
 
 function isMacos(): boolean {
   return os.platform() === 'darwin';
@@ -140,6 +142,22 @@ export class ComputerUseScreenshotTool extends Tool<z.infer<typeof ScreenshotArg
   }
 }
 
+/** Click, type, and key. A standing "always yes" is not enough — confirmed every time. */
+export async function confirmScreenChange(ctx: ToolContext, tool: string, operation: string): Promise<ToolResult | null> {
+  ctx.emit({ type: 'permission-request', tool, operation });
+  const answer = await ctx.askUser(
+    `${tool} will change what is on screen: ${operation}`,
+    ['yes', 'no'],
+  );
+  if (interpretPermissionAnswer(answer) !== 'allow') {
+    return {
+      content: `[USER_REJECTED] ${tool} was not approved. Click, type, and key are confirmed every time — a click can send, spend, or delete, and there is no undo.`,
+      isError: true,
+    };
+  }
+  return null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // computer_use_click
 
@@ -157,8 +175,10 @@ export class ComputerUseClickTool extends Tool<z.infer<typeof ClickArgs>> {
   isDestructive = true;
   argsSchema = ClickArgs;
 
-  async execute(args: z.infer<typeof ClickArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof ClickArgs>, ctx: ToolContext): Promise<ToolResult> {
     if (!isMacos()) return macosOnly(this.name);
+    const blocked = await confirmScreenChange(ctx, this.name, `click ${args.x},${args.y}`);
+    if (blocked) return blocked;
     try {
       const cliclickPath = await which('cliclick');
       const count = args.count ?? 1;
@@ -202,8 +222,10 @@ export class ComputerUseTypeTool extends Tool<z.infer<typeof TypeArgs>> {
   isDestructive = true;
   argsSchema = TypeArgs;
 
-  async execute(args: z.infer<typeof TypeArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof TypeArgs>, ctx: ToolContext): Promise<ToolResult> {
     if (!isMacos()) return macosOnly(this.name);
+    const blocked = await confirmScreenChange(ctx, this.name, `type ${args.text.length} chars`);
+    if (blocked) return blocked;
     try {
       const cliclickPath = await which('cliclick');
       if (cliclickPath) {
@@ -245,8 +267,10 @@ export class ComputerUseKeyTool extends Tool<z.infer<typeof KeyArgs>> {
   isDestructive = true;
   argsSchema = KeyArgs;
 
-  async execute(args: z.infer<typeof KeyArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof KeyArgs>, ctx: ToolContext): Promise<ToolResult> {
     if (!isMacos()) return macosOnly(this.name);
+    const blocked = await confirmScreenChange(ctx, this.name, `key ${args.combo}`);
+    if (blocked) return blocked;
     try {
       const parts = args.combo.toLowerCase().split('+').map(s => s.trim());
       const modifiers: string[] = [];

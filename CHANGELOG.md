@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.9.0 — 2026-11-10
+
+**QodeX Desk — named teammates on your machine, not a cloud computer.**
+
+Grok Bot splits work across bots that share one rented computer. Muse keeps one agent in a Secure VM and stops before send or spend. QodeX does not ship either of those. A desk is a role on the box you already have.
+
+1. **`qodex desk`.** Up to six desks, each with a cwd and a brief. `goal` queues work. Send, spend, delete, publish, and credentials (including the Persian phrasings) stay `needs-approval` until `allow` or `deny`. `handoff` moves the open goal, strips secrets, and stops at depth 3. `teach` stores a routine as JSON steps, not a screen recording.
+
+2. **`qodex desk run`.** Claims the oldest runnable goal and runs it with the same agent as `qodex -p`, in that desk's directory. `--dry-run` prints the prompt and calls nothing. A killed run stays `running` until `release`, and an approved goal stays approved. Ordinary edits and shell proceed; irreversible shell is denied on this path. The board lock is not held while the model runs.
+
+3. **`qodex desk serve`.** Console on `127.0.0.1` only, token in the URL. It assigns and approves. It does not call a model.
+
+4. **Screen control tells the truth.** `computer_use_click`, `computer_use_type`, and `computer_use_key` ask every time, including under always-yes. A click can send, pay, or delete, and nothing rolls it back. Screenshot and window listing stay read-only. Linux and Windows still have no click backend.
+
+The board is `~/.qodex/desks/board.json`. The trail is `~/.qodex/desks/audit.jsonl`. See [docs/DESK.md](docs/DESK.md).
+
+```
+src/desk/board.ts
+src/desk/policy.ts
+src/desk/store.ts
+src/desk/console.ts
+src/desk/dispatch.ts
+src/cli/desk-command.ts
+src/tools/computer/use.ts
+```
+
+
 ## v2.8.0 — 2026-11-10
 
 **Witnessed skill replay — self-improvement that works on one local model.**

@@ -1891,7 +1891,9 @@ program
 // `qodex skill …` — install / list / remove / enable installable model skills.
 // Built as a separate sub-Command so each subcommand gets clean --help and arg validation.
 import { buildSkillCommand } from './cli/skill-command.js';
+import { buildDeskCommand } from './cli/desk-command.js';
 program.addCommand(buildSkillCommand());
+program.addCommand(buildDeskCommand());
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);
