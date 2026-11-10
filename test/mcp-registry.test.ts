@@ -6,7 +6,7 @@ import { expandEnvRefs } from '../src/mcp/manager.js';
 describe('MCP registry', () => {
   it('has all the well-known servers', () => {
     const ids = listMcpSpecs().map(s => s.id);
-    for (const id of ['github', 'supabase', 'postgres', 'playwright', 'figma', 'sentry', 'linear', 'slack', 'sequential-thinking', 'brave-search', 'fetch', 'higgsfield', 'tavily']) {
+    for (const id of ['github', 'supabase', 'postgres', 'playwright', 'figma', 'sentry', 'linear', 'slack', 'sequential-thinking', 'parallel-search', 'brave-search', 'fetch', 'higgsfield', 'tavily']) {
       expect(ids).toContain(id);
     }
   });
@@ -15,6 +15,23 @@ describe('MCP registry', () => {
     expect(findMcpSpec('GitHub')?.id).toBe('github');
     expect(findMcpSpec('sentry')?.id).toBe('sentry');
     expect(findMcpSpec('nonexistent')).toBeUndefined();
+  });
+
+  it('Parallel Search is a no-auth Streamable HTTP server', () => {
+    const spec = findMcpSpec('Parallel Search')!;
+    expect(spec.id).toBe('parallel-search');
+    expect(spec.transport).toBe('remote');
+    expect(spec.auth).toBe('none');
+    expect(spec.url).toBe('https://search.parallel.ai/mcp');
+    expect(spec.streamable).toBe(true);
+    expect(spec.credentials).toEqual([]);
+
+    const entry = buildServerEntry(spec);
+    expect(entry).toEqual({
+      enabled: true,
+      url: 'https://search.parallel.ai/mcp',
+      streamable: true,
+    });
   });
 
   it('offers all three Figma access methods', () => {
