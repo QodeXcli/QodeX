@@ -15,9 +15,8 @@
  *   - browser_wait_for    — wait for a selector / URL pattern / network idle
  *   - browser_close       — explicitly close the browser (otherwise closes on session end)
  *
- * Mutating? Yes — every interaction mutates the loaded page. Counted as
- * destructive in the permission system so the user sees them in `/auto` flows.
- * Read-only sub-tools: browser_console, browser_get_text, browser_screenshot.
+ * Mutating clicks, fills, and page scripts ask every time. A standing
+ * always-yes does not cover them. Screenshot, console, and reading text do not ask.
  */
 
 import { z } from 'zod';
@@ -27,6 +26,27 @@ import * as os from 'os';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
 import { getSession, clearBuffers, closeBrowser } from './session.js';
 import { logger } from '../../utils/logger.js';
+import { interpretPermissionAnswer } from '../../security/permissions.js';
+import { scrubPacket } from '../../desk/policy.js';
+
+/**
+ * Click, fill, and page script. A standing "always yes" is not enough.
+ * Navigate, screenshot, and reading the page do not ask.
+ */
+export async function confirmPageChange(ctx: ToolContext, tool: string, operation: string): Promise<ToolResult | null> {
+  ctx.emit({ type: 'permission-request', tool, operation });
+  const answer = await ctx.askUser(
+    `${tool} will change the page: ${operation}`,
+    ['yes', 'no'],
+  );
+  if (interpretPermissionAnswer(answer) !== 'allow') {
+    return {
+      content: `[USER_REJECTED] ${tool} was not approved. Click, fill, and page script are confirmed every time. They can submit, spend, or delete, and a standing yes does not cover them.`,
+      isError: true,
+    };
+  }
+  return null;
+}
 
 const NavigateArgs = z.object({
   url: z.string().min(1).describe('URL to navigate to. Must include scheme (http:// or https://).'),
@@ -126,12 +146,14 @@ const ClickArgs = z.object({
 
 export class BrowserClickTool extends Tool<z.infer<typeof ClickArgs>> {
   name = 'browser_click';
-  description = 'Click an element matching a Playwright selector. Waits up to 5s for the element to become actionable (visible + enabled). Use after browser_navigate.';
+  description = 'Click an element matching a Playwright selector. Asks every time, then waits up to 5s for the element to become actionable. A standing always-yes does not cover it. Use after browser_navigate.';
   isReadOnly = false;
-  isDestructive = false;
+  isDestructive = true;
   argsSchema = ClickArgs;
 
-  async execute(args: z.infer<typeof ClickArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof ClickArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const blocked = await confirmPageChange(ctx, this.name, args.selector);
+    if (blocked) return blocked;
     try {
       const s = await getSession();
       await s.page.click(args.selector, {
@@ -154,12 +176,14 @@ const FillArgs = z.object({
 
 export class BrowserFillTool extends Tool<z.infer<typeof FillArgs>> {
   name = 'browser_fill';
-  description = 'Fill an input/textarea/contenteditable. Replaces existing content. For non-text widgets (date picker, range slider) use browser_evaluate.';
+  description = 'Fill an input/textarea/contenteditable. Asks every time. The typed text is not put in the question, only the selector and the length. A standing always-yes does not cover it.';
   isReadOnly = false;
-  isDestructive = false;
+  isDestructive = true;
   argsSchema = FillArgs;
 
-  async execute(args: z.infer<typeof FillArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof FillArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const blocked = await confirmPageChange(ctx, this.name, `${args.selector} (${args.value.length} chars)`);
+    if (blocked) return blocked;
     try {
       const s = await getSession();
       await s.page.fill(args.selector, args.value, { timeout: args.timeout_ms ?? 5000 });
@@ -249,12 +273,15 @@ const EvaluateArgs = z.object({
 
 export class BrowserEvaluateTool extends Tool<z.infer<typeof EvaluateArgs>> {
   name = 'browser_evaluate';
-  description = 'Run JavaScript in the page context and return the result. Wrap the script as a function body (use `return`). Returned values must be JSON-serializable.';
+  description = 'Run JavaScript in the page context and return the result. Asks every time, showing a short scrubbed preview, not a secret. A standing always-yes does not cover it. Wrap the script as a function body (use `return`). Returned values must be JSON-serializable.';
   isReadOnly = false;
-  isDestructive = false;
+  isDestructive = true;
   argsSchema = EvaluateArgs;
 
-  async execute(args: z.infer<typeof EvaluateArgs>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: z.infer<typeof EvaluateArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const preview = scrubPacket(args.script.replace(/\s+/g, ' ').trim()).text.slice(0, 80);
+    const blocked = await confirmPageChange(ctx, this.name, preview || `${args.script.length} chars`);
+    if (blocked) return blocked;
     try {
       const s = await getSession();
       // Wrap so the user can use `return` naturally in their script.

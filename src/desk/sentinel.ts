@@ -43,6 +43,9 @@ export function classifyAsk(prompt: string): { kind: string; reason: string } {
   }
   const sensitive = classifySensitive(body);
   if (sensitive.sensitive) return { kind: sensitive.kind, reason: sensitive.reason };
+  if (/\bbrowser_(click|fill|evaluate)\b/i.test(body) || /will change the page/i.test(body)) {
+    return { kind: 'page', reason: 'this call changes a browser page' };
+  }
   if (/\brm\s+-[a-z]*r/i.test(body) || /\bgit\s+push\b/i.test(body) || /\b(npm|pnpm|yarn)\s+publish\b/i.test(body)) {
     return { kind: 'irreversible', reason: 'irreversible command — one call, one yes' };
   }

@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.16.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.17.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -100,7 +100,7 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Read and edit code** — `read_file`, `write_file`, `edit_text`, `edit_symbol` (AST-aware), `multi_edit` (single-file sequential), `multi_file_edit` (atomic across up to 50 files).
 - **Understand a codebase** — `ls`, `glob`, `grep`, plus a Tree-sitter code-graph: `project_overview`, `analyze_impact`, `find_callers`, `find_references`, `find_dead_code`, `safe_rename`.
 - **Run commands** — `shell` on the host, or inside Docker when `runtime.backend: docker`; plus `code_run` for sandboxed Python / Node / TS / PHP / Ruby (macOS `sandbox-exec` where available).
-- **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes.
+- **Drive a real browser** — Playwright-backed Chromium: navigate, click, fill, screenshot, evaluate JS, read console + page errors — to verify your own UI changes. Click, fill, and page script ask every time. A standing yes does not cover them.
 - **Manage dev servers & jobs** — `dev_server_start npm run dev` then `browser_navigate http://localhost:5173`; `background_job_start` for async work, all in one session.
 - **Search the web** — DuckDuckGo by default (hardened with a `lite` fallback + retry), or Tavily / Brave / **Firecrawl** (returns full page markdown inline to save round-trips) when you set a key. Auto-fallback chain across whatever keys are present.
 - **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.

@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.17.0 — 2026-11-11
+
+**A page change asks, the same way a screen press does.**
+
+`browser_click`, `browser_fill`, and `browser_evaluate` were running under always-yes. They now ask every time. Always-yes is not a yes. The filled text stays out of the question. A desk labels the ask as a page change, unless the words themselves are a purchase, a send, or a delete. Navigate, screenshot, and reading the page do not ask. A no does not launch the browser and does not pretend the click happened.
+
+```
+src/tools/browser/tools.ts
+src/desk/sentinel.ts
+```
+
+
 ## v2.16.0 — 2026-11-11
 
 **A cloud browser that is actually Browserbase's, with your key.**

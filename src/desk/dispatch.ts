@@ -3,8 +3,9 @@
  *
  * Ordinary edits and shell use approval mode "always" for this process, then
  * the previous mode is restored. Anything that still asks — irreversible shell,
- * screen click/type/key, send/spend — is parked on the sentinel. The call runs
- * only after a person allows that exact id. Timeout denies it.
+ * screen click/type/key, a browser click/fill/script, send/spend — is parked
+ * on the sentinel. The call runs only after a person allows that exact id.
+ * Timeout denies it.
  *
  * Tool names and scrubbed args are returned so `desk teach --from-last` can
  * turn a real run into a routine. MCP is not started; the process must exit

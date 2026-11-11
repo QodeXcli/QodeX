@@ -238,6 +238,7 @@ describe('screen click, type, and key ask every time', () => {
 describe('sentinel and desktop backends', () => {
   it('labels a screen ask and a purchase, and decides a parked call once', async () => {
     expect(classifyAsk('computer_use_click will change what is on screen: click 1,2').kind).toBe('screen');
+    expect(classifyAsk('browser_click will change the page: text=Save').kind).toBe('page');
     expect(classifyAsk('Run: npm publish qodex').kind).toBe('publish');
     let file = emptySentinel();
     file = {
