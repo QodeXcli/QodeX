@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.14.0 — 2026-11-11
+
+**Press a control by name. Then check the tree again.**
+
+Hermes clicks a pixel or a browser. `computer_use_tree` reads the OS accessibility tree: macOS Accessibility, Windows UI Automation, Linux AT-SPI. If AT-SPI does not import, the tool errors. It does not invent controls.
+
+`computer_use_invoke` presses one name. Zero matches or two matches is a refusal. It asks, then presses that element (or, only when the element has no action, the center of its own bounds). It reads the tree again. Gone or changed is verified. A control that still looks the same is unverified, and the tool errors.
+
+Blind `computer_use_click` stays for coordinates the tree does not name. The sentinel still parks the press.
+
+```
+src/tools/computer/access.ts
+```
+
+
 ## v2.13.0 — 2026-11-11
 
 **One resident, not three commands and a crontab.**

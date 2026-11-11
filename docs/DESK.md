@@ -33,11 +33,21 @@ qodex desk deny-call <id>       # the agent is told no
 
 ## Screen
 
-`computer_use_screenshot`, `computer_use_click`, `computer_use_type`, and `computer_use_key` are real:
+`computer_use_tree` and `computer_use_invoke` press a **named** control. Hermes clicks a pixel or drives a browser. This reads the OS accessibility tree:
+
+- macOS — Accessibility (System Events). One matching element is clicked. Zero or two is a refusal.
+- Windows — UI Automation. Invoke or Toggle. If the control has neither, the click is the center of **that control's** bounds, not a coordinate the model guessed.
+- Linux — AT-SPI when `python3-gi` and `gir1.2-atspi-2.0` import. If they do not, the tool errors. It does not invent a tree. Blind clicks still need xdotool.
+
+After the press the tree is read again. The control leaving, or its bounds / value / enabled bit changing, is verified. If it looks the same, the result is unverified and the tool errors. Do not treat that as success.
+
+`computer_use_screenshot`, `computer_use_click`, `computer_use_type`, and `computer_use_key` remain for pixels the tree does not name:
 
 - macOS — screencapture, System Events, optional cliclick
 - Linux — xdotool, plus scrot or ImageMagick `import` or gnome-screenshot. If xdotool is missing, the tool says so. It does not pretend it clicked.
 - Windows — PowerShell and Win32. `cmd` is sent as Ctrl. The Windows key is not sent.
+
+Every press, click, type, and key still waits for the sentinel.
 
 Click, type, and key ask every time, including under always-yes. Screenshot and window listing stay read-only.
 

@@ -138,45 +138,56 @@ export interface DesktopTools {
   xdotool?: boolean;
   /** scrot, ImageMagick `import`, or gnome-screenshot is on PATH. */
   screenshot?: boolean;
+  /** python3 can import AT-SPI. Named controls, not just pixels. */
+  atspi?: boolean;
 }
+
+export type AccessBackend = 'ax' | 'uia' | 'atspi' | 'none';
 
 /**
  * What this process can drive. Linux click/type is real when xdotool is
- * installed. Windows uses PowerShell, which ships with the OS. Anything else
+ * installed. Windows uses PowerShell, which ships with the OS. Named controls
+ * use the accessibility tree (AX / UI Automation / AT-SPI). Anything else
  * is files, shell, and the browser — we do not invent a backend.
  */
-export function describeDesktop(platform: string, tools: DesktopTools = {}): { os: string; gui: GuiBackend; note: string } {
+export function describeDesktop(platform: string, tools: DesktopTools = {}): { os: string; gui: GuiBackend; access: AccessBackend; note: string } {
   if (platform === 'darwin') {
     return {
       os: 'macos',
       gui: 'macos',
-      note: 'Screen, click, and type use screencapture and System Events. Click, type, and key wait for a sentinel yes, then they run.',
+      access: 'ax',
+      note: 'Named controls use the accessibility tree (computer_use_tree, computer_use_invoke) and are checked again after the press. Blind click, type, and key use screencapture and System Events and wait for a sentinel yes.',
     };
   }
   if (platform === 'linux' && tools.xdotool) {
     return {
       os: 'linux',
       gui: 'x11',
-      note: tools.screenshot
-        ? 'Click, type, and key use xdotool. Screenshots use scrot, import, or gnome-screenshot. Each change waits for a sentinel yes, then it runs.'
-        : 'Click, type, and key use xdotool and wait for a sentinel yes. No screenshot binary is on PATH (install scrot or imagemagick).',
+      access: tools.atspi ? 'atspi' : 'none',
+      note: tools.atspi
+        ? 'Named controls use AT-SPI. Blind click, type, and key use xdotool. Each change waits for a sentinel yes, then it runs.'
+        : 'Click, type, and key use xdotool and wait for a sentinel yes. AT-SPI is not importable, so computer_use_tree will fail until python3-gi and gir1.2-atspi-2.0 are installed. It will not invent controls.',
     };
   }
   if (platform === 'linux') {
     return {
       os: 'linux',
       gui: 'none',
-      note: 'Desktop control is implemented for X11, but xdotool is not on PATH. Install xdotool and scrot and the same computer_use_* tools drive this screen. Until then the desk uses files, shell, and the browser.',
+      access: tools.atspi ? 'atspi' : 'none',
+      note: tools.atspi
+        ? 'Named controls use AT-SPI (computer_use_invoke). xdotool is not on PATH, so blind coordinate clicks are unavailable.'
+        : 'Desktop control is implemented for X11, but xdotool is not on PATH and AT-SPI is not importable. Install xdotool, or python3-gi and gir1.2-atspi-2.0 for named controls. Until then the desk uses files, shell, and the browser.',
     };
   }
   if (platform === 'win32') {
     return {
       os: 'windows',
       gui: 'windows',
-      note: 'Screenshot, click, type, and key use PowerShell and Win32. Click, type, and key wait for a sentinel yes, then they run.',
+      access: 'uia',
+      note: 'Named controls use UI Automation and are checked again after the press. Blind click, type, and key use PowerShell and Win32 and wait for a sentinel yes.',
     };
   }
-  return { os: platform || 'unknown', gui: 'none', note: 'No desktop backend for this platform. The desk still runs files, shell, and the browser.' };
+  return { os: platform || 'unknown', gui: 'none', access: 'none', note: 'No desktop backend for this platform. The desk still runs files, shell, and the browser.' };
 }
 
 function binOnPath(bin: string): boolean {
@@ -184,13 +195,27 @@ function binOnPath(bin: string): boolean {
   return result.status === 0 && Boolean(result.stdout?.trim());
 }
 
-/** describeDesktop plus a PATH check on Linux. Other platforms need no extra binary. */
-export function probeDesktop(platform = process.platform): { os: string; gui: GuiBackend; note: string } {
+/** describeDesktop plus a PATH check on Linux. macOS and Windows need no extra binary for named controls. */
+export function probeDesktop(platform = process.platform): { os: string; gui: GuiBackend; access: AccessBackend; note: string } {
   if (platform !== 'linux') return describeDesktop(platform);
   return describeDesktop('linux', {
     xdotool: binOnPath('xdotool'),
     screenshot: binOnPath('scrot') || binOnPath('import') || binOnPath('gnome-screenshot'),
+    atspi: atspiImportable(),
   });
+}
+
+function atspiImportable(): boolean {
+  try {
+    const result = spawnSync('python3', ['-c', 'import gi; gi.require_version("Atspi", "2.0")'], {
+      encoding: 'utf8',
+      timeout: 4000,
+      stdio: 'ignore',
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 export function slugDeskName(name: string): string {

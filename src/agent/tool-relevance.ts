@@ -83,7 +83,7 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
     'check the page', 'see the page', 'view the page', 'render', 'preview', 'open the site', 'open the page',
     'in the browser',
     'مرورگر', 'اسکرین', 'اسکرپ', 'کراول', 'چطور به نظر', 'پیش‌نمایش'] },
-  { members: ['computer_use_'], keywords: ['desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard', 'دسکتاپ', 'ماوس', 'کیبورد', 'صفحه‌نمایش'] },
+  { members: ['computer_use_'], keywords: ['desktop', 'screen', 'window', 'gui', 'mouse', 'keyboard', 'accessibility', 'dialog', 'system dialog', 'دسکتاپ', 'ماوس', 'کیبورد', 'صفحه‌نمایش', 'دیالوگ', 'دکمه'] },
   { members: ['dev_server_'], keywords: ['dev server', 'npm run', 'serve', 'localhost', 'vite', 'next dev', 'hot reload', 'hmr', 'سرور توسعه', 'لوکال‌هاست'] },
   { members: ['background_job_'], keywords: ['background job', 'long-running', 'long running', 'async job', 'queue', 'worker'] },
   { members: ['csv_read', 'csv_write', 'xlsx_read', 'pdf_read', 'media_probe', 'media_transform'],

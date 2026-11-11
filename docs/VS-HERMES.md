@@ -71,4 +71,6 @@ One process, on this machine. Each pass, default every 60 seconds:
 
 Ahead of Hermes on the thing QodeX is for: a weak local model cannot talk a skill into the library, and the always-on loop is one command that still stops for send, spend, delete, screen, and ssh.
 
+Ahead on the desktop too, in one specific way Hermes does not do: `computer_use_invoke` presses a control by its accessibility name (macOS AX, Windows UI Automation, Linux AT-SPI), refuses ambiguous matches, and reads the tree again. A control that still looks the same is unverified. Hermes clicks a pixel or a browser.
+
 Not ahead, and not claimed: Hermes still has the broader gateway, a desktop shell, cloud browser, and a model that rewrites skill prose when you trust a second model. QodeX does not ship those. `qodex up` does not call a model of its own.

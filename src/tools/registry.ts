@@ -73,6 +73,7 @@ import {
   ComputerUseActiveWindowTool,
   ComputerUseListWindowsTool,
 } from './computer/use.js';
+import { ComputerUseTreeTool, ComputerUseInvokeTool } from './computer/access.js';
 import {
   BrowserNavigateTool,
   BrowserClickTool,
@@ -287,6 +288,8 @@ export class ToolRegistry {
       new ComputerUseKeyTool(),
       new ComputerUseActiveWindowTool(),
       new ComputerUseListWindowsTool(),
+      new ComputerUseTreeTool(),
+      new ComputerUseInvokeTool(),
       new BrowserNavigateTool(),
       new BrowserClickTool(),
       new BrowserFillTool(),

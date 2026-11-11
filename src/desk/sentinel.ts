@@ -38,7 +38,7 @@ export function emptySentinel(): SentinelFile {
 /** Label an ask. Every ask waits; the kind is what the console shows. */
 export function classifyAsk(prompt: string): { kind: string; reason: string } {
   const body = prompt ?? '';
-  if (/will change what is on screen/i.test(body) || /computer_use_(click|type|key)/i.test(body)) {
+  if (/will change what is on screen/i.test(body) || /computer_use_(click|type|key|invoke)/i.test(body)) {
     return { kind: 'screen', reason: 'this call changes the screen' };
   }
   const sensitive = classifySensitive(body);
