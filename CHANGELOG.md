@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.12.0 — 2026-11-11
+
+**Connectors that exist, wired as themselves.**
+
+Canva was already `qodex mcp add canva`. This release adds the other accounts people actually asked for, each pointed at the vendor's server. No stand-in client, no copied OAuth secret.
+
+1. **Google Workspace.** `gmail`, `google-drive`, `google-calendar`, `google-docs`, `google-sheets`. URLs are the official `https://gmailmcp.googleapis.com/mcp/v1` family (docs checked 2026-11-06). Google refuses dynamic client registration, so the entry runs `mcp-remote@0.16.5` with your `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`. The secret stays in the environment; it is not written onto the command line. Each server pins a localhost redirect (`4311`–`4315`). The client must be marked "Use this client for an AI-powered agent" and be in the Workspace Developer Preview. Gmail's official tool list searches and drafts. It does not send.
+
+2. **Hotmail / Outlook.** `hotmail` is `@softeria/ms-365-mcp-server` in personal mode (Outlook.com, Hotmail, Live, calendar, OneDrive) with `--enable-auth-tools`. Sign-in is that server's device-code login. `outlook-work` is the same package plus `--org-mode`. Neither is Microsoft's Copilot-only Work IQ server.
+
+3. **Notion and Jira.** `notion` → `https://mcp.notion.com/mcp`. `atlassian` → `https://mcp.atlassian.com/v2/mcp`. Both are the hosted OAuth servers, through the same `mcp-remote` bridge Canva already uses.
+
+`install_mcp source="list"` shows them. A Gmail / Hotmail / Notion / Jira question surfaces those tools only after the server is added.
+
+```
+src/mcp/registry.ts
+src/mcp/config-writer.ts
+src/mcp/manager.ts
+```
+
+
 ## v2.11.0 — 2026-11-11
 
 **`ssh` and `telnet` are tools, not a bash session that hangs.**

@@ -27,7 +27,11 @@ export function expandEnvRefs(config: MCPServerConfig, serverName: string): MCPS
 
   const out: MCPServerConfig = { ...config };
 
-  if (config.args) out.args = config.args.map(a => (typeof a === 'string' ? expand(a) : a));
+  if (config.args) {
+    out.args = config.preserveArgEnvRefs
+      ? config.args.slice()
+      : config.args.map(a => (typeof a === 'string' ? expand(a) : a));
+  }
   if (config.url) out.url = expand(config.url);
   if (config.env) {
     const env: Record<string, string> = {};

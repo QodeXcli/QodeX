@@ -30,6 +30,7 @@ const ALL = [
   'install_skill','install_mcp','mcp_scaffold',
   // MCP design servers (only present when the user added figma/canva) — names use `:`.
   'mcp:figma:get_code','mcp:figma:get_file','mcp:canva:create_design','mcp:canva:export_design',
+  'mcp:gmail:search_threads','mcp:hotmail:list-mail-messages','mcp:notion:search','mcp:atlassian:search',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -112,6 +113,15 @@ console.log('— design MCP tools (figma/canva) gate on design signal, EN + FA �
   check('fa "طراحی وب‌سایت" surfaces figma tools', names('طراحی وب‌سایت برای فروشگاه').has('mcp:figma:get_code'));
   check('unrelated task EXCLUDES design MCP tools', !names('fix the type error in math.ts').has('mcp:figma:get_code'));
   check('plain backend task EXCLUDES canva', !names('write a sql migration').has('mcp:canva:create_design'));
+}
+
+console.log('— account connectors gate on the product name —');
+{
+  check('gmail', names('search my gmail for the invoice').has('mcp:gmail:search_threads'));
+  check('fa hotmail', names('صندوق هاتمیل را نشان بده').has('mcp:hotmail:list-mail-messages'));
+  check('notion', names('find the notion page about pricing').has('mcp:notion:search'));
+  check('jira', names('open the jira ticket').has('mcp:atlassian:search'));
+  check('unrelated excludes gmail', !names('fix the type error in math.ts').has('mcp:gmail:search_threads'));
 }
 
 console.log('— install_skill surfaces whenever skills are discussed (regression) —');

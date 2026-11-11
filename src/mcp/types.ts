@@ -107,6 +107,13 @@ export interface MCPServerConfig {
   destructive?: boolean;
   /** Seconds to wait for initialize handshake. Default 10. */
   startupTimeoutSeconds?: number;
+  /**
+   * Leave `${ENV}` placeholders in `args` for the child process to expand.
+   * mcp-remote does this inside `--static-oauth-client-info`, so the secret
+   * stays in the environment and is not copied onto the command line.
+   * Env values on this entry are still expanded before spawn.
+   */
+  preserveArgEnvRefs?: boolean;
 }
 
 export interface MCPManagerConfig {

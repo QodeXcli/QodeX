@@ -74,6 +74,146 @@ export interface McpServerSpec {
 
   /** Docs URL. */
   docs?: string;
+
+  /**
+   * How the user signs in, when auth is 'oauth'.
+   * 'browser' (default): mcp-remote opens a browser on connect.
+   * 'device-code': the server prints a URL and a code (Hotmail / Outlook).
+   */
+  login?: 'browser' | 'device-code';
+
+  /**
+   * Write `${ENV}` into args and also pass the credential through env, so a
+   * child that expands placeholders (mcp-remote --static-oauth-client-info)
+   * never receives the secret on argv.
+   */
+  preserveArgEnvRefs?: boolean;
+}
+
+/**
+ * Google's official Workspace MCP servers.
+ * Checked against https://developers.google.com/workspace/guides/configure-mcp-servers
+ * on 2026-11-06. One URL per product. No dynamic client registration — the user
+ * brings an OAuth client marked for an AI agent. Ports are pinned so the
+ * redirect URI in the note is the one mcp-remote will actually use
+ * (http://localhost:<port>/oauth/callback).
+ */
+const GOOGLE_OAUTH_CLIENT: McpCredential[] = [
+  {
+    envVar: 'GOOGLE_OAUTH_CLIENT_ID',
+    label: 'Google OAuth client id',
+    hint: 'Google Auth Platform → Clients → Create. Type Web. Turn on "Use this client for an AI-powered agent". One client is reused by gmail, google-drive, google-calendar, google-docs, and google-sheets. Add each server\'s redirect URI (printed after add) to that client.',
+  },
+  {
+    envVar: 'GOOGLE_OAUTH_CLIENT_SECRET',
+    label: 'Google OAuth client secret',
+    hint: 'Same client. QodeX does not include a client id or secret. Google rejects clients that are not in the Workspace Developer Preview Program.',
+  },
+];
+
+function googleWorkspaceServer(opts: {
+  id: string;
+  title: string;
+  description: string;
+  url: string;
+  port: number;
+  scopes: string[];
+  destructive?: boolean;
+}): McpServerSpec {
+  return {
+    id: opts.id,
+    title: opts.title,
+    description: opts.description,
+    transport: 'stdio',
+    auth: 'oauth',
+    command: 'npx',
+    args: [
+      '-y', 'mcp-remote@0.16.5', opts.url, String(opts.port),
+      '--host', 'localhost', '--transport', 'http-only',
+      '--static-oauth-client-info',
+    ],
+    tokenArgTemplate: [
+      '{"client_id":"{GOOGLE_OAUTH_CLIENT_ID}","client_secret":"{GOOGLE_OAUTH_CLIENT_SECRET}"}',
+      '--static-oauth-client-metadata',
+      JSON.stringify({ scope: opts.scopes.join(' ') }),
+    ],
+    credentials: GOOGLE_OAUTH_CLIENT,
+    preserveArgEnvRefs: true,
+    destructive: opts.destructive,
+    startupTimeoutSeconds: 90,
+    note:
+      `Official Google remote MCP (developer preview). Google does not allow dynamic client registration, and from 2026-11-11 it rejects OAuth clients that are not marked "Use this client for an AI-powered agent". Join the Workspace Developer Preview Program and enable the API. Export GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET — the same pair for every Google server. On that client add this redirect URI exactly: http://localhost:${opts.port}/oauth/callback. The secret stays in the environment; mcp-remote expands \${GOOGLE_OAUTH_CLIENT_SECRET} itself, so it is not put on the command line. If the preview rejects the client, the call fails. There is no second, silent login.`,
+    docs: 'https://developers.google.com/workspace/guides/configure-mcp-servers',
+  };
+}
+
+function googleWorkspaceServers(): McpServerSpec[] {
+  return [
+    googleWorkspaceServer({
+      id: 'gmail',
+      title: 'Gmail',
+      description: 'Search Gmail, read threads, and create drafts on the official server. That server does not send mail.',
+      url: 'https://gmailmcp.googleapis.com/mcp/v1',
+      port: 4311,
+      destructive: true,
+      scopes: [
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.compose',
+      ],
+    }),
+    googleWorkspaceServer({
+      id: 'google-drive',
+      title: 'Google Drive',
+      description: 'List and open Drive files, and create files the app is allowed to touch (drive.file).',
+      url: 'https://drivemcp.googleapis.com/mcp/v1',
+      port: 4312,
+      destructive: true,
+      scopes: [
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+      ],
+    }),
+    googleWorkspaceServer({
+      id: 'google-calendar',
+      title: 'Google Calendar',
+      description: 'Read Google Calendar events. The scopes requested here are the read scopes on Google\'s configure page.',
+      url: 'https://calendarmcp.googleapis.com/mcp/v1',
+      port: 4313,
+      scopes: [
+        'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+        'https://www.googleapis.com/auth/calendar.events.freebusy',
+        'https://www.googleapis.com/auth/calendar.events.readonly',
+      ],
+    }),
+    googleWorkspaceServer({
+      id: 'google-docs',
+      title: 'Google Docs',
+      description: 'Read and edit Google Docs through the official Docs MCP server.',
+      url: 'https://docsmcp.googleapis.com/mcp/v1',
+      port: 4314,
+      destructive: true,
+      scopes: [
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/documents.readonly',
+        'https://www.googleapis.com/auth/documents',
+      ],
+    }),
+    googleWorkspaceServer({
+      id: 'google-sheets',
+      title: 'Google Sheets',
+      description: 'Read and edit Google Sheets through the official Sheets MCP server.',
+      url: 'https://sheetsmcp.googleapis.com/mcp/v1',
+      port: 4315,
+      destructive: true,
+      scopes: [
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/spreadsheets',
+      ],
+    }),
+  ];
 }
 
 export const MCP_REGISTRY: McpServerSpec[] = [
@@ -301,6 +441,65 @@ export const MCP_REGISTRY: McpServerSpec[] = [
     credentials: [],
     note: 'Connects to Higgsfield\'s hosted MCP server via the mcp-remote stdio bridge — more robust than a direct connection (QodeX\'s HTTP+SSE transport speaks the OLDER SSE protocol and would hang on Higgsfield\'s streamable-HTTP endpoint). On first connect, mcp-remote opens a browser for the OAuth handshake and caches the token under ~/.mcp-auth, so later runs are silent. Exposes generate_image / generate_video, Soul character training, and Marketing Studio ad-creative tools as mcp:higgsfield:* tools. On a restricted network, route npx + the OAuth browser through a proxy or Warp.',
     docs: 'https://higgsfield.ai',
+  },
+  ...googleWorkspaceServers(),
+  {
+    id: 'hotmail',
+    title: 'Hotmail / Outlook',
+    description: 'Hotmail, Outlook.com, and Live mail, plus the personal calendar and OneDrive. Device-code login. Does not send a password to QodeX.',
+    transport: 'stdio',
+    auth: 'oauth',
+    login: 'device-code',
+    command: 'npx',
+    args: ['-y', '@softeria/ms-365-mcp-server', '--enable-auth-tools'],
+    credentials: [],
+    destructive: true,
+    startupTimeoutSeconds: 60,
+    note: 'Personal Microsoft accounts only, via @softeria/ms-365-mcp-server (Graph, device code). This is not Microsoft Copilot Work IQ and it does not need a Copilot license. On first use the model calls the server\'s login tool; you open the URL and enter the code. That server caches the token (OS keychain). QodeX does not store it. A work or school tenant is a different entry: qodex mcp add outlook-work.',
+    docs: 'https://github.com/Softeria/ms-365-mcp-server',
+  },
+  {
+    id: 'outlook-work',
+    title: 'Outlook (work / school)',
+    description: 'Microsoft 365 work or school: mail, calendar, Teams, SharePoint. Same package as hotmail, with --org-mode.',
+    transport: 'stdio',
+    auth: 'oauth',
+    login: 'device-code',
+    command: 'npx',
+    args: ['-y', '@softeria/ms-365-mcp-server', '--enable-auth-tools', '--org-mode'],
+    credentials: [],
+    destructive: true,
+    startupTimeoutSeconds: 60,
+    note: 'Work or school tenant (--org-mode). An admin may have to consent to the Graph permissions. Personal Hotmail / Outlook.com stays on `hotmail`, which does not pass --org-mode. Login is still the device-code tool, not a password in the config.',
+    docs: 'https://github.com/Softeria/ms-365-mcp-server',
+  },
+  {
+    id: 'notion',
+    title: 'Notion',
+    description: 'Search and edit the Notion pages your user can already open. Browser login, no integration token.',
+    transport: 'stdio',
+    auth: 'oauth',
+    command: 'npx',
+    args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
+    credentials: [],
+    destructive: true,
+    startupTimeoutSeconds: 60,
+    note: 'Official hosted Notion MCP (https://mcp.notion.com/mcp) via the mcp-remote stdio bridge. First connect opens a browser; the token caches under ~/.mcp-auth. The model sees what that Notion user can see, including edits. This is not the unmaintained open-source server that asked for an ntn_ integration secret.',
+    docs: 'https://developers.notion.com/guides/mcp/get-started-with-mcp',
+  },
+  {
+    id: 'atlassian',
+    title: 'Jira / Confluence',
+    description: 'Jira and Confluence through Atlassian\'s official remote MCP. Browser login.',
+    transport: 'stdio',
+    auth: 'oauth',
+    command: 'npx',
+    args: ['-y', 'mcp-remote', 'https://mcp.atlassian.com/v2/mcp'],
+    credentials: [],
+    destructive: true,
+    startupTimeoutSeconds: 60,
+    note: 'Official Atlassian Rovo MCP at https://mcp.atlassian.com/v2/mcp (Jira, Confluence, Jira Service Management). OAuth runs in the browser through mcp-remote. The retired SSE endpoint is not used.',
+    docs: 'https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/',
   },
 ];
 

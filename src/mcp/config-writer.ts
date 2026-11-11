@@ -32,6 +32,8 @@ export interface BuiltServerEntry {
   enabled: boolean;
   destructive?: boolean;
   startupTimeoutSeconds?: number;
+  /** See MCPServerConfig.preserveArgEnvRefs. */
+  preserveArgEnvRefs?: boolean;
 }
 
 export interface AddServerOptions {
@@ -58,21 +60,37 @@ export function buildServerEntry(spec: McpServerSpec, opts: AddServerOptions = {
     entry.args = [...(spec.args ?? [])];
 
     // connstr / templated-arg servers: append the credential as an argument.
-    if (spec.tokenArgTemplate && spec.credentials[0]) {
-      const cred = spec.credentials[0];
+    // `{TOKEN}` is credentials[0]. `{ENV_VAR}` is that credential's envVar name,
+    // so one arg can carry two secrets (Google client id + secret).
+    // preserveArgEnvRefs keeps `${ENV}` in the arg even with --inline: the
+    // literal goes to env, and the child (mcp-remote) expands the arg itself
+    // so the secret is not on the command line.
+    if (spec.tokenArgTemplate && spec.credentials.length > 0) {
+      const primary = spec.credentials[0]!;
+      const argToken = (envVar: string): string =>
+        spec.preserveArgEnvRefs ? `\${${envVar}}` : ref(envVar);
       for (const t of spec.tokenArgTemplate) {
-        entry.args.push(t.replace('{TOKEN}', ref(cred.envVar)));
+        // `{ENV_VAR}` first. Doing it after `{TOKEN}` → `${ENV}` would see
+        // the braces inside `${ENV}` and double the dollar.
+        let arg = t;
+        for (const cred of spec.credentials) {
+          arg = arg.split(`{${cred.envVar}}`).join(argToken(cred.envVar));
+        }
+        arg = arg.split('{TOKEN}').join(argToken(primary.envVar));
+        entry.args.push(arg);
       }
     }
 
     // token servers (stdio): expose every credential as an env var.
+    // A templated arg normally consumes the secret, so it is not also copied
+    // into env — unless the arg deliberately leaves `${ENV}` for the child.
     const env: Record<string, string> = {};
     for (const cred of spec.credentials) {
-      // Skip ones already consumed by tokenArgTemplate
-      if (spec.tokenArgTemplate) continue;
+      if (spec.tokenArgTemplate && !spec.preserveArgEnvRefs) continue;
       env[cred.envVar] = ref(cred.envVar);
     }
     if (Object.keys(env).length > 0) entry.env = env;
+    if (spec.preserveArgEnvRefs) entry.preserveArgEnvRefs = true;
   } else {
     // remote
     entry.url = spec.url;

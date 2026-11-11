@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.11.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.12.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -33,7 +33,7 @@ qodex setup && qodex
 - **Always reachable — drive it from your phone** — run QodeX as a **Telegram / Discord / Slack service** and command the *same* agent from chat: stream tasks, approve diffs as inline buttons, and get **Living Artifacts** back as cards with an AI **vision review** (looks-good / needs-work / broken) and Approve / Edit / Reject.
 - **Remembers across sessions** — a layered, **local** memory (curated `QODEX.md` rules · scoped project/user facts · per-project worklog · episodic task-recall · resumable sessions) with a **human-readable Markdown mirror** you can edit and git-commit, and a **budget-aware Light Memory Mode** for small context windows. The agent builds real context about *you* and *this* codebase instead of starting every session cold.
 - **Live, shareable artifacts + a project dashboard** — build a page / React app / dashboard that **hot-reloads on every edit and auto-opens in your browser**; share it over your LAN or a private, token-protected https tunnel. `qodex dashboard` renders a live snapshot of providers, sessions, token/cost, memory, and skills.
-- **Design integrations** — drive **Figma** (3 ways) and **Canva** straight from the terminal over MCP.
+- **Design and account connectors** — **Canva** and **Figma** were already one command. 2.12 adds the official Google servers (Gmail, Drive, Calendar, Docs, Sheets), Hotmail / Outlook, Notion, and Jira / Confluence. Each one is the vendor's real server. Nothing is simulated.
 - **100+ built-in tools** — Tree-sitter code-graph, real Playwright browser automation, dev-servers, web search, vision, Docker / DB / WordPress, and any MCP server.
 - **Persian-first** — prompts, skill matching, *and* generated artifact copy follow your chat language, not a fixed default.
 - **Token-efficient** — sub-agent delegation, result-aging, compaction, and tool-gating keep the working context small on long sessions.
@@ -102,6 +102,7 @@ Give QodeX a task in natural language (English or Persian) and it drives a real 
 - **Smart vision** — `vision_analyze` automatically uses *your own* vision-capable model (Gemini, GPT‑4o, Claude, or a local Qwen‑VL) when your primary or sub‑agent can already see; it only spins up a dedicated vision model when neither can.
 - **Shareable live artifacts** — build a web page / React / dashboard and serve it with `artifact_live` that **hot‑reloads on every edit and auto‑opens in your browser** so you watch it change live; `share="network"` opens it to your LAN and `share="tunnel"` gives a **private https link your team can open** (token‑protected) — a live PR walkthrough or project dashboard.
 - **Design integrations (Figma + Canva)** — `qodex mcp add figma` (3 ways: your logged‑in desktop Dev Mode, a personal token, or hosted OAuth) and `qodex mcp add canva` (OAuth login) let the model turn a Figma frame into code or build a Canva design — driven from the terminal over MCP.
+- **Google, Hotmail, Notion, Jira** — `qodex mcp add gmail` (also `google-drive`, `google-calendar`, `google-docs`, `google-sheets`), `hotmail`, `notion`, `atlassian`. Google's servers are the official `*mcp.googleapis.com` endpoints. They are a developer preview: you create the OAuth client (marked "Use this client for an AI-powered agent") and export `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`. Gmail's server searches and drafts; it does not send. Hotmail is `@softeria/ms-365-mcp-server` in personal mode (device code). Work tenants are `outlook-work`. Canva was already `qodex mcp add canva`.
 - **Matches your code style automatically** — QodeX infers the project's conventions (indentation, quotes, semicolons, naming) from its own source + `.editorconfig` and writes new code to match, **without you having to configure or `remember` anything**. Off via `context.styleProfile: false`.
 - **Self‑learning skills** — after a task that *objectively* succeeded (verified + honest, ≥ a few tool calls), QodeX can capture the winning approach as a **candidate** skill in quarantine. An **independent judge model** (a *different* model from the one that did the work) reviews it before it’s promoted, and a human‑authored skill is **never** overwritten. Drive it with `qodex skill candidates | curate | promote`. Off by default (`learning.enabled`).
 - **Trade‑off & business analysis** — ask it to analyze or plan (not code) and it produces **decision‑grade output**: options × weighted criteria → a scored comparison and one clear recommendation, business‑plan structure, no invented numbers.

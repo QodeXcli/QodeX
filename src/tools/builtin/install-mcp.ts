@@ -22,7 +22,7 @@ import { logger } from '../../utils/logger.js';
 
 const Args = z.object({
   source: z.string().describe(
-    'MCP server name to add (e.g. "linear", "sentry", "github", "slack"), ' +
+    'MCP server name to add (e.g. "gmail", "hotmail", "canva", "notion", "linear", "slack"), ' +
     'or "list" to see the catalog of available servers.'
   ),
 });

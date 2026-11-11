@@ -118,6 +118,16 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
     'prototype', 'wireframe', 'ui design', 'design system', 'brand template',
     'طراحی', 'فیگما', 'کانوا', 'کانواس', 'دیزاین', 'ماکاپ', 'وب‌سایت', 'وبسایت',
     'طراحی سایت', 'طراحی وب', 'رابط کاربری', 'لندینگ', 'صفحه فرود'] },
+  // Account connectors. Names are mcp:<id>:<tool>, and only exist after
+  // `qodex mcp add`. Gmail's official server drafts; it does not send.
+  { members: ['mcp:gmail:', 'mcp:google-drive:', 'mcp:google-calendar:', 'mcp:google-docs:', 'mcp:google-sheets:'], keywords: [
+    'gmail', 'google mail', 'inbox', 'google drive', 'google doc', 'google sheet', 'google calendar',
+    'جیمیل', 'گوگل', 'درایو', 'گوگل داک', 'گوگل شیت', 'تقویم گوگل'] },
+  { members: ['mcp:hotmail:', 'mcp:outlook-work:'], keywords: [
+    'hotmail', 'outlook', 'live.com', 'microsoft 365', 'ms365',
+    'هاتمیل', 'هات‌میل', 'اوتلوک', 'ایمیل مایکروسافت'] },
+  { members: ['mcp:notion:'], keywords: ['notion', 'نوشن'] },
+  { members: ['mcp:atlassian:'], keywords: ['jira', 'confluence', 'atlassian', 'جیرا', 'کانفلونس'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {

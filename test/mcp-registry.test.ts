@@ -6,7 +6,12 @@ import { expandEnvRefs } from '../src/mcp/manager.js';
 describe('MCP registry', () => {
   it('has all the well-known servers', () => {
     const ids = listMcpSpecs().map(s => s.id);
-    for (const id of ['github', 'supabase', 'postgres', 'playwright', 'figma', 'sentry', 'linear', 'slack', 'sequential-thinking', 'brave-search', 'fetch', 'higgsfield', 'tavily']) {
+    for (const id of [
+      'github', 'supabase', 'postgres', 'playwright', 'figma', 'sentry', 'linear', 'slack',
+      'sequential-thinking', 'brave-search', 'fetch', 'higgsfield', 'tavily', 'canva',
+      'gmail', 'google-drive', 'google-calendar', 'google-docs', 'google-sheets',
+      'hotmail', 'outlook-work', 'notion', 'atlassian',
+    ]) {
       expect(ids).toContain(id);
     }
   });
@@ -47,6 +52,75 @@ describe('MCP registry', () => {
     expect(argsJoined).toContain('mcp-remote');
     expect(argsJoined).toContain('https://mcp.canva.com/mcp');
     expect(entry.destructive).toBe(true); // can create/edit/export designs
+  });
+
+  it('Gmail uses Google\'s official URL and never puts the client secret on argv', () => {
+    const spec = findMcpSpec('gmail')!;
+    expect(spec.auth).toBe('oauth');
+    expect(spec.preserveArgEnvRefs).toBe(true);
+    const joined = (spec.args ?? []).join(' ');
+    expect(joined).toContain('mcp-remote@0.16.5');
+    expect(joined).toContain('https://gmailmcp.googleapis.com/mcp/v1');
+    expect(joined).toContain('4311');
+    expect(joined).toContain('--transport http-only');
+    expect(spec.note).toContain('http://localhost:4311/oauth/callback');
+    expect(spec.description.toLowerCase()).toContain('does not send');
+
+    const entry = buildServerEntry(spec, {
+      secrets: {
+        GOOGLE_OAUTH_CLIENT_ID: 'id.apps.googleusercontent.com',
+        GOOGLE_OAUTH_CLIENT_SECRET: 'super-secret-value',
+      },
+      inlineToken: true,
+    });
+    const argsJoined = (entry.args ?? []).join(' ');
+    expect(argsJoined).toContain('https://gmailmcp.googleapis.com/mcp/v1');
+    expect(argsJoined).toContain('${GOOGLE_OAUTH_CLIENT_ID}');
+    expect(argsJoined).toContain('${GOOGLE_OAUTH_CLIENT_SECRET}');
+    expect(argsJoined).not.toContain('super-secret-value');
+    expect(argsJoined).not.toContain('id.apps.googleusercontent.com');
+    expect(entry.env?.GOOGLE_OAUTH_CLIENT_SECRET).toBe('super-secret-value');
+    expect(entry.env?.GOOGLE_OAUTH_CLIENT_ID).toBe('id.apps.googleusercontent.com');
+    expect(entry.preserveArgEnvRefs).toBe(true);
+    // Without --inline the env stays a reference, still not a literal.
+    const referenced = buildServerEntry(spec);
+    expect(referenced.env?.GOOGLE_OAUTH_CLIENT_SECRET).toBe('${GOOGLE_OAUTH_CLIENT_SECRET}');
+    expect(JSON.stringify(referenced.args)).not.toContain('super-secret-value');
+  });
+
+  it('Google product URLs are the official Workspace endpoints, each with its own port', () => {
+    const expectUrl = (id: string, url: string, port: string) => {
+      const spec = findMcpSpec(id)!;
+      expect((spec.args ?? []).join(' ')).toContain(url);
+      expect((spec.args ?? []).join(' ')).toContain(port);
+      expect(spec.docs).toBe('https://developers.google.com/workspace/guides/configure-mcp-servers');
+    };
+    expectUrl('google-drive', 'https://drivemcp.googleapis.com/mcp/v1', '4312');
+    expectUrl('google-calendar', 'https://calendarmcp.googleapis.com/mcp/v1', '4313');
+    expectUrl('google-docs', 'https://docsmcp.googleapis.com/mcp/v1', '4314');
+    expectUrl('google-sheets', 'https://sheetsmcp.googleapis.com/mcp/v1', '4315');
+    expect(findMcpSpec('google-calendar')!.destructive).toBeUndefined();
+  });
+
+  it('Hotmail is the personal Graph server; work mode is a separate id', () => {
+    const personal = findMcpSpec('hotmail')!;
+    expect(personal.login).toBe('device-code');
+    expect(personal.credentials).toEqual([]);
+    const args = (personal.args ?? []).join(' ');
+    expect(args).toContain('@softeria/ms-365-mcp-server');
+    expect(args).toContain('--enable-auth-tools');
+    expect(args).not.toContain('--org-mode');
+    expect(personal.note).toContain('not Microsoft Copilot');
+    const work = findMcpSpec('outlook-work')!;
+    expect((work.args ?? []).join(' ')).toContain('--org-mode');
+    expect(work.login).toBe('device-code');
+  });
+
+  it('Notion and Atlassian point at the vendors\' hosted MCP URLs', () => {
+    expect((findMcpSpec('notion')!.args ?? []).join(' ')).toContain('https://mcp.notion.com/mcp');
+    expect(findMcpSpec('notion')!.credentials).toEqual([]);
+    expect((findMcpSpec('atlassian')!.args ?? []).join(' ')).toContain('https://mcp.atlassian.com/v2/mcp');
+    expect((findMcpSpec('atlassian')!.args ?? []).join(' ')).not.toContain('/sse');
   });
 
   it('tavily uses the mcp-remote stdio bridge with the key in the URL via env ref', () => {
@@ -146,5 +220,16 @@ describe('expandEnvRefs', () => {
     const input = { command: 'x', env: { TOKEN: '${TEST_MCP_TOKEN}' } } as any;
     expandEnvRefs(input, 'test');
     expect(input.env.TOKEN).toBe('${TEST_MCP_TOKEN}'); // original untouched
+  });
+
+  it('preserveArgEnvRefs leaves ${VAR} in args and still expands env', () => {
+    const out = expandEnvRefs({
+      command: 'npx',
+      args: ['--static-oauth-client-info', '{"client_secret":"${TEST_MCP_TOKEN}"}'],
+      env: { TEST_MCP_TOKEN: '${TEST_MCP_TOKEN}' },
+      preserveArgEnvRefs: true,
+    } as any, 'gmail');
+    expect(out.args?.[1]).toBe('{"client_secret":"${TEST_MCP_TOKEN}"}');
+    expect(out.env?.TEST_MCP_TOKEN).toBe('resolved-value');
   });
 });

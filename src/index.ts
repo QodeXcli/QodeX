@@ -825,8 +825,13 @@ mcpCmd
     const specs = listMcpSpecs();
     console.log(`${specs.length} well-known MCP servers:\n`);
     for (const s of specs) {
-      const authTag = s.auth === 'oauth' ? 'OAuth (browser)' :
-        s.auth === 'token' ? `token: ${s.credentials[0]?.envVar ?? '?'}` :
+      const authTag = s.auth === 'oauth'
+        ? (s.login === 'device-code'
+          ? 'device code'
+          : (s.credentials.length
+            ? `OAuth + ${s.credentials.map(c => c.envVar).join(', ')}`
+            : 'OAuth (browser)'))
+        : s.auth === 'token' ? `token: ${s.credentials[0]?.envVar ?? '?'}` :
         s.auth === 'connstr' ? 'connection string' : 'no auth';
       const danger = s.destructive ? '  ⚠ can modify external state' : '';
       console.log(`  ${s.id.padEnd(20)} ${s.title}`);
@@ -853,22 +858,26 @@ mcpCmd
       process.exit(1);
     }
 
-    // Gather secrets.
+    // Gather secrets. Every credential is prompted. --token fills only the first
+    // (the historical single-secret servers). Nothing is written unless --inline.
     const secrets: Record<string, string> = {};
     const needsSecret = spec.credentials.length > 0;
     if (needsSecret) {
-      const cred = spec.credentials[0]!;
-      let value = opts.token;
-      if (!value) {
-        // Prompt interactively.
-        const readline = await import('readline/promises');
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const readline = await import('readline/promises');
+      let rl: Awaited<ReturnType<typeof readline.createInterface>> | undefined;
+      for (let i = 0; i < spec.credentials.length; i++) {
+        const cred = spec.credentials[i]!;
+        if (i === 0 && opts.token) {
+          secrets[cred.envVar] = opts.token;
+          continue;
+        }
+        if (!rl) rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         console.log(`\n${spec.title} needs: ${cred.label}`);
         console.log(`  ${cred.hint}\n`);
-        value = (await rl.question(`Paste ${cred.envVar} (or leave blank to set the env var yourself later): `)).trim();
-        rl.close();
+        const value = (await rl.question(`Paste ${cred.envVar} (or leave blank to set the env var yourself later): `)).trim();
+        if (value) secrets[cred.envVar] = value;
       }
-      if (value) secrets[cred.envVar] = value;
+      rl?.close();
     }
 
     const { id: writtenId, entry } = await addServerToConfig(spec, {
@@ -878,20 +887,37 @@ mcpCmd
     });
 
     console.log(`\n✓ Added "${writtenId}" to ~/.qodex/config.yaml`);
-    if (spec.auth === 'oauth') {
-      console.log(`\n  This server uses OAuth. On the next \`qodex\` launch it will open your browser to authorize. Nothing else to do.`);
-    } else if (needsSecret) {
-      const cred = spec.credentials[0]!;
-      if (opts.inline && secrets[cred.envVar]) {
-        console.log(`\n  ⚠ Token written literally into config.yaml. Don't commit that file.`);
-      } else if (secrets[cred.envVar]) {
-        console.log(`\n  Config references \${${cred.envVar}}. Export it so QodeX can read it:`);
-        console.log(`    echo 'export ${cred.envVar}="${'*'.repeat(8)}"' >> ~/.zshrc && source ~/.zshrc`);
-        console.log(`  (Your pasted value is NOT stored in config — only the reference is.)`);
-        console.log(`\n  Tip: paste with --inline to store it in config.yaml directly instead.`);
+    if (spec.auth === 'oauth' && spec.credentials.length === 0) {
+      if (spec.login === 'device-code') {
+        console.log(`\n  Sign-in is a device code, not a token in this file. On first use, have the agent call this server's login tool, then open the URL and enter the code.`);
       } else {
-        console.log(`\n  No token provided. Set it before launching:`);
-        console.log(`    export ${cred.envVar}="your-token"   # add to ~/.zshrc to persist`);
+        console.log(`\n  This server uses OAuth. On the next \`qodex\` launch it will open your browser to authorize. Nothing else to do.`);
+      }
+    } else if (spec.auth === 'oauth') {
+      console.log(`\n  OAuth with your own client. QodeX does not ship a client id. The browser opens on first connect, after the env vars below are exported.`);
+    }
+    if (needsSecret) {
+      for (const cred of spec.credentials) {
+        const storedInline = Boolean(opts.inline && secrets[cred.envVar]);
+        if (storedInline && spec.preserveArgEnvRefs) {
+          console.log(`\n  ⚠ ${cred.envVar} was written into the server's env in config.yaml, not onto the command line. Don't commit that file.`);
+          continue;
+        }
+        if (storedInline) {
+          console.log(`\n  ⚠ Token written literally into config.yaml. Don't commit that file.`);
+          continue;
+        }
+        if (secrets[cred.envVar]) {
+          console.log(`\n  Config references \${${cred.envVar}}. Export it so QodeX can read it:`);
+          console.log(`    echo 'export ${cred.envVar}="${'*'.repeat(8)}"' >> ~/.zshrc && source ~/.zshrc`);
+          console.log(`  (Your pasted value is NOT stored in config — only the reference is.)`);
+        } else {
+          console.log(`\n  No value given for ${cred.envVar}. Set it before launching:`);
+          console.log(`    export ${cred.envVar}="your-token"   # add to ~/.zshrc to persist`);
+        }
+      }
+      if (!opts.inline && spec.credentials.length === 1 && secrets[spec.credentials[0]!.envVar]) {
+        console.log(`\n  Tip: paste with --inline to store it in config.yaml directly instead.`);
       }
     }
     if (spec.note) console.log(`\n  Note: ${spec.note}`);
