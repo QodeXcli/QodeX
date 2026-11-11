@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.19.0 — 2026-11-11
+
+**Thoughts scroll inside a fixed window.**
+
+While the model is working, an 8-line pane sits above the prompt. New thoughts appear at the bottom and the older ones move up. The pane does not grow, so the input stays where it is. The answer stream gives those rows back instead of pushing the whole screen down.
+
+```
+src/cli/viewport.ts
+src/cli/prompts/thinking-panel.tsx
+```
+
+
 ## v2.18.1 — 2026-11-11
 
 **A long paste is just "Pasted".**

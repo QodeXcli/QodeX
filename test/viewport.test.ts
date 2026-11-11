@@ -2,7 +2,7 @@
  * Tests for src/cli/viewport.ts (tail capping + shrink detection).
  * Run: node --experimental-strip-types test/viewport.test.ts
  */
-import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from '../src/cli/viewport.ts';
+import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter, scrollThoughts, THINK_ROWS } from '../src/cli/viewport.ts';
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -76,6 +76,23 @@ console.log('— formatContextMeter —');
   check('small numbers keep precision', formatContextMeter(500, 4096).includes('500/4.1k'));
 }
 
+
+console.log('— scrollThoughts stays a fixed height and keeps the tail —');
+{
+  const empty = scrollThoughts('', THINK_ROWS, 20);
+  check('empty window is exactly THINK_ROWS', empty.length === THINK_ROWS);
+  check('empty window marks the bottom row', empty[THINK_ROWS - 1] === '…');
+  check('empty window pads above', empty[0] === '');
+  const short = scrollThoughts('one\ntwo', 4, 20);
+  check('short thoughts sit at the bottom', short.join('|') === '||one|two');
+  const many = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n');
+  const scrolled = scrollThoughts(many, 4, 40);
+  check('long thoughts keep a fixed height', scrolled.length === 4);
+  check('newest thought is the bottom row', scrolled[3] === 'line 19');
+  check('older thoughts moved up', scrolled[0] === 'line 16');
+  const wrapped = scrollThoughts('abcdefghij', 4, 8);
+  check('a long line wraps and the tail stays', wrapped[3] === 'ij' && wrapped[2] === 'abcdefgh');
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

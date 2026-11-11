@@ -80,3 +80,36 @@ export function formatContextMeter(used: number, window: number, barWidth = 10):
   const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
   return `${k(used)}/${k(window)} ${bar} ${pct}%`;
 }
+
+/** Fixed thought window. Tall enough to read, short enough that the input does not move. */
+export const THINK_ROWS = 8;
+
+/**
+ * Last lines of the model's thoughts, newest at the bottom, always exactly `rows` high.
+ * The window does not grow, so the rest of the CLI stays put. Blank rows pad the top.
+ * An empty stream shows a single ellipsis on the bottom row.
+ */
+export function scrollThoughts(text: string, rows = THINK_ROWS, width = 72): string[] {
+  const col = Math.max(8, width);
+  const height = Math.max(1, rows);
+  const flat = (text ?? '').replace(/\s+$/, '');
+  if (!flat.trim()) {
+    const blank = Array.from({ length: height }, () => '');
+    blank[height - 1] = '…';
+    return blank;
+  }
+  const wrapped: string[] = [];
+  for (const logical of flat.split('\n')) {
+    const chars = Array.from(logical);
+    if (chars.length === 0) {
+      wrapped.push('');
+      continue;
+    }
+    for (let i = 0; i < chars.length; i += col) {
+      wrapped.push(chars.slice(i, i + col).join(''));
+    }
+  }
+  const tail = wrapped.slice(-height);
+  while (tail.length < height) tail.unshift('');
+  return tail;
+}

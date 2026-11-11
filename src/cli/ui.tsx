@@ -41,7 +41,7 @@ import { DiffViewer } from './prompts/diff-viewer.js';
 import { Confirmation } from './prompts/confirmation.js';
 import { ThinkingPanel } from './prompts/thinking-panel.js';
 import { AssistantMessage, StreamingView } from './render/assistant-message.js';
-import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter } from './viewport.js';
+import { tailForViewport, didShrink, CLEAR_SCREEN, formatContextMeter, THINK_ROWS } from './viewport.js';
 import { summarizeToolResult } from './render/tool-summary.js';
 import { handleSlashCommand } from './slash-commands.js';
 import { slashAliasMap } from '../skills/registry.js';
@@ -897,15 +897,11 @@ export function App(props: AppProps): React.ReactElement {
       </Static>
 
       {streamingText && (
-        <StreamingView text={tailForViewport(streamingText, rows, cols)} />
+        <StreamingView text={tailForViewport(streamingText, Math.max(10, rows - (busy && showThinking ? THINK_ROWS + 3 : 0)), cols)} />
       )}
 
       {/* Tool activity hides while a permission prompt is up — the prompt IS the activity,
           and every extra dynamic line enlarges the frame Ink re-paints. */}
-      {!pendingPrompt && showThinking && thinkingText && (
-        <ThinkingPanel text={thinkingText} width={cols} />
-      )}
-
       {!pendingPrompt && activeTools.map(t => (
         <ToolActivityLine key={t.id} name={t.name} partialArgs={t.partialArgs} motion={motion} />
       ))}
@@ -951,6 +947,11 @@ export function App(props: AppProps): React.ReactElement {
 
       {!pendingPrompt && (
         <Box flexDirection="column" marginTop={1}>
+          {/* Thoughts stay in a fixed window above the prompt. New lines scroll
+              inside it; the input box does not move down. */}
+          {busy && showThinking && (
+            <ThinkingPanel text={thinkingText} width={cols} />
+          )}
           {/* Persistent shimmering wordmark — the signature gradient keeps running. */}
           <LiveHeader width={cols} mode={mode} approvalMode={approvalMode} busy={busy} thinkingChars={thinkingChars} motion={motion} />
           {/* Input lives in its own bordered box, visually detached from the transcript above. */}
