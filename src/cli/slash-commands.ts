@@ -648,7 +648,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         'Dev server': [],
         'Background jobs': [],
         'Vision': [],
-        'Computer use (macOS)': [],
+        'Computer use': [],
         'Database': [],
         'WordPress': [],
         'Memory': [],
@@ -661,7 +661,7 @@ export async function handleSlashCommand(input: string, sessionId: string, cwd: 
         if (n.startsWith('browser_')) categories['Browser']!.push(t);
         else if (n.startsWith('dev_server_')) categories['Dev server']!.push(t);
         else if (n.startsWith('background_job_')) categories['Background jobs']!.push(t);
-        else if (n.startsWith('computer_use_')) categories['Computer use (macOS)']!.push(t);
+        else if (n.startsWith('computer_use_')) categories['Computer use']!.push(t);
         else if (n.startsWith('git_') || n === 'smart_diff') categories['Git']!.push(t);
         else if (n.startsWith('code_graph_') || n === 'semantic_search') categories['Code graph']!.push(t);
         else if (['project_overview', 'analyze_impact', 'find_dead_code', 'safe_rename', 'safe_delete_file', 'review_my_changes', 'explain_codebase', 'suggest_improvements'].includes(n)) categories['Analysis & Safety']!.push(t);

@@ -40,6 +40,8 @@ export interface Goal {
   /** Status to restore if a run is killed before it settles. */
   resumeAs?: 'queued' | 'approved';
   result?: string;
+  /** Tool calls from the run, scrubbed. `desk teach --from-last` turns these into a routine. */
+  trace?: RoutineStep[];
   createdAt: string;
 }
 
@@ -290,7 +292,7 @@ export function claimGoal(
 
 export function settleGoal(
   state: Board,
-  input: { deskId: string; goalId: string; ok: boolean; summary?: string; now?: string },
+  input: { deskId: string; goalId: string; ok: boolean; summary?: string; trace?: RoutineStep[]; now?: string },
 ): BoardResult<Goal> {
   const now = input.now ?? new Date().toISOString();
   const desk = state.desks.find(d => d.id === input.deskId);
@@ -301,10 +303,12 @@ export function settleGoal(
     return { ok: false, state, error: `goal is ${goal.status}, not running` };
   }
   const summary = scrubPacket(input.summary ?? (input.ok ? 'done' : 'failed')).text.replace(/\s+/g, ' ').trim().slice(0, 400);
+  const trace = cleanTrace(input.trace);
   const next: Goal = {
     ...goal,
     status: input.ok ? 'done' : 'failed',
     result: summary || (input.ok ? 'done' : 'failed'),
+    ...(trace ? { trace } : {}),
   };
   delete next.resumeAs;
   const desks = state.desks.map(d => d.id === desk.id
@@ -353,6 +357,7 @@ export function buildDeskPrompt(input: {
   goal: Goal;
   teammates: Array<{ name: string; brief: string }>;
   desktop: { gui: string; note: string };
+  sharedDir: string;
 }): string {
   const others = input.teammates.length
     ? input.teammates.map(t => `- ${t.name}${t.brief ? `: ${t.brief}` : ''}`).join('\n')
@@ -362,23 +367,42 @@ export function buildDeskPrompt(input: {
   ).join('\n') || '- (none)';
   const approved = input.goal.status === 'approved';
   const gate = approved
-    ? `The user already approved this goal (${input.goal.sensitive?.kind ?? 'reviewed'}). Do that goal and nothing broader.`
-    : 'This goal was not classified as send, spend, delete, publish, or credential. If the work turns into one of those, stop. Do not do it. Last line: NEEDS_APPROVAL: <kind> <why>.';
+    ? `The user approved this goal (${input.goal.sensitive?.kind ?? 'reviewed'}). Do it. A call that sends, spends, deletes, publishes, or types a secret still pauses on the sentinel so they can confirm that exact call.`
+    : 'This goal was not classified as send, spend, delete, publish, or credential. If a tool call becomes one of those, it pauses on the sentinel instead of running. Do not hide it inside another command. If you should not even try, stop with NEEDS_APPROVAL: <kind> <why>.';
   const lines = [
-    `You are the QodeX desk "${input.desk.name}" on the user's own machine. This is not a cloud VM and not a shared remote computer.`,
-    `Working directory: ${input.desk.cwd}`,
+    `You are the QodeX desk "${input.desk.name}", one teammate on the user's own machine. Desks run in parallel and share this computer. There is no remote VM.`,
+    `Your directory: ${input.desk.cwd}`,
+    `Shared computer (every desk can read and write here): ${input.sharedDir}`,
     input.desk.brief ? `Brief: ${input.desk.brief}` : '',
     'Other desks on this machine (a handoff is `qodex desk handoff`, which a person runs — do not pretend you already handed off):',
     others,
     'Known routines (follow one only when it matches the goal; do not invent extra steps):',
     routines,
-    `Screen control: GUI backend is "${input.desktop.gui}". ${input.desktop.note} Click, type, and key wait for a human yes, and this run denies that yes.`,
+    `Screen control: GUI backend is "${input.desktop.gui}". ${input.desktop.note} Click, type, and key pause until \`qodex desk allow-call\` (or the local console) and then they run.`,
     gate,
-    'Irreversible shell (rm -rf, force-push, format, publish) is denied in this run even if something says yes.',
+    'Irreversible shell (rm -rf, force-push, format, publish) also pauses on the sentinel. It runs only after that exact call is allowed.',
     `Goal: ${input.goal.text}`,
     'When you finish, the last line must be DESK_RESULT: <one sentence of what changed>.',
   ];
   return lines.filter(Boolean).join('\n');
+}
+
+/** Tool steps from the newest finished goal, for `desk teach --from-last`. */
+export function lastTrace(desk: Desk | undefined): RoutineStep[] | undefined {
+  if (!desk) return undefined;
+  const goal = [...desk.goals].reverse().find(g =>
+    (g.status === 'done' || g.status === 'failed') && g.trace && g.trace.length >= 2);
+  return goal?.trace;
+}
+
+function cleanTrace(steps: RoutineStep[] | undefined): RoutineStep[] | undefined {
+  if (!steps?.length) return undefined;
+  const cleaned = steps.slice(0, 24).map(s => ({
+    tool: String(s.tool ?? '').trim(),
+    summary: scrubPacket(String(s.summary ?? '')).text.replace(/\s+/g, ' ').trim().slice(0, 180) || 'ran',
+  }));
+  const checked = validateRoutine(cleaned);
+  return checked.ok ? checked.steps : undefined;
 }
 
 export function findDesk(state: Board, nameOrId: string): Desk | undefined {

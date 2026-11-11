@@ -7,26 +7,12 @@
  *   - Read text from a desktop app (Slack, Mail, terminal)
  *   - Automate flows in native apps (Finder, Xcode, anything not web-based)
  *
- * Why macOS-only for v1.7.0: implementation uses built-in macOS tooling
- * (`screencapture`, `osascript` for AppleScript, `cliclick` if installed for
- * mouse/keyboard). Linux/Windows variants are future work.
+ * macOS uses screencapture, osascript, and optional cliclick.
+ * Linux uses xdotool plus scrot, ImageMagick import, or gnome-screenshot.
+ * Windows uses PowerShell and Win32. No extra install.
  *
- * Built-in tools we use:
- *   - `screencapture` — ships with macOS, takes PNGs
- *   - `osascript` — AppleScript runtime, ships with macOS, drives System Events
- *   - `cliclick` — OPTIONAL — for fast mouse/keyboard; install via brew if missing
- *
- * Security:
- *   - First use of System Events triggers macOS Accessibility permission prompt.
- *     User must grant it once in System Settings > Privacy & Security > Accessibility.
- *   - This is INTENTIONALLY visible — we don't bypass the prompt; it's the
- *     correct user-consent flow.
- *
- * Permission model:
- *   - Screenshot, list windows, and the active window are read-only.
- *   - Click, type, and key ask every time — including under always-yes.
- *     A click can send, pay, or delete, and nothing can roll a screen action back.
- *   - `qodex desk run` denies that ask, so a desk does not drive the GUI on its own.
+ * Click, type, and key ask every time — including under always-yes — and then
+ * they run. `qodex desk run` parks that ask on the sentinel until you allow it.
  *
  * Tools defined here:
  *   - computer_use_screenshot     — capture screen or specific window to PNG
@@ -51,7 +37,7 @@ function isMacos(): boolean {
 
 function macosOnly(toolName: string): ToolResult {
   return {
-    content: `[COMPUTER_USE_UNAVAILABLE] ${toolName} requires macOS. Current platform: ${os.platform()}. Linux/Windows variants are planned for future versions.`,
+    content: `[COMPUTER_USE_UNAVAILABLE] ${toolName} has no backend for ${os.platform()}. macOS uses screencapture, Linux uses xdotool, Windows uses PowerShell.`,
     isError: true,
   };
 }
@@ -100,12 +86,20 @@ const ScreenshotArgs = z.object({
 
 export class ComputerUseScreenshotTool extends Tool<z.infer<typeof ScreenshotArgs>> {
   name = 'computer_use_screenshot';
-  description = 'Capture a PNG of the macOS desktop or a specific app\'s window. Use to see what\'s on screen beyond the browser (LM Studio, Slack, Finder, etc). Pass `window: "AppName"` to target a specific app. Returns file path; pass to vision_analyze for understanding. Read-only on the user filesystem; macOS-only.';
+  description = 'Capture a PNG of the desktop or one window. macOS: screencapture. Linux: scrot, import, or gnome-screenshot. Windows: Win32 CopyFromScreen. Returns a file path for vision_analyze. Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = ScreenshotArgs;
 
   async execute(args: z.infer<typeof ScreenshotArgs>, _ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxScreenshot } = await import('./linux.js');
+      return runLinuxScreenshot(args);
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsScreenshot } = await import('./win.js');
+      return runWindowsScreenshot(args);
+    }
     if (!isMacos()) return macosOnly(this.name);
     try {
       const dir = path.join(os.tmpdir(), 'qodex-screenshots');
@@ -170,12 +164,20 @@ const ClickArgs = z.object({
 
 export class ComputerUseClickTool extends Tool<z.infer<typeof ClickArgs>> {
   name = 'computer_use_click';
-  description = 'Click at a screen coordinate using macOS native input. Best workflow: screenshot → vision_analyze to find the target → use the coordinates returned to click. Requires `cliclick` (brew install cliclick) for fast mouse, falls back to AppleScript otherwise. macOS-only. Destructive — actually moves cursor and clicks.';
+  description = 'Click at a screen coordinate. macOS: cliclick or System Events. Linux: xdotool. Windows: Win32 mouse_event. Asks every time, then clicks. Workflow: screenshot, vision_analyze, then click the coordinates.';
   isReadOnly = false;
   isDestructive = true;
   argsSchema = ClickArgs;
 
   async execute(args: z.infer<typeof ClickArgs>, ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxClick } = await import('./linux.js');
+      return runLinuxClick(args, ctx, confirmScreenChange);
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsClick } = await import('./win.js');
+      return runWindowsClick(args, ctx, confirmScreenChange);
+    }
     if (!isMacos()) return macosOnly(this.name);
     const blocked = await confirmScreenChange(ctx, this.name, `click ${args.x},${args.y}`);
     if (blocked) return blocked;
@@ -217,12 +219,20 @@ const TypeArgs = z.object({
 
 export class ComputerUseTypeTool extends Tool<z.infer<typeof TypeArgs>> {
   name = 'computer_use_type';
-  description = 'Type text into the currently focused field/input. Click first with computer_use_click to focus the target. macOS-only. Destructive — actually types.';
+  description = 'Type text into the focused field. macOS, Linux (xdotool), or Windows (SendKeys). Asks every time, then types.';
   isReadOnly = false;
   isDestructive = true;
   argsSchema = TypeArgs;
 
   async execute(args: z.infer<typeof TypeArgs>, ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxType } = await import('./linux.js');
+      return runLinuxType(args, ctx, confirmScreenChange);
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsType } = await import('./win.js');
+      return runWindowsType(args, ctx, confirmScreenChange);
+    }
     if (!isMacos()) return macosOnly(this.name);
     const blocked = await confirmScreenChange(ctx, this.name, `type ${args.text.length} chars`);
     if (blocked) return blocked;
@@ -262,12 +272,20 @@ const KEY_ALIASES: Record<string, string> = {
 
 export class ComputerUseKeyTool extends Tool<z.infer<typeof KeyArgs>> {
   name = 'computer_use_key';
-  description = 'Press a key or key combo (cmd+s, esc, tab, return, etc). Use for shortcuts that fill forms, save, navigate, switch apps. macOS-only. Destructive — actually presses keys.';
+  description = 'Press a key combo (cmd+s, ctrl+s, esc, tab, return). macOS, Linux (xdotool), or Windows (SendKeys). Asks every time, then presses. On Windows, cmd is sent as Ctrl. The Windows key is not sent.';
   isReadOnly = false;
   isDestructive = true;
   argsSchema = KeyArgs;
 
   async execute(args: z.infer<typeof KeyArgs>, ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxKey } = await import('./linux.js');
+      return runLinuxKey(args, ctx, confirmScreenChange);
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsKey } = await import('./win.js');
+      return runWindowsKey(args, ctx, confirmScreenChange);
+    }
     if (!isMacos()) return macosOnly(this.name);
     const blocked = await confirmScreenChange(ctx, this.name, `key ${args.combo}`);
     if (blocked) return blocked;
@@ -313,12 +331,20 @@ const ActiveWindowArgs = z.object({});
 
 export class ComputerUseActiveWindowTool extends Tool<z.infer<typeof ActiveWindowArgs>> {
   name = 'computer_use_active_window';
-  description = 'Get info about the currently focused app and window (app name, window title, bounds). Use to verify you\'re in the right context before clicking/typing. Read-only. macOS-only.';
+  description = 'Read the focused app and window title. macOS, Linux (xdotool), or Windows. Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = ActiveWindowArgs;
 
   async execute(_args: z.infer<typeof ActiveWindowArgs>, _ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxActiveWindow } = await import('./linux.js');
+      return runLinuxActiveWindow();
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsActiveWindow } = await import('./win.js');
+      return runWindowsActiveWindow();
+    }
     if (!isMacos()) return macosOnly(this.name);
     try {
       const script = `tell application "System Events"
@@ -354,12 +380,20 @@ const ListWindowsArgs = z.object({
 
 export class ComputerUseListWindowsTool extends Tool<z.infer<typeof ListWindowsArgs>> {
   name = 'computer_use_list_windows';
-  description = 'List visible apps and their windows. Useful when you need to find the right app/window to target with screenshot or click. Read-only. macOS-only.';
+  description = 'List visible windows. macOS, Linux (wmctrl or xdotool), or Windows. Read-only.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = ListWindowsArgs;
 
   async execute(args: z.infer<typeof ListWindowsArgs>, _ctx: ToolContext): Promise<ToolResult> {
+    if (os.platform() === 'linux') {
+      const { runLinuxListWindows } = await import('./linux.js');
+      return runLinuxListWindows(args.app);
+    }
+    if (os.platform() === 'win32') {
+      const { runWindowsListWindows } = await import('./win.js');
+      return runWindowsListWindows();
+    }
     if (!isMacos()) return macosOnly(this.name);
     try {
       const script = args.app

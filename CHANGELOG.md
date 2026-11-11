@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.10.0 — 2026-11-11
+
+**Desks that act, then wait on the exact call.**
+
+2.9 could queue a teammate and deny anything that asked. 2.10 runs the team and lets the risky call proceed after a yes.
+
+1. **Sentinel.** `qodex desk run` parks screen clicks, irreversible shell, and send/spend/delete/publish calls. `qodex desk allow-call <id>` (or the local console) runs that call. Deny and a 10-minute timeout are no.
+
+2. **Parallel desks.** `qodex desk run --all` runs every desk with a goal. Different directories at once. The same directory is sequential. They share `~/.qodex/desks/computer`.
+
+3. **The screen, on the three desktops.** macOS as before. Linux uses xdotool and scrot/import/gnome-screenshot when those binaries exist. Windows uses PowerShell and Win32. A missing binary is an error, not a fake click.
+
+4. **Teach from the run.** A finished goal stores the tools it called. `qodex desk teach <desk> <name> --from-last` turns that trace into a routine. Secrets in the args are stripped.
+
+```
+src/desk/sentinel.ts
+src/desk/dispatch.ts
+src/tools/computer/linux.ts
+src/tools/computer/win.ts
+src/tools/computer/use.ts
+docs/DESK.md
+```
+
+
 ## v2.9.0 — 2026-11-10
 
 **QodeX Desk — named teammates on your machine, not a cloud computer.**

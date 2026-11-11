@@ -24,6 +24,17 @@ function auditPath(): string {
   return path.join(desksDir(), 'audit.jsonl');
 }
 
+export function sharedComputerDir(): string {
+  return path.join(desksDir(), 'computer');
+}
+
+/** The folder every desk shares — the local stand-in for one shared computer. */
+export async function ensureSharedComputer(): Promise<string> {
+  const dir = sharedComputerDir();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
 export function deskLockPath(): string {
   return path.join(desksDir(), 'board.lock');
 }

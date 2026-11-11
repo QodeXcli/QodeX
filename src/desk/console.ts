@@ -6,7 +6,6 @@
  */
 import * as http from 'http';
 import { randomBytes } from 'crypto';
-import * as os from 'os';
 import {
   createDesk,
   decideGoal,
@@ -17,7 +16,8 @@ import {
   type Board,
   type RoutineStep,
 } from './board.js';
-import { describeDesktop } from './policy.js';
+import { probeDesktop } from './policy.js';
+import { decideSentinel, listPending, type SentinelRequest } from './sentinel.js';
 import { appendAudit, loadBoard, readAudit, saveBoard, withDeskLock } from './store.js';
 
 export interface DeskRoute {
@@ -39,8 +39,8 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '\u0026#39;');
 }
 
-export function renderDeskHtml(board: Board, token: string): string {
-  const desktop = describeDesktop(os.platform());
+export function renderDeskHtml(board: Board, token: string, pending: SentinelRequest[] = []): string {
+  const desktop = probeDesktop();
   const cards = board.desks.map(d => {
     const goals = d.goals.slice(-6).map(g => {
       const hold = g.status === 'needs-approval'
@@ -68,6 +68,19 @@ export function renderDeskHtml(board: Board, token: string): string {
       </form>
     </article>`;
   }).join('') || '<p class="muted">No desks yet. Add one below — six is the cap, same idea as a small Bot group.</p>';
+
+  const waiting = pending.length
+    ? pending.map(p => `<li>
+        <strong>${escapeHtml(p.kind)}</strong> ${escapeHtml(p.deskId)} <code>${escapeHtml(p.id)}</code>
+        <div>${escapeHtml(p.prompt.slice(0, 220))}</div>
+        <form method="post" action="/api/action?k=${token}" class="row">
+          <input type="hidden" name="action" value="sentinel"/>
+          <input type="hidden" name="id" value="${escapeHtml(p.id)}"/>
+          <button name="allow" value="yes">Allow call</button>
+          <button name="allow" value="no" class="deny">Deny</button>
+        </form>
+      </li>`).join('')
+    : '<li class="muted">No call is waiting. A click, a send, or an irreversible shell pauses here and then runs if you allow it.</li>';
 
   return `<!doctype html>
 <html lang="en">
@@ -102,6 +115,10 @@ export function renderDeskHtml(board: Board, token: string): string {
     <div>GUI: ${escapeHtml(desktop.gui)}</div>
     <div>${escapeHtml(desktop.note)}</div>
   </div>
+  <article id="sentinel">
+    <h2>Sentinel</h2>
+    <ul>${waiting}</ul>
+  </article>
   ${cards}
   <article>
     <h2>New desk</h2>
@@ -113,6 +130,33 @@ export function renderDeskHtml(board: Board, token: string): string {
     </form>
   </article>
 </main>
+<script>
+function qodexEsc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return c === '\u0026' ? '\u0026amp;' : c === '<' ? '\u0026lt;' : c === '>' ? '\u0026gt;' : c === '"' ? '\u0026quot;' : '\u0026#39;';
+  });
+}
+async function qodexRefresh() {
+  try {
+    var k = new URLSearchParams(location.search).get('k') || '';
+    var res = await fetch('/api/state?k=' + encodeURIComponent(k));
+    if (!res.ok) return;
+    var data = await res.json();
+    var rows = data.pending || [];
+    var html = rows.length ? rows.map(function (p) {
+      return '<li><strong>' + qodexEsc(p.kind) + '</strong> ' + qodexEsc(p.deskId) + ' <code>' + qodexEsc(p.id) + '</code><div>' + qodexEsc(String(p.prompt).slice(0, 220)) + '</div>'
+        + '<form method="post" action="/api/action?k=' + encodeURIComponent(k) + '" class="row">'
+        + '<input type="hidden" name="action" value="sentinel"/>'
+        + '<input type="hidden" name="id" value="' + qodexEsc(p.id) + '"/>'
+        + '<button name="allow" value="yes">Allow call</button>'
+        + '<button name="allow" value="no" class="deny">Deny</button></form></li>';
+    }).join('') : '<li class="muted">No call is waiting. A click, a send, or an irreversible shell pauses here and then runs if you allow it.</li>';
+    var box = document.querySelector('#sentinel ul');
+    if (box) box.innerHTML = html;
+  } catch (e) {}
+}
+setInterval(qodexRefresh, 2000);
+</script>
 </html>`;
 }
 
@@ -171,6 +215,18 @@ async function applyActionUnlocked(body: Record<string, string>, cwd: string): P
     if (res.audit) await appendAudit(res.audit);
     return { ok: true, message: `routine ${res.value?.name}` };
   }
+  if (action === 'sentinel') {
+    const allow = body.allow === 'yes' || body.allow === 'true';
+    const res = await decideSentinel(body.id ?? '', allow, now);
+    if (!res.ok || !res.request) return { ok: false, message: res.error ?? 'no such call' };
+    await appendAudit({
+      ts: now,
+      deskId: res.request.deskId,
+      kind: allow ? 'sentinel-allow' : 'sentinel-deny',
+      detail: `${res.request.id} ${res.request.kind}`,
+    });
+    return { ok: true, message: res.request.status };
+  }
   return { ok: false, message: `unknown action ${action}` };
 }
 
@@ -203,12 +259,14 @@ export async function handleDeskRequest(opts: {
   if (!opts.tokenOk) return json(401, { ok: false, message: 'Unauthorized — missing or bad token.' });
   if (opts.method === 'GET' && (opts.pathname === '/' || opts.pathname === '')) {
     const board = await loadBoard();
-    return { status: 200, body: renderDeskHtml(board, opts.htmlToken ?? 'token'), contentType: 'text/html; charset=utf-8' };
+    const pending = await listPending();
+    return { status: 200, body: renderDeskHtml(board, opts.htmlToken ?? 'token', pending), contentType: 'text/html; charset=utf-8' };
   }
   if (opts.method === 'GET' && opts.pathname === '/api/state') {
     const board = await loadBoard();
     const audit = await readAudit(30);
-    return json(200, { ok: true, board, audit, desktop: describeDesktop(os.platform()) });
+    const pending = await listPending();
+    return json(200, { ok: true, board, audit, pending, desktop: probeDesktop() });
   }
   if (opts.method === 'POST' && opts.pathname === '/api/action') {
     const body = parseForm(opts.rawBody, opts.contentType);

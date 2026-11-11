@@ -1,19 +1,37 @@
 /**
  * One desk goal, run by the same headless agent as `qodex -p`.
  *
- * Ordinary edits and shell use approval mode "always" for this process only,
- * then the previous mode is restored. Irreversible shell still asks, and
- * headless without --yes denies that ask. Screen click/type/key ask every
- * time and are denied here too.
+ * Ordinary edits and shell use approval mode "always" for this process, then
+ * the previous mode is restored. Anything that still asks — irreversible shell,
+ * screen click/type/key, send/spend — is parked on the sentinel. The call runs
+ * only after a person allows that exact id. Timeout denies it.
  *
- * MCP servers are not started: a desk run must return when the goal returns,
- * not sit on a background socket. Code-graph tools say so if the index is cold.
+ * Tool names and scrubbed args are returned so `desk teach --from-last` can
+ * turn a real run into a routine. MCP is not started; the process must exit
+ * when the goal exits.
  */
 import { getApprovalMode, setApprovalMode } from '../security/permissions.js';
+import { scrubPacket } from './policy.js';
+import { classifyAsk, parkSentinel, waitForSentinel } from './sentinel.js';
 
-export async function runDeskAgent(opts: { cwd: string; prompt: string }): Promise<number> {
+const TOOL_NAME = /^[a-z][a-z0-9_]{0,40}$/;
+
+export interface DeskRunResult {
+  code: number;
+  trace: Array<{ tool: string; summary: string }>;
+}
+
+export async function runDeskAgent(opts: {
+  cwd: string;
+  prompt: string;
+  deskId: string;
+  goalId: string;
+  sentinelTimeoutMs?: number;
+}): Promise<DeskRunResult> {
   const prevMode = getApprovalMode();
   const prevCwd = process.cwd();
+  const trace: Array<{ tool: string; summary: string }> = [];
+  const timeoutMs = opts.sentinelTimeoutMs ?? 10 * 60_000;
   setApprovalMode('always');
   try {
     process.chdir(opts.cwd);
@@ -46,7 +64,7 @@ export async function runDeskAgent(opts: { cwd: string; prompt: string }): Promi
     } catch { /* skills stay empty if seeding fails */ }
     await router.initialize();
     const { runHeadless } = await import('../cli/modes/headless.js');
-    return await runHeadless({
+    const code = await runHeadless({
       cwd: opts.cwd,
       config,
       router,
@@ -55,7 +73,31 @@ export async function runDeskAgent(opts: { cwd: string; prompt: string }): Promi
       prompt: opts.prompt,
       json: false,
       autoApproveAll: false,
+      askUser: async prompt => {
+        const hit = classifyAsk(prompt);
+        const req = await parkSentinel({
+          deskId: opts.deskId,
+          goalId: opts.goalId,
+          prompt,
+          kind: hit.kind,
+          reason: hit.reason,
+        });
+        console.error(`\n⏸ sentinel ${req.id} [${hit.kind}] ${hit.reason}`);
+        console.error(`   ${prompt.split('\n')[0]?.slice(0, 220) ?? ''}`);
+        console.error(`   allow: qodex desk allow-call ${req.id}`);
+        console.error(`   deny:  qodex desk deny-call ${req.id}`);
+        console.error(`   waiting up to ${Math.round(timeoutMs / 1000)}s\n`);
+        const decision = await waitForSentinel(req.id, timeoutMs);
+        console.error(decision === 'allowed' ? `✓ sentinel ${req.id} allowed — running it` : `✗ sentinel ${req.id} ${decision}`);
+        return decision === 'allowed' ? 'yes' : 'no';
+      },
+      onTool: (name, args) => {
+        if (!TOOL_NAME.test(name) || trace.length >= 24) return;
+        const summary = scrubPacket(args || name).text.replace(/\s+/g, ' ').trim().slice(0, 180) || name;
+        trace.push({ tool: name, summary });
+      },
     });
+    return { code, trace };
   } finally {
     setApprovalMode(prevMode);
     try { process.chdir(prevCwd); } catch { /* the old cwd disappeared */ }

@@ -6,6 +6,8 @@
  * accept without a human, and what must stop for approval. Pure. No I/O.
  */
 
+import { spawnSync } from 'child_process';
+
 export const MAX_DESKS = 6;
 export const MAX_HANDOFF_DEPTH = 3;
 export const MAX_ROUTINE_STEPS = 24;
@@ -129,35 +131,66 @@ export function validateRoutine(steps: RoutineStep[]): { ok: true; steps: Routin
   return { ok: true, steps: clean };
 }
 
-export type GuiBackend = 'macos' | 'linux' | 'windows' | 'none';
+export type GuiBackend = 'macos' | 'x11' | 'windows' | 'none';
+
+export interface DesktopTools {
+  /** `xdotool` is on PATH, so click/type/key can drive an X11 session. */
+  xdotool?: boolean;
+  /** scrot, ImageMagick `import`, or gnome-screenshot is on PATH. */
+  screenshot?: boolean;
+}
 
 /**
- * What this machine can actually drive. We do not pretend Windows/Linux have
- * the macOS computer-use tools. The desk still runs files, shell, and browser.
+ * What this process can drive. Linux click/type is real when xdotool is
+ * installed. Windows uses PowerShell, which ships with the OS. Anything else
+ * is files, shell, and the browser — we do not invent a backend.
  */
-export function describeDesktop(platform: string): { os: string; gui: GuiBackend; note: string } {
+export function describeDesktop(platform: string, tools: DesktopTools = {}): { os: string; gui: GuiBackend; note: string } {
   if (platform === 'darwin') {
     return {
       os: 'macos',
       gui: 'macos',
-      note: 'Screen, click, and type are available through computer_use_* after you grant Accessibility.',
+      note: 'Screen, click, and type use screencapture and System Events. Click, type, and key wait for a sentinel yes, then they run.',
+    };
+  }
+  if (platform === 'linux' && tools.xdotool) {
+    return {
+      os: 'linux',
+      gui: 'x11',
+      note: tools.screenshot
+        ? 'Click, type, and key use xdotool. Screenshots use scrot, import, or gnome-screenshot. Each change waits for a sentinel yes, then it runs.'
+        : 'Click, type, and key use xdotool and wait for a sentinel yes. No screenshot binary is on PATH (install scrot or imagemagick).',
     };
   }
   if (platform === 'linux') {
     return {
       os: 'linux',
       gui: 'none',
-      note: 'No native click/type backend yet. The desk still owns files, shell, browser, and schedules on this machine.',
+      note: 'Desktop control is implemented for X11, but xdotool is not on PATH. Install xdotool and scrot and the same computer_use_* tools drive this screen. Until then the desk uses files, shell, and the browser.',
     };
   }
   if (platform === 'win32') {
     return {
       os: 'windows',
-      gui: 'none',
-      note: 'No native click/type backend yet. The desk still owns files, shell, browser, and schedules on this machine.',
+      gui: 'windows',
+      note: 'Screenshot, click, type, and key use PowerShell and Win32. Click, type, and key wait for a sentinel yes, then they run.',
     };
   }
-  return { os: platform || 'unknown', gui: 'none', note: 'Unknown platform. Desk runs as a local agent, not a GUI driver.' };
+  return { os: platform || 'unknown', gui: 'none', note: 'No desktop backend for this platform. The desk still runs files, shell, and the browser.' };
+}
+
+function binOnPath(bin: string): boolean {
+  const result = spawnSync('which', [bin], { encoding: 'utf8' });
+  return result.status === 0 && Boolean(result.stdout?.trim());
+}
+
+/** describeDesktop plus a PATH check on Linux. Other platforms need no extra binary. */
+export function probeDesktop(platform = process.platform): { os: string; gui: GuiBackend; note: string } {
+  if (platform !== 'linux') return describeDesktop(platform);
+  return describeDesktop('linux', {
+    xdotool: binOnPath('xdotool'),
+    screenshot: binOnPath('scrot') || binOnPath('import') || binOnPath('gnome-screenshot'),
+  });
 }
 
 export function slugDeskName(name: string): string {

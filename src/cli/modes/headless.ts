@@ -37,6 +37,10 @@ export interface HeadlessOptions {
   /** `--receipt <path>`: write a signed, tamper-evident JSON receipt of the run there.
    *  Requires a contract (there is nothing to attest without one). */
   receiptPath?: string;
+  /** When set, answers permission asks. Desk run uses this to wait on the sentinel. */
+  askUser?: (prompt: string, options?: string[]) => Promise<string>;
+  /** Fired once per finished tool call. `argsPreview` is the raw args JSON, possibly empty. */
+  onTool?: (name: string, argsPreview: string) => void;
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
@@ -173,7 +177,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // all). Recreated per iteration so state never leaks across turns.
   let display = new StreamDisplayFilter();
 
-  const askUser = async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
+  const askUser = opts.askUser ?? (async (prompt: string, options: string[] = ['yes', 'no']): Promise<string> => {
     const { choice, denied } = headlessAskChoice(options, !!opts.autoApproveAll);
     if (denied) {
       if (opts.json) {
@@ -183,7 +187,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       }
     }
     return choice;
-  };
+  });
 
   // ── Autonomy contract: arm the write-scope gate ──
   // The scope root is a module-global consulted by Transaction.write()/delete() during
@@ -197,6 +201,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   }
 
   try {
+    const argsByIndex = new Map<number, string>();
+    const nameByIndex = new Map<number, string>();
     for await (const event of agent.run(initialMessages, sessionId, {
       explicitModel: explicitModelOverride,
       mode: allowedToolsOverride && allowedToolsOverride.length > 0
@@ -204,6 +210,25 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
         : { mode: modeOverride },
       askUser,
     })) {
+      if (event.type === 'tool_call_start') {
+        const idx = Number(event.data?.index ?? 0);
+        if (event.data?.name) nameByIndex.set(idx, String(event.data.name));
+      } else if (event.type === 'tool_call_args_delta') {
+        const idx = Number(event.data?.index ?? 0);
+        argsByIndex.set(idx, (argsByIndex.get(idx) ?? '') + String(event.data?.delta ?? ''));
+      } else if (event.type === 'tool_result' && opts.onTool) {
+        const name = String(event.data?.name ?? '');
+        let preview = '';
+        for (const [idx, n] of nameByIndex) {
+          if (n === name) {
+            preview = argsByIndex.get(idx) ?? '';
+            nameByIndex.delete(idx);
+            argsByIndex.delete(idx);
+            break;
+          }
+        }
+        try { opts.onTool(name, preview); } catch { /* a trace hook must not kill the run */ }
+      }
       // Contract telemetry first — independent of the output mode below.
       if (event.type === 'budget_update' && event.data) {
         lastUsage = {
