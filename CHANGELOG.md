@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.18.1 — 2026-11-11
+
+**A long paste is just "Pasted".**
+
+Up to 100 characters, the chip shows the words. Longer than that, it says only "Pasted", so the line stays clear and the user can type next to it. The agent still receives the full text.
+
+```
+src/cli/components/editor-logic.ts
+```
+
+
 ## v2.18.0 — 2026-11-11
 
 **A paste shows its words.**

@@ -76,16 +76,17 @@ export function countLines(s: string): number {
 const PASTE_PREVIEW = 100;
 
 /**
- * Chip label for a pasted blob. The words themselves show, up to 100 characters.
- * Only what does not fit is marked Pasted — a short paste is not replaced by that word.
- * Newlines collapse so the chip stays one line.
+ * Chip label for a pasted blob.
+ * Up to 100 characters, the words themselves show.
+ * Longer than that, the chip says only "Pasted" so the line stays clear
+ * and the user can type an instruction next to it. The agent still gets the full text.
  */
 export function pasteLabel(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
   if (!flat) return 'Pasted';
   const chars = Array.from(flat);
   if (chars.length <= PASTE_PREVIEW) return flat;
-  return `${chars.slice(0, PASTE_PREVIEW).join('')}… Pasted`;
+  return 'Pasted';
 }
 
 // ── Attachment chips (pasted blobs / images / dropped files & folders) ──────────
