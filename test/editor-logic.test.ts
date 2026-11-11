@@ -60,9 +60,15 @@ describe('editor-logic paste classification', () => {
     expect(countLines('')).toBe(0);
     expect(countLines('a\nb\nc')).toBe(3);
   });
-  it('labels a paste with line count and size', () => {
-    expect(pasteLabel('a\nb\nc')).toContain('3 lines');
-    expect(pasteLabel('hello')).toContain('1 line');
+  it('shows the pasted words, and marks only the overflow as Pasted', () => {
+    expect(pasteLabel('hello world')).toBe('hello world');
+    expect(pasteLabel('سلام\nدنیا')).toBe('سلام دنیا');
+    expect(pasteLabel('a\nb\nc')).toBe('a b c');
+    const long = 'ک'.repeat(140);
+    const label = pasteLabel(long);
+    expect(Array.from(label.replace(/… Pasted$/, '')).length).toBe(100);
+    expect(label.endsWith('… Pasted')).toBe(true);
+    expect(label).not.toBe('Pasted');
   });
 });
 

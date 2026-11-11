@@ -72,13 +72,20 @@ export function countLines(s: string): number {
   return s.split('\n').length;
 }
 
-/** Short, human label for a pasted blob, e.g. "Pasted 42 lines (1.2 KB)". */
+/** How many characters of a paste stay visible. The rest is marked Pasted. */
+const PASTE_PREVIEW = 100;
+
+/**
+ * Chip label for a pasted blob. The words themselves show, up to 100 characters.
+ * Only what does not fit is marked Pasted — a short paste is not replaced by that word.
+ * Newlines collapse so the chip stays one line.
+ */
 export function pasteLabel(s: string): string {
-  const lines = countLines(s);
-  const bytes = Buffer.byteLength(s, 'utf8');
-  const size = bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
-  const lineStr = lines === 1 ? '1 line' : `${lines} lines`;
-  return `Pasted ${lineStr} (${size})`;
+  const flat = s.replace(/\s+/g, ' ').trim();
+  if (!flat) return 'Pasted';
+  const chars = Array.from(flat);
+  if (chars.length <= PASTE_PREVIEW) return flat;
+  return `${chars.slice(0, PASTE_PREVIEW).join('')}… Pasted`;
 }
 
 // ── Attachment chips (pasted blobs / images / dropped files & folders) ──────────

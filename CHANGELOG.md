@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.18.0 — 2026-11-11
+
+**A paste shows its words.**
+
+The chip used to say only "Pasted N lines". A short paste now shows the text. A long one shows the first 100 characters, then "Pasted" for the rest. The full text is still what the agent receives.
+
+```
+src/cli/components/editor-logic.ts
+```
+
+
 ## v2.17.0 — 2026-11-11
 
 **A page change asks, the same way a screen press does.**
