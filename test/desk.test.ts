@@ -3,7 +3,10 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { classifySensitive, canHandoff, scrubPacket, validateRoutine, describeDesktop, MAX_DESKS } from '../src/desk/policy.js';
-import { buildDeskPrompt, claimGoal, createDesk, decideGoal, emptyBoard, handoff, postGoal, releaseGoal, settleGoal, teachRoutine } from '../src/desk/board.js';
+import { buildDeskPrompt, claimGoal, createDesk, decideGoal, emptyBoard, handoff, lastTrace, postGoal, releaseGoal, settleGoal, teachRoutine } from '../src/desk/board.js';
+import { classifyAsk, decideInFile, emptySentinel, parkSentinel, pollSentinel } from '../src/desk/sentinel.js';
+import { mapKeyCombo, x11ClickArgs } from '../src/tools/computer/linux.js';
+import { windowsClickScript, windowsSendKeys } from '../src/tools/computer/win.js';
 import { handleDeskRequest } from '../src/desk/console.js';
 import { confirmScreenChange } from '../src/tools/computer/use.js';
 
@@ -47,9 +50,11 @@ describe('handoff and routines', () => {
     const ok = validateRoutine([{ tool: 'read_file', summary: 'look' }, { tool: 'shell', summary: 'test' }]);
     expect(ok.ok).toBe(true);
   });
-  it('does not claim a GUI on linux', () => {
+  it('does not claim an X11 backend until xdotool is there, and Windows ships one', () => {
     expect(describeDesktop('linux').gui).toBe('none');
+    expect(describeDesktop('linux', { xdotool: true }).gui).toBe('x11');
     expect(describeDesktop('darwin').gui).toBe('macos');
+    expect(describeDesktop('win32').gui).toBe('windows');
   });
 });
 
@@ -132,13 +137,35 @@ describe('board — desks, holds, handoffs', () => {
       goal,
       teammates: [{ name: 'writer', brief: 'draft the notes' }],
       desktop: describeDesktop('linux'),
+      sharedDir: '/shared-computer',
     });
-    expect(prompt).toContain('not a cloud VM');
+    expect(prompt).toContain('share this computer');
+    expect(prompt).toContain('/shared-computer');
     expect(prompt).toContain('/r');
     expect(prompt).toContain('writer');
     expect(prompt).toContain('NEEDS_APPROVAL');
+    expect(prompt).toContain('allow-call');
     expect(prompt).toContain('GUI backend is "none"');
     expect(prompt).not.toContain('/w');
+  });
+  it('keeps a scrubbed tool trace the teach command can replay', () => {
+    let state = createDesk(emptyBoard(), { name: 'repo', cwd: '/work', now }).state;
+    state = postGoal(state, { deskId: 'repo', text: 'rename the parser', now }).state;
+    const claimed = claimGoal(state, { deskId: 'repo', now });
+    const settled = settleGoal(claimed.state, {
+      deskId: 'repo',
+      goalId: claimed.value!.id,
+      ok: true,
+      summary: 'renamed',
+      now,
+      trace: [
+        { tool: 'shell', summary: 'token=supersecret123 rg parser' },
+        { tool: 'edit_text', summary: 'rename the symbol' },
+      ],
+    });
+    expect(settled.value?.trace?.[0]?.summary).not.toContain('supersecret');
+    expect(settled.value?.trace?.[0]?.summary).toContain('[redacted]');
+    expect(lastTrace(settled.state.desks[0])).toHaveLength(2);
   });
 });
 
@@ -192,7 +219,7 @@ describe('desk console auth', () => {
     });
     const lt = String.fromCharCode(38) + 'lt;';
     const gt = String.fromCharCode(38) + 'gt;';
-    expect(page.body.includes('<script>')).toBe(false);
+    expect(page.body).toContain('<h2>' + lt + 'script' + gt + '</h2>');
     expect(page.body).toContain(lt + 'script' + gt);
   });
 });
@@ -205,5 +232,44 @@ describe('screen click, type, and key ask every time', () => {
   });
   it('accepts one yes', async () => {
     expect(await confirmScreenChange(ctx('yes'), 'computer_use_key', 'key cmd+s')).toBeNull();
+  });
+});
+
+describe('sentinel and desktop backends', () => {
+  it('labels a screen ask and a purchase, and decides a parked call once', async () => {
+    expect(classifyAsk('computer_use_click will change what is on screen: click 1,2').kind).toBe('screen');
+    expect(classifyAsk('Run: npm publish qodex').kind).toBe('publish');
+    let file = emptySentinel();
+    file = {
+      ...file,
+      requests: [{ id: 'ab', deskId: 'd', goalId: 'g', prompt: 'click', kind: 'screen', reason: 'screen', status: 'pending', createdAt: 't' }],
+    };
+    const yes = decideInFile(file, 'ab', true, 't2');
+    expect(yes.ok && yes.request.status).toBe('allowed');
+    if (yes.ok) expect(decideInFile(yes.file, 'ab', false, 't3').ok).toBe(false);
+    const polled = await pollSentinel('ab', {
+      timeoutMs: 0,
+      pollMs: 1,
+      load: async () => ({ id: 'ab', deskId: 'd', goalId: 'g', prompt: 'x', kind: 'ask', reason: 'ask', status: 'pending', createdAt: 't' }),
+      sleep: async () => {},
+      now: () => 0,
+    });
+    expect(polled).toBe('timeout');
+    const passed = await pollSentinel('ab', {
+      timeoutMs: 0,
+      pollMs: 1,
+      load: async () => ({ id: 'ab', deskId: 'd', goalId: 'g', prompt: 'x', kind: 'ask', reason: 'ask', status: 'allowed', createdAt: 't' }),
+      sleep: async () => {},
+    });
+    expect(passed).toBe('allowed');
+  });
+
+  it('builds real xdotool and Win32 calls', () => {
+    expect(mapKeyCombo('cmd+s')).toBe('super+s');
+    expect(x11ClickArgs(12, 40, 'left', 2)).toEqual(['mousemove', '--sync', '12', '40', 'click', '--repeat', '2', '--delay', '80', '1']);
+    expect(windowsSendKeys('ctrl+s')).toBe('^s');
+    expect(windowsSendKeys('super+r')).toBeNull();
+    const script = windowsClickScript(12, 40, 'left', 1);
+    expect(script).toContain('SetCursorPos(12, 40)');
   });
 });
