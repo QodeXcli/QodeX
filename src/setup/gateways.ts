@@ -79,6 +79,17 @@ export const KNOWN_GATEWAYS: Record<string, GatewaySpec> = {
     suggestedToolCalls: true,
     note: 'OpenAI-compatible LLM endpoint (https://api.atlascloud.ai/v1). Image/video generation uses a separate Atlas API and is not this gateway. Browse models at https://www.atlascloud.ai/models/list.',
   },
+  demonroute: {
+    name: 'demonroute',
+    title: 'Demon Route',
+    baseUrl: 'https://api.demonroute.com/v1',
+    apiKeyEnv: 'DEMONROUTE_API_KEY',
+    keyHint: 'Get a key at https://demonroute.com (starts with sk-dr-).',
+    suggestedModel: 'Qwen/Qwen3-Coder-Next',
+    suggestedContextWindow: 262144,
+    suggestedToolCalls: true,
+    note: 'OpenAI-compatible gateway for open-weight models, including uncensored/abliterated fine-tunes. Prepaid: requests stop with HTTP 402 when the balance runs out. Browse models at https://demonroute.com/models.',
+  },
   moonshot: {
     name: 'moonshot',
     title: 'Moonshot AI (Kimi)',

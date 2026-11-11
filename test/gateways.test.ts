@@ -42,6 +42,9 @@ console.log('— registry —');
   check('atlascloud uses ATLASCLOUD_API_KEY', findGateway('atlascloud')?.apiKeyEnv === 'ATLASCLOUD_API_KEY');
   check('atlascloud default model is a documented chat id, not a media/qwen guess', findGateway('atlascloud')?.suggestedModel === 'deepseek-v3');
   check('atlascloud key hint points at the real console', /console\.atlascloud\.ai/.test(findGateway('atlascloud')?.keyHint ?? ''));
+  check('demonroute uses the Demon Route OpenAI-compatible endpoint', findGateway('demonroute')?.baseUrl === 'https://api.demonroute.com/v1');
+  check('demonroute uses DEMONROUTE_API_KEY', findGateway('demonroute')?.apiKeyEnv === 'DEMONROUTE_API_KEY');
+  check('demonroute default model is a tool-calling coder', findGateway('demonroute')?.suggestedModel === 'Qwen/Qwen3-Coder-Next' && findGateway('demonroute')?.suggestedToolCalls === true);
 }
 
 console.log('— buildCustomEntry —');
@@ -54,6 +57,10 @@ console.log('— buildCustomEntry —');
   const atlas = buildCustomEntry({ spec: findGateway('atlascloud')! });
   check('builds Atlas Cloud from spec', atlas.name === 'atlascloud' && atlas.baseUrl === 'https://api.atlascloud.ai/v1');
   check('pins Atlas Cloud suggested model', atlas.models?.[0].id === 'deepseek-v3');
+
+  const dr = buildCustomEntry({ spec: findGateway('demonroute')! });
+  check('builds Demon Route from spec', dr.name === 'demonroute' && dr.baseUrl === 'https://api.demonroute.com/v1' && dr.apiKeyEnv === 'DEMONROUTE_API_KEY');
+  check('pins Demon Route context window', dr.models?.[0].contextWindow === 262144);
 
   // explicit override for an unlisted gateway
   const c = buildCustomEntry({ name: 'mygw', baseUrl: 'https://x.example/v1', apiKeyEnv: 'MYGW_KEY' });
