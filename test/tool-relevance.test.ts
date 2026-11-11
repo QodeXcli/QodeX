@@ -31,6 +31,7 @@ const ALL = [
   // MCP design servers (only present when the user added figma/canva) — names use `:`.
   'mcp:figma:get_code','mcp:figma:get_file','mcp:canva:create_design','mcp:canva:export_design',
   'mcp:gmail:search_threads','mcp:hotmail:list-mail-messages','mcp:notion:search','mcp:atlassian:search',
+  'mcp:browserbase:start','mcp:browserbase:act',
 ];
 const names = (sig: string) => selectRelevantToolNames(ALL, sig).selected;
 
@@ -122,6 +123,8 @@ console.log('— account connectors gate on the product name —');
   check('notion', names('find the notion page about pricing').has('mcp:notion:search'));
   check('jira', names('open the jira ticket').has('mcp:atlassian:search'));
   check('unrelated excludes gmail', !names('fix the type error in math.ts').has('mcp:gmail:search_threads'));
+  check('browserbase', names('open this in browserbase').has('mcp:browserbase:start'));
+  check('unrelated excludes browserbase', !names('fix the type error in math.ts').has('mcp:browserbase:act'));
 }
 
 console.log('— install_skill surfaces whenever skills are discussed (regression) —');

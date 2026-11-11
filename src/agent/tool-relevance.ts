@@ -128,6 +128,9 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
     'هاتمیل', 'هات‌میل', 'اوتلوک', 'ایمیل مایکروسافت'] },
   { members: ['mcp:notion:'], keywords: ['notion', 'نوشن'] },
   { members: ['mcp:atlassian:'], keywords: ['jira', 'confluence', 'atlassian', 'جیرا', 'کانفلونس'] },
+  { members: ['mcp:browserbase:'], keywords: [
+    'browserbase', 'cloud browser', 'stagehand',
+    'مرورگر ابری', 'براوزر ابری'] },
 ];
 
 function expand(members: string[], allNames: string[]): Set<string> {

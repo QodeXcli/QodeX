@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildServerEntry } from '../src/mcp/config-writer.js';
 import { findMcpSpec, listMcpSpecs } from '../src/mcp/registry.js';
 import { expandEnvRefs } from '../src/mcp/manager.js';
+import { cloudBrowserAsk } from '../src/mcp/tool-wrapper.js';
+import { classifyAsk } from '../src/desk/sentinel.js';
 
 describe('MCP registry', () => {
   it('has all the well-known servers', () => {
@@ -10,7 +12,7 @@ describe('MCP registry', () => {
       'github', 'supabase', 'postgres', 'playwright', 'figma', 'sentry', 'linear', 'slack',
       'sequential-thinking', 'brave-search', 'fetch', 'higgsfield', 'tavily', 'canva',
       'gmail', 'google-drive', 'google-calendar', 'google-docs', 'google-sheets',
-      'hotmail', 'outlook-work', 'notion', 'atlassian',
+      'hotmail', 'outlook-work', 'notion', 'atlassian', 'browserbase',
     ]) {
       expect(ids).toContain(id);
     }
@@ -52,6 +54,47 @@ describe('MCP registry', () => {
     expect(argsJoined).toContain('mcp-remote');
     expect(argsJoined).toContain('https://mcp.canva.com/mcp');
     expect(entry.destructive).toBe(true); // can create/edit/export designs
+  });
+
+  it('Browserbase is the hosted cloud browser and the key stays off argv', () => {
+    const spec = findMcpSpec('browserbase')!;
+    expect(spec.transport).toBe('stdio');
+    expect(spec.auth).toBe('token');
+    expect(spec.preserveArgEnvRefs).toBe(true);
+    expect(spec.destructive).toBe(true);
+    const joined = (spec.args ?? []).join(' ');
+    expect(joined).toContain('mcp-remote@0.16.5');
+    expect(joined).toContain('https://mcp.browserbase.com/mcp');
+    expect(joined).toContain('--header');
+    expect(joined).not.toContain('browserbaseApiKey=');
+
+    const entry = buildServerEntry(spec, {
+      secrets: { BROWSERBASE_API_KEY: 'bb_live_secret_value' },
+      inlineToken: true,
+    });
+    const argsJoined = (entry.args ?? []).join(' ');
+    expect(argsJoined).toContain('Authorization: Bearer ${BROWSERBASE_API_KEY}');
+    expect(argsJoined).not.toContain('bb_live_secret_value');
+    expect(entry.env?.BROWSERBASE_API_KEY).toBe('bb_live_secret_value');
+    expect(entry.preserveArgEnvRefs).toBe(true);
+
+    const spawned = expandEnvRefs({
+      command: entry.command,
+      args: entry.args,
+      env: { BROWSERBASE_API_KEY: '${BROWSERBASE_API_KEY}' },
+      preserveArgEnvRefs: true,
+    }, 'browserbase');
+    expect((spawned.args ?? []).join(' ')).toContain('${BROWSERBASE_API_KEY}');
+    expect((spawned.args ?? []).join(' ')).not.toContain('bb_live_secret_value');
+
+    const start = cloudBrowserAsk('mcp:browserbase:start');
+    const act = cloudBrowserAsk('mcp:browserbase:act');
+    expect(start).toBeTruthy();
+    expect(act).toBeTruthy();
+    expect(cloudBrowserAsk('mcp:browserbase:extract')).toBeNull();
+    expect(cloudBrowserAsk('mcp:playwright:navigate')).toBeNull();
+    expect(classifyAsk(start!).kind).toBe('spend');
+    expect(classifyAsk(act!).kind).toBe('spend');
   });
 
   it('Gmail uses Google\'s official URL and never puts the client secret on argv', () => {

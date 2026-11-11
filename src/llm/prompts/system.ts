@@ -263,8 +263,9 @@ an agent with actual filesystem and shell access. The following rules are NON-NE
 - \`computer_use_click\` is only for a coordinate the tree does not name. A missing accessibility backend is an error, not a reason to invent a click.
 
 **Mail, Drive, Calendar, Docs, Sheets, Canva, Notion, Jira are connectors.**
-- They are not installed until \`install_mcp\` (or \`qodex mcp add\`) writes them. Ids: \`gmail\`, \`google-drive\`, \`google-calendar\`, \`google-docs\`, \`google-sheets\`, \`hotmail\` (Outlook.com / Hotmail; \`outlook-work\` for a work tenant), \`canva\`, \`notion\`, \`atlassian\`. \`install_mcp source="list"\` is the full catalog.
+- They are not installed until \`install_mcp\` (or \`qodex mcp add\`) writes them. Ids: \`gmail\`, \`google-drive\`, \`google-calendar\`, \`google-docs\`, \`google-sheets\`, \`hotmail\` (Outlook.com / Hotmail; \`outlook-work\` for a work tenant), \`canva\`, \`notion\`, \`atlassian\`, \`browserbase\`. \`install_mcp source="list"\` is the full catalog.
 - Do not say you read an inbox, edited a Doc, or exported a Canva file unless that server's tool returned it. Google's servers are a developer preview and need the user's own OAuth client. Gmail's official server creates drafts; it does not send. Hotmail's login is a device code, not a password in the config.
+- \`browserbase\` is Browserbase's cloud browser, not a browser QodeX runs. It needs the user's own API key. \`start\` and \`act\` ask every time. If the key is missing, the call fails — do not invent a page, a click, or a screenshot.
 
 If you ever catch yourself about to say:
 - "I cannot create files directly" → STOP. You CAN. Use \`write_file\`.

@@ -8,6 +8,21 @@ import { redactValue } from '../utils/redact.js';
 import { interpretPermissionAnswer, setApprovalMode } from '../security/permissions.js';
 
 /**
+ * Browserbase `start` opens a billed cloud session. `act` can submit or buy.
+ * A standing always-yes is not enough — same rule as a screen click.
+ * The prompt is worded so the desk sentinel labels it spend.
+ */
+export function cloudBrowserAsk(toolName: string): string | null {
+  if (toolName === 'mcp:browserbase:start') {
+    return 'mcp:browserbase:start will charge a Browserbase session on their cloud. A standing yes does not cover this.';
+  }
+  if (toolName === 'mcp:browserbase:act') {
+    return 'mcp:browserbase:act can purchase or submit on that cloud page. A standing yes does not cover this.';
+  }
+  return null;
+}
+
+/**
  * Wraps an MCP-exposed tool as a QodeX Tool so the agent loop can call it through the
  * same registry path as built-in tools. The tool name is namespaced as `mcp:<server>:<tool>`
  * to avoid collisions with builtins and across servers.
@@ -54,29 +69,43 @@ export class MCPToolWrapper extends Tool<Record<string, unknown>> {
       };
     }
 
-    // Permission check (MCP tools go through the same engine as builtins)
-    const permReq = {
-      tool: this.name,
-      operation: this.name,
-      description: this.description,
-    };
-    const decision = ctx.permissions.evaluate(permReq);
-    if (decision === 'deny') {
-      return { content: `[PERMISSION_DENIED] Blocked by policy: ${this.name}`, isError: true };
-    }
-    if (decision === 'ask') {
-      const summary = this.summarizeArgs(args);
-      const answer = await ctx.askUser(
-        `Run MCP tool ${this.name}${summary ? `\n  args: ${summary}` : ''}?`,
-        ['yes', 'no', 'always yes'],
-      );
-      const verdict = interpretPermissionAnswer(answer);
-      if (verdict === 'deny') {
-        return { content: `[USER_REJECTED] User declined MCP tool ${this.name}`, isError: true };
+    // start/act on Browserbase spend money or submit a form. Ask every time,
+    // even when the session is "always yes". Other MCP tools use policy.
+    const cloud = cloudBrowserAsk(this.name);
+    if (cloud) {
+      ctx.emit({ type: 'permission-request', tool: this.name, operation: cloud });
+      const answer = await ctx.askUser(cloud, ['yes', 'no']);
+      if (interpretPermissionAnswer(answer) !== 'allow') {
+        return {
+          content: `[USER_REJECTED] ${this.name} was not approved. Opening or driving a Browserbase session spends money and can submit a form. Always-yes does not cover it.`,
+          isError: true,
+        };
       }
-      if (verdict === 'always') {
-        setApprovalMode('always');
-        ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
+    } else {
+      // Permission check (MCP tools go through the same engine as builtins)
+      const permReq = {
+        tool: this.name,
+        operation: this.name,
+        description: this.description,
+      };
+      const decision = ctx.permissions.evaluate(permReq);
+      if (decision === 'deny') {
+        return { content: `[PERMISSION_DENIED] Blocked by policy: ${this.name}`, isError: true };
+      }
+      if (decision === 'ask') {
+        const summary = this.summarizeArgs(args);
+        const answer = await ctx.askUser(
+          `Run MCP tool ${this.name}${summary ? `\n  args: ${summary}` : ''}?`,
+          ['yes', 'no', 'always yes'],
+        );
+        const verdict = interpretPermissionAnswer(answer);
+        if (verdict === 'deny') {
+          return { content: `[USER_REJECTED] User declined MCP tool ${this.name}`, isError: true };
+        }
+        if (verdict === 'always') {
+          setApprovalMode('always');
+          ctx.permissions.rememberDecision(permReq, 'allow', 'pattern');
+        }
       }
     }
 

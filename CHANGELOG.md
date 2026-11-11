@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.16.0 — 2026-11-11
+
+**A cloud browser that is actually Browserbase's, with your key.**
+
+`qodex mcp add browserbase` bridges `https://mcp.browserbase.com/mcp` through mcp-remote. The API key is `${BROWSERBASE_API_KEY}` in the environment. It is not placed on the command line, and QodeX does not ship a key. `start` and `act` ask every time, including under always-yes. A desk parks that ask as spend. Observe, extract, navigate, and end stay on the normal permission check. A missing or rejected key is an error. There is no second, silent browser.
+
+```
+src/mcp/registry.ts
+src/mcp/tool-wrapper.ts
+```
+
+
 ## v2.15.0 — 2026-11-11
 
 **A desktop shell on this machine. Not a cloud browser.**

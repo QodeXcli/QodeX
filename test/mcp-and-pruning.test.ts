@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { MCPClient } from '../src/mcp/client.js';
 import { MCPToolWrapper } from '../src/mcp/tool-wrapper.js';
+import type { ToolContext } from '../src/tools/base.js';
 
 describe('MCPClient lifecycle', () => {
   it('reports stopped state when not started', () => {
@@ -59,6 +60,49 @@ describe('MCPToolWrapper', () => {
     );
     expect(wrapper.isReadOnly).toBe(true);
     expect(wrapper.isDestructive).toBe(false);
+  });
+
+  it('does not open a Browserbase session when the person says no', async () => {
+    let calls = 0;
+    const fakeClient = {
+      name: 'browserbase',
+      isReady: () => true,
+      status: { state: 'ready' },
+      callTool: async () => { calls += 1; return { content: [{ type: 'text', text: 'opened' }] }; },
+    } as any;
+    const wrapper = new MCPToolWrapper(fakeClient, { name: 'start', description: 'start a session' }, true);
+    const ctx = {
+      askUser: async () => 'no',
+      emit: () => {},
+      permissions: { evaluate: () => 'allow', rememberDecision: () => {} },
+    } as unknown as ToolContext;
+    const result = await wrapper.execute({}, ctx);
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('USER_REJECTED');
+    expect(calls).toBe(0);
+  });
+
+  it('runs Browserbase act only after an explicit yes', async () => {
+    let calls = 0;
+    const fakeClient = {
+      name: 'browserbase',
+      isReady: () => true,
+      status: { state: 'ready' },
+      callTool: async () => { calls += 1; return { content: [{ type: 'text', text: 'pressed' }] }; },
+    } as any;
+    const wrapper = new MCPToolWrapper(fakeClient, { name: 'act', description: 'act' }, true);
+    const ctx = {
+      askUser: async (prompt: string) => {
+        expect(prompt).toContain('purchase');
+        return 'yes';
+      },
+      emit: () => {},
+      permissions: { evaluate: () => 'allow', rememberDecision: () => {} },
+    } as unknown as ToolContext;
+    const result = await wrapper.execute({ action: 'click login' }, ctx);
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('pressed');
+    expect(calls).toBe(1);
   });
 });
 
