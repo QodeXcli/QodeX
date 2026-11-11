@@ -32,7 +32,13 @@ export interface StartBotsOptions {
   signal?: boolean;
 }
 
-export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<void> {
+export interface OpenedBots {
+  gateway: BotGateway | null;
+  platforms: string[];
+  notes: string[];
+}
+
+export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<OpenedBots> {
   const cwd = deps.cwd ?? process.cwd();
   const botCfg: any = (deps.config as any).bot ?? {};
   const allow: AllowConfig = {
@@ -117,19 +123,27 @@ export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}
     }
   }
 
-  for (const n of notes) console.error('⚠️  ' + n);
   if (!transports.length) {
-    console.error('No bot transports started. Enable bot.<platform> in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
-    return;
+    return { gateway: null, platforms: [], notes };
   }
 
   const runner = new QodexAgentRunner({ config: deps.config, router: deps.router, registry: deps.registry, permissions: deps.permissions, cwd });
   const gateway = new BotGateway({ transports, agent: runner, allow });
   await gateway.start();
-  console.error(`🤖 QodeX bot running on: ${transports.map(t => t.platform).join(', ')} · project=${cwd} · Ctrl-C to stop`);
+  return { gateway, platforms: transports.map(t => t.platform), notes };
+}
 
-  const shutdown = () => void gateway.stop().finally(() => process.exit(0));
+/** Block until Ctrl-C. `qodex bot` uses this. `qodex up` uses openBots so the resident owns the process. */
+export async function startBots(deps: StartBotsDeps, opts: StartBotsOptions = {}): Promise<void> {
+  const opened = await openBots(deps, opts);
+  for (const n of opened.notes) console.error('⚠️  ' + n);
+  if (!opened.gateway) {
+    console.error('No bot transports started. Enable bot.<platform> in config, put the token(s) in ~/.qodex/.env, and add allowed user ids.');
+    return;
+  }
+  console.error(`🤖 QodeX bot running on: ${opened.platforms.join(', ')} · project=${deps.cwd ?? process.cwd()} · Ctrl-C to stop`);
+  const shutdown = () => void opened.gateway!.stop().finally(() => process.exit(0));
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  await new Promise<never>(() => {}); // run until killed
+  await new Promise<never>(() => {});
 }

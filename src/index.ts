@@ -1918,8 +1918,10 @@ program
 // Built as a separate sub-Command so each subcommand gets clean --help and arg validation.
 import { buildSkillCommand } from './cli/skill-command.js';
 import { buildDeskCommand } from './cli/desk-command.js';
+import { buildResidentCommand } from './cli/resident-command.js';
 program.addCommand(buildSkillCommand());
 program.addCommand(buildDeskCommand());
+program.addCommand(buildResidentCommand({ bootstrap }));
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);

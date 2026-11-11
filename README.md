@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.12.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.13.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -26,6 +26,7 @@ qodex setup && qodex
 
 - **Local-first & private** — runs entirely on *your* models (Qwen-Coder via Ollama / LM Studio); your code never leaves the machine. Claude / GPT / Gemini / DeepSeek are opt-in cloud fallbacks.
 - **A desk on this machine, not a rented computer** — `qodex desk` is a local team of up to six that can run at once and share `~/.qodex/desks/computer`. A goal that would send, spend, delete, publish, or touch a secret waits for `qodex desk allow`. If the run then tries that call, the sentinel pauses the exact tool until `qodex desk allow-call`, and then it runs. Click and type work on macOS, on Linux with xdotool, and on Windows via PowerShell. `qodex desk teach --from-last` saves the tools the run actually used. [docs/DESK.md](docs/DESK.md).
+- **One process you leave up** — `qodex up` fires schedules, drains runnable desks, seals a skill only when its witness patch still passes the real checker (no model), and attaches the chat bots you already configured. `qodex up status` says whether that pid is alive. `--once` is a single pass and does not open bots.
 - **`--profile studio` / `--profile cloud`** — named overlays, not a second product. Local Qwen on the Mac Studio in one file; a cloud model + Docker-isolated shell in another. `-p` is still `--print`.
 - **Shell in a box, not on bare metal** — `runtime.backend: docker` bind-mounts the project and drops host `$HOME`, `docker.sock`, privileged mode, and host networking. File edits stay in the repo (a coding agent that cannot touch files is a chatbot). The Mac outside `/workspace` stays out of reach.
 - **Guardrails around the model, not just prompts** — a syntax gate, completion gate, and per-language auto-verification run *around* the agent loop, so even a weak local model **can't ship broken or unverified code**.

@@ -222,6 +222,21 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('seal')
+    .description('Promote every candidate whose witness patch replays cleanly under the real verifier. No model call. A failed patch is not retried until the skill file changes. Human-authored skills stay immutable.')
+    .action(async () => {
+      const { sealCandidates } = await import('../resident/seal.js');
+      const result = await sealCandidates(process.cwd());
+      if (result.snapshot) console.log(`snapshot ${result.snapshot}`);
+      for (const name of result.promoted) console.log(`✓ ${name} promoted by witness`);
+      for (const r of result.rejected) console.log(`✗ ${r.name}: ${r.reason}`);
+      for (const r of result.skipped) console.log(`↷ ${r.name}: ${r.reason}`);
+      if (result.promoted.length === 0 && result.rejected.length === 0 && result.skipped.length === 0) {
+        console.log('No candidates to seal.');
+      }
+    });
+
+  cmd
     .command('versions <name>')
     .description('Show a skill\'s version history, champion/challenger, and per-version stats (UCB1 A/B)')
     .action(async (name: string) => {

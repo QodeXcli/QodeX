@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.13.0 — 2026-11-11
+
+**One resident, not three commands and a crontab.**
+
+`qodex up` stays on this machine. Each pass fires due schedules, drains runnable desk goals (different directories at once, the same directory sequential), and seals a candidate only when its witness patch replays clean under the real checker. No model call. A failed patch is not retried until the file changes. Human-authored skills stay immutable. `qodex skill seal` is that step, once.
+
+Bots you already configured (token and allowlist) attach to the same process. `--no-bots` skips them. `--once` does not open bots. `qodex up status` reads `~/.qodex/resident.json` and checks the pid.
+
+```
+src/resident/loop.ts
+src/resident/seal.ts
+src/resident/desks.ts
+src/cli/resident-command.ts
+```
+
+
 ## v2.12.0 — 2026-11-11
 
 **Connectors that exist, wired as themselves.**

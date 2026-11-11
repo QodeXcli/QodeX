@@ -49,9 +49,26 @@ Hermes asks "does a model like this skill?" QodeX asks "does this diff still
 apply, and does the compiler still agree?" That is the added value on a
 machine that only runs Qwen.
 
-## What this is not
+## What 2.13 adds (the process, not another tool)
 
-Not a claim that QodeX matches Hermes as a personal life-operator, and not a
-SWE-bench number. Coding-agent quality is still the model plus the guardrails
-you already have. 2.8 closes the hole that made the learning loop dishonest
-on the default local setup.
+Hermes is something you leave running. QodeX was a CLI you invoked, plus a
+crontab, plus `qodex bot`, plus `qodex desk run`. That was the real distance.
+
+```
+qodex up
+```
+
+One process, on this machine. Each pass, default every 60 seconds:
+
+1. Fires due schedules, in the same isolated children `qodex schedule tick` already used.
+2. Drains runnable desk goals. Different directories at once. The same directory is sequential.
+3. Seals candidates when `learning.enabled` is on (or you pass `--seal`). A seal replays the witness patch and promotes only if the checker is clean. No model. A patch that already failed is not replayed until the skill file changes. A human-authored skill is still immutable. `qodex skill seal` is the same function, once.
+4. Attaches the chat platforms you already configured (token and allowlist). `--no-bots` skips them. `--once` does not stay up, so it does not open bots.
+
+`qodex up status` reads `~/.qodex/resident.json` and checks the pid. The file is not a claim that a dead process is alive.
+
+## Where that leaves the comparison
+
+Ahead of Hermes on the thing QodeX is for: a weak local model cannot talk a skill into the library, and the always-on loop is one command that still stops for send, spend, delete, screen, and ssh.
+
+Not ahead, and not claimed: Hermes still has the broader gateway, a desktop shell, cloud browser, and a model that rewrites skill prose when you trust a second model. QodeX does not ship those. `qodex up` does not call a model of its own.
