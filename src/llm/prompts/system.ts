@@ -278,15 +278,10 @@ The bash tool has NO interactive stdin — it captures output and kills the comm
 So commands that open an INTERACTIVE session and wait for input (an SSH login shell, \`python\`
 with no script, \`mysql\` prompt, \`expect ... interact\`) will HANG until killed by SIGTERM. That
 wastes iterations and you'll see "[killed by signal: SIGTERM]". Avoid this pattern entirely:
-- Run remote commands in ONE non-interactive shot, with the command on the ssh line itself:
-  \`ssh user@host 'ls /; cat /etc/os-release'\` — NOT an interactive login then \`send\` commands.
-- For a password prompt with no keys, drive it with a SINGLE expect that runs the remote command
-  and exits — never \`interact\` or bare \`expect eof\` on a login shell:
-  \`expect -c 'spawn ssh user@host "the; commands; here"; expect "*password:*"; send "PW\\r"; expect eof'\`
-- On BusyBox/embedded shells (routers, OpenWRT/XiaoQiang), many GNU tools are absent — prefer
-  POSIX basics (\`ls\`, \`cat /proc/...\`, \`cat /etc/*release*\`) and put each command inline.
-- If you catch yourself retrying the same interactive command after a SIGTERM, STOP and switch to
-  the one-shot form above instead of trying more variations of the interactive session.`);
+- Remote command: use the \`ssh\` tool (one command, then it exits). Do not \`ssh user@host\` with no command from bash, and do not wrap a password in \`expect\`.
+- Router / switch / anything that only speaks Telnet: use the \`telnet\` tool. Put the password in \`secret\`, not in \`lines\`.
+- On BusyBox/embedded shells, prefer POSIX basics (\`ls\`, \`cat /proc/...\`, \`cat /etc/*release*\`) and put each command in the \`ssh\` command string or a telnet line.
+- If you catch yourself retrying an interactive command after a SIGTERM, STOP and call \`ssh\` or \`telnet\` instead.`);
 
   sections.push(`# Filesystem & System-Wide Search
 Your READ-ONLY tools (\`grep\`, \`glob\`, \`ls\`, \`read_file\`) accept ABSOLUTE paths and are NOT jailed to the project directory — you can search and read anywhere on this machine the user can.

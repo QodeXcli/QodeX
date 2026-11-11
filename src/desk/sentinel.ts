@@ -46,6 +46,9 @@ export function classifyAsk(prompt: string): { kind: string; reason: string } {
   if (/\brm\s+-[a-z]*r/i.test(body) || /\bgit\s+push\b/i.test(body) || /\b(npm|pnpm|yarn)\s+publish\b/i.test(body)) {
     return { kind: 'irreversible', reason: 'irreversible command — one call, one yes' };
   }
+  if (/\b(ssh|telnet)\b/i.test(body) || /leaves this machine/i.test(body)) {
+    return { kind: 'remote', reason: 'this call runs on another machine' };
+  }
   return { kind: 'ask', reason: 'the agent asked before acting' };
 }
 

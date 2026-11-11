@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.11.0 — 2026-11-11
+
+**`ssh` and `telnet` are tools, not a bash session that hangs.**
+
+1. **`ssh`.** One remote command through the system OpenSSH, then it exits. The command cannot be parsed as an ssh option. A password, if there is no key, goes through `SSH_ASKPASS` and is not put on the command line or in the result. Host-key checking is not turned off. Every call asks, then it runs.
+
+2. **`telnet`.** A real RFC 854 client for routers and switches. It refuses option negotiation, sends the lines, and returns the text. A device password goes in `secret` and is not printed. Every call asks.
+
+On a desk run the sentinel labels these `remote` (or `irreversible` if the command itself is) and waits for `qodex desk allow-call`.
+
+```
+src/tools/remote/ssh.ts
+src/tools/remote/telnet.ts
+src/tools/remote/target.ts
+```
+
+
 ## v2.10.0 — 2026-11-11
 
 **Desks that act, then wait on the exact call.**

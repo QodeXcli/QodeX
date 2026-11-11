@@ -95,6 +95,7 @@ const SPECIALIST_FAMILIES: SpecialistFamily[] = [
   { members: ['install_mcp', 'mcp_scaffold'], keywords: ['mcp', 'scaffold', 'connector', 'install skill'] },
   { members: ['forget', 'project_log', 'project_recall'], keywords: ['forget', 'project log', 'remember that', 'note that'] },
   { members: ['network_check', 'network_optimize'], keywords: ['network', 'latency', 'dns', 'proxy', 'ping'] },
+  { members: ['ssh', 'telnet'], keywords: ['ssh', 'telnet', 'remote host', 'remote server', 'router', 'switch', 'serial', 'سرور', 'روتر', 'تلنت'] },
   { members: ['ci_status'], keywords: [' ci ', 'pipeline', 'github actions', 'workflow run'] },
   { members: ['code_run'], keywords: ['run code', 'eval', 'repl', 'snippet'] },
   // Standalone UI/visual artifacts (html/react/svg/markdown) with versioned manifests.

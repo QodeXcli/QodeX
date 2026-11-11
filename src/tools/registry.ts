@@ -14,6 +14,8 @@ import { LsTool } from './filesystem/ls.js';
 import { GlobTool } from './filesystem/glob.js';
 import { GrepTool } from './filesystem/grep.js';
 import { BashTool } from './shell/bash.js';
+import { SshTool } from './remote/ssh.js';
+import { TelnetTool } from './remote/telnet.js';
 import { CodeRunTool } from './shell/code-run.js';
 import { EditSymbolTool } from './ast/edit-symbol.js';
 import { TodoWriteTool, TodoReadTool } from './builtin/todo.js';
@@ -175,6 +177,10 @@ export class ToolRegistry {
     terminal: 'shell',
     shell_command: 'shell',
     cmd: 'shell',
+    ssh_exec: 'ssh',
+    ssh_command: 'ssh',
+    telnet_exec: 'telnet',
+    telnet_command: 'telnet',
     // Edit/write aliases — models trained on Claude Code / Cursor / str_replace reach for
     // these names; without the alias `edit_file` (etc.) hit "unknown tool" and burned a turn.
     edit_file: 'edit_text',
@@ -215,6 +221,8 @@ export class ToolRegistry {
       new GlobTool(),
       new GrepTool(),
       new BashTool(),
+      new SshTool(),
+      new TelnetTool(),
       new CodeRunTool(),
       new TodoWriteTool(),
       new TodoReadTool(),
