@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.15.0 — 2026-11-11
+
+**A desktop shell on this machine. Not a cloud browser.**
+
+`qodex desktop` listens on `127.0.0.1` only. If Chrome, Chromium, Edge, or Brave is installed, it opens an application window (`--app`). If not, it opens a normal browser tab and says that is a tab, not a shell window.
+
+The window reads the accessibility tree, presses one named control (that submit is you; the agent still pauses on the sentinel), and can take a screenshot. A screenshot path outside the screenshot directory is refused. There is no Browserbase and no rented VM.
+
+```
+src/desktop/shell.ts
+src/desktop/window.ts
+```
+
+
 ## v2.14.0 — 2026-11-11
 
 **Press a control by name. Then check the tree again.**

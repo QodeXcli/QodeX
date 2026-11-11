@@ -567,6 +567,47 @@ async function press(node: UiNode, query: UiQuery): Promise<{ ok: true; method: 
   return { ok: false, error: `no accessibility backend for ${platform}` };
 }
 
+/** Read-only tree for the desktop shell and the tool. Errors if the backend is missing. */
+export async function readUiTree(app?: string): Promise<{ ok: true; text: string; count: number } | { ok: false; error: string }> {
+  const dumped = await dumpTree(app);
+  if (!dumped.ok) return dumped;
+  const tree = parseUiTree(dumped.text);
+  return { ok: true, text: formatTree(tree.nodes, tree.capped), count: tree.nodes.length };
+}
+
+/**
+ * Press one named control. No permission prompt — the caller already asked
+ * (the model tool, or the human at the desktop shell).
+ */
+export async function invokeNamed(query: UiQuery): Promise<ToolResult> {
+  const bad = assertQuery(query.name, query.app, query.role);
+  if (bad) return { content: `[COMPUTER_USE_ERROR] ${bad}`, isError: true };
+  const dumped = await dumpTree(query.app);
+  if (!dumped.ok) return { content: `[COMPUTER_USE_ERROR] ${dumped.error}`, isError: true };
+  const tree = parseUiTree(dumped.text);
+  const picked = pickControl(tree.nodes, query);
+  if (!picked.ok) {
+    const list = picked.matches.slice(0, 8).map(n => `[${n.role}] ${n.name} — ${n.app}`).join('\n');
+    return { content: `[COMPUTER_USE_ERROR] ${picked.reason}${list ? `\n${list}` : ''}`, isError: true };
+  }
+  const node = picked.node;
+  const pressed = await press(node, query);
+  if (!pressed.ok) return { content: `[COMPUTER_USE_ERROR] ${pressed.error}`, isError: true };
+  const again = await dumpTree(query.app);
+  const after = again.ok ? findSame(parseUiTree(again.text).nodes, node) : null;
+  const verdict = again.ok ? verifyInvoke(node, after) : 'same';
+  const how = pressed.method === 'center'
+    ? 'center of the control bounds (no press action on this element)'
+    : 'the control\'s own action';
+  const head = `Pressed "${node.name}" [${node.role}] in ${node.app} via ${how}.`;
+  if (!again.ok) {
+    return { content: `${head}\nunverified: could not re-read the tree (${again.error})`, isError: true };
+  }
+  if (verdict === 'gone') return { content: `${head}\nverified: the control is no longer in the tree.` };
+  if (verdict === 'changed') return { content: `${head}\nverified: the control's bounds, value, or enabled state changed.` };
+  return { content: `${head}\nunverified: the control still looks the same. Do not claim it worked.`, isError: true };
+}
+
 const TreeArgs = z.object({
   app: z.string().optional().describe('Only this app. Omit for every visible app. macOS matches the process name.'),
 });
@@ -582,13 +623,9 @@ export class ComputerUseTreeTool extends Tool<z.infer<typeof TreeArgs>> {
     if (args.app && /[\r\n\t"\\]/.test(args.app)) {
       return { content: '[COMPUTER_USE_ERROR] app cannot contain quotes or line breaks', isError: true };
     }
-    const dumped = await dumpTree(args.app);
-    if (!dumped.ok) return { content: `[COMPUTER_USE_ERROR] ${dumped.error}`, isError: true };
-    const tree = parseUiTree(dumped.text);
-    return {
-      content: formatTree(tree.nodes, tree.capped),
-      metadata: { count: tree.nodes.length, capped: tree.capped },
-    };
+    const tree = await readUiTree(args.app);
+    if (!tree.ok) return { content: `[COMPUTER_USE_ERROR] ${tree.error}`, isError: true };
+    return { content: tree.text, metadata: { count: tree.count } };
   }
 }
 
@@ -610,36 +647,17 @@ export class ComputerUseInvokeTool extends Tool<z.infer<typeof InvokeArgs>> {
     if (bad) return { content: `[COMPUTER_USE_ERROR] ${bad}`, isError: true };
     const dumped = await dumpTree(args.app);
     if (!dumped.ok) return { content: `[COMPUTER_USE_ERROR] ${dumped.error}`, isError: true };
-    const tree = parseUiTree(dumped.text);
-    const picked = pickControl(tree.nodes, args);
+    const picked = pickControl(parseUiTree(dumped.text).nodes, args);
     if (!picked.ok) {
       const list = picked.matches.slice(0, 8).map(n => `[${n.role}] ${n.name} — ${n.app}`).join('\n');
       return { content: `[COMPUTER_USE_ERROR] ${picked.reason}${list ? `\n${list}` : ''}`, isError: true };
     }
-    const node = picked.node;
     const blocked = await confirmScreenChange(
       ctx,
       this.name,
-      `invoke "${node.name}" (${node.role}) in ${node.app}`,
+      `invoke "${picked.node.name}" (${picked.node.role}) in ${picked.node.app}`,
     );
     if (blocked) return blocked;
-    const pressed = await press(node, args);
-    if (!pressed.ok) return { content: `[COMPUTER_USE_ERROR] ${pressed.error}`, isError: true };
-    const again = await dumpTree(args.app);
-    const after = again.ok ? findSame(parseUiTree(again.text).nodes, node) : null;
-    const verdict = again.ok ? verifyInvoke(node, after) : 'same';
-    const how = pressed.method === 'center'
-      ? 'center of the control bounds (no press action on this element)'
-      : 'the control\'s own action';
-    const head = `Pressed "${node.name}" [${node.role}] in ${node.app} via ${how}.`;
-    if (!again.ok) {
-      return { content: `${head}\nunverified: could not re-read the tree (${again.error})`, isError: true };
-    }
-    if (verdict === 'gone') return { content: `${head}\nverified: the control is no longer in the tree.` };
-    if (verdict === 'changed') return { content: `${head}\nverified: the control's bounds, value, or enabled state changed.` };
-    return {
-      content: `${head}\nunverified: the control still looks the same. Do not claim it worked.`,
-      isError: true,
-    };
+    return invokeNamed(args);
   }
 }

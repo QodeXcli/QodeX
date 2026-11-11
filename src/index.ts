@@ -1919,9 +1919,11 @@ program
 import { buildSkillCommand } from './cli/skill-command.js';
 import { buildDeskCommand } from './cli/desk-command.js';
 import { buildResidentCommand } from './cli/resident-command.js';
+import { buildDesktopCommand } from './cli/desktop-command.js';
 program.addCommand(buildSkillCommand());
 program.addCommand(buildDeskCommand());
 program.addCommand(buildResidentCommand({ bootstrap }));
+program.addCommand(buildDesktopCommand());
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);

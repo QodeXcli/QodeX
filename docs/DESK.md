@@ -49,6 +49,8 @@ After the press the tree is read again. The control leaving, or its bounds / val
 
 Every press, click, type, and key still waits for the sentinel.
 
+`qodex desktop` is the window for the person at this machine. Loopback only. Chrome, Chromium, Edge, or Brave opens it with `--app` when one of those is installed; otherwise it is a browser tab and the command says so. A press from that page is you, so it does not pause on the sentinel. The agent's own invoke still does. There is no cloud browser.
+
 Click, type, and key ask every time, including under always-yes. Screenshot and window listing stay read-only.
 
 ## Teach from a real run
