@@ -568,11 +568,11 @@ async function press(node: UiNode, query: UiQuery): Promise<{ ok: true; method: 
 }
 
 /** Read-only tree for the desktop shell and the tool. Errors if the backend is missing. */
-export async function readUiTree(app?: string): Promise<{ ok: true; text: string; count: number } | { ok: false; error: string }> {
+export async function readUiTree(app?: string): Promise<{ ok: true; text: string; count: number; nodes: UiNode[]; capped: boolean } | { ok: false; error: string }> {
   const dumped = await dumpTree(app);
   if (!dumped.ok) return dumped;
   const tree = parseUiTree(dumped.text);
-  return { ok: true, text: formatTree(tree.nodes, tree.capped), count: tree.nodes.length };
+  return { ok: true, text: formatTree(tree.nodes, tree.capped), count: tree.nodes.length, nodes: tree.nodes, capped: tree.capped };
 }
 
 /**

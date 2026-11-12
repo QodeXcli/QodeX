@@ -10,7 +10,7 @@ import { canOpenBrowser, openUrl } from '../artifacts/open-browser.js';
 export function buildDesktopCommand(): Command {
   const cmd = new Command('desktop');
   cmd
-    .description('Open the local desktop shell: accessibility tree, one named press, screenshot. 127.0.0.1 only. Not a cloud browser.')
+    .description('Open the local desktop shell: named controls, one press, screenshot, and the waiting sentinel queue. 127.0.0.1 only. Not a cloud browser.')
     .option('--port <n>', 'Port', '0')
     .option('--no-open', 'Do not open a window; print the URL')
     .action(async (opts: { port?: string; open?: boolean }) => {

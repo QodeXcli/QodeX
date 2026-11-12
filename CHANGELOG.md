@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.23.0 — 2026-11-12
+
+**The desktop shell is an operator window.**
+
+`qodex desktop` lists each named control as a row and presses that one name. A filter only hides rows already on the page. Waiting sentinel calls can be allowed or denied from the same window; a bad id is refused. A verified press is marked clean. An unverified press is marked failed. The page still does not call a model, and it still does not open a cloud browser.
+
+```
+src/desktop/shell.ts
+```
+
+
 ## v2.22.0 — 2026-11-12
 
 **A red checker is not a finished desk goal.**
