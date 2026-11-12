@@ -57,7 +57,7 @@ Click, type, and key ask every time, including under always-yes. Screenshot and 
 
 ## Teach from a real run
 
-A finished goal stores the tool names it actually called (secrets stripped).
+A finished goal is `done` only when the agent exits 0. If the type-check of files it changed still has errors after the repair rounds, the exit is 1 and the goal is `failed`. No checker, or a clean checker, is not a failure.
 
 ```bash
 qodex desk teach research morning --from-last

@@ -2,12 +2,24 @@ import { describe, it, expect } from 'vitest';
 import {
   relevantTouchedFiles, filterToTouched,
   buildVerifyRepairMessage, buildVerifyGiveupMessage,
+  exitCodeAfterVerify,
 } from '../src/agent/verification.js';
 import { CHECKERS } from '../src/tools/diagnostics/checkers.js';
 import type { Diagnostic } from '../src/tools/diagnostics/parsers.js';
 
 const tsc = CHECKERS.find(c => c.id === 'tsc')!;
 const ruff = CHECKERS.find(c => c.id === 'ruff')!;
+
+describe('exitCodeAfterVerify', () => {
+  it('keeps a clean finish at 0 and does not hide an earlier failure', () => {
+    expect(exitCodeAfterVerify(0, true)).toBe(0);
+    expect(exitCodeAfterVerify(0, undefined)).toBe(0);
+    expect(exitCodeAfterVerify(2, false)).toBe(2);
+  });
+  it('a model that stopped talking is still a failure when the checker is red', () => {
+    expect(exitCodeAfterVerify(0, false)).toBe(1);
+  });
+});
 
 describe('relevantTouchedFiles', () => {
   it('keeps only files in the checker\'s language', () => {

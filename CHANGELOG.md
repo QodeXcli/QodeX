@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.22.0 — 2026-11-12
+
+**A red checker is not a finished desk goal.**
+
+When the model stops but the files it changed still fail the checker, the run exits 1. `qodex desk run` records that goal as failed. A later clean check clears the failure. No checker is not a failure. A skill is not captured from a run whose last check failed.
+
+```
+src/agent/loop.ts
+src/agent/verification.ts
+src/cli/modes/headless.ts
+```
+
+
 ## v2.21.0 — 2026-11-12
 
 **A desk uses the code graph you already built.**

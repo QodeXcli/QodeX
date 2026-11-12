@@ -122,7 +122,11 @@ export function buildVerifyRepairMessage(
   return lines.join('\n');
 }
 
-/** Message used when auto-repair is exhausted — surfaced ONCE, then the model proceeds. */
+/** A clean finish stays 0. Remaining checker errors are not a success, even if the model stopped talking. */
+export function exitCodeAfterVerify(exitCode: number, verifyClean: boolean | undefined): number {
+  if (exitCode !== 0) return exitCode;
+  return verifyClean === false ? 1 : exitCode;
+}
 export function buildVerifyGiveupMessage(errorCount: number, checker: string): string {
   return (
     `[AUTO-VERIFY] After repeated attempts, ${errorCount} ${checker} error(s) remain in the ` +

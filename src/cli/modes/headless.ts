@@ -5,6 +5,7 @@ import type { PermissionEngine } from '../../security/permissions.js';
 import type { QodexConfig } from '../../config/defaults.js';
 import { getSessionStore } from '../../session/store.js';
 import { logger } from '../../utils/logger.js';
+import { exitCodeAfterVerify } from '../../agent/verification.js';
 import { StreamDisplayFilter } from '../../llm/thinking.js';
 import { dedupeFinalAgainstStreamed, dedupeSelfRepeatedText } from './final-dedupe.js';
 import { headlessAskChoice } from './headless-ask.js';
@@ -152,6 +153,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   store.recordTurn(sessionId, [{ role: 'user', content: effectivePrompt }], { input: 0, output: 0, costUsd: 0 });
 
   let exitCode = 0;
+  let verifyFailed = false;
   // ── Contract-run telemetry, gathered regardless of --json ──
   // usage comes from budget_update/final events; budget-exceeded is the loop's
   // 'error' event carrying a budgetType (tokens/cost/time/iterations — time is the
@@ -237,8 +239,9 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
           wallTimeMs: event.data.wallTimeMs ?? lastUsage.wallTimeMs,
           iterations: event.data.iterations ?? lastUsage.iterations,
         };
-      } else if (event.type === 'final' && event.data?.usage) {
-        lastUsage = event.data.usage;
+      } else if (event.type === 'final') {
+        if (event.data?.usage) lastUsage = event.data.usage;
+        if (event.data?.verifyClean === false) verifyFailed = true;
       } else if (event.type === 'error') {
         if (event.data?.budgetType) {
           budgetExceeded = { type: event.data.budgetType, message: event.data.message ?? 'budget exceeded' };
@@ -422,5 +425,5 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     });
   }
 
-  return exitCode;
+  return exitCodeAfterVerify(exitCode, verifyFailed ? false : undefined);
 }

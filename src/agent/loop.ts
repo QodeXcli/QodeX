@@ -993,7 +993,7 @@ export class AgentLoop {
         if (learningCfg?.enabled) {
           try {
             const { captureEligible } = await import('../skills/learning/capture.js');
-            const signal = { toolCalls: this.totalToolCalls, verifyClean: true, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles };
+            const signal = { toolCalls: this.totalToolCalls, verifyClean: this.verifyLedger.at(-1)?.passed !== false, completionHonest: true, toolsUsed: [...this.sessionToolNames], filesChanged: changedFiles };
             const elig = captureEligible(signal, { minToolCalls: learningCfg.minToolCalls ?? 5, requireObjectiveSuccess: learningCfg.requireObjectiveSuccess !== false });
             if (elig.eligible) {
               const { buildCandidateSkill } = await import('../skills/learning/capture.js');
@@ -2214,7 +2214,8 @@ export class AgentLoop {
                 logger.info('Auto-verify gate forcing repair', { checker: vr.checker, errors: vr.errorCount, attempt: verifyRepairAttempts });
                 continue; // force the model to fix before it's allowed to finish
               } else if (!verifyGaveUp) {
-                // Exhausted repair budget — surface remaining errors once, then let it finish.
+                // Exhausted repair budget — surface remaining errors once, then let it explain.
+                // The finish is still not clean: headless and a desk will not call this a success.
                 verifyGaveUp = true;
                 const giveup: Message = { role: 'user', content: buildVerifyGiveupMessage(vr.errorCount, vr.checker ?? 'type-check') };
                 newMessages.push(giveup);
@@ -2225,6 +2226,7 @@ export class AgentLoop {
             } else if (vr.ran) {
               // Clean compile — reset so a later edit batch gets a fresh repair budget.
               verifyRepairAttempts = 0;
+              verifyGaveUp = false;
             }
           } catch (e: any) {
             // The pre-finish safety gate was skipped — a possibly-broken task can
@@ -2384,7 +2386,10 @@ export class AgentLoop {
           mode: mode.mode,
           aborted: options.signal?.aborted,
         });
-        yield { type: 'final', data: { content: assistantText, usage: budget.getUsage() } };
+        if (verifyGaveUp) {
+          yield { type: 'notice', data: { message: '⚠ Auto-verify: changed files still have errors. This finish is not clean.' } };
+        }
+        yield { type: 'final', data: { content: assistantText, usage: budget.getUsage(), verifyClean: !verifyGaveUp } };
         return;
       }
 
