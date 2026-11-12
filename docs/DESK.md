@@ -49,7 +49,7 @@ After the press the tree is read again. The control leaving, or its bounds / val
 
 Every press, click, type, and key still waits for the sentinel. So do `browser_click`, `browser_fill`, and `browser_evaluate`: those change a page, not the desktop, and a standing yes does not cover them. Loading a URL and taking a screenshot stay quiet.
 
-`qodex desktop` is the window for the person at this machine. Loopback only. Chrome, Chromium, Edge, or Brave opens it with `--app` when one of those is installed; otherwise it is a browser tab and the command says so. The page lists the named controls the accessibility tree returned and lets you press one. Waiting sentinel calls can be allowed or denied from the same window. That submit is you, so it does not pause again. The agent's own invoke still does. The page does not call a model.
+`qodex desktop` is the window for the person at this machine. Loopback only. Chrome, Chromium, Edge, or Brave opens it with `--app` when one of those is installed; otherwise it is a browser tab and the command says so. The page lists the named controls the accessibility tree returned and lets you press one. Desks and waiting sentinel calls refresh every two seconds from this machine. Waiting calls can be allowed or denied from the same window. That submit is you, so it does not pause again. The agent's own invoke still does. The page does not call a model.
 
 A cloud browser is separate: `qodex mcp add browserbase` points at Browserbase's hosted server with your API key. `start` and `act` pause on the sentinel as spend, even if the desk is in always-yes. If the key is missing, the call errors. There is no browser QodeX rents on its own.
 

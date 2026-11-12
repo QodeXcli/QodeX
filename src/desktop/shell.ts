@@ -41,6 +41,11 @@ export interface ShellWait {
   prompt: string;
 }
 
+export interface ShellDesk {
+  name: string;
+  goals: { id: string; text: string; status: string }[];
+}
+
 export interface ShellView {
   token: string;
   tree: string;
@@ -55,6 +60,31 @@ export interface ShellView {
   controls: ShellControl[];
   capped: boolean;
   waits: ShellWait[];
+  team: ShellDesk[];
+}
+
+const LIVE_GOAL = new Set(['running', 'needs-approval', 'approved', 'queued']);
+
+/** What the window shows for each desk: active goals first, otherwise the latest one. Text is clipped. */
+export function deskRows(desks: { name: string; goals: { id: string; text: string; status: string }[] }[]): ShellDesk[] {
+  return desks.slice(0, 6).map(d => {
+    const ordered = [...d.goals].reverse();
+    const active = ordered.filter(g => LIVE_GOAL.has(g.status)).slice(0, 4);
+    const shown = active.length ? active : ordered.slice(0, 1);
+    return {
+      name: d.name,
+      goals: shown.map(g => ({
+        id: g.id,
+        status: g.status,
+        text: g.text.replace(/\s+/g, ' ').trim().slice(0, 160),
+      })),
+    };
+  });
+}
+
+/** Loopback poll. No token, no screenshot bytes. */
+export function liveSnapshot(view: ShellView): { resident: string; pending: number; waits: ShellWait[]; desks: ShellDesk[] } {
+  return { resident: view.resident, pending: view.waits.length, waits: view.waits, desks: view.team };
 }
 
 function escapeHtml(s: string): string {
@@ -98,6 +128,16 @@ function controlRows(view: ShellView): string {
         <button>Press</button>
       </form>
     </article>`;
+  }).join('');
+}
+
+function deskBlock(view: ShellView): string {
+  if (view.team.length === 0) return '<p class="muted">No desks on this machine.</p>';
+  return view.team.map(d => {
+    const goals = d.goals.length
+      ? d.goals.map(g => `<p class="goal"><span class="chip">${escapeHtml(g.status)}</span> ${escapeHtml(g.text)}</p>`).join('')
+      : '<p class="muted">No goal.</p>';
+    return `<article class="desk"><strong>${escapeHtml(d.name)}</strong>${goals}</article>`;
   }).join('');
 }
 
@@ -168,7 +208,9 @@ export function renderShellHtml(view: ShellView): string {
   img { width:100%; border:1px solid var(--line); background:#000; display:block; }
   details { margin-top:14px; }
   pre { white-space:pre-wrap; background:var(--panel); border:1px solid var(--line); padding:12px; }
-  .note { margin:12px 0 0; }
+  .goal { margin:6px 0; }
+  .desk { padding:8px 0; border-bottom:1px solid var(--line); }
+  .live { font-size:12px; color:var(--muted); margin:0 0 8px; }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } .stage { border-left:0; } }
 </style>
 <header>
@@ -179,14 +221,17 @@ export function renderShellHtml(view: ShellView): string {
   <div class="pills">
     <span class="pill">${escapeHtml(view.gui)} · ${escapeHtml(view.access)}</span>
     <span class="pill">${view.desks} desks</span>
-    <span class="pill">${view.waits.length} waiting</span>
-    <span class="pill">${escapeHtml(view.resident)}</span>
+    <span class="pill" id="wait-pill">${view.waits.length} waiting</span>
+    <span class="pill" id="resident-pill">${escapeHtml(view.resident)}</span>
   </div>
 </header>
 <main>
   <aside>
+    <p class="live" id="live">Live on this machine.</p>
+    <h2>Desks</h2>
+    <div id="desks">${deskBlock(view)}</div>
     <h2>Waiting</h2>
-    ${waitRows(view)}
+    <div id="waits">${waitRows(view)}</div>
     <p class="note">${escapeHtml(view.note)}</p>
     <p class="muted">Allow and deny here are you. A press is you. The agent's own press still waits.</p>
   </aside>
@@ -232,6 +277,80 @@ export function renderShellHtml(view: ShellView): string {
     var n = document.getElementById('shown');
     if (n) n.textContent = String(shown);
   });
+})();
+(function () {
+  var waits = document.getElementById('waits');
+  var desks = document.getElementById('desks');
+  var live = document.getElementById('live');
+  if (!waits || !desks) return;
+  var token = ${JSON.stringify(view.token)};
+  function el(tag, text, cls) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function paint(data) {
+    desks.textContent = '';
+    if (!data.desks || !data.desks.length) desks.appendChild(el('p', 'No desks on this machine.', 'muted'));
+    (data.desks || []).forEach(function (d) {
+      var box = el('article', null, 'desk');
+      box.appendChild(el('strong', d.name || 'desk'));
+      if (!d.goals || !d.goals.length) box.appendChild(el('p', 'No goal.', 'muted'));
+      (d.goals || []).forEach(function (g) {
+        var p = el('p', null, 'goal');
+        var chip = el('span', g.status || '', 'chip');
+        p.appendChild(chip);
+        p.appendChild(document.createTextNode(' ' + (g.text || '')));
+        box.appendChild(p);
+      });
+      desks.appendChild(box);
+    });
+    waits.textContent = '';
+    if (!data.waits || !data.waits.length) {
+      waits.appendChild(el('p', 'Nothing is waiting. The agent is not asking.', 'muted'));
+    }
+    (data.waits || []).forEach(function (w) {
+      var box = el('article', null, 'wait');
+      var who = el('div', null, 'who');
+      who.appendChild(el('span', w.kind || 'ask', 'chip waitchip'));
+      who.appendChild(el('code', w.id || ''));
+      box.appendChild(who);
+      box.appendChild(el('p', w.reason || ''));
+      box.appendChild(el('p', w.prompt || '', 'prompt'));
+      var pair = el('div', null, 'pair');
+      ['allow', 'deny'].forEach(function (action) {
+        var form = document.createElement('form');
+        form.method = 'post';
+        form.action = '/act?k=' + encodeURIComponent(token);
+        var a = document.createElement('input');
+        a.type = 'hidden'; a.name = 'action'; a.value = action;
+        var id = document.createElement('input');
+        id.type = 'hidden'; id.name = 'id'; id.value = w.id || '';
+        var button = document.createElement('button');
+        button.textContent = action === 'allow' ? 'Allow' : 'Deny';
+        if (action === 'deny') button.className = 'ghost';
+        form.appendChild(a); form.appendChild(id); form.appendChild(button);
+        pair.appendChild(form);
+      });
+      box.appendChild(pair);
+      waits.appendChild(box);
+    });
+    var pill = document.getElementById('wait-pill');
+    if (pill) pill.textContent = String(data.pending || 0) + ' waiting';
+    var res = document.getElementById('resident-pill');
+    if (res) res.textContent = data.resident || '';
+    if (live) live.textContent = 'Live. Updated just now.';
+  }
+  function tick() {
+    fetch('/live?k=' + encodeURIComponent(token), { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('live ' + r.status);
+      return r.json();
+    }).then(paint).catch(function () {
+      if (live) live.textContent = 'Live update failed. The page is still this machine.';
+    });
+  }
+  setInterval(tick, 2000);
 })();
 </script>
 </html>`;
@@ -345,6 +464,9 @@ export async function handleShell(opts: {
       return { view, route: { status: 404, body: 'missing', contentType: 'text/plain' } };
     }
   }
+  if (opts.method === 'GET' && opts.pathname === '/live') {
+    return { view, route: { status: 200, body: JSON.stringify(liveSnapshot(view)), contentType: 'application/json; charset=utf-8' } };
+  }
   if (opts.method === 'GET' && (opts.pathname === '/' || opts.pathname === '')) {
     return { view, route: { status: 200, body: renderShellHtml(view), contentType: 'text/html; charset=utf-8' } };
   }
@@ -385,6 +507,7 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
           controls: state.controls,
           capped: state.capped,
           waits: pending.map(p => ({ id: p.id, kind: p.kind, reason: p.reason, prompt: p.prompt })),
+          team: deskRows(board?.desks ?? []),
         };
         const handled = await handleShell({
           method: req.method ?? 'GET',

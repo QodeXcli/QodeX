@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { handleShell, renderShellHtml, resultTone, type ShellView } from '../src/desktop/shell.js';
+import { handleShell, renderShellHtml, resultTone, deskRows, liveSnapshot, type ShellView } from '../src/desktop/shell.js';
 import { appWindowLaunch, isLoopbackAppUrl } from '../src/desktop/window.js';
 
 const view = (over: Partial<ShellView> = {}): ShellView => ({
@@ -19,6 +19,7 @@ const view = (over: Partial<ShellView> = {}): ShellView => ({
   controls: [],
   capped: false,
   waits: [],
+  team: [],
   ...over,
 });
 
@@ -51,6 +52,36 @@ describe('desktop shell', () => {
     expect(html).toContain('banner bad');
     expect(resultTone('verified: the control is no longer in the tree.')).toBe('ok');
     expect(resultTone('')).toBe('idle');
+  });
+
+  it('shows active desk goals and serves them on the live poll', async () => {
+    const rows = deskRows([
+      { name: 'research', goals: [
+        { id: 'old', text: 'done already', status: 'done' },
+        { id: 'now', text: '<script>alert(1)</script> ' + 'x'.repeat(200), status: 'running' },
+      ] },
+    ]);
+    expect(rows[0]!.goals.map(g => g.status)).toEqual(['running']);
+    expect(rows[0]!.goals[0]!.text.startsWith('<script>')).toBe(true);
+    expect(rows[0]!.goals[0]!.text.length).toBeLessThanOrEqual(160);
+    const page = view({ team: rows, waits: [{ id: 'ab12cd34', kind: 'spend', reason: 'pays', prompt: 'buy' }] });
+    const html = renderShellHtml(page);
+    expect(html).toContain('research');
+    expect(html).not.toContain('<script>alert');
+    const live = await handleShell({
+      method: 'GET', pathname: '/live', tokenOk: true, rawBody: '', view: page, deps: deps(),
+    });
+    expect(live.route.status).toBe(200);
+    expect(live.route.contentType).toContain('application/json');
+    const body = JSON.parse(String(live.route.body));
+    expect(body.pending).toBe(1);
+    expect(body.desks[0].name).toBe('research');
+    expect(body.token).toBeUndefined();
+    expect(liveSnapshot(page).waits[0].kind).toBe('spend');
+    const denied = await handleShell({
+      method: 'GET', pathname: '/live', tokenOk: false, rawBody: '', view: page, deps: deps(),
+    });
+    expect(denied.route.status).toBe(401);
   });
 
   it('allows a waiting call only with a real id', async () => {

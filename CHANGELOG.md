@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.24.0 — 2026-11-12
+
+**The desktop window stays current.**
+
+Desks and waiting calls refresh every two seconds from `127.0.0.1`. The poll is JSON, token-gated, and it does not include the token. A goal that is running, queued, or waiting for approval is what you see. The page still does not call a model.
+
+```
+src/desktop/shell.ts
+```
+
+
 ## v2.23.0 — 2026-11-12
 
 **The desktop shell is an operator window.**
