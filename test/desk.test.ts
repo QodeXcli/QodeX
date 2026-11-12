@@ -2,12 +2,15 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { classifySensitive, canHandoff, scrubPacket, validateRoutine, describeDesktop, MAX_DESKS } from '../src/desk/policy.js';
+import { classifySensitive, canHandoff, scrubPacket, validateRoutine, describeDesktop, MAX_DESKS, deskMcpConfig, isDeskToolName } from '../src/desk/policy.js';
 import { buildDeskPrompt, claimGoal, createDesk, decideGoal, emptyBoard, handoff, lastTrace, postGoal, releaseGoal, settleGoal, teachRoutine } from '../src/desk/board.js';
 import { classifyAsk, decideInFile, emptySentinel, parkSentinel, pollSentinel } from '../src/desk/sentinel.js';
 import { mapKeyCombo, x11ClickArgs } from '../src/tools/computer/linux.js';
 import { windowsClickScript, windowsSendKeys } from '../src/tools/computer/win.js';
 import { handleDeskRequest } from '../src/desk/console.js';
+import { withConfiguredMcp } from '../src/desk/dispatch.js';
+import { getMCPManager } from '../src/mcp/manager.js';
+import { ToolRegistry } from '../src/tools/registry.js';
 import { confirmScreenChange } from '../src/tools/computer/use.js';
 
 describe('classifySensitive — Muse-style stop before the machine acts', () => {
@@ -49,6 +52,32 @@ describe('handoff and routines', () => {
     expect(validateRoutine([{ tool: 'Read File', summary: 'x' }, { tool: 'shell', summary: 'y' }]).ok).toBe(false);
     const ok = validateRoutine([{ tool: 'read_file', summary: 'look' }, { tool: 'shell', summary: 'test' }]);
     expect(ok.ok).toBe(true);
+    const mcp = validateRoutine([
+      { tool: 'mcp:gmail:search_threads', summary: 'find the invoice' },
+      { tool: 'mcp:google-drive:list-files', summary: 'open the folder' },
+    ]);
+    expect(mcp.ok).toBe(true);
+    expect(isDeskToolName('mcp:../x:tool')).toBe(false);
+    expect(isDeskToolName('Not A Tool')).toBe(false);
+  });
+  it('starts no MCP server when none are configured or all are disabled', () => {
+    expect(deskMcpConfig(undefined)).toBeNull();
+    expect(deskMcpConfig({ servers: {} })).toBeNull();
+    expect(deskMcpConfig({ servers: { gmail: { enabled: false } } })).toBeNull();
+    const on = deskMcpConfig({ servers: { gmail: { enabled: true }, old: { enabled: false } } });
+    expect(on?.servers.gmail).toBeTruthy();
+    expect(on?.servers.old).toBeUndefined();
+  });
+  it('does not install an MCP manager when nothing is enabled', async () => {
+    const prev = getMCPManager();
+    const registry = new ToolRegistry();
+    let seen: string[] = ['unset'];
+    await withConfiguredMcp(registry, { servers: { gmail: { enabled: false } } }, async (ready) => {
+      seen = ready;
+      expect(getMCPManager()).toBe(prev);
+    });
+    expect(seen).toEqual([]);
+    expect(getMCPManager()).toBe(prev);
   });
   it('does not claim an X11 backend until xdotool is there, and Windows ships one', () => {
     expect(describeDesktop('linux').gui).toBe('none');

@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.20.0 — 2026-11-12
+
+**A desk uses the connectors you already added.**
+
+`qodex desk run` and `qodex up` start the MCP servers in your config, then stop them when the goal exits. Disabled servers, and an empty list, start nothing. A server that fails to initialize is not described as up. Spend, send, delete, and a cloud-browser act still wait. A finished goal can record `mcp:<server>:<tool>` in its trace. A name that is not a tool is still rejected.
+
+```
+src/desk/dispatch.ts
+src/desk/policy.ts
+```
+
+
 ## v2.19.0 — 2026-11-11
 
 **Thoughts scroll inside a fixed window.**

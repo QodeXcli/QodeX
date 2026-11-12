@@ -12,7 +12,7 @@ shell). The distance that still mattered is below.
 | Gap | Why it matters |
 | --- | --- |
 | Messaging breadth | Hermes reaches more channels (email, Matrix, and others). QodeX's gateway is the five transports above, on purpose: each one is a real adapter, not a logo. |
-| Always-on daemon as the product | Hermes is built to live on a VPS and wake from cron or a phone. QodeX can schedule, but the primary surface is still the repo you are in. |
+| Always-on | `qodex up` fires schedules, drains desk goals, and attaches the chat adapters you configured. Each desk child starts the MCP servers already in your config and stops them when the goal exits. Hermes still reaches more channels. |
 | Model-written skill evolution | Hermes (GEPA-style) rewrites skills with a model. That compounds when you have a strong second model and you trust its taste. |
 
 ## Where QodeX was stuck
@@ -75,4 +75,4 @@ Ahead on the desktop too, in one specific way Hermes does not do: `computer_use_
 
 Not ahead, and not claimed: Hermes still has the broader gateway, and a model that rewrites skill prose when you trust a second model. QodeX does not rewrite a skill with a model. `qodex desktop` is a local loopback window (Chrome, Chromium, Edge, or Brave `--app` when one is installed; otherwise a tab, and it says so). The page reads the tree and presses one name; that submit is the human. The agent's own press still waits on the sentinel. The same pause covers the headless browser: `browser_click`, `browser_fill`, and `browser_evaluate` ask every time, and a desk labels that ask as a page change (or as spend, if the call itself is a purchase). Navigate and screenshot do not ask. A rejected call is an error, not a claimed click.
 
-The cloud browser is `qodex mcp add browserbase`. It is Browserbase's hosted server (`https://mcp.browserbase.com/mcp`) with the user's own API key, bridged through mcp-remote because this client does not speak streamable HTTP. The key is an environment variable, not a command-line argument. `start` and `act` ask every time, including under always-yes, and a desk parks that ask as spend. A missing or rejected key is an error. QodeX does not run a browser of its own in someone else's cloud. `qodex up` does not call a model of its own.
+The cloud browser is `qodex mcp add browserbase`. It is Browserbase's hosted server (`https://mcp.browserbase.com/mcp`) with the user's own API key, bridged through mcp-remote because this client does not speak streamable HTTP. The key is an environment variable, not a command-line argument. `start` and `act` ask every time, including under always-yes, and a desk parks that ask as spend. A missing or rejected key is an error. QodeX does not run a browser of its own in someone else's cloud. `qodex up` does not call a model of its own. A desk run starts only the MCP servers already in your config, and stops them when the goal exits. None configured means nothing extra starts.

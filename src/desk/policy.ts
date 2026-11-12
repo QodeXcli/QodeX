@@ -111,7 +111,25 @@ export interface RoutineStep {
   summary: string;
 }
 
-const TOOL_NAME = /^[a-z][a-z0-9_]{0,40}$/;
+const BUILTIN_TOOL = /^[a-z][a-z0-9_]{0,40}$/;
+/** `mcp:<server>:<tool>` as registered. Hyphens are real (google-drive, list-mail-messages). */
+const MCP_TOOL = /^mcp:[a-z0-9][a-z0-9._-]{0,48}:[A-Za-z0-9._-]{1,80}$/;
+
+export function isDeskToolName(name: string): boolean {
+  return BUILTIN_TOOL.test(name) || MCP_TOOL.test(name);
+}
+
+/** Servers a desk run should start. Disabled entries are not started. Empty means start nothing. */
+export function deskMcpConfig<T extends { enabled?: boolean }>(
+  mcp: { servers?: Record<string, T> } | undefined,
+): { servers: Record<string, T> } | null {
+  const on: Record<string, T> = {};
+  for (const [name, srv] of Object.entries(mcp?.servers ?? {})) {
+    if (!srv || srv.enabled === false) continue;
+    on[name] = srv;
+  }
+  return Object.keys(on).length ? { servers: on } : null;
+}
 
 export function validateRoutine(steps: RoutineStep[]): { ok: true; steps: RoutineStep[] } | { ok: false; reason: string } {
   if (!Array.isArray(steps) || steps.length < 2) {
@@ -124,7 +142,7 @@ export function validateRoutine(steps: RoutineStep[]): { ok: true; steps: Routin
   for (const step of steps) {
     const tool = String(step?.tool ?? '').trim();
     const summary = String(step?.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 180);
-    if (!TOOL_NAME.test(tool)) return { ok: false, reason: `bad tool name "${tool}"` };
+    if (!isDeskToolName(tool)) return { ok: false, reason: `bad tool name "${tool}"` };
     if (!summary) return { ok: false, reason: `step ${tool} has no summary` };
     clean.push({ tool, summary });
   }
