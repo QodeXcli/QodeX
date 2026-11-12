@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.27.0 — 2026-11-12
+
+**A model may rewrite skill prose. It may not promote it.**
+
+`qodex skill rewrite <name>` asks the configured model (`learning.rewriteModel`, otherwise the reflection route) to clarify a skill. The answer has to be a description plus a body. The name, the tool list, and the witness patch stay as they were. The result is a candidate. The active skill is not touched. No model means nothing is written.
+
+```
+src/skills/learning/rewrite.ts
+```
+
+
 ## v2.26.0 — 2026-11-12
 
 **Run next, from the window.**

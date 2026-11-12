@@ -312,6 +312,22 @@ export function buildSkillCommand(): Command {
     });
 
   cmd
+    .command('rewrite <name>')
+    .description('Ask the configured model to clarify a skill. Writes a candidate. Does not replace the active skill.')
+    .action(async (name: string) => {
+      const { rewriteSkillText } = await import('../skills/learning/rewrite.js');
+      const res = await rewriteSkillText({ name, cwd: process.cwd() });
+      if (!res.ok) {
+        console.error(`✗ ${res.reason}`);
+        process.exit(1);
+        return;
+      }
+      console.log(`✓ Rewrite of "${name}" by ${res.model}`);
+      console.log(`  candidate: ${res.file}`);
+      console.log('  The active skill was not changed. Promote only after review, a witness, or an independent judge.');
+    });
+
+  cmd
     .command('promote <name>')
     .description('Promote a candidate skill to active (you are the independent reviewer). Refuses to overwrite a human-authored skill.')
     .action(async (name: string) => {

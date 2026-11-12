@@ -10,7 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { logger } from '../../utils/logger.js';
 
-export type LearningEventKind = 'capture' | 'promote' | 'reject' | 'merge' | 'eval';
+export type LearningEventKind = 'capture' | 'promote' | 'reject' | 'merge' | 'eval' | 'rewrite';
 
 export interface LearningEvent {
   ts: string;
