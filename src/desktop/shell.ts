@@ -1,7 +1,8 @@
 /**
  * QodeX Desktop — the local operator window on 127.0.0.1.
  * It assigns a goal, allows a held one, reads the accessibility tree, and
- * presses one named control when you submit. It does not call a model.
+ * presses one named control, or starts the next runnable goal. It does not
+ * call a model itself — Run next uses the same desk agent as `qodex desk run`.
  */
 import * as http from 'http';
 import { randomBytes } from 'crypto';
@@ -10,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { probeDesktop } from '../desk/policy.js';
 import { applyDeskAction } from '../desk/console.js';
+import { launchDesk } from '../desk/launch.js';
 import { listPending, decideSentinel } from '../desk/sentinel.js';
 import { loadBoard, readAudit } from '../desk/store.js';
 import { readResidentStatus } from '../resident/loop.js';
@@ -44,6 +46,7 @@ export interface ShellWait {
 export interface ShellDesk {
   id: string;
   name: string;
+  runnable: boolean;
   goals: { id: string; text: string; status: string }[];
 }
 
@@ -74,14 +77,16 @@ export interface ShellView {
 const LIVE_GOAL = new Set(['running', 'needs-approval', 'approved', 'queued']);
 
 /** What the window shows for each desk: active goals first, otherwise the latest one. Text is clipped. */
-export function deskRows(desks: { id: string; name: string; goals: { id: string; text: string; status: string }[] }[]): ShellDesk[] {
+export function deskRows(desks: { id: string; name: string; goals: { id: string; text: string; status: string; sensitive?: unknown }[] }[]): ShellDesk[] {
   return desks.slice(0, 6).map(d => {
     const ordered = [...d.goals].reverse();
     const active = ordered.filter(g => LIVE_GOAL.has(g.status)).slice(0, 4);
     const shown = active.length ? active : ordered.slice(0, 1);
+    const runnable = d.goals.some(g => g.status === 'approved' || (g.status === 'queued' && !g.sensitive));
     return {
       id: d.id,
       name: d.name,
+      runnable,
       goals: shown.map(g => ({
         id: g.id,
         status: g.status,
@@ -164,6 +169,11 @@ function deskBlock(view: ShellView): string {
         <input name="text" placeholder="Assign a goal" maxlength="500" required aria-label="Goal for ${escapeHtml(d.name)}"/>
         <button>Assign</button>
       </form>
+      ${d.runnable ? `<form method="post" action="/act?k=${view.token}">
+        <input type="hidden" name="action" value="run"/>
+        <input type="hidden" name="deskId" value="${escapeHtml(d.id)}"/>
+        <button>Run next</button>
+      </form>` : ''}
     </article>`;
   }).join('');
 }
@@ -265,7 +275,7 @@ export function renderShellHtml(view: ShellView): string {
     <h2>Waiting</h2>
     <div id="waits">${waitRows(view)}</div>
     <p class="note">${escapeHtml(view.note)}</p>
-    <p class="muted">Assign, allow, and press here are you. The page does not call a model. A sensitive goal stays held until you allow it. Work still runs with <code>qodex up</code> or <code>qodex desk run</code>.</p>
+    <p class="muted">Assign, allow, press, and Run next are you. A sensitive goal stays held until you allow it. Run next starts the same agent as <code>qodex desk run</code>. The page itself does not answer.</p>
     <h2>Audit</h2>
     <div id="audit">${auditBlock(view)}</div>
   </aside>
@@ -369,6 +379,16 @@ export function renderShellHtml(view: ShellView): string {
       go.textContent = 'Assign';
       assign.appendChild(text); assign.appendChild(go);
       box.appendChild(assign);
+      if (d.runnable) {
+        var run = document.createElement('form');
+        run.method = 'post';
+        run.action = '/act?k=' + encodeURIComponent(token);
+        fields(run, [['action', 'run'], ['deskId', d.id || '']]);
+        var runBtn = document.createElement('button');
+        runBtn.textContent = 'Run next';
+        run.appendChild(runBtn);
+        box.appendChild(run);
+      }
       desks.appendChild(box);
     });
     waits.textContent = '';
@@ -456,6 +476,7 @@ export interface ShellDeps {
   setShot: (file: string) => void;
   decide: (id: string, allow: boolean) => Promise<{ ok: boolean; error?: string }>;
   board: (body: Record<string, string>) => Promise<{ ok: boolean; message: string }>;
+  launch: (deskId: string) => Promise<{ ok: boolean; message: string }>;
 }
 
 async function defaultShoot(): Promise<{ ok: true; file: string } | { ok: false; error: string }> {
@@ -478,6 +499,10 @@ export function defaultShellDeps(state: { shot: string | null }): ShellDeps {
       return { ok: decided.ok, error: decided.error };
     },
     board: body => applyDeskAction(body, process.cwd()),
+    launch: async id => {
+      const started = await launchDesk(id);
+      return { ok: started.ok, message: started.message };
+    },
   };
 }
 
@@ -530,6 +555,14 @@ export async function handleShell(opts: {
         const allow = form.allow === 'yes';
         const decided = await opts.deps.board({ action: 'approve', deskId, goalId, allow: allow ? 'yes' : 'no' });
         view = { ...view, result: decided.ok ? `goal ${decided.message}` : (decided.message || 'not decided') };
+      }
+    } else if (form.action === 'run') {
+      const deskId = (form.deskId ?? '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(deskId)) {
+        view = { ...view, result: 'refused: bad desk' };
+      } else {
+        const started = await opts.deps.launch(deskId);
+        view = { ...view, result: started.ok ? started.message : (started.message || 'not started') };
       }
     } else if (form.action === 'allow' || form.action === 'deny') {
       const id = form.id ?? '';

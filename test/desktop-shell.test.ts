@@ -32,6 +32,7 @@ const deps = (over: Record<string, unknown> = {}) => ({
   setShot: () => {},
   decide: async () => ({ ok: true }),
   board: async () => ({ ok: true, message: 'queued' }),
+  launch: async () => ({ ok: true, message: 'running ab12cd34' }),
   ...over,
 });
 
@@ -64,6 +65,7 @@ describe('desktop shell', () => {
       ] },
     ]);
     expect(rows[0]!.goals.map(g => g.status)).toEqual(['running']);
+    expect(rows[0]!.runnable).toBe(false);
     expect(rows[0]!.goals[0]!.text.startsWith('<script>')).toBe(true);
     expect(rows[0]!.goals[0]!.text.length).toBeLessThanOrEqual(160);
     const page = view({ team: rows, waits: [{ id: 'ab12cd34', kind: 'spend', reason: 'pays', prompt: 'buy' }] });
@@ -149,6 +151,27 @@ describe('desktop shell', () => {
       else process.env.HOME = prev;
       await fs.rm(home, { recursive: true, force: true });
     }
+  });
+
+  it('starts a runnable goal only through the launch path', async () => {
+    let seen = '';
+    const started = await handleShell({
+      method: 'POST', pathname: '/act', tokenOk: true, rawBody: 'action=run&deskId=inbox',
+      view: view(),
+      deps: deps({ launch: async (id: string) => { seen = id; return { ok: true, message: 'running ab12cd34' }; } }),
+    });
+    expect(started.view.result).toBe('running ab12cd34');
+    expect(seen).toBe('inbox');
+    const bad = await handleShell({
+      method: 'POST', pathname: '/act', tokenOk: true, rawBody: 'action=run&deskId=../x',
+      view: view(), deps: deps(),
+    });
+    expect(bad.view.result).toContain('refused');
+    const rows = deskRows([{ id: 'inbox', name: 'inbox', goals: [{ id: 'ab12cd34', text: 'read notes', status: 'queued' }] }]);
+    expect(renderShellHtml(view({ team: rows }))).toContain('value="run"');
+    const held = deskRows([{ id: 'inbox', name: 'inbox', goals: [{ id: 'ab12cd34', text: 'pay the invoice', status: 'needs-approval', sensitive: { kind: 'spend' } }] }]);
+    expect(held[0]!.runnable).toBe(false);
+    expect(renderShellHtml(view({ team: held }))).not.toContain('value="run"');
   });
 
   it('refuses a request without the token', async () => {

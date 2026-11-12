@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.26.0 — 2026-11-12
+
+**Run next, from the window.**
+
+`qodex desktop` can start the oldest runnable goal. It claims that goal, then runs the same desk agent as `qodex desk run`, and records done or failed when the agent exits. A held goal is not claimed. A second start on a desk that is already running is refused. The page still does not answer by itself.
+
+```
+src/desk/launch.ts
+src/desktop/shell.ts
+```
+
+
 ## v2.25.0 — 2026-11-12
 
 **One operator window.**
