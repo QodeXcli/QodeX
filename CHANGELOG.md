@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.21.0 — 2026-11-12
+
+**A desk uses the code graph you already built.**
+
+`qodex desk run` opens `.qodex/codegraph.db` when that file exists, and closes it when the goal exits. It does not create a database, and it does not reindex. With no file, the graph tools still say to build the index. The prompt mentions the graph only when it has symbols, and it says the index can be stale.
+
+```
+src/codegraph/tools.ts
+src/desk/dispatch.ts
+```
+
+
 ## v2.20.0 — 2026-11-12
 
 **A desk uses the connectors you already added.**

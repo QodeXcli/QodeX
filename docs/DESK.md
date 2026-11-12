@@ -68,7 +68,7 @@ That is the routine. It is not a screen recording.
 ## What is still local
 
 - A desk run starts the MCP servers you already configured, then stops them when the goal exits. Disabled servers and an empty list start nothing. `qodex up` uses the same `desk run`. Spend, send, delete, and a cloud-browser act still wait.
-- The code graph says the index is cold until you build it.
+- If this directory already has `.qodex/codegraph.db`, the desk opens it and closes it when the goal exits. A missing file is not created, and the graph tools still say to run the index. The prompt mentions the graph only when it contains symbols.
 - The board is `~/.qodex/desks/board.json`. The trail is `~/.qodex/desks/audit.jsonl`. Paused calls are `~/.qodex/desks/sentinel.json`.
 
 If a run is killed while a goal is `running`:

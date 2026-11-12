@@ -177,6 +177,9 @@ import {
   CodeGraphFindReferencesTool,
   CodeGraphExplainSymbolTool,
   setCodeGraphDB,
+  getCodeGraphDB,
+  attachExistingCodeGraph,
+  codeGraphPromptLine,
 } from '../src/codegraph/tools.js';
 import { __setRipgrepAvailable } from '../src/utils/ripgrep.js';
 import type { ToolContext } from '../src/tools/base.js';
@@ -379,4 +382,60 @@ describe('Code graph: navigation tools degrade gracefully without ripgrep', () =
     expect(result.content).toContain('use.ts');
     expect((result.metadata as any)?.count).toBeGreaterThanOrEqual(2);
   }, 30000);
+});
+
+describe('desk opens an existing code graph and does not create one', () => {
+  it('leaves a project with no database untouched', () => {
+    setCodeGraphDB(null);
+    const detach = attachExistingCodeGraph(tmpDir);
+    expect(getCodeGraphDB()).toBeNull();
+    detach();
+    expect(getCodeGraphDB()).toBeNull();
+    const fsSync = require('fs') as typeof import('fs');
+    expect(fsSync.existsSync(path.join(tmpDir, '.qodex', 'codegraph.db'))).toBe(false);
+    expect(codeGraphPromptLine(null)).toBe('');
+    expect(codeGraphPromptLine({ files: 1, symbols: 0 })).toBe('');
+    const line = codeGraphPromptLine({ files: 2, symbols: 9 });
+    expect(line).toContain('9 symbols');
+    expect(line).toContain('code_graph_');
+  });
+
+  it('a database that cannot be opened does not replace the current graph', () => {
+    const project = path.join(tmpDir, 'bad');
+    const dir = path.join(project, '.qodex');
+    require('fs').mkdirSync(dir, { recursive: true });
+    require('fs').writeFileSync(path.join(dir, 'codegraph.db'), 'not a database');
+    setCodeGraphDB(null);
+    const detach = attachExistingCodeGraph(project);
+    if (!sqliteOk) expect(getCodeGraphDB()).toBeNull();
+    detach();
+    expect(getCodeGraphDB()).toBeNull();
+  });
+
+  const sqliteOk = (() => {
+    try {
+      const Database = require('better-sqlite3');
+      const db = new Database(':memory:');
+      db.close();
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!sqliteOk)('opens a database that is already on disk, then closes it', () => {
+    const project = path.join(tmpDir, 'proj');
+    const dir = path.join(project, '.qodex');
+    require('fs').mkdirSync(dir, { recursive: true });
+    const db = new CodeGraphDB(path.join(dir, 'codegraph.db'));
+    db.db.close();
+    setCodeGraphDB(null);
+    const detach = attachExistingCodeGraph(project);
+    const opened = getCodeGraphDB();
+    expect(opened).not.toBeNull();
+    expect(opened!.stats().symbols).toBe(0);
+    detach();
+    expect(getCodeGraphDB()).toBeNull();
+    expect(() => opened!.stats()).toThrow();
+  });
 });

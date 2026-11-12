@@ -1,13 +1,42 @@
 import { z } from 'zod';
 import * as path from 'path';
+import * as fsSync from 'fs';
 import { promises as fs } from 'fs';
 import { Tool, type ToolContext, type ToolResult } from '../tools/base.js';
 import { CodeGraphDB } from './schema.js';
 import { runLineSearch } from '../utils/ripgrep.js';
 
 let _db: CodeGraphDB | null = null;
-export function setCodeGraphDB(db: CodeGraphDB): void { _db = db; }
+export function setCodeGraphDB(db: CodeGraphDB | null): void { _db = db; }
 export function getCodeGraphDB(): CodeGraphDB | null { return _db; }
+
+/**
+ * Open this project's code graph only when the file is already there.
+ * A missing file is not created: the tools keep saying the index was never built.
+ * Returns a detach that restores the previous handle and closes the one we opened.
+ */
+export function attachExistingCodeGraph(cwd: string): () => void {
+  const dbPath = path.join(cwd, '.qodex', 'codegraph.db');
+  if (!fsSync.existsSync(dbPath)) return () => {};
+  let db: CodeGraphDB;
+  try {
+    db = new CodeGraphDB(dbPath);
+  } catch {
+    return () => {};
+  }
+  const prev = _db;
+  _db = db;
+  return () => {
+    if (_db === db) _db = prev;
+    try { db.db.close(); } catch { /* already closed */ }
+  };
+}
+
+/** One line for a desk prompt. Empty when there is no index to use. */
+export function codeGraphPromptLine(stats: { files: number; symbols: number } | null): string {
+  if (!stats || stats.symbols <= 0) return '';
+  return `\nCode graph for this directory is open (${stats.symbols} symbols, ${stats.files} files). Prefer code_graph_* to locate a symbol. It can be stale if files changed after the last index. Do not invent a symbol the graph does not list.`;
+}
 
 let _indexer: import('./indexer.js').Indexer | null = null;
 export function setIndexer(idx: import('./indexer.js').Indexer): void { _indexer = idx; }

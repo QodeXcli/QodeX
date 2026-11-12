@@ -16,6 +16,7 @@ import { getApprovalMode, setApprovalMode } from '../security/permissions.js';
 import { getMCPManager, MCPManager, setMCPManager } from '../mcp/manager.js';
 import type { MCPManagerConfig } from '../mcp/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
+import * as path from 'path';
 import { deskMcpConfig, isDeskToolName, scrubPacket } from './policy.js';
 import { classifyAsk, parkSentinel, waitForSentinel } from './sentinel.js';
 
@@ -61,8 +62,12 @@ export async function runDeskAgent(opts: {
   const trace: Array<{ tool: string; summary: string }> = [];
   const timeoutMs = opts.sentinelTimeoutMs ?? 10 * 60_000;
   setApprovalMode('always');
+  let detachGraph: () => void = () => {};
   try {
+    const project = path.resolve(prevCwd, opts.cwd);
     process.chdir(opts.cwd);
+    const { attachExistingCodeGraph, codeGraphPromptLine, getCodeGraphDB } = await import('../codegraph/tools.js');
+    detachGraph = attachExistingCodeGraph(project);
     const { loadConfig, ensureQodexHome, setActiveConfig } = await import('../config/loader.js');
     const { logger } = await import('../utils/logger.js');
     await ensureQodexHome();
@@ -96,6 +101,8 @@ export async function runDeskAgent(opts: {
       if (ready.length > 0) {
         prompt += `\nConnectors up for this run (already configured on this machine): ${ready.join(', ')}. Spend, send, delete, and a cloud-browser act still wait on the sentinel. A connector that is not in the tool list is not available.`;
       }
+      const graph = getCodeGraphDB();
+      prompt += codeGraphPromptLine(graph ? graph.stats() : null);
       const { runHeadless } = await import('../cli/modes/headless.js');
       const code = await runHeadless({
         cwd: opts.cwd,
@@ -133,6 +140,7 @@ export async function runDeskAgent(opts: {
       return { code, trace };
     });
   } finally {
+    detachGraph();
     setApprovalMode(prevMode);
     try { process.chdir(prevCwd); } catch { /* the old cwd disappeared */ }
   }
