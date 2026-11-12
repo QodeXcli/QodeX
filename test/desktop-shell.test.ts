@@ -20,6 +20,7 @@ const view = (over: Partial<ShellView> = {}): ShellView => ({
   capped: false,
   waits: [],
   team: [],
+  audit: [],
   ...over,
 });
 
@@ -30,6 +31,7 @@ const deps = (over: Record<string, unknown> = {}) => ({
   shotFile: () => null as string | null,
   setShot: () => {},
   decide: async () => ({ ok: true }),
+  board: async () => ({ ok: true, message: 'queued' }),
   ...over,
 });
 
@@ -56,7 +58,7 @@ describe('desktop shell', () => {
 
   it('shows active desk goals and serves them on the live poll', async () => {
     const rows = deskRows([
-      { name: 'research', goals: [
+      { id: 'research', name: 'research', goals: [
         { id: 'old', text: 'done already', status: 'done' },
         { id: 'now', text: '<script>alert(1)</script> ' + 'x'.repeat(200), status: 'running' },
       ] },
@@ -98,6 +100,55 @@ describe('desktop shell', () => {
     });
     expect(ok.view.result).toBe('allowed ab12cd34');
     expect(seen).toEqual({ id: 'ab12cd34', allow: true });
+  });
+
+  it('assigns a goal through the desk lock and holds a sensitive one', async () => {
+    const fs = await import('fs/promises');
+    const os = await import('os');
+    const path = await import('path');
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'qodex-shell-desk-'));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const { handleDeskRequest } = await import('../src/desk/console.js');
+      const { loadBoard } = await import('../src/desk/store.js');
+      const { applyDeskAction } = await import('../src/desk/console.js');
+      const created = await handleDeskRequest({
+        method: 'POST', pathname: '/api/action', tokenOk: true,
+        rawBody: JSON.stringify({ action: 'create', name: 'inbox', brief: 'mail' }),
+        contentType: 'application/json', cwd: '/work',
+      });
+      expect(created.status).toBe(200);
+      const refused = await handleShell({
+        method: 'POST', pathname: '/act', tokenOk: true, rawBody: 'action=goal&deskId=../x&text=hello',
+        view: view(), deps: deps(),
+      });
+      expect(refused.view.result).toContain('refused');
+      const posted = await handleShell({
+        method: 'POST', pathname: '/act', tokenOk: true,
+        rawBody: 'action=goal&deskId=inbox&text=' + encodeURIComponent('send an email to the team'),
+        view: view(),
+        deps: deps({ board: (body: Record<string, string>) => applyDeskAction(body, '/work') }),
+      });
+      expect(posted.view.result).toBe('goal needs-approval');
+      const board = await loadBoard();
+      const goal = board.desks[0]!.goals[0]!;
+      expect(goal.status).toBe('needs-approval');
+      const html = renderShellHtml(view({ team: deskRows(board.desks) }));
+      expect(html).toContain('name="action" value="approve"');
+      expect(html).toContain('Assign a goal');
+      const allowed = await handleShell({
+        method: 'POST', pathname: '/act', tokenOk: true,
+        rawBody: `action=approve&deskId=inbox&goalId=${goal.id}&allow=yes`,
+        view: view(),
+        deps: deps({ board: (body: Record<string, string>) => applyDeskAction(body, '/work') }),
+      });
+      expect(allowed.view.result).toBe('goal approved');
+    } finally {
+      if (prev === undefined) delete process.env.HOME;
+      else process.env.HOME = prev;
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   it('refuses a request without the token', async () => {

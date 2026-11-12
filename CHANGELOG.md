@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.25.0 — 2026-11-12
+
+**One operator window.**
+
+`qodex desktop` can assign a goal and allow or deny a held one. It uses the same desk lock and the same rules as `qodex desk serve`. A sensitive goal stays `needs-approval`. The audit shows on the page. `/` focuses the control filter. The page still does not call a model. The goal runs when `qodex up` or `qodex desk run` does.
+
+```
+src/desktop/shell.ts
+src/desk/console.ts
+```
+
+
 ## v2.24.0 — 2026-11-12
 
 **The desktop window stays current.**

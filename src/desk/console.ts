@@ -160,7 +160,7 @@ setInterval(qodexRefresh, 2000);
 </html>`;
 }
 
-async function applyAction(body: Record<string, string>, cwd: string): Promise<{ ok: boolean; message: string }> {
+export async function applyDeskAction(body: Record<string, string>, cwd: string): Promise<{ ok: boolean; message: string }> {
   return withDeskLock(() => applyActionUnlocked(body, cwd));
 }
 
@@ -270,7 +270,7 @@ export async function handleDeskRequest(opts: {
   }
   if (opts.method === 'POST' && opts.pathname === '/api/action') {
     const body = parseForm(opts.rawBody, opts.contentType);
-    const result = await applyAction(body, opts.cwd);
+    const result = await applyDeskAction(body, opts.cwd);
     return json(result.ok ? 200 : 400, result);
   }
   return json(404, { ok: false, message: 'Not found.' });

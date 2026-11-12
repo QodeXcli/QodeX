@@ -1,8 +1,7 @@
 /**
- * QodeX Desktop — a local shell on 127.0.0.1.
- * It reads the accessibility tree, presses one named control when you submit
- * the form, and shows sentinel / desk counts. It does not call a model and
- * it does not open a cloud browser.
+ * QodeX Desktop — the local operator window on 127.0.0.1.
+ * It assigns a goal, allows a held one, reads the accessibility tree, and
+ * presses one named control when you submit. It does not call a model.
  */
 import * as http from 'http';
 import { randomBytes } from 'crypto';
@@ -10,8 +9,9 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { probeDesktop } from '../desk/policy.js';
+import { applyDeskAction } from '../desk/console.js';
 import { listPending, decideSentinel } from '../desk/sentinel.js';
-import { loadBoard } from '../desk/store.js';
+import { loadBoard, readAudit } from '../desk/store.js';
 import { readResidentStatus } from '../resident/loop.js';
 import { invokeNamed, readUiTree, type UiQuery } from '../tools/computer/access.js';
 import { ComputerUseScreenshotTool } from '../tools/computer/use.js';
@@ -42,8 +42,15 @@ export interface ShellWait {
 }
 
 export interface ShellDesk {
+  id: string;
   name: string;
   goals: { id: string; text: string; status: string }[];
+}
+
+export interface ShellAudit {
+  ts: string;
+  kind: string;
+  detail: string;
 }
 
 export interface ShellView {
@@ -61,17 +68,19 @@ export interface ShellView {
   capped: boolean;
   waits: ShellWait[];
   team: ShellDesk[];
+  audit: ShellAudit[];
 }
 
 const LIVE_GOAL = new Set(['running', 'needs-approval', 'approved', 'queued']);
 
 /** What the window shows for each desk: active goals first, otherwise the latest one. Text is clipped. */
-export function deskRows(desks: { name: string; goals: { id: string; text: string; status: string }[] }[]): ShellDesk[] {
+export function deskRows(desks: { id: string; name: string; goals: { id: string; text: string; status: string }[] }[]): ShellDesk[] {
   return desks.slice(0, 6).map(d => {
     const ordered = [...d.goals].reverse();
     const active = ordered.filter(g => LIVE_GOAL.has(g.status)).slice(0, 4);
     const shown = active.length ? active : ordered.slice(0, 1);
     return {
+      id: d.id,
       name: d.name,
       goals: shown.map(g => ({
         id: g.id,
@@ -83,8 +92,8 @@ export function deskRows(desks: { name: string; goals: { id: string; text: strin
 }
 
 /** Loopback poll. No token, no screenshot bytes. */
-export function liveSnapshot(view: ShellView): { resident: string; pending: number; waits: ShellWait[]; desks: ShellDesk[] } {
-  return { resident: view.resident, pending: view.waits.length, waits: view.waits, desks: view.team };
+export function liveSnapshot(view: ShellView): { resident: string; pending: number; waits: ShellWait[]; desks: ShellDesk[]; audit: ShellAudit[] } {
+  return { resident: view.resident, pending: view.waits.length, waits: view.waits, desks: view.team, audit: view.audit };
 }
 
 function escapeHtml(s: string): string {
@@ -132,13 +141,36 @@ function controlRows(view: ShellView): string {
 }
 
 function deskBlock(view: ShellView): string {
-  if (view.team.length === 0) return '<p class="muted">No desks on this machine.</p>';
+  if (view.team.length === 0) return '<p class="muted">No desks on this machine. Add one with <code>qodex desk add</code>.</p>';
   return view.team.map(d => {
     const goals = d.goals.length
-      ? d.goals.map(g => `<p class="goal"><span class="chip">${escapeHtml(g.status)}</span> ${escapeHtml(g.text)}</p>`).join('')
+      ? d.goals.map(g => {
+        const hold = g.status === 'needs-approval'
+          ? `<form method="post" action="/act?k=${view.token}">
+              <input type="hidden" name="action" value="approve"/>
+              <input type="hidden" name="deskId" value="${escapeHtml(d.id)}"/>
+              <input type="hidden" name="goalId" value="${escapeHtml(g.id)}"/>
+              <button name="allow" value="yes">Allow</button>
+              <button name="allow" value="no" class="ghost">Deny</button>
+            </form>`
+          : '';
+        return `<div class="goal"><span class="chip">${escapeHtml(g.status)}</span> ${escapeHtml(g.text)}${hold}</div>`;
+      }).join('')
       : '<p class="muted">No goal.</p>';
-    return `<article class="desk"><strong>${escapeHtml(d.name)}</strong>${goals}</article>`;
+    return `<article class="desk"><strong>${escapeHtml(d.name)}</strong>${goals}
+      <form method="post" action="/act?k=${view.token}">
+        <input type="hidden" name="action" value="goal"/>
+        <input type="hidden" name="deskId" value="${escapeHtml(d.id)}"/>
+        <input name="text" placeholder="Assign a goal" maxlength="500" required aria-label="Goal for ${escapeHtml(d.name)}"/>
+        <button>Assign</button>
+      </form>
+    </article>`;
   }).join('');
+}
+
+function auditBlock(view: ShellView): string {
+  if (view.audit.length === 0) return '<p class="muted">No audit yet.</p>';
+  return view.audit.slice(-6).map(a => `<p class="goal"><span class="chip">${escapeHtml(a.kind)}</span> ${escapeHtml(a.detail)}</p>`).join('');
 }
 
 function waitRows(view: ShellView): string {
@@ -209,7 +241,7 @@ export function renderShellHtml(view: ShellView): string {
   details { margin-top:14px; }
   pre { white-space:pre-wrap; background:var(--panel); border:1px solid var(--line); padding:12px; }
   .goal { margin:6px 0; }
-  .desk { padding:8px 0; border-bottom:1px solid var(--line); }
+  .desk form { display:flex; gap:6px; margin-top:8px; }
   .live { font-size:12px; color:var(--muted); margin:0 0 8px; }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } .stage { border-left:0; } }
 </style>
@@ -233,7 +265,9 @@ export function renderShellHtml(view: ShellView): string {
     <h2>Waiting</h2>
     <div id="waits">${waitRows(view)}</div>
     <p class="note">${escapeHtml(view.note)}</p>
-    <p class="muted">Allow and deny here are you. A press is you. The agent's own press still waits.</p>
+    <p class="muted">Assign, allow, and press here are you. The page does not call a model. A sensitive goal stays held until you allow it. Work still runs with <code>qodex up</code> or <code>qodex desk run</code>.</p>
+    <h2>Audit</h2>
+    <div id="audit">${auditBlock(view)}</div>
   </aside>
   <section style="padding:16px 18px">
     <h2>Controls <span id="shown">${view.controls.length}</span></h2>
@@ -290,20 +324,51 @@ export function renderShellHtml(view: ShellView): string {
     if (text != null) n.textContent = text;
     return n;
   }
+  function fields(form, pairs) {
+    pairs.forEach(function (pair) {
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = pair[0];
+      input.value = pair[1];
+      form.appendChild(input);
+    });
+  }
   function paint(data) {
     desks.textContent = '';
-    if (!data.desks || !data.desks.length) desks.appendChild(el('p', 'No desks on this machine.', 'muted'));
+    if (!data.desks || !data.desks.length) desks.appendChild(el('p', 'No desks on this machine. Add one with qodex desk add.', 'muted'));
     (data.desks || []).forEach(function (d) {
       var box = el('article', null, 'desk');
       box.appendChild(el('strong', d.name || 'desk'));
       if (!d.goals || !d.goals.length) box.appendChild(el('p', 'No goal.', 'muted'));
       (d.goals || []).forEach(function (g) {
-        var p = el('p', null, 'goal');
-        var chip = el('span', g.status || '', 'chip');
-        p.appendChild(chip);
+        var p = el('div', null, 'goal');
+        p.appendChild(el('span', g.status || '', 'chip'));
         p.appendChild(document.createTextNode(' ' + (g.text || '')));
+        if (g.status === 'needs-approval') {
+          var form = document.createElement('form');
+          form.method = 'post';
+          form.action = '/act?k=' + encodeURIComponent(token);
+          fields(form, [['action', 'approve'], ['deskId', d.id || ''], ['goalId', g.id || '']]);
+          var yes = document.createElement('button');
+          yes.name = 'allow'; yes.value = 'yes'; yes.textContent = 'Allow';
+          var no = document.createElement('button');
+          no.name = 'allow'; no.value = 'no'; no.className = 'ghost'; no.textContent = 'Deny';
+          form.appendChild(yes); form.appendChild(no);
+          p.appendChild(form);
+        }
         box.appendChild(p);
       });
+      var assign = document.createElement('form');
+      assign.method = 'post';
+      assign.action = '/act?k=' + encodeURIComponent(token);
+      fields(assign, [['action', 'goal'], ['deskId', d.id || '']]);
+      var text = document.createElement('input');
+      text.name = 'text'; text.maxLength = 500; text.required = true; text.placeholder = 'Assign a goal';
+      text.setAttribute('aria-label', 'Goal for ' + (d.name || 'desk'));
+      var go = document.createElement('button');
+      go.textContent = 'Assign';
+      assign.appendChild(text); assign.appendChild(go);
+      box.appendChild(assign);
       desks.appendChild(box);
     });
     waits.textContent = '';
@@ -340,6 +405,17 @@ export function renderShellHtml(view: ShellView): string {
     if (pill) pill.textContent = String(data.pending || 0) + ' waiting';
     var res = document.getElementById('resident-pill');
     if (res) res.textContent = data.resident || '';
+    var audit = document.getElementById('audit');
+    if (audit) {
+      audit.textContent = '';
+      if (!data.audit || !data.audit.length) audit.appendChild(el('p', 'No audit yet.', 'muted'));
+      (data.audit || []).slice(-6).forEach(function (a) {
+        var p = el('p', null, 'goal');
+        p.appendChild(el('span', a.kind || '', 'chip'));
+        p.appendChild(document.createTextNode(' ' + (a.detail || '')));
+        audit.appendChild(p);
+      });
+    }
     if (live) live.textContent = 'Live. Updated just now.';
   }
   function tick() {
@@ -352,6 +428,15 @@ export function renderShellHtml(view: ShellView): string {
   }
   setInterval(tick, 2000);
 })();
+document.addEventListener('keydown', function (e) {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  var find = document.getElementById('find');
+  if (!find) return;
+  e.preventDefault();
+  find.focus();
+});
 </script>
 </html>`;
 }
@@ -370,6 +455,7 @@ export interface ShellDeps {
   shotFile: () => string | null;
   setShot: (file: string) => void;
   decide: (id: string, allow: boolean) => Promise<{ ok: boolean; error?: string }>;
+  board: (body: Record<string, string>) => Promise<{ ok: boolean; message: string }>;
 }
 
 async function defaultShoot(): Promise<{ ok: true; file: string } | { ok: false; error: string }> {
@@ -391,6 +477,7 @@ export function defaultShellDeps(state: { shot: string | null }): ShellDeps {
       const decided = await decideSentinel(id, allow);
       return { ok: decided.ok, error: decided.error };
     },
+    board: body => applyDeskAction(body, process.cwd()),
   };
 }
 
@@ -423,6 +510,27 @@ export async function handleShell(opts: {
       const shot = await opts.deps.shoot();
       if (shot.ok) opts.deps.setShot(shot.file);
       view = { ...view, result: shot.ok ? `screenshot ${shot.file}` : shot.error };
+    } else if (form.action === 'goal') {
+      const deskId = (form.deskId ?? '').trim();
+      const text = (form.text ?? '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(deskId)) {
+        view = { ...view, result: 'refused: bad desk' };
+      } else if (!text || text.length > 500) {
+        view = { ...view, result: 'refused: a goal needs text' };
+      } else {
+        const posted = await opts.deps.board({ action: 'goal', deskId, text });
+        view = { ...view, result: posted.ok ? `goal ${posted.message}` : (posted.message || 'not posted') };
+      }
+    } else if (form.action === 'approve') {
+      const deskId = (form.deskId ?? '').trim();
+      const goalId = (form.goalId ?? '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(deskId) || !/^[a-f0-9]{8}$/.test(goalId)) {
+        view = { ...view, result: 'refused: bad goal' };
+      } else {
+        const allow = form.allow === 'yes';
+        const decided = await opts.deps.board({ action: 'approve', deskId, goalId, allow: allow ? 'yes' : 'no' });
+        view = { ...view, result: decided.ok ? `goal ${decided.message}` : (decided.message || 'not decided') };
+      }
     } else if (form.action === 'allow' || form.action === 'deny') {
       const id = form.id ?? '';
       if (!/^[a-f0-9]{8}$/.test(id)) {
@@ -492,6 +600,7 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
         const desktop = probeDesktop();
         const board = await loadBoard().catch(() => null);
         const pending = await listPending().catch(() => []);
+        const audit = await readAudit(6).catch(() => []);
         const resident = await readResidentStatus().catch(() => null);
         const view: ShellView = {
           token,
@@ -508,6 +617,7 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
           capped: state.capped,
           waits: pending.map(p => ({ id: p.id, kind: p.kind, reason: p.reason, prompt: p.prompt })),
           team: deskRows(board?.desks ?? []),
+          audit: audit.map(a => ({ ts: a.ts, kind: a.kind, detail: a.detail })),
         };
         const handled = await handleShell({
           method: req.method ?? 'GET',
