@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.27.1 — 2026-11-12
+
+**The rewrite is tested on disk.**
+
+A passing rewrite writes only the candidate. The active skill file is unchanged. A missing skill, an empty model name, or a bad answer writes nothing, and a later bad answer does not replace a candidate that already passed. Candidate and ledger paths read `HOME` at call time.
+
+```
+src/skills/learning/rewrite.ts
+src/skills/learning/candidate-store.ts
+src/skills/learning/ledger.ts
+```
+
+
 ## v2.27.0 — 2026-11-12
 
 **A model may rewrite skill prose. It may not promote it.**

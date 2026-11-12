@@ -17,7 +17,10 @@ import { canMachineWrite } from '../provenance.js';
 import type { CandidateSkill } from './types.js';
 
 export function candidatesDir(): string {
-  return path.join(os.homedir(), '.qodex', 'skills-candidates');
+  // os.homedir() is cached for the process. HOME has to win at call time or a
+  // test, and a late export HOME, writes the candidate into the wrong home.
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  return path.join(home, '.qodex', 'skills-candidates');
 }
 
 export interface CandidateInfo {

@@ -13,7 +13,7 @@ shell). The distance that still mattered is below.
 | --- | --- |
 | Messaging breadth | Hermes reaches more channels (email, Matrix, and others). QodeX's gateway is the five transports above, on purpose: each one is a real adapter, not a logo. |
 | Always-on | `qodex up` fires schedules, drains desk goals, and attaches the chat adapters you configured. Each desk child starts the MCP servers already in your config and stops them when the goal exits. Hermes still reaches more channels. |
-| Model-written skill evolution | Hermes (GEPA-style) rewrites skills with a model. That compounds when you have a strong second model and you trust its taste. |
+| Model-written skill evolution | Hermes rewrites a skill and keeps the version it prefers. `qodex skill rewrite` only stores a candidate. The active file is not replaced, and a model liking the prose is not a promotion. |
 
 ## Where QodeX was stuck
 

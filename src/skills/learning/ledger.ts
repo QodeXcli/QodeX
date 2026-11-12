@@ -27,7 +27,8 @@ export interface LearningEvent {
 }
 
 export function ledgerPath(): string {
-  return path.join(os.homedir(), '.qodex', 'learning-events.jsonl');
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  return path.join(home, '.qodex', 'learning-events.jsonl');
 }
 
 export async function recordLearningEvent(ev: Omit<LearningEvent, 'ts'>): Promise<void> {
