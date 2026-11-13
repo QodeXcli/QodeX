@@ -67,7 +67,53 @@ export function windowsTypeScript(text: string): string {
   return `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(${psQuote(literal)})`;
 }
 
+/** Win32 virtual keys. Only codes we name. An unknown key is not guessed. */
+const WIN_VK: Record<string, number> = {
+  ctrl: 0x11, control: 0x11, cmd: 0x11, command: 0x11, meta: 0x11,
+  alt: 0x12, opt: 0x12, option: 0x12,
+  shift: 0x10,
+  enter: 0x0D, return: 0x0D, esc: 0x1B, escape: 0x1B, tab: 0x09, space: 0x20,
+  left: 0x25, up: 0x26, right: 0x27, down: 0x28,
+  a: 0x41, b: 0x42, c: 0x43, d: 0x44, e: 0x45, f: 0x46, g: 0x47, h: 0x48,
+  i: 0x49, j: 0x4A, k: 0x4B, l: 0x4C, m: 0x4D, n: 0x4E, o: 0x4F, p: 0x50,
+  q: 0x51, r: 0x52, s: 0x53, t: 0x54, u: 0x55, v: 0x56, w: 0x57, x: 0x58,
+  y: 0x59, z: 0x5A,
+};
+
+/**
+ * The Windows key is not a SendKeys token. keybd_event can press it.
+ * The combo must include one real key. Integers only, so the name is not shell.
+ */
+export function windowsWinScript(combo: string): string | null {
+  const parts = combo.toLowerCase().split('+').map(s => s.trim()).filter(Boolean);
+  if (!parts.some(p => p === 'win' || p === 'super')) return null;
+  const rest = parts.filter(p => p !== 'win' && p !== 'super');
+  if (rest.length === 0) return null;
+  const codes = rest.map(p => WIN_VK[p]);
+  if (codes.some(c => c === undefined)) return null;
+  const hex = (n: number) => '0x' + n.toString(16).toUpperCase();
+  const downs = [0x5B, ...codes as number[]];
+  const ups = [...downs].reverse();
+  const calls = [
+    ...downs.map(c => `[QodeXKey]::Send(${hex(c)}, 0)`),
+    ...ups.map(c => `[QodeXKey]::Send(${hex(c)}, 2)`),
+  ];
+  return `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class QodeXKey {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, int dwExtraInfo);
+  public static void Send(int vk, int flags) { keybd_event((byte)vk, 0, flags, 0); }
+}
+"@
+${calls.join('\n')}
+`.trim();
+}
+
 export function windowsKeyScript(combo: string): string | null {
+  const win = windowsWinScript(combo);
+  if (win) return win;
   const keys = windowsSendKeys(combo);
   if (!keys) return null;
   return `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(${psQuote(keys)})`;
@@ -152,7 +198,7 @@ export async function runWindowsKey(args: { combo: string }, ctx: ToolContext, c
   if (blocked) return blocked;
   const script = windowsKeyScript(args.combo);
   if (!script) {
-    return { content: `[COMPUTER_USE_ERROR] combo "${args.combo}" is not mapped (the Windows key is not sent this way).`, isError: true };
+    return { content: `[COMPUTER_USE_ERROR] combo "${args.combo}" is not mapped.`, isError: true };
   }
   try {
     await runPowershell(script);

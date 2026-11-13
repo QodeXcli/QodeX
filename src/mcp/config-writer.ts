@@ -98,7 +98,10 @@ export function buildServerEntry(spec: McpServerSpec, opts: AddServerOptions = {
     if (spec.auth === 'token' && spec.authHeader && spec.credentials[0]) {
       const cred = spec.credentials[0];
       const fmt = spec.authHeaderFormat ?? '{TOKEN}';
-      entry.headers = { [spec.authHeader]: fmt.replace('{TOKEN}', ref(cred.envVar)) };
+      // The header line keeps ${ENV}. A literal, if the user asked for one,
+      // goes in env. expandEnvRefs fills the header from that env at launch.
+      entry.headers = { [spec.authHeader]: fmt.replace('{TOKEN}', `\${${cred.envVar}}`) };
+      entry.env = { ...(entry.env ?? {}), [cred.envVar]: ref(cred.envVar) };
     }
     // oauth remote: no headers — the MCP client negotiates in the browser.
   }

@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.33.0 — 2026-11-13
+
+**Browserbase is a direct Streamable HTTP call. The Windows key can be pressed.**
+
+`qodex mcp add browserbase` no longer starts `mcp-remote`. The client already spoke Streamable HTTP; the registry was still routing around it. The header stored on disk is `Bearer ${BROWSERBASE_API_KEY}`. At launch the key is taken from the environment, or from that server's own env value, and it is not copied into the header line. `start` and `act` still wait, including under always-yes.
+
+On Windows, `win+e` is `keybd_event` with virtual key `0x5B`. A combo that is only the Windows key, or a key we do not map, is refused. SendKeys still cannot express that key, so this path does not pretend it can.
+
+```
+src/mcp/registry.ts
+src/mcp/manager.ts
+src/tools/computer/win.ts
+```
+
+
 ## v2.32.0 — 2026-11-13
 
 **The person at the machine can drive the screen.**

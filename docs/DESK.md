@@ -45,7 +45,7 @@ After the press the tree is read again. The control leaving, or its bounds / val
 
 - macOS — screencapture, System Events, optional cliclick
 - Linux — xdotool, plus scrot or ImageMagick `import` or gnome-screenshot. If xdotool is missing, the tool says so. It does not pretend it clicked.
-- Windows — PowerShell and Win32. `cmd` is sent as Ctrl. The Windows key is not sent.
+- Windows — PowerShell and Win32. `cmd` is sent as Ctrl. `win+e` uses keybd_event. A combo that is only the Windows key is refused.
 
 Every press, click, type, and key still waits for the sentinel. So do `browser_click`, `browser_fill`, and `browser_evaluate`: those change a page, not the desktop, and a standing yes does not cover them. Loading a URL and taking a screenshot stay quiet.
 

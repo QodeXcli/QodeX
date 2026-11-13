@@ -10,22 +10,46 @@ import { logger } from '../utils/logger.js';
  * process.env at launch. This is what lets `qodex mcp add` write a reference
  * instead of a plaintext token into config.yaml.
  *
- * Expansion covers: env values, every arg, header values, and the url. A
- * reference to a variable that isn't set expands to '' and logs a warning, so
- * a missing credential surfaces as a diagnosable "server failed" rather than a
- * confusing literal-string-passed-as-token bug. Returns a NEW config object;
- * the input is not mutated.
+ * Expansion covers: env values, every arg, header values, and the url.
+ * A header may say `Bearer ${TOKEN}` while the literal sits only in this
+ * server's `env` (so config.yaml never stores the secret in a header).
+ * process.env wins. Then a resolved, non-reference env value. A variable
+ * that is in neither expands to '' and logs a warning, so a missing
+ * credential surfaces as a diagnosable failure rather than the literal
+ * `${TOKEN}` being sent. Returns a NEW config object; the input is not mutated.
  */
 export function expandEnvRefs(config: MCPServerConfig, serverName: string): MCPServerConfig {
   const missing = new Set<string>();
-  const expand = (s: string): string =>
-    s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, varName: string) => {
-      const v = process.env[varName];
-      if (v === undefined || v === '') { missing.add(varName); return ''; }
+  const fromProc = (name: string): string | undefined => {
+    const v = process.env[name];
+    return v === undefined || v === '' ? undefined : v;
+  };
+  const expandProc = (s: string): string =>
+    s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
+      const v = fromProc(name);
+      if (v === undefined) { missing.add(name); return ''; }
       return v;
     });
 
   const out: MCPServerConfig = { ...config };
+  if (config.env) {
+    const env: Record<string, string> = {};
+    for (const [k, val] of Object.entries(config.env)) {
+      env[k] = typeof val === 'string' ? expandProc(val) : (val as string);
+    }
+    out.env = env;
+  }
+  const fromServer = (name: string): string | undefined => {
+    const v = out.env?.[name];
+    if (!v || v.includes('${')) return undefined;
+    return v;
+  };
+  const expand = (s: string): string =>
+    s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
+      const v = fromProc(name) ?? fromServer(name);
+      if (v === undefined) { missing.add(name); return ''; }
+      return v;
+    });
 
   if (config.args) {
     out.args = config.preserveArgEnvRefs
@@ -33,17 +57,10 @@ export function expandEnvRefs(config: MCPServerConfig, serverName: string): MCPS
       : config.args.map(a => (typeof a === 'string' ? expand(a) : a));
   }
   if (config.url) out.url = expand(config.url);
-  if (config.env) {
-    const env: Record<string, string> = {};
-    for (const [k, val] of Object.entries(config.env)) {
-      env[k] = typeof val === 'string' ? expand(val) : (val as any);
-    }
-    out.env = env;
-  }
   if (config.headers) {
     const headers: Record<string, string> = {};
     for (const [k, val] of Object.entries(config.headers)) {
-      headers[k] = typeof val === 'string' ? expand(val) : (val as any);
+      headers[k] = typeof val === 'string' ? expand(val) : (val as string);
     }
     out.headers = headers;
   }

@@ -56,36 +56,33 @@ describe('MCP registry', () => {
     expect(entry.destructive).toBe(true); // can create/edit/export designs
   });
 
-  it('Browserbase is the hosted cloud browser and the key stays off argv', () => {
+  it('Browserbase speaks streamable HTTP and the key stays out of the header line', () => {
     const spec = findMcpSpec('browserbase')!;
-    expect(spec.transport).toBe('stdio');
+    expect(spec.transport).toBe('remote');
+    expect(spec.streamable).toBe(true);
+    expect(spec.url).toBe('https://mcp.browserbase.com/mcp');
     expect(spec.auth).toBe('token');
-    expect(spec.preserveArgEnvRefs).toBe(true);
     expect(spec.destructive).toBe(true);
-    const joined = (spec.args ?? []).join(' ');
-    expect(joined).toContain('mcp-remote@0.16.5');
-    expect(joined).toContain('https://mcp.browserbase.com/mcp');
-    expect(joined).toContain('--header');
-    expect(joined).not.toContain('browserbaseApiKey=');
+    expect(spec.command).toBeUndefined();
+    expect((spec.args ?? []).join(' ')).not.toContain('mcp-remote');
 
     const entry = buildServerEntry(spec, {
       secrets: { BROWSERBASE_API_KEY: 'bb_live_secret_value' },
       inlineToken: true,
     });
-    const argsJoined = (entry.args ?? []).join(' ');
-    expect(argsJoined).toContain('Authorization: Bearer ${BROWSERBASE_API_KEY}');
-    expect(argsJoined).not.toContain('bb_live_secret_value');
+    expect(entry.streamable).toBe(true);
+    expect(entry.headers?.Authorization).toBe('Bearer ${BROWSERBASE_API_KEY}');
+    expect(JSON.stringify(entry.headers)).not.toContain('bb_live_secret_value');
     expect(entry.env?.BROWSERBASE_API_KEY).toBe('bb_live_secret_value');
-    expect(entry.preserveArgEnvRefs).toBe(true);
 
     const spawned = expandEnvRefs({
-      command: entry.command,
-      args: entry.args,
-      env: { BROWSERBASE_API_KEY: '${BROWSERBASE_API_KEY}' },
-      preserveArgEnvRefs: true,
+      url: entry.url,
+      headers: entry.headers,
+      env: entry.env,
+      streamable: true,
     }, 'browserbase');
-    expect((spawned.args ?? []).join(' ')).toContain('${BROWSERBASE_API_KEY}');
-    expect((spawned.args ?? []).join(' ')).not.toContain('bb_live_secret_value');
+    expect(spawned.headers?.Authorization).toBe('Bearer bb_live_secret_value');
+    expect(spawned.url).toBe('https://mcp.browserbase.com/mcp');
 
     const start = cloudBrowserAsk('mcp:browserbase:start');
     const act = cloudBrowserAsk('mcp:browserbase:act');
@@ -190,10 +187,13 @@ describe('buildServerEntry', () => {
     expect(JSON.stringify(entry)).not.toContain('ghp_secret');
   });
 
-  it('--inline writes the literal token instead of a ref', () => {
+  it('--inline puts the literal in env and leaves the header as a ref', () => {
     const spec = findMcpSpec('github')!;
     const entry = buildServerEntry(spec, { secrets: { GITHUB_PAT: 'ghp_secret' }, inlineToken: true });
-    expect(entry.headers?.Authorization).toBe('Bearer ghp_secret');
+    expect(entry.headers?.Authorization).toBe('Bearer ${GITHUB_PAT}');
+    expect(entry.env?.GITHUB_PAT).toBe('ghp_secret');
+    const spawned = expandEnvRefs({ url: entry.url, headers: entry.headers, env: entry.env }, 'github');
+    expect(spawned.headers?.Authorization).toBe('Bearer ghp_secret');
   });
 
   it('stdio+token exposes the credential as an env var ref', () => {

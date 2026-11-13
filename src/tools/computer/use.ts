@@ -272,7 +272,7 @@ const KEY_ALIASES: Record<string, string> = {
 
 export class ComputerUseKeyTool extends Tool<z.infer<typeof KeyArgs>> {
   name = 'computer_use_key';
-  description = 'Press a key combo (cmd+s, ctrl+s, esc, tab, return). macOS, Linux (xdotool), or Windows (SendKeys). Asks every time, then presses. On Windows, cmd is sent as Ctrl. The Windows key is not sent.';
+  description = 'Press a key combo (cmd+s, ctrl+s, win+e, esc, tab, return). macOS, Linux (xdotool), or Windows. Asks every time, then presses. On Windows, cmd is sent as Ctrl. win+key uses keybd_event. A combo that is only the Windows key is refused.';
   isReadOnly = false;
   isDestructive = true;
   argsSchema = KeyArgs;

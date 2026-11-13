@@ -6,7 +6,7 @@ import { classifySensitive, canHandoff, scrubPacket, validateRoutine, describeDe
 import { buildDeskPrompt, claimGoal, createDesk, decideGoal, emptyBoard, handoff, lastTrace, postGoal, releaseGoal, settleGoal, teachRoutine } from '../src/desk/board.js';
 import { classifyAsk, decideInFile, emptySentinel, parkSentinel, pollSentinel } from '../src/desk/sentinel.js';
 import { mapKeyCombo, x11ClickArgs } from '../src/tools/computer/linux.js';
-import { windowsClickScript, windowsSendKeys } from '../src/tools/computer/win.js';
+import { windowsClickScript, windowsKeyScript, windowsSendKeys } from '../src/tools/computer/win.js';
 import { handleDeskRequest } from '../src/desk/console.js';
 import { withConfiguredMcp } from '../src/desk/dispatch.js';
 import { getMCPManager } from '../src/mcp/manager.js';
@@ -299,6 +299,12 @@ describe('sentinel and desktop backends', () => {
     expect(x11ClickArgs(12, 40, 'left', 2)).toEqual(['mousemove', '--sync', '12', '40', 'click', '--repeat', '2', '--delay', '80', '1']);
     expect(windowsSendKeys('ctrl+s')).toBe('^s');
     expect(windowsSendKeys('super+r')).toBeNull();
+    const win = windowsKeyScript('win+e');
+    expect(win).toContain('0x5B');
+    expect(win).toContain('0x45');
+    expect(win).not.toContain('SendKeys');
+    expect(windowsKeyScript('win')).toBeNull();
+    expect(windowsKeyScript('ctrl+s')).toContain('SendKeys');
     const script = windowsClickScript(12, 40, 'left', 1);
     expect(script).toContain('SetCursorPos(12, 40)');
   });
