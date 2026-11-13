@@ -80,6 +80,11 @@ struct App {
     top: bool,
     goal: String,
     typed: String,
+    click_x: String,
+    click_y: String,
+    keys: String,
+    combo: String,
+    focus_app: String,
     shot: Option<egui::TextureHandle>,
     shot_at: Option<Instant>,
     last_poll: Instant,
@@ -96,6 +101,11 @@ impl App {
             top: false,
             goal: String::new(),
             typed: String::new(),
+            click_x: String::new(),
+            click_y: String::new(),
+            keys: String::new(),
+            combo: String::new(),
+            focus_app: String::new(),
             shot: None,
             shot_at: None,
             last_poll: Instant::now(),
@@ -238,6 +248,40 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("This machine");
+            ui.label("You are here, so these run now. The model still has to ask.");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.click_x).hint_text("x").desired_width(56.0));
+                ui.add(egui::TextEdit::singleline(&mut self.click_y).hint_text("y").desired_width(56.0));
+                if ui.button("Click").clicked() {
+                    let x = self.click_x.trim().to_string();
+                    let y = self.click_y.trim().to_string();
+                    self.act(&[("action", "operate"), ("kind", "click"), ("x", &x), ("y", &y)]);
+                }
+                if ui.button("Windows").clicked() { self.act(&[("action", "operate"), ("kind", "windows")]); }
+                if ui.button("Front").clicked() { self.act(&[("action", "operate"), ("kind", "front")]); }
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.keys).hint_text("Keys into the focused app").desired_width(220.0));
+                if ui.button("Keys").clicked() && !self.keys.is_empty() {
+                    let text = self.keys.clone();
+                    self.act(&[("action", "operate"), ("kind", "keystroke"), ("text", &text)]);
+                    self.keys.clear();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.combo).hint_text("ctrl+l").desired_width(120.0));
+                if ui.button("Combo").clicked() && !self.combo.trim().is_empty() {
+                    let combo = self.combo.trim().to_string();
+                    self.act(&[("action", "operate"), ("kind", "key"), ("combo", &combo)]);
+                }
+                ui.add(egui::TextEdit::singleline(&mut self.focus_app).hint_text("App or window").desired_width(140.0));
+                if ui.button("Focus").clicked() && !self.focus_app.trim().is_empty() {
+                    let app = self.focus_app.trim().to_string();
+                    self.act(&[("action", "operate"), ("kind", "focus"), ("app", &app)]);
+                }
+            });
+            ui.separator();
             ui.heading(format!("Controls  {}", self.live.controls.len()));
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.live.controls.is_empty() {

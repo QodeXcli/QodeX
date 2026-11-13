@@ -28,12 +28,17 @@ const deps = (over: Record<string, unknown> = {}) => ({
   readTree: async () => ({ ok: true as const, text: '' }),
   invoke: async () => ({ content: '' }),
   typeText: async () => ({ content: '' }),
+  click: async () => ({ content: '' }),
+  key: async () => ({ content: '' }),
+  typeFocus: async () => ({ content: '' }),
+  windows: async () => ({ content: '' }),
   shoot: async () => ({ ok: false as const, error: 'no' }),
   shotFile: () => null as string | null,
   setShot: () => {},
   decide: async () => ({ ok: true }),
   board: async () => ({ ok: true, message: 'queued' }),
   launch: async () => ({ ok: true, message: 'running ab12cd34' }),
+  operate: async () => ({ content: '' }),
   ...over,
 });
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.32.0 — 2026-11-13
+
+**The person at the machine can drive the screen.**
+
+From the native window and the loopback page: click a coordinate, type into the focused app, press a combo, list windows, and focus an app. Those run immediately, because the human is the one submitting them. The model still stops on `computer_use_click`, `computer_use_type`, and `computer_use_key`. A bad coordinate or a modifier-only combo is refused before anything is sent. This is not a shell.
+
+```
+src/desktop/operator.ts
+native/src/main.rs
+```
+
+
 ## v2.31.0 — 2026-11-13
 
 **The desktop has a native OS window.**

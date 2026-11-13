@@ -17,6 +17,7 @@ import { loadBoard, readAudit } from '../desk/store.js';
 import { readResidentStatus } from '../resident/loop.js';
 import { invokeNamed, readUiTree, typeNamed, type UiQuery } from '../tools/computer/access.js';
 import { ComputerUseScreenshotTool } from '../tools/computer/use.js';
+import { parseOperator, runOperator, type OperatorCommand } from './operator.js';
 
 export interface ShellRoute {
   status: number;
@@ -313,6 +314,44 @@ export function renderShellHtml(view: ShellView): string {
   <section style="padding:16px 18px">
     <h2>Controls <span id="shown">${view.controls.length}</span></h2>
     <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="operate"/>
+      <input type="hidden" name="kind" value="click"/>
+      <input name="x" inputmode="numeric" placeholder="x" aria-label="Click x" required style="max-width:5rem"/>
+      <input name="y" inputmode="numeric" placeholder="y" aria-label="Click y" required style="max-width:5rem"/>
+      <button>Click</button>
+    </form>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="operate"/>
+      <input type="hidden" name="kind" value="keystroke"/>
+      <input name="text" maxlength="2000" placeholder="Keys into the focused app" aria-label="Keystroke" required/>
+      <button class="ghost">Keys</button>
+    </form>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="operate"/>
+      <input type="hidden" name="kind" value="key"/>
+      <input name="combo" placeholder="ctrl+l" aria-label="Key combo" required/>
+      <button class="ghost">Combo</button>
+    </form>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="operate"/>
+      <input type="hidden" name="kind" value="focus"/>
+      <input name="app" placeholder="App or window" aria-label="Focus app" required/>
+      <button class="ghost">Focus</button>
+    </form>
+    <div class="pair">
+      <form method="post" action="/act?k=${view.token}">
+        <input type="hidden" name="action" value="operate"/>
+        <input type="hidden" name="kind" value="windows"/>
+        <button class="ghost">Windows</button>
+      </form>
+      <form method="post" action="/act?k=${view.token}">
+        <input type="hidden" name="action" value="operate"/>
+        <input type="hidden" name="kind" value="front"/>
+        <button class="ghost">Front</button>
+      </form>
+    </div>
+    <p class="muted">You are at this machine, so click, keys, and focus run now. The model still has to ask. This is not a shell.</p>
+    <form class="stack" method="post" action="/act?k=${view.token}">
       <input type="hidden" name="action" value="tree"/>
       <input name="app" placeholder="App name, optional" aria-label="App name"/>
       <button>Read tree</button>
@@ -332,6 +371,30 @@ export function renderShellHtml(view: ShellView): string {
     <form method="post" action="/act?k=${view.token}" style="margin-top:12px">
       <input type="hidden" name="action" value="shot"/>
       <button>Screenshot</button>
+    </form>
+    <form method="post" action="/act?k=${view.token}" style="margin-top:8px">
+      <input type="hidden" name="action" value="windows"/>
+      <button class="ghost">Windows</button>
+    </form>
+    <h2>Pointer</h2>
+    <p class="muted">You are at this machine, so this does not ask again. A pixel click can send, spend, or delete. The agent still asks.</p>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="click"/>
+      <input name="x" inputmode="numeric" required placeholder="x" aria-label="Click x"/>
+      <input name="y" inputmode="numeric" required placeholder="y" aria-label="Click y"/>
+      <input name="button" value="left" aria-label="Button"/>
+      <input name="count" value="1" aria-label="Count"/>
+      <button>Click</button>
+    </form>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="key"/>
+      <input name="combo" required placeholder="ctrl+l" aria-label="Key combo"/>
+      <button class="ghost">Key</button>
+    </form>
+    <form class="stack" method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="focus"/>
+      <input name="text" maxlength="500" required placeholder="Type into the focused field" aria-label="Type into focus"/>
+      <button class="ghost">Focus</button>
     </form>
     <label class="live" for="live-screen"><input id="live-screen" type="checkbox"/> Live — a new shot of this machine every 2s. Off until you check it.</label>
   </section>
@@ -527,6 +590,7 @@ export interface ShellDeps {
   readTree: (app?: string) => Promise<{ ok: true; text: string; nodes?: ShellControl[]; capped?: boolean } | { ok: false; error: string }>;
   invoke: (query: UiQuery) => Promise<{ content: string; isError?: boolean }>;
   typeText: (query: UiQuery, text: string) => Promise<{ content: string; isError?: boolean }>;
+  operate: (command: OperatorCommand) => Promise<{ content: string; isError?: boolean }>;
   shoot: () => Promise<{ ok: true; file: string } | { ok: false; error: string }>;
   shotFile: () => string | null;
   setShot: (file: string) => void;
@@ -548,6 +612,7 @@ export function defaultShellDeps(state: { shot: string | null }): ShellDeps {
     readTree: readUiTree,
     invoke: invokeNamed,
     typeText: typeNamed,
+    operate: runOperator,
     shoot: defaultShoot,
     shotFile: () => state.shot,
     setShot: file => { state.shot = file; },
@@ -591,6 +656,13 @@ export async function handleShell(opts: {
     } else if (form.action === 'type') {
       const typed = await opts.deps.typeText({ name: form.name ?? '', role: form.role, app: form.app }, form.text ?? '');
       view = { ...view, result: typed.content };
+    } else if (form.action === 'operate') {
+      const parsed = parseOperator(form);
+      if (!parsed.ok) view = { ...view, result: `refused: ${parsed.error}` };
+      else {
+        const ran = await opts.deps.operate(parsed.command);
+        view = { ...view, result: ran.content };
+      }
     } else if (form.action === 'shot') {
       const shot = await opts.deps.shoot();
       if (shot.ok) opts.deps.setShot(shot.file);
