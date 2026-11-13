@@ -278,6 +278,8 @@ export interface QodexConfig {
     signal?: { enabled?: boolean; allowedUsers?: string[] };
     /** Matrix Client-Server API. Homeserver and access token in ~/.qodex/.env. */
     matrix?: { enabled?: boolean; allowedUsers?: string[] };
+    /** IMAP + SMTP on the user's own mail server. Secrets in ~/.qodex/.env. */
+    email?: { enabled?: boolean; allowedUsers?: string[] };
   };
   mcp: {
     servers: Record<string, {
@@ -817,6 +819,7 @@ export const DEFAULT_CONFIG: QodexConfig = {
     whatsapp: { enabled: false, allowedUsers: [] },
     signal: { enabled: false, allowedUsers: [] },
     matrix: { enabled: false, allowedUsers: [] },
+    email: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

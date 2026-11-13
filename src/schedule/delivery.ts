@@ -16,21 +16,22 @@
 import { logger } from '../utils/logger.js';
 
 export interface DeliveryTarget {
-  platform: 'telegram' | 'discord' | 'slack' | 'matrix';
+  platform: 'telegram' | 'discord' | 'slack' | 'matrix' | 'email';
   chatId: string;
 }
 
-const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000, slack: 3000, matrix: 4000 };
+const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000, slack: 3000, matrix: 4000, email: 8000 };
 
-/** Parse a `telegram:<id>` / `discord:<id>` / `slack:<id>` / `matrix:!<room>:<server>` target. Returns null when malformed. PURE. */
+/** Parse a chat target. `email:` must be an address. `matrix:` must be a room id. PURE. */
 export function parseDeliveryTarget(s: string | undefined | null): DeliveryTarget | null {
   if (!s) return null;
-  const m = /^\s*(telegram|discord|slack|matrix)\s*:\s*(\S.*?)\s*$/i.exec(s);
+  const m = /^\s*(telegram|discord|slack|matrix|email)\s*:\s*(\S.*?)\s*$/i.exec(s);
   if (!m) return null;
   const platform = m[1]!.toLowerCase() as DeliveryTarget['platform'];
   const chatId = m[2]!;
   if (platform === 'matrix' && !/^![^:\s]+:[^\s]+$/.test(chatId)) return null;
-  return { platform, chatId };
+  if (platform === 'email' && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(chatId)) return null;
+  return { platform, chatId: platform === 'email' ? chatId.toLowerCase() : chatId };
 }
 
 /** Build the chat summary for a finished run. PURE. Pulls out a recipe's final status line
@@ -107,6 +108,29 @@ export async function deliverRun(target: DeliveryTarget, text: string): Promise<
       if (!base) { logger.warn('schedule delivery skipped: MATRIX_HOMESERVER is not an https origin'); return false; }
       const sent = await new MatrixTransport({ base, token }).send(target.chatId, body);
       return Boolean(sent.id);
+    }
+    if (target.platform === 'email') {
+      const from = process.env.EMAIL_FROM;
+      const host = process.env.SMTP_HOST;
+      const user = process.env.SMTP_USER || process.env.IMAP_USER;
+      const password = process.env.SMTP_PASSWORD || process.env.IMAP_PASSWORD;
+      if (!from || !host || !user || !password) { logger.warn('schedule delivery skipped: email SMTP settings missing'); return false; }
+      const { mailEndpoint, parseAddress, buildSmtpData } = await import('../bot/email/parse.js');
+      const { smtpSend } = await import('../bot/email/wire.js');
+      const sender = parseAddress(from);
+      const tls = process.env.SMTP_TLS === '0' ? false : process.env.SMTP_TLS === '1' ? true : undefined;
+      const endpoint = sender ? mailEndpoint(host, Number(process.env.SMTP_PORT || 465), tls) : null;
+      if (!sender || !endpoint) { logger.warn('schedule delivery skipped: email sender or host is invalid'); return false; }
+      const { randomBytes } = await import('crypto');
+      const data = buildSmtpData({
+        from: sender,
+        to: target.chatId,
+        subject: 'QodeX',
+        text: body,
+        messageId: `<${randomBytes(8).toString('hex')}@${sender.split('@')[1]}>`,
+      });
+      await smtpSend({ ...endpoint, user, password, from: sender, to: target.chatId, data });
+      return true;
     }
     // slack — chat.postMessage (Web API), bot token from SLACK_BOT_TOKEN
     const token = process.env.SLACK_BOT_TOKEN;

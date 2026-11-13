@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.28.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.29.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -565,6 +565,12 @@ echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
 #   Matrix Client-Server API (your homeserver, your access token — not E2EE):
 #   echo 'MATRIX_HOMESERVER=https://matrix.example' >> ~/.qodex/.env
 #   echo 'MATRIX_ACCESS_TOKEN=syt_...' >> ~/.qodex/.env
+#   Email is IMAP + SMTP on your server (not a webmail login):
+#   echo 'EMAIL_FROM=me@example.com' >> ~/.qodex/.env
+#   echo 'IMAP_HOST=imap.example.com' >> ~/.qodex/.env
+#   echo 'IMAP_USER=me@example.com' >> ~/.qodex/.env
+#   echo 'IMAP_PASSWORD=...' >> ~/.qodex/.env
+#   echo 'SMTP_HOST=smtp.example.com' >> ~/.qodex/.env
 
 # 2. enable the platform + allowlist your user id (deny-by-default) in config
 #    bot:
@@ -574,6 +580,7 @@ echo 'TELEGRAM_BOT_TOKEN=123:abc' >> ~/.qodex/.env
 #      whatsapp: { enabled: true, allowedUsers: ["15551234567"] }          # digits, no +
 #      signal:   { enabled: true, allowedUsers: ["+15551234567"] }
 #      matrix:   { enabled: true, allowedUsers: ["@you:matrix.example"] }
+#      email:    { enabled: true, allowedUsers: ["you@example.com"] }
 
 # 3. run it from the project directory you want it to work in
 #    Prefer --profile cloud + runtime.backend: docker so a sofa-command cannot rm ~
@@ -581,9 +588,10 @@ qodex bot                 # all enabled platforms
 qodex bot --whatsapp
 qodex bot --signal
 qodex bot --matrix
+qodex bot --email
 ```
 
-WhatsApp Cloud API needs a **public HTTPS webhook** (Cloudflare Tunnel / `qodex tunnel`) pointed at `http://127.0.0.1:8787` (`WHATSAPP_WEBHOOK_PORT`). Signal talks to **your** `signal-cli` over JSON-RPC — we never log in as you on a third-party server. Matrix talks to **your** homeserver with the Client-Server API (`/_matrix/client/v3`). The first sync is only a cursor, so old history is not replayed. Encrypted rooms are skipped, not claimed as read.
+WhatsApp Cloud API needs a **public HTTPS webhook** (Cloudflare Tunnel / `qodex tunnel`) pointed at `http://127.0.0.1:8787` (`WHATSAPP_WEBHOOK_PORT`). Signal talks to **your** `signal-cli` over JSON-RPC — we never log in as you on a third-party server. Matrix talks to **your** homeserver with the Client-Server API (`/_matrix/client/v3`). The first sync is only a cursor, so old history is not replayed. Encrypted rooms are skipped, not claimed as read. Email talks to **your** IMAP and SMTP servers. The first poll only stores `UIDNEXT`, so mail already in the box is not answered and not marked read. A stream of edits becomes one letter. Cleartext is refused except to localhost.
 
 One transport-agnostic gateway does all the work; the platform adapters are thin — **Telegram** and **WhatsApp Cloud** need zero extra npm packages, **Discord** / **Slack** are optional lazy-loaded deps, **Signal** needs a local `signal-cli` daemon. Adding a platform is one adapter implementing the same `Transport` seam, so behaviour never drifts between them.
 

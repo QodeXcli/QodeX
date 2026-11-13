@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.29.0 — 2026-11-13
+
+**Email is IMAP in and one SMTP letter out.**
+
+`qodex bot --email` reads the inbox on `IMAP_HOST` and sends through `SMTP_HOST`. The account is yours. The first poll stores `UIDNEXT` and does not replay or mark old mail. A new letter is fetched, then marked seen. Multipart mail uses the plain part. HTML-only mail is stripped to text. Streaming edits collapse into one letter, because SMTP cannot edit a message. Cleartext is refused except to localhost. There is no Gmail OAuth client and no webmail scraper.
+
+```
+src/bot/adapters/email.ts
+src/bot/email/parse.ts
+src/bot/email/wire.ts
+```
+
+
 ## v2.28.0 — 2026-11-13
 
 **Matrix is a real adapter.**

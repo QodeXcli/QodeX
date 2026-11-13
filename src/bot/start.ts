@@ -23,7 +23,7 @@ export interface StartBotsDeps {
   permissions: PermissionEngine;
   cwd?: string;
 }
-export type BotPlatformFlag = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal' | 'matrix';
+export type BotPlatformFlag = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal' | 'matrix' | 'email';
 export interface StartBotsOptions {
   telegram?: boolean;
   discord?: boolean;
@@ -31,6 +31,7 @@ export interface StartBotsOptions {
   whatsapp?: boolean;
   signal?: boolean;
   matrix?: boolean;
+  email?: boolean;
 }
 
 export interface OpenedBots {
@@ -49,8 +50,9 @@ export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {})
     whatsapp: { allowedUsers: botCfg.whatsapp?.allowedUsers ?? [] },
     signal: { allowedUsers: botCfg.signal?.allowedUsers ?? [] },
     matrix: { allowedUsers: botCfg.matrix?.allowedUsers ?? [] },
+    email: { allowedUsers: botCfg.email?.allowedUsers ?? [] },
   };
-  const anyFlag = !!(opts.telegram || opts.discord || opts.slack || opts.whatsapp || opts.signal || opts.matrix);
+  const anyFlag = !!(opts.telegram || opts.discord || opts.slack || opts.whatsapp || opts.signal || opts.matrix || opts.email);
   const want = (p: BotPlatformFlag) => !anyFlag || !!opts[p];
 
   const transports: Transport[] = [];
@@ -123,6 +125,37 @@ export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {})
         const base = await resolveMatrixBase(homeserver);
         transports.push(new MatrixTransport({ base, token }));
       } catch (e: any) { notes.push(e?.message ?? 'matrix transport failed'); }
+    }
+  }
+
+  if (want('email') && (botCfg.email?.enabled ?? false)) {
+    const from = process.env.EMAIL_FROM;
+    const imapHost = process.env.IMAP_HOST;
+    const smtpHost = process.env.SMTP_HOST;
+    const user = process.env.IMAP_USER;
+    const password = process.env.IMAP_PASSWORD;
+    const smtpUser = process.env.SMTP_USER || user;
+    const smtpPassword = process.env.SMTP_PASSWORD || password;
+    if (!from || !imapHost || !smtpHost || !user || !password || !smtpUser || !smtpPassword) {
+      notes.push('email is enabled but EMAIL_FROM / IMAP_HOST / SMTP_HOST / IMAP_USER / IMAP_PASSWORD is missing — add them to ~/.qodex/.env');
+    } else if (!allow.email!.allowedUsers!.length) {
+      notes.push('email allowlist is empty — set bot.email.allowedUsers to the addresses that may command this machine');
+    } else {
+      try {
+        const { EmailTransport } = await import('./adapters/email.js');
+        const { mailEndpoint } = await import('./email/parse.js');
+        const tlsFlag = (raw: string | undefined) => raw === '0' ? false : raw === '1' ? true : undefined;
+        const imap = mailEndpoint(imapHost, Number(process.env.IMAP_PORT || 993), tlsFlag(process.env.IMAP_TLS));
+        const smtp = mailEndpoint(smtpHost, Number(process.env.SMTP_PORT || 465), tlsFlag(process.env.SMTP_TLS));
+        if (!imap || !smtp) notes.push('email host must be a hostname. Cleartext is only allowed to localhost.');
+        else {
+          transports.push(new EmailTransport({
+            from,
+            imap: { ...imap, user, password },
+            smtp: { ...smtp, user: smtpUser, password: smtpPassword },
+          }));
+        }
+      } catch (e: any) { notes.push(e?.message ?? 'email transport failed'); }
     }
   }
 

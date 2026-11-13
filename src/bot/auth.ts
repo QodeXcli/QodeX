@@ -16,11 +16,12 @@ export interface AllowConfig {
   whatsapp?: { allowedUsers?: string[] };
   signal?: { allowedUsers?: string[] };
   matrix?: { allowedUsers?: string[] };
+  email?: { allowedUsers?: string[] };
 }
 
 export function isAuthorized(platform: Platform, userId: string, allow: AllowConfig): boolean {
   const list = allow[platform]?.allowedUsers;
   if (!list || list.length === 0) return false;          // no allowlist ⇒ nobody
-  const id = String(userId);
-  return list.includes('*') || list.includes(id);
+  const id = platform === 'email' ? String(userId).trim().toLowerCase() : String(userId);
+  return list.includes('*') || list.some(item => (platform === 'email' ? item.toLowerCase() : item) === id);
 }

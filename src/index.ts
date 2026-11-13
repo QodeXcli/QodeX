@@ -734,14 +734,15 @@ profileCmd
 
 program
   .command('bot')
-  .description('Run the chat front-end (Telegram / Discord / Slack / WhatsApp Cloud / Signal / Matrix)')
+  .description('Run the chat front-end (Telegram / Discord / Slack / WhatsApp Cloud / Signal / Matrix / Email)')
   .option('--telegram', 'start only Telegram')
   .option('--discord', 'start only Discord')
   .option('--slack', 'start only Slack')
   .option('--whatsapp', 'start only WhatsApp Cloud API')
   .option('--signal', 'start only signal-cli')
   .option('--matrix', 'start only Matrix')
-  .action(async (opts: { telegram?: boolean; discord?: boolean; slack?: boolean; whatsapp?: boolean; signal?: boolean; matrix?: boolean }) => {
+  .option('--email', 'start only IMAP/SMTP')
+  .action(async (opts: { telegram?: boolean; discord?: boolean; slack?: boolean; whatsapp?: boolean; signal?: boolean; matrix?: boolean; email?: boolean }) => {
     const { config, router, registry, permissions } = await bootstrap();
     const { startBots } = await import('./bot/start.js');
     await startBots({ config, router, registry, permissions, cwd: process.cwd() }, opts);

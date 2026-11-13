@@ -11,7 +11,7 @@ shell). The distance that still mattered is below.
 
 | Gap | Why it matters |
 | --- | --- |
-| Messaging breadth | Hermes reaches more channels (email, and others). QodeX now has Matrix as well as Telegram, Discord, Slack, WhatsApp, and Signal. Matrix is the Client-Server API on the homeserver you name, with your access token. Encrypted rooms are not decrypted. Email is still not an adapter. |
+| Messaging breadth | Hermes still reaches more odd channels. QodeX speaks Telegram, Discord, Slack, WhatsApp, Signal, Matrix, and email. Email is IMAP and SMTP on the server you name, not a Gmail login and not a scraped inbox. Matrix does not decrypt encrypted rooms. |
 | Always-on | `qodex up` fires schedules, drains desk goals, and attaches the chat adapters you configured. Each desk child starts the MCP servers already in your config and stops them when the goal exits. Hermes still reaches more channels. |
 | Model-written skill evolution | Hermes rewrites a skill and keeps the version it prefers. `qodex skill rewrite` only stores a candidate. The active file is not replaced, and a model liking the prose is not a promotion. |
 
