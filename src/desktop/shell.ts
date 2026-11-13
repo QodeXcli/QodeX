@@ -1,7 +1,7 @@
 /**
  * QodeX Desktop — the local operator window on 127.0.0.1.
  * It assigns a goal, allows a held one, reads the accessibility tree, and
- * presses one named control, or starts the next runnable goal. It does not
+ * presses or fills one named control, or starts the next runnable goal. It does not
  * call a model itself — Run next uses the same desk agent as `qodex desk run`.
  */
 import * as http from 'http';
@@ -15,7 +15,7 @@ import { launchDesk } from '../desk/launch.js';
 import { listPending, decideSentinel } from '../desk/sentinel.js';
 import { loadBoard, readAudit } from '../desk/store.js';
 import { readResidentStatus } from '../resident/loop.js';
-import { invokeNamed, readUiTree, type UiQuery } from '../tools/computer/access.js';
+import { invokeNamed, readUiTree, typeNamed, type UiQuery } from '../tools/computer/access.js';
 import { ComputerUseScreenshotTool } from '../tools/computer/use.js';
 
 export interface ShellRoute {
@@ -134,6 +134,7 @@ function controlRows(view: ShellView): string {
         <div class="who"><span class="chip">${escapeHtml(c.role || 'control')}</span>${off}<strong>${escapeHtml(c.name)}</strong></div>
         <div class="where">${escapeHtml(c.app || 'app')} · ${c.x},${c.y} · ${c.w}×${c.h}${value ? ' · ' + value : ''}</div>
       </div>
+      <div class="acts">
       <form method="post" action="/act?k=${view.token}">
         <input type="hidden" name="action" value="invoke"/>
         <input type="hidden" name="name" value="${escapeHtml(c.name)}"/>
@@ -141,6 +142,15 @@ function controlRows(view: ShellView): string {
         <input type="hidden" name="app" value="${escapeHtml(c.app)}"/>
         <button>Press</button>
       </form>
+      <form class="typeform" method="post" action="/act?k=${view.token}">
+        <input type="hidden" name="action" value="type"/>
+        <input type="hidden" name="name" value="${escapeHtml(c.name)}"/>
+        <input type="hidden" name="role" value="${escapeHtml(c.role)}"/>
+        <input type="hidden" name="app" value="${escapeHtml(c.app)}"/>
+        <input name="text" maxlength="500" required placeholder="One line" aria-label="Type into ${escapeHtml(c.name)}"/>
+        <button class="ghost">Type</button>
+      </form>
+      </div>
     </article>`;
   }).join('');
 }
@@ -236,6 +246,9 @@ export function renderShellHtml(view: ShellView): string {
   button { background:var(--accent); color:#1a1c0c; border:0; padding:8px 12px; font-weight:650; cursor:pointer; }
   button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
   .row, .wait { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid var(--line); }
+  .acts { display:flex; flex-direction:column; gap:6px; align-items:stretch; }
+  .typeform { display:flex; gap:6px; }
+  .typeform input { width: 9rem; }
   .who { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
   .where, .prompt, .muted, .note { color:var(--muted); }
   .chip { font-size:11px; letter-spacing:0.04em; text-transform:uppercase; border:1px solid var(--line); padding:1px 6px; color:var(--muted); }
@@ -275,7 +288,7 @@ export function renderShellHtml(view: ShellView): string {
     <h2>Waiting</h2>
     <div id="waits">${waitRows(view)}</div>
     <p class="note">${escapeHtml(view.note)}</p>
-    <p class="muted">Assign, allow, press, and Run next are you. A sensitive goal stays held until you allow it. Run next starts the same agent as <code>qodex desk run</code>. The page itself does not answer.</p>
+    <p class="muted">Assign, allow, press, type, and Run next are you. Type sets that control's value. It does not send keys to whatever else is focused. A sensitive goal stays held until you allow it.</p>
     <h2>Audit</h2>
     <div id="audit">${auditBlock(view)}</div>
   </aside>
@@ -302,6 +315,7 @@ export function renderShellHtml(view: ShellView): string {
       <input type="hidden" name="action" value="shot"/>
       <button>Screenshot</button>
     </form>
+    <label class="live" for="live-screen"><input id="live-screen" type="checkbox"/> Live — a new shot of this machine every 2s. Off until you check it.</label>
   </section>
 </main>
 <script>
@@ -447,6 +461,29 @@ export function renderShellHtml(view: ShellView): string {
     });
   }
   setInterval(tick, 2000);
+  var screen = document.getElementById('live-screen');
+  var stage = document.querySelector('.stage');
+  if (screen && stage) {
+    setInterval(function () {
+      if (!screen.checked) return;
+      fetch('/act?k=' + encodeURIComponent(token), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'action=shot',
+        redirect: 'manual',
+      }).then(function () {
+        var img = stage.querySelector('img');
+        if (!img) {
+          img = document.createElement('img');
+          img.alt = 'This machine, just now';
+          stage.insertBefore(img, screen.parentNode);
+        }
+        img.src = '/shot?k=' + encodeURIComponent(token) + '&t=' + Date.now();
+      }).catch(function () {
+        if (live) live.textContent = 'Screenshot failed. The page is still this machine.';
+      });
+    }, 2000);
+  }
 })();
 document.addEventListener('keydown', function (e) {
   if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -471,6 +508,7 @@ function parseForm(raw: string): Record<string, string> {
 export interface ShellDeps {
   readTree: (app?: string) => Promise<{ ok: true; text: string; nodes?: ShellControl[]; capped?: boolean } | { ok: false; error: string }>;
   invoke: (query: UiQuery) => Promise<{ content: string; isError?: boolean }>;
+  typeText: (query: UiQuery, text: string) => Promise<{ content: string; isError?: boolean }>;
   shoot: () => Promise<{ ok: true; file: string } | { ok: false; error: string }>;
   shotFile: () => string | null;
   setShot: (file: string) => void;
@@ -491,6 +529,7 @@ export function defaultShellDeps(state: { shot: string | null }): ShellDeps {
   return {
     readTree: readUiTree,
     invoke: invokeNamed,
+    typeText: typeNamed,
     shoot: defaultShoot,
     shotFile: () => state.shot,
     setShot: file => { state.shot = file; },
@@ -531,6 +570,9 @@ export async function handleShell(opts: {
     } else if (form.action === 'invoke') {
       const pressed = await opts.deps.invoke({ name: form.name ?? '', role: form.role, app: form.app });
       view = { ...view, result: pressed.content };
+    } else if (form.action === 'type') {
+      const typed = await opts.deps.typeText({ name: form.name ?? '', role: form.role, app: form.app }, form.text ?? '');
+      view = { ...view, result: typed.content };
     } else if (form.action === 'shot') {
       const shot = await opts.deps.shoot();
       if (shot.ok) opts.deps.setShot(shot.file);

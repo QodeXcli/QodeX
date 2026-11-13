@@ -29,7 +29,7 @@
 
 import type { ToolCall } from '../llm/types.js';
 
-const GLOBAL_TOOLS = new Set(['bash', 'code_run', 'auto_fix', 'computer_use_screenshot', 'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_tree', 'computer_use_invoke', 'http_request', 'db_query', 'browser_navigate', 'browser_click', 'browser_fill', 'browser_evaluate', 'dev_server_start', 'dev_server_stop', 'dev_server_restart']);
+const GLOBAL_TOOLS = new Set(['bash', 'code_run', 'auto_fix', 'computer_use_screenshot', 'computer_use_click', 'computer_use_type', 'computer_use_key', 'computer_use_tree', 'computer_use_invoke', 'computer_use_set_value', 'http_request', 'db_query', 'browser_navigate', 'browser_click', 'browser_fill', 'browser_evaluate', 'dev_server_start', 'dev_server_stop', 'dev_server_restart']);
 const BROAD_TOOLS = new Set(['multi_file_edit', 'safe_rename', 'safe_delete_file']);
 
 function extractPaths(args: any): string[] | null {

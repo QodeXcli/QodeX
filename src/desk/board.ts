@@ -378,7 +378,7 @@ export function buildDeskPrompt(input: {
     others,
     'Known routines (follow one only when it matches the goal; do not invent extra steps):',
     routines,
-    `Screen control: GUI backend is "${input.desktop.gui}". ${input.desktop.note} Prefer computer_use_tree and computer_use_invoke (one named control, then a second read that says whether it changed). Blind click, type, and key also pause until \`qodex desk allow-call\` (or the local console) and then they run.`,
+    `Screen control: GUI backend is "${input.desktop.gui}". ${input.desktop.note} Prefer computer_use_tree and computer_use_invoke (one named control, then a second read that says whether it changed). Fill a named field with computer_use_set_value — that sets the control's value and does not type into whatever else is focused. Blind click, type, and key also pause until \`qodex desk allow-call\` (or the local console) and then they run.`,
     gate,
     'Irreversible shell (rm -rf, force-push, format, publish) also pauses on the sentinel. It runs only after that exact call is allowed.',
     `Goal: ${input.goal.text}`,

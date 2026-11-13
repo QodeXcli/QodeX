@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.30.0 — 2026-11-13
+
+**The desktop window can fill a named field, and the screen can go live.**
+
+Type sets that control's value. The characters are not pasted into the script and they are not keystrokes to whatever else is focused. A control with no value pattern errors. After the write, the tree is read again. If the field does not show the text, the result is unverified. The agent's `computer_use_set_value` still waits on the sentinel. The person at the window does not. Live is off until checked. Then this machine is shot every two seconds. It is not a video stream and it is not a remote browser.
+
+```
+src/tools/computer/access.ts
+src/desktop/shell.ts
+```
+
+
 ## v2.29.0 — 2026-11-13
 
 **Email is IMAP in and one SMTP letter out.**

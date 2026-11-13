@@ -108,7 +108,29 @@ export function findSame(nodes: UiNode[], before: UiNode): UiNode | null {
   return hits.find(n => n.x === before.x && n.y === before.y) ?? hits[0]!;
 }
 
-/** gone = the control left the tree. changed = bounds, enabled, name, or value moved. same = not verified. */
+/** One line, kept out of the script so a quote cannot become code. */
+export function assertTypeText(text: string): string | null {
+  if (text.length < 1 || text.length > 500) return 'text must be 1–500 characters';
+  if (/[\u0000-\u001F]/.test(text)) return 'one line — control characters are not typed into a named field';
+  return null;
+}
+
+/** The field shows the text, or its value changed. Gone or unchanged is not success. */
+export function verifyTyped(before: UiNode, after: UiNode | null, text: string): 'verified' | 'gone' | 'same' {
+  if (!after) return 'gone';
+  const want = text.replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (want && after.value.replace(/\s+/g, ' ').includes(want)) return 'verified';
+  if (after.value !== before.value && after.value.trim() !== '') return 'verified';
+  return 'same';
+}
+
+export function parseTypeLine(raw: string): { ok: true } | { ok: false; error: string } {
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const line = [...lines].reverse().find(l => l.startsWith('OK\t') || l.startsWith('ERR\t')) ?? '';
+  if (line === 'OK\tvalue') return { ok: true };
+  if (line.startsWith('ERR\t')) return { ok: false, error: line.slice(4).trim() || 'type failed' };
+  return { ok: false, error: raw.trim().slice(0, 240) || 'type produced no result' };
+}
 export function verifyInvoke(before: UiNode, after: UiNode | null): 'gone' | 'changed' | 'same' {
   if (!after) return 'gone';
   if (
@@ -256,6 +278,27 @@ return "OK" & tab & "action"
 `;
 }
 
+/** Sets the value of the one matching element. The text arrives in QODEX_UI_TEXT, never in this source. */
+export function macosTypeScript(app: string, name: string, role?: string): string {
+  const roleClause = role?.trim() ? ` and role contains "${escAs(role.trim())}"` : '';
+  return `set typed to system attribute "QODEX_UI_TEXT"
+if typed is missing value or typed is "" then error "QODEX_TEXT"
+tell application "System Events"
+  tell process "${escAs(app)}"
+    set hits to {}
+    repeat with w in windows
+      try
+        set hits to hits & (every UI element of w whose name contains "${escAs(name)}"${roleClause})
+      end try
+    end repeat
+    if (count of hits) is not 1 then error "QODEX_MATCH " & (count of hits)
+    set value of item 1 of hits to typed
+  end tell
+end tell
+return "OK" & tab & "value"
+`;
+}
+
 export function windowsTreeScript(): string {
   return `
 $ErrorActionPreference = 'Stop'
@@ -362,6 +405,56 @@ Write-Output "OK\`tcenter"
 `;
 }
 
+/** Sets ValuePattern. The characters are $env:QODEX_UI_TEXT, not part of the script. */
+export function windowsTypeScript(name: string, role?: string, app?: string): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  return `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$typed = $env:QODEX_UI_TEXT
+if ([string]::IsNullOrEmpty($typed)) { Write-Output "ERR\`tempty text"; exit 2 }
+$needle = ${q(name)}
+$role = ${q(role?.trim() ?? '')}
+$appf = ${q(app?.trim() ?? '')}
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$script:hits = @()
+function ProcName($el) {
+  try { return (Get-Process -Id $el.Current.ProcessId -ErrorAction Stop).ProcessName } catch { return '' }
+}
+function Walk($el, $depth) {
+  if ($null -eq $el -or $depth -gt 8 -or $script:hits.Count -gt 1) { return }
+  try {
+    $name = [string]$el.Current.Name
+    $type = [string]$el.Current.ControlType.ProgrammaticName
+    $proc = ProcName $el
+    $ok = $name -and ($name.ToLower().Contains($needle.ToLower()))
+    if ($role -and ($type.ToLower() -notlike "*$($role.ToLower())*")) { $ok = $false }
+    if ($appf -and ($proc.ToLower() -ne $appf.ToLower())) { $ok = $false }
+    if ($ok) { $script:hits += $el }
+  } catch {}
+  $child = $walker.GetFirstChild($el)
+  while ($null -ne $child) {
+    Walk $child ($depth + 1)
+    $child = $walker.GetNextSibling($child)
+  }
+}
+Walk ([System.Windows.Automation.AutomationElement]::RootElement) 0
+if ($script:hits.Count -ne 1) { Write-Output "ERR\`tQODEX_MATCH $($script:hits.Count)"; exit 2 }
+$el = $script:hits[0]
+try { $el.SetFocus() } catch {}
+try {
+  $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+  $vp.SetValue($typed)
+  Write-Output "OK\`tvalue"
+  exit 0
+} catch {
+  Write-Output "ERR\`tno value pattern"
+  exit 3
+}
+`;
+}
+
 /** Reads AT-SPI. QODEX_UI_NAME set means invoke; unset means dump the tree. */
 export function linuxAtspiScript(): string {
   return `import os, gi
@@ -369,6 +462,7 @@ gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
 Atspi.init()
 CAP = ${UI_CAP}
+typed = os.environ.get("QODEX_UI_TEXT", "")
 needle = os.environ.get("QODEX_UI_NAME", "").strip().lower()
 role_f = os.environ.get("QODEX_UI_ROLE", "").strip().lower()
 app_f = os.environ.get("QODEX_UI_APP", "").strip().lower()
@@ -452,6 +546,21 @@ if needle:
         print("ERR\\tQODEX_MATCH %d" % len(hits))
         raise SystemExit(2)
     acc = hits[0]
+    if typed:
+        try:
+            editable = acc.get_editable_text()
+        except Exception:
+            editable = None
+        if editable is None:
+            print("ERR\\tno editable text")
+            raise SystemExit(3)
+        try:
+            editable.set_text_contents(typed)
+        except Exception as exc:
+            print("ERR\\t%s" % clean(str(exc), 160))
+            raise SystemExit(3)
+        print("OK\\tvalue")
+        raise SystemExit(0)
     acted = False
     try:
         action = acc.get_action()
@@ -608,6 +717,65 @@ export async function invokeNamed(query: UiQuery): Promise<ToolResult> {
   return { content: `${head}\nunverified: the control still looks the same. Do not claim it worked.`, isError: true };
 }
 
+async function writeValue(node: UiNode, query: UiQuery, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const platform = os.platform();
+  const env = { ...process.env, QODEX_UI_TEXT: text };
+  if (platform === 'darwin') {
+    const ran = await run('osascript', ['-'], { stdin: macosTypeScript(node.app, query.name.trim(), query.role), env, timeoutMs: 15_000 });
+    if (ran.code !== 0 && !ran.stdout.includes('OK\t')) return { ok: false, error: ran.stderr.trim() || ran.stdout.trim() || `osascript exited ${ran.code}` };
+    return parseTypeLine(ran.stdout);
+  }
+  if (platform === 'win32') {
+    const ran = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', windowsTypeScript(query.name.trim(), query.role, query.app?.trim() || node.app)], { env, timeoutMs: 20_000 });
+    return parseTypeLine(ran.stdout + '\n' + ran.stderr);
+  }
+  if (platform === 'linux') {
+    const file = path.join(os.tmpdir(), `qodex-atspi-${process.pid}.py`);
+    await fs.writeFile(file, linuxAtspiScript(), 'utf-8');
+    const ran = await run('python3', [file], {
+      timeoutMs: 20_000,
+      env: {
+        ...env,
+        QODEX_UI_NAME: query.name.trim(),
+        QODEX_UI_ROLE: query.role?.trim() ?? '',
+        QODEX_UI_APP: query.app?.trim() || node.app,
+      },
+    });
+    return parseTypeLine(ran.stdout + '\n' + ran.stderr);
+  }
+  return { ok: false, error: `no accessibility backend for ${platform}` };
+}
+
+/**
+ * Set the value of one named control. No keystrokes into whatever else is focused.
+ * A field that does not expose a value is an error, not a claimed type.
+ */
+export async function typeNamed(query: UiQuery, text: string): Promise<ToolResult> {
+  const bad = assertQuery(query.name, query.app, query.role) ?? assertTypeText(text);
+  if (bad) return { content: `[COMPUTER_USE_ERROR] ${bad}`, isError: true };
+  const dumped = await dumpTree(query.app);
+  if (!dumped.ok) return { content: `[COMPUTER_USE_ERROR] ${dumped.error}`, isError: true };
+  const tree = parseUiTree(dumped.text);
+  const picked = pickControl(tree.nodes, query);
+  if (!picked.ok) {
+    const list = picked.matches.slice(0, 8).map(n => `[${n.role}] ${n.name} — ${n.app}`).join('\n');
+    return { content: `[COMPUTER_USE_ERROR] ${picked.reason}${list ? `\n${list}` : ''}`, isError: true };
+  }
+  const node = picked.node;
+  const wrote = await writeValue(node, query, text);
+  if (!wrote.ok) return { content: `[COMPUTER_USE_ERROR] ${wrote.error}`, isError: true };
+  const again = await dumpTree(query.app);
+  if (!again.ok) {
+    return { content: `Set the value of "${node.name}" in ${node.app}.\nunverified: could not re-read the tree (${again.error})`, isError: true };
+  }
+  const after = findSame(parseUiTree(again.text).nodes, node);
+  const verdict = verifyTyped(node, after, text);
+  const head = `Set the value of "${node.name}" [${node.role}] in ${node.app}.`;
+  if (verdict === 'verified') return { content: `${head}\nverified: the field now shows the text.` };
+  if (verdict === 'gone') return { content: `${head}\nunverified: the field left the tree. Do not claim it was filled.`, isError: true };
+  return { content: `${head}\nunverified: the field value did not show the text. Do not claim it was filled.`, isError: true };
+}
+
 const TreeArgs = z.object({
   app: z.string().optional().describe('Only this app. Omit for every visible app. macOS matches the process name.'),
 });
@@ -659,5 +827,32 @@ export class ComputerUseInvokeTool extends Tool<z.infer<typeof InvokeArgs>> {
     );
     if (blocked) return blocked;
     return invokeNamed(args);
+  }
+}
+
+const SetValueArgs = z.object({
+  name: z.string().describe('Visible name of the one field to fill.'),
+  text: z.string().describe('One line, 1–500 characters. It is set as the control value, not typed into whichever window is focused.'),
+  role: z.string().optional().describe('Optional role substring when several controls share the name.'),
+  app: z.string().optional().describe('Optional app name when the same field exists in two apps.'),
+});
+
+export class ComputerUseSetValueTool extends Tool<z.infer<typeof SetValueArgs>> {
+  name = 'computer_use_set_value';
+  description = 'Set the text of one named accessibility control. Refuses zero or several matches. Does not send keystrokes to the focused window. A control with no value pattern errors. Asks every time, then reads the tree again: the field must show the text, or its value must change. Otherwise the result is unverified, not a success.';
+  isReadOnly = false;
+  isDestructive = true;
+  argsSchema = SetValueArgs;
+
+  async execute(args: z.infer<typeof SetValueArgs>, ctx: ToolContext): Promise<ToolResult> {
+    const bad = assertQuery(args.name, args.app, args.role) ?? assertTypeText(args.text);
+    if (bad) return { content: `[COMPUTER_USE_ERROR] ${bad}`, isError: true };
+    const blocked = await confirmScreenChange(
+      ctx,
+      this.name,
+      `set value of "${args.name.trim()}" to ${args.text.slice(0, 80)}`,
+    );
+    if (blocked) return blocked;
+    return typeNamed(args, args.text);
   }
 }

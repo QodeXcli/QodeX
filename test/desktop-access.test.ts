@@ -10,6 +10,11 @@ import {
   windowsInvokeScript,
   linuxAtspiScript,
   parseInvokeLine,
+  assertTypeText,
+  verifyTyped,
+  parseTypeLine,
+  macosTypeScript,
+  windowsTypeScript,
   type UiNode,
 } from '../src/tools/computer/access.js';
 import { describeDesktop } from '../src/desk/policy.js';
@@ -70,6 +75,29 @@ describe('accessibility tree', () => {
     expect(parseInvokeLine('noise\nOK\taction')).toEqual({ ok: true, method: 'action' });
     expect(parseInvokeLine('ERR\tQODEX_MATCH 2').ok).toBe(false);
     expect(parseInvokeLine('OK\tcenter\nwarning').ok).toBe(true);
+  });
+
+  it('sets a field value without putting the text in the script', () => {
+    expect(assertTypeText('')).toBeTruthy();
+    expect(assertTypeText('hello\nthere')).toBeTruthy();
+    expect(assertTypeText('x'.repeat(501))).toBeTruthy();
+    expect(assertTypeText('café')).toBeNull();
+    const secret = '"; do shell script "id';
+    expect(macosTypeScript('Notes', 'Body')).not.toContain(secret);
+    expect(macosTypeScript('Notes', 'Body')).toContain('QODEX_UI_TEXT');
+    expect(windowsTypeScript('Body')).toContain('$env:QODEX_UI_TEXT');
+    expect(windowsTypeScript('Body')).not.toContain(secret);
+    const linux = linuxAtspiScript();
+    const typeAt = linux.indexOf('set_text_contents');
+    const clickAt = linux.indexOf('do_action');
+    expect(typeAt).toBeGreaterThan(0);
+    expect(typeAt).toBeLessThan(clickAt);
+    expect(parseTypeLine('OK\tvalue').ok).toBe(true);
+    expect(parseTypeLine('ERR\tno editable text').ok).toBe(false);
+    const field = { ...allow, role: 'AXTextField', name: 'Body', value: '' };
+    expect(verifyTyped(field, { ...field, value: 'café' }, 'café')).toBe('verified');
+    expect(verifyTyped(field, field, 'café')).toBe('same');
+    expect(verifyTyped(field, null, 'café')).toBe('gone');
   });
 });
 

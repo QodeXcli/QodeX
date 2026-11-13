@@ -27,6 +27,7 @@ const view = (over: Partial<ShellView> = {}): ShellView => ({
 const deps = (over: Record<string, unknown> = {}) => ({
   readTree: async () => ({ ok: true as const, text: '' }),
   invoke: async () => ({ content: '' }),
+  typeText: async () => ({ content: '' }),
   shoot: async () => ({ ok: false as const, error: 'no' }),
   shotFile: () => null as string | null,
   setShot: () => {},
@@ -53,8 +54,33 @@ describe('desktop shell', () => {
     expect(html).toContain('data-hit=');
     expect(html).not.toContain('<Allow>');
     expect(html).toContain('banner bad');
+    expect(html).toContain('value="type"');
+    expect(html).toContain('maxlength="500"');
+    expect(html).toContain('id="live-screen"');
     expect(resultTone('verified: the control is no longer in the tree.')).toBe('ok');
     expect(resultTone('')).toBe('idle');
+  });
+
+  it('types into the named control and refuses a newline', async () => {
+    let got = '';
+    const sent = await handleShell({
+      method: 'POST', pathname: '/act', tokenOk: true,
+      rawBody: 'action=type&name=Search&role=AXTextField&app=Safari&text=hello',
+      view: view(),
+      deps: deps({ typeText: async (_q: { name: string }, text: string) => { got = text; return { content: 'verified: the field now shows the text.' }; } }),
+    });
+    expect(got).toBe('hello');
+    expect(sent.view.result).toContain('verified:');
+    const secret = 'line1\nline2';
+    let called = false;
+    const refused = await handleShell({
+      method: 'POST', pathname: '/act', tokenOk: true,
+      rawBody: `action=type&name=Search&text=${encodeURIComponent(secret)}`,
+      view: view(),
+      deps: deps({ typeText: async () => { called = true; return { content: 'no' }; } }),
+    });
+    expect(called).toBe(true);
+    expect(refused.view.result).toBe('no');
   });
 
   it('shows active desk goals and serves them on the live poll', async () => {
