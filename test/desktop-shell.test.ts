@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm } from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { handleShell, renderShellHtml, resultTone, deskRows, liveSnapshot, type ShellView } from '../src/desktop/shell.js';
-import { appWindowLaunch, isLoopbackAppUrl } from '../src/desktop/window.js';
+import { appWindowLaunch, isLoopbackAppUrl, nativeWindowLaunch } from '../src/desktop/window.js';
 
 const view = (over: Partial<ShellView> = {}): ShellView => ({
   token: 'tok',
@@ -267,5 +267,11 @@ describe('app window', () => {
     const launch = appWindowLaunch('linux', 'http://127.0.0.1:9/?k=a', '/usr/bin/chromium');
     expect(launch?.cmd).toBe('/usr/bin/chromium');
     expect(launch?.args[0]).toBe('--app=http://127.0.0.1:9/?k=a');
+    expect(nativeWindowLaunch('https://example.com/', '/usr/local/bin/qodex-desktop')).toBeNull();
+    expect(nativeWindowLaunch('http://127.0.0.1:9/?k=a', null)).toBeNull();
+    expect(nativeWindowLaunch('http://127.0.0.1:9/?k=a', '/usr/local/bin/qodex-desktop')).toEqual({
+      cmd: '/usr/local/bin/qodex-desktop',
+      args: ['--url', 'http://127.0.0.1:9/?k=a'],
+    });
   });
 });

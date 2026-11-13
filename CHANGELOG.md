@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.31.0 — 2026-11-13
+
+**The desktop has a native OS window.**
+
+`native/` is a real window process, not Chrome with `--app`. It only accepts `http://127.0.0.1`. Desks, goals, sentinel, named press, type, and the screenshot go through the same loopback shell. Always-on-top is a window flag. `qodex desktop` uses that binary when it has been built, and says "app window" or "tab" when it has not. `qodex desktop --build-native` compiles it. `--native` refuses to pretend a browser is the native window.
+
+```
+native/
+src/cli/desktop-command.ts
+```
+
+
 ## v2.30.0 — 2026-11-13
 
 **The desktop window can fill a named field, and the screen can go live.**

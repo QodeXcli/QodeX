@@ -18,5 +18,8 @@ coverage/
 .qodex/sandbox-recovery.json
 **/.manifest.lock
 
+# Native window build
+native/target/
+
 # QodeX runtime artifacts created when running qodex inside this repo
 .qodex/artifacts/

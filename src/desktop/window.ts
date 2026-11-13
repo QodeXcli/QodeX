@@ -41,3 +41,9 @@ export function appWindowLaunch(platform: string, url: string, browser: string |
   }
   return { cmd: browser, args: [`--app=${url}`, '--new-window'] };
 }
+
+/** A real OS window. Null unless the binary exists and the URL is loopback. */
+export function nativeWindowLaunch(url: string, binary: string | null): { cmd: string; args: string[] } | null {
+  if (!binary || !isLoopbackAppUrl(url)) return null;
+  return { cmd: binary, args: ['--url', url] };
+}

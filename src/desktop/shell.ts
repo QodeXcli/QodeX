@@ -96,9 +96,27 @@ export function deskRows(desks: { id: string; name: string; goals: { id: string;
   });
 }
 
-/** Loopback poll. No token, no screenshot bytes. */
-export function liveSnapshot(view: ShellView): { resident: string; pending: number; waits: ShellWait[]; desks: ShellDesk[]; audit: ShellAudit[] } {
-  return { resident: view.resident, pending: view.waits.length, waits: view.waits, desks: view.team, audit: view.audit };
+/** Loopback poll. No token and no screenshot bytes. Controls are names, not pixels. */
+export function liveSnapshot(view: ShellView): {
+  resident: string;
+  pending: number;
+  waits: ShellWait[];
+  desks: ShellDesk[];
+  audit: ShellAudit[];
+  result: string;
+  shot: boolean;
+  controls: { app: string; role: string; name: string; enabled: boolean; value: string }[];
+} {
+  return {
+    resident: view.resident,
+    pending: view.waits.length,
+    waits: view.waits,
+    desks: view.team,
+    audit: view.audit,
+    result: view.result,
+    shot: view.shot,
+    controls: view.controls.map(c => ({ app: c.app, role: c.role, name: c.name, enabled: c.enabled, value: c.value })),
+  };
 }
 
 function escapeHtml(s: string): string {
