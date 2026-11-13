@@ -276,6 +276,8 @@ export interface QodexConfig {
     whatsapp?: { enabled?: boolean; allowedUsers?: string[] };
     /** signal-cli daemon (JSON-RPC or REST). Account in SIGNAL_ACCOUNT. */
     signal?: { enabled?: boolean; allowedUsers?: string[] };
+    /** Matrix Client-Server API. Homeserver and access token in ~/.qodex/.env. */
+    matrix?: { enabled?: boolean; allowedUsers?: string[] };
   };
   mcp: {
     servers: Record<string, {
@@ -814,6 +816,7 @@ export const DEFAULT_CONFIG: QodexConfig = {
     slack: { enabled: false, allowedUsers: [] },
     whatsapp: { enabled: false, allowedUsers: [] },
     signal: { enabled: false, allowedUsers: [] },
+    matrix: { enabled: false, allowedUsers: [] },
   },
   mcp: {
     servers: {},

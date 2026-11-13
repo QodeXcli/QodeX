@@ -8,7 +8,7 @@
  * ever leaks into an adapter, so the two platforms can never drift in behaviour or bugs.
  */
 
-export type Platform = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal';
+export type Platform = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal' | 'matrix';
 
 /** A normalized inbound event from any platform. */
 export interface Incoming {

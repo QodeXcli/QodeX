@@ -11,7 +11,7 @@ shell). The distance that still mattered is below.
 
 | Gap | Why it matters |
 | --- | --- |
-| Messaging breadth | Hermes reaches more channels (email, Matrix, and others). QodeX's gateway is the five transports above, on purpose: each one is a real adapter, not a logo. |
+| Messaging breadth | Hermes reaches more channels (email, and others). QodeX now has Matrix as well as Telegram, Discord, Slack, WhatsApp, and Signal. Matrix is the Client-Server API on the homeserver you name, with your access token. Encrypted rooms are not decrypted. Email is still not an adapter. |
 | Always-on | `qodex up` fires schedules, drains desk goals, and attaches the chat adapters you configured. Each desk child starts the MCP servers already in your config and stops them when the goal exits. Hermes still reaches more channels. |
 | Model-written skill evolution | Hermes rewrites a skill and keeps the version it prefers. `qodex skill rewrite` only stores a candidate. The active file is not replaced, and a model liking the prose is not a promotion. |
 

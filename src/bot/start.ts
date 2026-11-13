@@ -23,13 +23,14 @@ export interface StartBotsDeps {
   permissions: PermissionEngine;
   cwd?: string;
 }
-export type BotPlatformFlag = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal';
+export type BotPlatformFlag = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'signal' | 'matrix';
 export interface StartBotsOptions {
   telegram?: boolean;
   discord?: boolean;
   slack?: boolean;
   whatsapp?: boolean;
   signal?: boolean;
+  matrix?: boolean;
 }
 
 export interface OpenedBots {
@@ -47,8 +48,9 @@ export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {})
     slack: { allowedUsers: botCfg.slack?.allowedUsers ?? [] },
     whatsapp: { allowedUsers: botCfg.whatsapp?.allowedUsers ?? [] },
     signal: { allowedUsers: botCfg.signal?.allowedUsers ?? [] },
+    matrix: { allowedUsers: botCfg.matrix?.allowedUsers ?? [] },
   };
-  const anyFlag = !!(opts.telegram || opts.discord || opts.slack || opts.whatsapp || opts.signal);
+  const anyFlag = !!(opts.telegram || opts.discord || opts.slack || opts.whatsapp || opts.signal || opts.matrix);
   const want = (p: BotPlatformFlag) => !anyFlag || !!opts[p];
 
   const transports: Transport[] = [];
@@ -107,6 +109,20 @@ export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {})
         rpcPort: rpcPortRaw ? Number(rpcPortRaw) : 7583,
         restUrl: process.env.SIGNAL_CLI_URL,
       }));
+    }
+  }
+
+  if (want('matrix') && (botCfg.matrix?.enabled ?? false)) {
+    const homeserver = process.env.MATRIX_HOMESERVER;
+    const token = process.env.MATRIX_ACCESS_TOKEN;
+    if (!homeserver || !token) notes.push('matrix is enabled but MATRIX_HOMESERVER / MATRIX_ACCESS_TOKEN is missing — add both to ~/.qodex/.env');
+    else if (!allow.matrix!.allowedUsers!.length) notes.push('matrix allowlist is empty — set bot.matrix.allowedUsers to @user:server ids');
+    else {
+      try {
+        const { MatrixTransport, resolveMatrixBase } = await import('./adapters/matrix.js');
+        const base = await resolveMatrixBase(homeserver);
+        transports.push(new MatrixTransport({ base, token }));
+      } catch (e: any) { notes.push(e?.message ?? 'matrix transport failed'); }
     }
   }
 

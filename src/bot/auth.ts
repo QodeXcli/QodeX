@@ -15,6 +15,7 @@ export interface AllowConfig {
   slack?: { allowedUsers?: string[] };
   whatsapp?: { allowedUsers?: string[] };
   signal?: { allowedUsers?: string[] };
+  matrix?: { allowedUsers?: string[] };
 }
 
 export function isAuthorized(platform: Platform, userId: string, allow: AllowConfig): boolean {

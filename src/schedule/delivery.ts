@@ -16,18 +16,21 @@
 import { logger } from '../utils/logger.js';
 
 export interface DeliveryTarget {
-  platform: 'telegram' | 'discord' | 'slack';
+  platform: 'telegram' | 'discord' | 'slack' | 'matrix';
   chatId: string;
 }
 
-const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000, slack: 3000 };
+const MAX_LEN: Record<DeliveryTarget['platform'], number> = { telegram: 4096, discord: 2000, slack: 3000, matrix: 4000 };
 
-/** Parse a `telegram:<id>` / `discord:<id>` / `slack:<id>` target. Returns null when malformed. PURE. */
+/** Parse a `telegram:<id>` / `discord:<id>` / `slack:<id>` / `matrix:!<room>:<server>` target. Returns null when malformed. PURE. */
 export function parseDeliveryTarget(s: string | undefined | null): DeliveryTarget | null {
   if (!s) return null;
-  const m = /^\s*(telegram|discord|slack)\s*:\s*(\S.*?)\s*$/i.exec(s);
+  const m = /^\s*(telegram|discord|slack|matrix)\s*:\s*(\S.*?)\s*$/i.exec(s);
   if (!m) return null;
-  return { platform: m[1]!.toLowerCase() as DeliveryTarget['platform'], chatId: m[2]! };
+  const platform = m[1]!.toLowerCase() as DeliveryTarget['platform'];
+  const chatId = m[2]!;
+  if (platform === 'matrix' && !/^![^:\s]+:[^\s]+$/.test(chatId)) return null;
+  return { platform, chatId };
 }
 
 /** Build the chat summary for a finished run. PURE. Pulls out a recipe's final status line
@@ -94,6 +97,16 @@ export async function deliverRun(target: DeliveryTarget, text: string): Promise<
       });
       if (!res.ok) { logger.warn('discord delivery failed', { status: res.status }); return false; }
       return true;
+    }
+    if (target.platform === 'matrix') {
+      const homeserver = process.env.MATRIX_HOMESERVER;
+      const token = process.env.MATRIX_ACCESS_TOKEN;
+      if (!homeserver || !token) { logger.warn('schedule delivery skipped: MATRIX_HOMESERVER / MATRIX_ACCESS_TOKEN missing'); return false; }
+      const { MatrixTransport, matrixHomeserver } = await import('../bot/adapters/matrix.js');
+      const base = matrixHomeserver(homeserver);
+      if (!base) { logger.warn('schedule delivery skipped: MATRIX_HOMESERVER is not an https origin'); return false; }
+      const sent = await new MatrixTransport({ base, token }).send(target.chatId, body);
+      return Boolean(sent.id);
     }
     // slack — chat.postMessage (Web API), bot token from SLACK_BOT_TOKEN
     const token = process.env.SLACK_BOT_TOKEN;

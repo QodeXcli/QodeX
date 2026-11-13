@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.28.0 — 2026-11-13
+
+**Matrix is a real adapter.**
+
+`qodex bot --matrix` syncs `/_matrix/client/v3` on `MATRIX_HOMESERVER` with `MATRIX_ACCESS_TOKEN`. Both stay in `~/.qodex/.env`. The allowlist is Matrix user ids, empty means nobody. The first sync only stores `next_batch`, so history is not replayed. Own messages, edits, images, and encrypted events are ignored. A send is `m.room.message`. An edit is `m.replace`. `matrix:!room:server` works for schedule delivery. An alias does not. There is no email adapter.
+
+```
+src/bot/adapters/matrix.ts
+```
+
+
 ## v2.27.1 — 2026-11-12
 
 **The rewrite is tested on disk.**
