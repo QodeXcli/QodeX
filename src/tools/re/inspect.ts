@@ -12,7 +12,7 @@ const Args = z.object({
 
 export class ReInspectTool extends Tool<z.infer<typeof Args>> {
   name = 're_inspect';
-  description = 'Read a local Mac (Mach-O or .app) or Windows (PE) program statically: architecture, linked libraries, sections, import names, bundle id. Does not decompile, decrypt, patch, or bypass a license. An unknown file is an error, not a guess.';
+  description = 'Read a local Mac (Mach-O or .app) or Windows (PE) program statically: architecture, linked libraries, a dependency list, section entropy, and printable strings. Does not decompile, decrypt, hook, inject, or bypass a license. Secret-shaped strings are omitted. An unknown file is an error, not a guess.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = Args;

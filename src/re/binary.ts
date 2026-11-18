@@ -3,7 +3,7 @@
  * Headers and names only. No disassembly, no decryption, no patch.
  */
 
-export interface BinSection { name: string; size: number; }
+export interface BinSection { name: string; size: number; fileOff?: number; fileSize?: number; }
 export interface BinSlice {
   arch: string;
   bits: 32 | 64;
@@ -123,7 +123,8 @@ function parseMacho(b: Buffer, base: number, notes: string[]): BinSlice | null {
       for (let n = 0; n < Math.min(nsects, 64) && s + 16 <= p + size; n++) {
         const name = cstr(b, s, 16) ?? '';
         const sz = cmd === 0x19 ? Number(u64(b, s + 40, le)) : u32(b, s + 36, le);
-        if (name) slice.sections.push({ name, size: sz });
+        const fileOff = cmd === 0x19 ? u32(b, s + 48, le) : u32(b, s + 40, le);
+        if (name) slice.sections.push({ name, size: sz, fileOff, fileSize: sz });
         s += sectSize;
       }
     }
@@ -177,7 +178,7 @@ function parsePe(b: Buffer, notes: string[]): BinRead | null {
     const rawSize = b.readUInt32LE(sp + 16);
     const raw = b.readUInt32LE(sp + 20);
     sections.push({ name, va, virtualSize, raw, rawSize });
-    if (name) slice.sections.push({ name, size: virtualSize });
+    if (name) slice.sections.push({ name, size: virtualSize, fileOff: raw, fileSize: rawSize });
     sp += 40;
   }
   const rvaToOff = (rva: number): number | null => {
@@ -232,7 +233,8 @@ function parseElf(b: Buffer, notes: string[]): BinRead | null {
     if (sh + 64 > b.length) { notes.push('ELF section headers are truncated'); break; }
     const name = nameOf(u32(b, sh, le));
     const size = Number(u64(b, sh + 32, le));
-    if (name) slice.sections.push({ name, size });
+    const fileOff = Number(u64(b, sh + 24, le));
+    if (name) slice.sections.push({ name, size, fileOff, fileSize: size });
     if (u32(b, sh + 4, le) !== 6) continue;
     const link = u32(b, sh + 40, le);
     const dynOff = Number(u64(b, sh + 24, le));

@@ -6,6 +6,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { readBinary, type BinRead } from './binary.js';
+import { buildSurface, type Surface } from './surface.js';
 
 const CAP = 48 * 1024 * 1024;
 
@@ -22,6 +23,7 @@ export interface ReReport {
   format: BinRead['format'] | 'app-bundle';
   bundle?: AppBundle;
   binary?: BinRead;
+  surface?: Surface;
   notes: string[];
   limits: string[];
 }
@@ -30,7 +32,7 @@ const LIMITS = [
   'This is a header read, not a decompiler and not a disassembler.',
   'A signature blob is not a notarization check.',
   'An encrypted image is reported. It is not decrypted.',
-  'A license check is not patched.',
+  'Strings are capped. Secret-shaped strings are omitted, not decoded.',
 ];
 
 function plistString(xml: string, key: string): string | undefined {
@@ -72,7 +74,8 @@ export async function inspectPath(file: string): Promise<ReReport> {
   }
   const buf = await readCapped(resolved, notes);
   const binary = readBinary(buf);
-  return { path: resolved, format: binary.format, binary, notes, limits: LIMITS };
+  const surface = buildSurface(path.basename(resolved), buf, binary);
+  return { path: resolved, format: binary.format, binary, surface, notes, limits: LIMITS };
 }
 
 async function inspectBundle(root: string, notes: string[]): Promise<ReReport> {
@@ -99,6 +102,7 @@ async function inspectBundle(root: string, notes: string[]): Promise<ReReport> {
     notes.push('Contents/Info.plist was not readable');
   }
   let binary: BinRead | undefined;
+  let surface: Surface | undefined;
   if (bundle.executable && !bundle.executable.includes('/') && !bundle.executable.includes('..')) {
     const exe = path.join(realRoot, 'Contents', 'MacOS', bundle.executable);
     try {
@@ -107,6 +111,7 @@ async function inspectBundle(root: string, notes: string[]): Promise<ReReport> {
       else {
         const buf = await readCapped(realExe, notes);
         binary = readBinary(buf);
+        surface = buildSurface(bundle.executable, buf, binary);
       }
     } catch {
       notes.push('Contents/MacOS executable was not readable');
@@ -114,7 +119,7 @@ async function inspectBundle(root: string, notes: string[]): Promise<ReReport> {
   } else if (!bundle.executable) {
     notes.push('no CFBundleExecutable, so the inner binary was not opened');
   }
-  return { path: realRoot, format: 'app-bundle', bundle, binary, notes, limits: LIMITS };
+  return { path: realRoot, format: 'app-bundle', bundle, binary, surface, notes, limits: LIMITS };
 }
 
 export function formatReport(report: ReReport): string {
@@ -140,6 +145,19 @@ export function formatReport(report: ReReport): string {
       if (s.sections.length) lines.push('  sections: ' + s.sections.slice(0, 24).map(sec => `${sec.name} ${sec.size}`).join(', '));
     }
     for (const n of bin.notes) lines.push(`note: ${n}`);
+  }
+  if (report.surface) {
+    if (report.surface.edges.length) {
+      lines.push('graph:');
+      for (const e of report.surface.edges.slice(0, 80)) lines.push(`  ${e.from} -> ${e.to}`);
+    }
+    const measured = report.surface.entropy.filter(e => e.entropy != null);
+    if (measured.length) lines.push('entropy: ' + measured.slice(0, 16).map(e => `${e.name} ${e.entropy}`).join(', '));
+    if (report.surface.strings.length) {
+      lines.push('strings:');
+      for (const s of report.surface.strings.slice(0, 40)) lines.push(`  ${s.kind} ${s.text}`);
+    }
+    if (report.surface.omittedSecrets) lines.push(`note: ${report.surface.omittedSecrets} secret-shaped string(s) omitted`);
   }
   for (const n of report.notes) lines.push(`note: ${n}`);
   lines.push('limits:', ...report.limits.map(l => `  - ${l}`));

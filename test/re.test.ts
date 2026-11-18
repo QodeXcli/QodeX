@@ -4,6 +4,7 @@ import path from 'path';
 import { describe, expect, it } from 'vitest';
 import { readBinary } from '../src/re/binary.js';
 import { formatReport, inspectPath } from '../src/re/inspect.js';
+import { buildSurface, extractStrings, shannon } from '../src/re/surface.js';
 
 function macho64(opts: { dylib: string; uuid: Buffer; encrypted?: boolean }): Buffer {
   const name = Buffer.from(opts.dylib + '\0');
@@ -76,7 +77,8 @@ describe('static re', () => {
     expect(bin.slices[0]?.dylibs).toEqual(['/usr/lib/libSystem.B.dylib']);
     expect(bin.slices[0]?.uuids[0]).toBe('00112233445566778899aabbccddeeff');
     expect(bin.slices[0]?.encrypted).toBe(true);
-    expect(bin.slices[0]?.sections[0]).toEqual({ name: '__text', size: 128 });
+    expect(bin.slices[0]?.sections[0]?.name).toBe('__text');
+    expect(bin.slices[0]?.sections[0]?.size).toBe(128);
     expect(formatReport({ path: 'a', format: bin.format, binary: bin, notes: [], limits: ['not a decompiler'] })).toContain('not decrypted');
   });
 
@@ -114,5 +116,22 @@ describe('static re', () => {
     expect(refused.bundle?.id).toBeUndefined();
     expect(refused.notes.join(' ')).toContain('left the bundle');
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it('builds a dependency list, entropy, and capped strings without secrets', () => {
+    expect(shannon(Buffer.alloc(32))).toBe(0);
+    const body = Buffer.concat([
+      Buffer.from('https://example.com/app\0'),
+      Buffer.from('hello_symbol\0'),
+      Buffer.from('-----BEGIN PRIVATE KEY-----\nMII\0'),
+    ]);
+    const got = extractStrings(body);
+    expect(got.strings.map(s => s.text)).toEqual(['https://example.com/app', 'hello_symbol']);
+    expect(got.strings[0]?.kind).toBe('url');
+    expect(got.omittedSecrets).toBe(1);
+    const bin = readBinary(macho64({ dylib: '/usr/lib/libSystem.B.dylib', uuid: Buffer.alloc(16, 1) }));
+    const surface = buildSurface('Demo', Buffer.concat([macho64({ dylib: '/usr/lib/libSystem.B.dylib', uuid: Buffer.alloc(16, 1) }), body]), bin);
+    expect(surface.edges).toEqual([{ from: 'Demo', to: '/usr/lib/libSystem.B.dylib' }]);
+    expect(surface.strings.some(s => s.text.includes('PRIVATE'))).toBe(false);
   });
 });

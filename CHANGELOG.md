@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.35.0 — 2026-11-18
+
+**The static read now has a dependency list, section entropy, and strings.**
+
+`qodex re` still does not disassemble or decrypt. Each linked library or import DLL is an edge. Section entropy is Shannon entropy of the bytes actually in the file. Printable strings are capped. A private-key-shaped string is omitted. Fat Mach-O entropy is not reported, because those section offsets belong to the slice.
+
+```
+src/re/surface.ts
+```
+
+
 ## v2.34.0 — 2026-11-18
 
 **A local program can be read, not decompiled.**
