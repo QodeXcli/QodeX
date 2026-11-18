@@ -21,7 +21,9 @@ function nativePaths(): { binary: string | null; manifest: string | null } {
   const binary = roots.map(root => path.join(root, 'native', 'target', 'release', name))
     .concat(roots.map(root => path.join(root, 'native', 'target', 'debug', name)))
     .find(file => existsSync(file)) ?? null;
-  const manifest = roots.map(root => path.join(root, 'native', 'Cargo.toml')).find(file => existsSync(file)) ?? null;
+  const manifest = roots.map(root => path.join(root, 'native', 'desktop-ui', 'Cargo.toml'))
+    .concat(roots.map(root => path.join(root, 'native', 'Cargo.toml')))
+    .find(file => existsSync(file)) ?? null;
   return { binary, manifest };
 }
 

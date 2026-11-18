@@ -549,3 +549,35 @@ export class AtomByAtomSynthesizer {
   }
 }
 ```
+
+---
+
+## ۸. وضعیت پیاده‌سازی (Implementation Status)
+
+وضعیت واقعی کد در برابر سند معماری — تاریخ ۱۸ نوامبر ۲۰۲۶.
+
+| ماژول | کد | وضعیت |
+|---|---|---|
+| Kernel Bridge (TS) | `src/rea/kernel-bridge.ts` | پیاده‌سازی شده؛ بدون باینری بومی، خطای واضح می‌دهد |
+| Kernel Bridge (Rust) | `native/kernel-bridge/` (napi-rs v2) | `cargo check` تمیز — هم `rea-kernel-bridge` و هم `qodex-desktop` |
+| Process Injector | `src/rea/injector.ts` | پیاده‌سازی شده (Frida 17.27) |
+| Crypto Harvester (agent) | `src/rea/agent/crypto-harvester.ts` | پیاده‌سازی شده؛ Keylog callback روی instance نگه داشته می‌شود |
+| Evasion Engine (agent) | `src/rea/agent/evasion-engine.ts` | پیاده‌سازی شده (SSL pinning / root / jailbreak) |
+| Repackager | `src/rea/repackager.ts` | پیاده‌سازی شده (APK/IPA با LIEF) |
+| Synthesizer | `src/rea/synthesizer.ts` | پیاده‌سازی شده؛ lifter/emulator تزریقی، نه جعلی |
+| CLI | `qodex rea` (`src/cli/rea-command.ts`) | `inject` / `build-agent` / `repackage-apk` / `repackage-ipa` |
+| Agent tools | `src/tools/rea/inject.ts`, `src/tools/rea/repackage.ts` | ثبت شده در registry |
+| تست‌ها | `test/rea-*.test.ts` | **۱۳/۱۳ پاس**؛ `tsc --noEmit` تمیز |
+
+**تایید نشده (NOT verified):**
+- تزریق زنده با Frida — باینری بومی Frida روی این ماشین ساخته نشده (`npm ci --ignore-scripts`).
+- بیلد agent با frida-compile — بدون binding بومی قابل اجرا نیست.
+- بازبسته‌بندی زنده APK/IPA — ابزارها (apktool / zipalign / apksigner / codesign) و LIEF روی این ماشین نیستند.
+- منبع رویداد هوک‌های کرنل: درایور ویندوز `.sys` وجود ندارد؛ کلاینت EndpointSecurity در macOS هنوز وصل نشده؛ بارگذاری/اتصال eBPF در لینوکس TODO است.
+- باینری `.node` برای `native/kernel-bridge` هنوز بیلد نشده (فقط `cargo check`).
+
+**مواردی که بر عهده‌ی حامد است (ارتقا):**
+- ساخت درایور کرنل ویندوز (`.sys`) برای IOCTLهای `0x801–0x804`.
+- اتصال EndpointSecurity در macOS (entitlement + `es_new_client`).
+- نوشتن برنامه‌ی آبجکت eBPF برای لینوکس/اندروید.
+- بیلد `.node` با `@napi-rs/cli` برای پلتفرم هدف.

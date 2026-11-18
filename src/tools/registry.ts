@@ -75,6 +75,8 @@ import {
 } from './computer/use.js';
 import { ComputerUseTreeTool, ComputerUseInvokeTool, ComputerUseSetValueTool } from './computer/access.js';
 import { ReInspectTool } from './re/inspect.js';
+import { ReaInjectTool } from './rea/inject.js';
+import { ReaRepackageTool } from './rea/repackage.js';
 import {
   BrowserNavigateTool,
   BrowserClickTool,
@@ -293,6 +295,8 @@ export class ToolRegistry {
       new ComputerUseInvokeTool(),
       new ComputerUseSetValueTool(),
       new ReInspectTool(),
+      new ReaInjectTool(),
+      new ReaRepackageTool(),
       new BrowserNavigateTool(),
       new BrowserClickTool(),
       new BrowserFillTool(),

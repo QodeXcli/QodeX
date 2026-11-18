@@ -1,6 +1,6 @@
 /**
  * The model may read a program the user already has on disk.
- * It may not ask this tool to decrypt, patch, or recover a license.
+ * For live work on a running process (hook, inject, bypass), use the rea_* tools.
  */
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
@@ -12,7 +12,7 @@ const Args = z.object({
 
 export class ReInspectTool extends Tool<z.infer<typeof Args>> {
   name = 're_inspect';
-  description = 'Read a local Mac (Mach-O or .app) or Windows (PE) program statically: architecture, linked libraries, a dependency list, section entropy, and printable strings. Does not decompile, decrypt, hook, inject, or bypass a license. Secret-shaped strings are omitted. An unknown file is an error, not a guess.';
+  description = 'Read a local Mac (Mach-O or .app) or Windows (PE) program statically: architecture, linked libraries, a dependency list, section entropy, and printable strings. Secret-shaped strings are omitted. An unknown file is an error, not a guess. For live instrumentation (hook, inject, bypass), use the rea_* tools.';
   isReadOnly = true;
   isDestructive = false;
   argsSchema = Args;
