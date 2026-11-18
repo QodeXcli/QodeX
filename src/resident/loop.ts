@@ -9,6 +9,8 @@ import * as path from 'path';
 import { tick, type TickResult } from '../schedule/runner.js';
 import { drainDesks, defaultSpawnDesk, type DeskJob } from './desks.js';
 import { residentStatusPath } from './paths.js';
+import { hangupPolicy } from './detach.js';
+import { readPresence } from './presence.js';
 import { sealCandidates, type SealResult } from './seal.js';
 
 export interface ResidentStatus {
@@ -133,6 +135,7 @@ export async function runResident(opts: RunResidentOptions): Promise<ResidentSta
   const onStop = () => { stop = true; };
   process.on('SIGINT', onStop);
   process.on('SIGTERM', onStop);
+  if (hangupPolicy() === 'ignore') process.on('SIGHUP', () => {});
 
   let last: ResidentStatus | null = null;
   try {
@@ -152,6 +155,10 @@ export async function runResident(opts: RunResidentOptions): Promise<ResidentSta
         bots: opts.bots,
         notes: opts.notes,
       });
+      await writeResidentStatus(last);
+      const presence = await readPresence().catch(() => null);
+      if (presence) last.notes = [...last.notes, `last reach ${presence.channel} at ${presence.at}`];
+      else if (!opts.once) last.notes = [...last.notes, 'no chat has reached this resident yet'];
       await writeResidentStatus(last);
       if (opts.once || stop) break;
       await sleep(intervalMs, () => stop);

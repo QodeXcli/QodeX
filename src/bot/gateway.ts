@@ -18,6 +18,7 @@ import { StreamPump } from './stream-pump.js';
 import { isAuthorized, type AllowConfig } from './auth.js';
 import { findCommand, menuDescriptors, type GatewayControls } from './commands.js';
 import { botLane, getOperatorHub, TUI_ORIGIN, type HubEvent } from '../operator/hub.js';
+import { recordReach } from '../resident/presence.js';
 
 interface PendingAsk { hubId: string; options: string[] }
 
@@ -142,6 +143,7 @@ export class BotGateway {
 
     let text = m.text.trim();
     if (!text) return;
+    void recordReach({ project: process.cwd(), channel: key, text }).catch(() => {});
 
     // 4) An "Edit" tap left this chat awaiting the change instruction → fold it into an update turn.
     const editId = this.pendingEdit.get(key);

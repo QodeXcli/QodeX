@@ -7,8 +7,7 @@
  * `qodex re` (static read) stays separate and read-only.
  */
 import { Command } from 'commander';
-import { buildAgentBundle, ProcessInjector, type DeviceKind } from '../rea/injector.js';
-import { MobileRepackager } from '../rea/repackager.js';
+import type { DeviceKind } from '../rea/injector.js';
 
 function parseTarget(raw: string): string | number {
   return /^\d+$/.test(raw) ? Number(raw) : raw;
@@ -26,6 +25,7 @@ export function buildReaCommand(): Command {
     .option('--spawn', 'Spawn the program suspended, instrument, then resume')
     .option('--device <local|usb|remote>', 'Frida device', 'local')
     .action(async (opts: { target: string; agent: string; spawn?: boolean; device: DeviceKind }) => {
+      const { ProcessInjector } = await import('../rea/injector.js');
       const injector = new ProcessInjector();
       const exports = await injector.inject({
         deviceType: opts.device,
@@ -51,6 +51,7 @@ export function buildReaCommand(): Command {
     .requiredOption('--entry <file.ts>', 'Agent entry (e.g. src/rea/agent/index.ts)')
     .requiredOption('--out <bundle.js>', 'Output bundle path')
     .action(async (opts: { entry: string; out: string }) => {
+      const { buildAgentBundle } = await import('../rea/injector.js');
       const out = await buildAgentBundle({ entry: opts.entry, out: opts.out });
       console.log(`[rea] agent bundle written to ${out}`);
     });
@@ -70,6 +71,7 @@ export function buildReaCommand(): Command {
         process.exitCode = 2;
         return;
       }
+      const { MobileRepackager } = await import('../rea/repackager.js');
       const out = await new MobileRepackager().repackageApk(
         opts.apk,
         opts.gadget,
@@ -89,6 +91,7 @@ export function buildReaCommand(): Command {
     .requiredOption('--provision <path>', 'Replacement .mobileprovision')
     .requiredOption('--identity <name>', 'codesign identity')
     .action(async (opts: { ipa: string; gadget: string; provision: string; identity: string }) => {
+      const { MobileRepackager } = await import('../rea/repackager.js');
       const out = await new MobileRepackager().repackageIpa(
         opts.ipa,
         opts.gadget,

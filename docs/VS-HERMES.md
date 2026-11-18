@@ -12,7 +12,7 @@ shell). The distance that still mattered is below.
 | Gap | Why it matters |
 | --- | --- |
 | Messaging breadth | Hermes still reaches more odd channels. QodeX speaks Telegram, Discord, Slack, WhatsApp, Signal, Matrix, and email. Email is IMAP and SMTP on the server you name, not a Gmail login and not a scraped inbox. Matrix does not decrypt encrypted rooms. |
-| Always-on | `qodex up` fires schedules, drains desk goals, and attaches the chat adapters you configured. Each desk child starts the MCP servers already in your config and stops them when the goal exits. Hermes still reaches more channels. |
+| Always-on | `qodex up --detach` keeps one local process after the terminal closes. `qodex up install` writes a systemd or launchd user service for the next reboot. Closing a laptop still stops it. There is no hosted agent. Chat is whatever platform you already enabled. |
 | Model-written skill evolution | Hermes rewrites a skill and keeps the version it prefers. `qodex skill rewrite` only stores a candidate. The active file is not replaced, and a model liking the prose is not a promotion. |
 
 ## Where QodeX was stuck

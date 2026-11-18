@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.36.0 — 2026-11-18
+
+**The resident can outlive the terminal.**
+
+`qodex up --detach` starts a real background process and ignores hangup. `qodex up stop` signals it. `qodex up install` writes a systemd or launchd user unit and does not claim a cloud. An allowlisted chat records the last reach in `~/.qodex/presence.json`, with bearer tokens stripped. A machine that is asleep is still asleep.
+
+```
+src/resident/detach.ts
+src/resident/presence.ts
+src/resident/service.ts
+```
+
+
 ## v2.35.0 — 2026-11-18
 
 **The static read now has a dependency list, section entropy, and strings.**

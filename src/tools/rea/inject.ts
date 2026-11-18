@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 import { Tool, type ToolContext, type ToolResult } from '../base.js';
-import { ProcessInjector, type DeviceKind } from '../../rea/injector.js';
+import type { DeviceKind } from '../../rea/injector.js';
 
 const Args = z.object({
   target: z
@@ -40,8 +40,10 @@ export class ReaInjectTool extends Tool<z.infer<typeof Args>> {
   argsSchema = Args;
 
   async execute(args: z.infer<typeof Args>, _ctx: ToolContext): Promise<ToolResult> {
-    const injector = new ProcessInjector();
+    let injector: InstanceType<typeof import('../../rea/injector.js').ProcessInjector> | null = null;
     try {
+      const { ProcessInjector } = await import('../../rea/injector.js');
+      injector = new ProcessInjector();
       const exports = await injector.inject({
         deviceType: (args.device ?? 'local') as DeviceKind,
         targetProcess: /^\d+$/.test(args.target) ? Number(args.target) : args.target,
@@ -69,7 +71,7 @@ export class ReaInjectTool extends Tool<z.infer<typeof Args>> {
     } catch (e: any) {
       return { content: `rea_inject failed: ${e?.message ?? e}`, isError: true };
     } finally {
-      await injector.detach();
+      await injector?.detach();
     }
   }
 }

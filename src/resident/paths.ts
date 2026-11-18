@@ -15,6 +15,14 @@ export function residentStatusPath(): string {
   return path.join(residentHome(), 'resident.json');
 }
 
+export function residentLogPath(): string {
+  return path.join(residentHome(), 'resident.log');
+}
+
+export function presencePath(): string {
+  return path.join(residentHome(), 'presence.json');
+}
+
 export function sealCachePath(): string {
   return path.join(residentHome(), 'resident-seal.json');
 }

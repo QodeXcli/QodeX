@@ -4,6 +4,9 @@
  */
 import { Command } from 'commander';
 import { learningWantsSeal, readResidentStatus, runResident } from '../resident/loop.js';
+import { residentChildArgs, spawnResident } from '../resident/detach.js';
+import { residentLogPath } from '../resident/paths.js';
+import { writeService, servicePlatform } from '../resident/service.js';
 
 function formatStatus(s: Awaited<ReturnType<typeof readResidentStatus>>): string {
   if (!s) return 'Resident is not running. Start it with `qodex up`.';
@@ -31,6 +34,7 @@ export function buildResidentCommand(deps: {
   cmd.option('--seal', 'Seal witnessed candidates even when learning.enabled is off');
   cmd.option('--skip-seal', 'Do not seal candidates');
   cmd.option('--no-bots', 'Do not attach chat platforms');
+  cmd.option('--detach', 'Start in the background. Closing the terminal does not stop it.');
 
   cmd
     .command('status')
@@ -39,7 +43,73 @@ export function buildResidentCommand(deps: {
       console.log(formatStatus(await readResidentStatus()));
     });
 
-  cmd.action(async (opts: { once?: boolean; interval?: string; seal?: boolean; skipSeal?: boolean; bots?: boolean }) => {
+  cmd
+    .command('stop')
+    .description('Stop the detached resident, if its pid is still alive')
+    .action(async () => {
+      const s = await readResidentStatus();
+      if (!s?.running) {
+        console.log(s ? 'resident pid is already gone' : 'Resident is not running.');
+        return;
+      }
+      try {
+        process.kill(s.pid, 'SIGTERM');
+        console.log(`signaled ${s.pid}`);
+      } catch (e: any) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd
+    .command('install')
+    .description('Write a user service that starts `qodex up` after reboot. systemd or launchd. Not a cloud.')
+    .action(async () => {
+      const platform = servicePlatform();
+      const home = process.env.HOME || process.env.USERPROFILE;
+      const exec = process.argv[1];
+      if (!home || !exec) {
+        console.error('cannot see HOME or the qodex script path');
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const file = await writeService(platform, home, exec);
+        console.log(`wrote ${file}`);
+        console.log('This starts the resident after reboot of a machine that stays on.');
+        console.log('It does not keep running while a laptop is asleep, and it is not hosted anywhere.');
+        if (platform === 'linux') console.log('enable: systemctl --user enable --now qodex-resident.service');
+        if (platform === 'darwin') console.log('enable: launchctl load ~/Library/LaunchAgents/com.qodex.resident.plist');
+      } catch (e: any) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.action(async (opts: { once?: boolean; interval?: string; seal?: boolean; skipSeal?: boolean; bots?: boolean; detach?: boolean }) => {
+    if (opts.detach) {
+      const existing = await readResidentStatus();
+      if (existing?.running) {
+        console.log(formatStatus(existing));
+        return;
+      }
+      const args = residentChildArgs(['up']);
+      if (opts.interval && opts.interval !== '60') args.push('--interval', String(opts.interval));
+      if (opts.seal) args.push('--seal');
+      if (opts.skipSeal) args.push('--skip-seal');
+      if (opts.bots === false) args.push('--no-bots');
+      try {
+        const pid = spawnResident({ args, logPath: residentLogPath() });
+        console.log(`resident detached · pid ${pid}`);
+        console.log(`log ${residentLogPath()}`);
+        console.log('Closing this terminal does not stop it. `qodex up stop` does.');
+        console.log('Chat reaches it only on a platform you already enabled, with a token and an allowlist.');
+      } catch (e: any) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+      return;
+    }
     const intervalMs = Math.max(15, Number(opts.interval) || 60) * 1000;
     const seal: boolean | 'auto' = opts.skipSeal ? false : opts.seal ? true : 'auto';
     const notes: string[] = [];
