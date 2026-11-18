@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.37.0 — 2026-11-18
+
+**A machine you leave on can keep the job. It is not a cloud.**
+
+`qodex host` listens with a token. `qodex host submit` hands it a prompt and exits. The job stays on that machine after the client is gone. `qodex host pull` reads the result. A permission ask is held, not auto-approved. `/v1/health` says `cloud: false`. Closing a laptop that is the host still stops it. Point `host` at a computer that stays on.
+
+```
+src/host/server.ts
+src/cli/host-command.ts
+```
+
+
 ## v2.36.0 — 2026-11-18
 
 **The resident can outlive the terminal.**

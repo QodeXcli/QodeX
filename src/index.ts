@@ -1924,12 +1924,14 @@ import { buildResidentCommand } from './cli/resident-command.js';
 import { buildDesktopCommand } from './cli/desktop-command.js';
 import { buildReCommand } from './cli/re-command.js';
 import { buildReaCommand } from './cli/rea-command.js';
+import { buildHostCommand } from './cli/host-command.js';
 program.addCommand(buildSkillCommand());
 program.addCommand(buildDeskCommand());
 program.addCommand(buildResidentCommand({ bootstrap }));
 program.addCommand(buildDesktopCommand());
 program.addCommand(buildReCommand());
 program.addCommand(buildReaCommand());
+program.addCommand(buildHostCommand());
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);
