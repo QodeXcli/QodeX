@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.34.0 — 2026-11-18
+
+**A local program can be read, not decompiled.**
+
+`qodex re <path>` and `re_inspect` parse a Mach-O, a Mac `.app`, a PE, or an ELF from the bytes. Architecture, linked libraries, sections, import DLL names, and an encryption flag come from the header. An encrypted image is reported and not decrypted. A Java class with the same magic as a fat Mach-O is not called a Mach-O. A plist or executable that leaves the `.app` is not followed.
+
+```
+src/re/binary.ts
+src/re/inspect.ts
+```
+
+
 ## v2.33.0 — 2026-11-13
 
 **Browserbase is a direct Streamable HTTP call. The Windows key can be pressed.**

@@ -74,6 +74,7 @@ import {
   ComputerUseListWindowsTool,
 } from './computer/use.js';
 import { ComputerUseTreeTool, ComputerUseInvokeTool, ComputerUseSetValueTool } from './computer/access.js';
+import { ReInspectTool } from './re/inspect.js';
 import {
   BrowserNavigateTool,
   BrowserClickTool,
@@ -291,6 +292,7 @@ export class ToolRegistry {
       new ComputerUseTreeTool(),
       new ComputerUseInvokeTool(),
       new ComputerUseSetValueTool(),
+      new ReInspectTool(),
       new BrowserNavigateTool(),
       new BrowserClickTool(),
       new BrowserFillTool(),

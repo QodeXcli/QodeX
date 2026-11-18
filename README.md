@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/QodeXcli/QodeX/main/install.sh | ba
 qodex setup && qodex
 ```
 
-**Version 2.33.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
+**Version 2.34.0** · 100+ tools · self-improving · phone-driveable · English & Persian · Apache-2.0
 
 [![Release](https://img.shields.io/github/v/release/QodeXcli/QodeX?color=blue&label=release)](https://github.com/QodeXcli/QodeX/releases/latest)
 [![CI](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml/badge.svg)](https://github.com/QodeXcli/QodeX/actions/workflows/ci.yml)
@@ -29,6 +29,7 @@ qodex setup && qodex
 - **One process you leave up** — `qodex up` fires schedules, drains runnable desks, seals a skill only when its witness patch still passes the real checker (no model), and attaches the chat bots you already configured. `qodex up status` says whether that pid is alive. `--once` is a single pass and does not open bots.
 - **Named desktop controls** — `computer_use_tree` reads the OS accessibility tree (macOS AX, Windows UI Automation, Linux AT-SPI). `computer_use_invoke` presses one named control, refuses zero or two matches, and reads the tree again. If the control still looks the same, the result is unverified. A missing backend is an error, not a fake click.
 - **Desktop shell** — `qodex desktop` prefers a native OS window (`native/`, built with `qodex desktop --build-native`). That window is not a browser. If the binary is missing it says so and falls back to Chrome/Chromium/Edge `--app`, or a tab. Loopback only. You read the real control tree, press or fill one name, and take a screenshot. It does not call a model.
+- **Static read** — `qodex re <path>` reads a Mach-O, a `.app`, a PE, or an ELF: architecture, libraries, sections, imports. It does not decompile or decrypt. The model has the same read as `re_inspect`.
 - **Cloud browser, your account** — `qodex mcp add browserbase` connects to Browserbase's hosted server. The API key stays in the environment. `start` and `act` ask every time, because a session is billed and a click can submit. No key, no browser — the call errors.
 - **`--profile studio` / `--profile cloud`** — named overlays, not a second product. Local Qwen on the Mac Studio in one file; a cloud model + Docker-isolated shell in another. `-p` is still `--print`.
 - **Shell in a box, not on bare metal** — `runtime.backend: docker` bind-mounts the project and drops host `$HOME`, `docker.sock`, privileged mode, and host networking. File edits stay in the repo (a coding agent that cannot touch files is a chatbot). The Mac outside `/workspace` stays out of reach.
