@@ -3,7 +3,7 @@
  */
 import type { HostJob } from './jobs.js';
 
-export async function runHostJob(job: HostJob): Promise<{ state: 'done' | 'held'; text: string }> {
+export async function runHostJob(job: HostJob): Promise<{ state: 'done' | 'held' | 'continue'; text: string }> {
   const { loadConfig } = await import('../config/loader.js');
   const { ModelRouter } = await import('../llm/router.js');
   const { ToolRegistry } = await import('../tools/registry.js');
@@ -18,7 +18,11 @@ export async function runHostJob(job: HostJob): Promise<{ state: 'done' | 'held'
     cwd: job.project,
   });
   let asked: string | null = null;
-  const text = await runner.runTurn('host:' + job.id, job.prompt, {
+  const followUp = job.turns > 0;
+  const prompt = followUp
+    ? `Continue the same task in this session. Do not start over. If and only if it is finished, put this alone on the last line: JOB_DONE\n\nTask: ${job.prompt}`
+    : `${job.prompt}\n\nWhen the task is finished, put this alone on the last line: JOB_DONE`;
+  const text = await runner.runTurn('host:' + job.id, prompt, {
     onDelta() {},
     onStatus() {},
     async ask(prompt: string) {
@@ -29,5 +33,5 @@ export async function runHostJob(job: HostJob): Promise<{ state: 'done' | 'held'
   if (asked) {
     return { state: 'held', text: `${text}\n\nheld: ${asked}\nThis was not auto-approved. A person has to allow it on the host.` };
   }
-  return { state: 'done', text };
+  return { state: 'continue', text };
 }

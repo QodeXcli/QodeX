@@ -2,9 +2,10 @@ import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
-import { JobStore } from '../src/host/jobs.js';
+import { JobStore, drainOne } from '../src/host/jobs.js';
 import { startHostServer } from '../src/host/server.js';
 import { bindAllowed, bearerOk } from '../src/host/token.js';
+import { waitForRateLimit } from '../src/host/continue.js';
 
 const token = 'a'.repeat(32);
 
@@ -63,5 +64,35 @@ describe('self-hosted presence', () => {
       await server.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('parks a rate limit and will not call a capped job finished', async () => {
+    const headers = { get: (n: string) => (n === 'retry-after' ? '120' : null) };
+    expect(waitForRateLimit(Object.assign(new Error('nope'), { status: 429, headers }))).toBe(120_000);
+    expect(waitForRateLimit(Object.assign(new Error('429'), { headers: { get: () => '999999' } }))).toBe(24 * 60 * 60 * 1000);
+    expect(waitForRateLimit(new Error('disk full'))).toBeNull();
+
+    const dir = await mkdtemp(path.join(tmpdir(), 'qodex-host-park-'));
+    const store = new JobStore(path.join(dir, 'jobs.json'));
+    await store.load();
+    const job = await store.add({ prompt: 'finish the api', project: '/work', maxTurns: 2 });
+    await store.park(job.id, new Date(Date.now() + 60_000).toISOString(), '429');
+    expect(await store.claim()).toBeNull();
+    await store.park(job.id, new Date(Date.now() - 1000).toISOString(), '429');
+    expect((await store.claim())?.id).toBe(job.id);
+
+    const again = new JobStore(path.join(dir, 'jobs2.json'));
+    await again.load();
+    const second = await again.add({ prompt: 'finish the api', project: '/work', maxTurns: 2 });
+    const step = await drainOne(again, async () => ({ state: 'continue', text: 'still working' }));
+    expect(step?.state).toBe('queued');
+    const last = await drainOne(again, async () => ({ state: 'continue', text: 'still working' }));
+    expect(last?.state).toBe('error');
+    expect(last?.error).toContain('not finished');
+    const done = await again.add({ prompt: 'small', project: '/work', maxTurns: 2 });
+    const finished = await drainOne(again, async () => ({ state: 'continue', text: 'all set\nJOB_DONE' }));
+    expect(finished?.id).toBe(done.id);
+    expect(finished?.state).toBe('done');
+    await rm(dir, { recursive: true, force: true });
   });
 });

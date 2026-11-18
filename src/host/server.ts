@@ -5,6 +5,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { bearerOk } from './token.js';
 import { drainOne, JobStore, type HostJob } from './jobs.js';
+import { clampTurns } from './continue.js';
 
 export interface HostServer {
   port: number;
@@ -41,7 +42,7 @@ export function startHostServer(opts: {
   port: number;
   token: string;
   store: JobStore;
-  run: (job: HostJob) => Promise<{ state: 'done' | 'held'; text: string }>;
+  run: (job: HostJob) => Promise<{ state: 'done' | 'held' | 'continue'; text: string }>;
 }): Promise<HostServer> {
   let pumping = false;
   const pump = () => {
@@ -79,10 +80,14 @@ export function startHostServer(opts: {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/jobs') {
-        const body = JSON.parse(await readBody(req) || '{}') as { prompt?: string; project?: string };
+        const body = JSON.parse(await readBody(req) || '{}') as { prompt?: string; project?: string; maxTurns?: number };
         const prompt = (body.prompt ?? '').trim();
         if (!prompt) { send(res, 400, { error: 'prompt is empty' }); return; }
-        const job = await opts.store.add({ prompt: prompt.slice(0, 8000), project: (body.project ?? process.cwd()).slice(0, 500) });
+        const job = await opts.store.add({
+          prompt: prompt.slice(0, 8000),
+          project: (body.project ?? process.cwd()).slice(0, 500),
+          maxTurns: clampTurns(body.maxTurns),
+        });
         send(res, 202, { id: job.id, state: job.state, cloud: false });
         pump();
         return;
@@ -96,12 +101,17 @@ export function startHostServer(opts: {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(opts.port, opts.host, () => {
+      const timer = setInterval(pump, 5_000);
+      timer.unref?.();
       const addr = server.address();
       const port = typeof addr === 'object' && addr ? addr.port : opts.port;
       resolve({
         port,
         store: opts.store,
-        close: () => new Promise((done, fail) => server.close(err => err ? fail(err) : done())),
+        close: () => new Promise((done, fail) => {
+          clearInterval(timer);
+          server.close(err => err ? fail(err) : done());
+        }),
       });
     });
   });

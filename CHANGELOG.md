@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.38.0 — 2026-11-18
+
+**A host job parks on a rate limit and continues the same session.**
+
+`429` no longer ends the job. It waits for `Retry-After`, capped at 24 hours, then runs again. From Telegram, `/goal` queues that job when `qodex host` is the process. The job stops on a line `JOB_DONE`, or after its turn cap (default 16, max 48) with an explicit "not finished". It does not run for weeks by itself, and it does not call a capped stop a completed project.
+
+```
+src/host/continue.ts
+src/bot/commands.ts
+```
+
+
 ## v2.37.0 — 2026-11-18
 
 **A machine you leave on can keep the job. It is not a cloud.**

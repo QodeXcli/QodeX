@@ -52,9 +52,24 @@ export const COMMANDS: BotCommand[] = [
     run: async ({ reply }) => reply(helpText()),
   },
   {
-    name: 'new',
-    description: 'Start a fresh conversation (new session)',
-    run: async ({ gateway, reply }) => { await gateway.reset(); await reply('🆕 Fresh conversation — previous context cleared.'); },
+    name: 'goal',
+    description: 'Queue a task that survives a rate limit',
+    run: async ({ args, key, agent, reply }) => {
+      const { hostEnqueue } = await import('../host/bridge.js');
+      const enq = hostEnqueue();
+      if (!enq) {
+        await reply('The host is not running in this process. On the machine that stays on, run `qodex host`.');
+        return;
+      }
+      const prompt = args.trim();
+      if (!prompt) {
+        await reply('Usage: /goal <what to finish>');
+        return;
+      }
+      const cwd = (await agent.status?.(key))?.cwd ?? process.cwd();
+      const job = await enq(prompt, cwd);
+      await reply(`Queued \`${job.id}\` on this machine (${job.maxTurns} turns). A rate limit parks it and the same session continues. It stops at JOB_DONE or the turn cap. It does not run for weeks on its own, and it will not mark the project finished unless the work says so.`);
+    },
   },
   {
     name: 'stop',

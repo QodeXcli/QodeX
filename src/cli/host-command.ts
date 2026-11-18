@@ -4,20 +4,22 @@
  */
 import { Command } from 'commander';
 import * as path from 'path';
-import { residentHome } from '../resident/paths.js';
-import { hangupPolicy } from '../resident/detach.js';
-import { spawnResident } from '../resident/detach.js';
-import { residentLogPath } from '../resident/paths.js';
+import { residentHome, residentLogPath } from '../resident/paths.js';
+import { hangupPolicy, spawnResident } from '../resident/detach.js';
 import { JobStore } from '../host/jobs.js';
 import { startHostServer } from '../host/server.js';
+import { setHostEnqueue } from '../host/bridge.js';
 import { bindAllowed, ensureHostToken, loopback } from '../host/token.js';
 
-export function buildHostCommand(): Command {
+export function buildHostCommand(deps: {
+  bootstrap?: () => Promise<{ config: any; router: any; registry: any; permissions: any }>;
+} = {}): Command {
   const cmd = new Command('host');
   cmd.description('Run the self-hosted agent on a machine that stays on. Not a cloud.');
   cmd.option('--bind <host>', 'Listen address', '127.0.0.1');
   cmd.option('--port <n>', 'Listen port', '8787');
   cmd.option('--detach', 'Keep running after this terminal closes');
+  cmd.option('--no-bots', 'Do not attach chat platforms');
 
   cmd
     .command('submit')
@@ -63,7 +65,7 @@ export function buildHostCommand(): Command {
       if (!res.ok) process.exitCode = 1;
     });
 
-  cmd.action(async (opts: { bind: string; port: string; detach?: boolean }) => {
+  cmd.action(async (opts: { bind: string; port: string; detach?: boolean; bots?: boolean }) => {
     const port = Number(opts.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       console.error('port must be 1-65535');
@@ -72,7 +74,7 @@ export function buildHostCommand(): Command {
     }
     if (opts.detach) {
       const pid = spawnResident({
-        args: ['host', '--bind', opts.bind, '--port', String(port)],
+        args: ['host', '--bind', opts.bind, '--port', String(port), ...(opts.bots === false ? ['--no-bots'] : [])],
         logPath: residentLogPath(),
       });
       console.log(`host detached · pid ${pid}`);
@@ -92,6 +94,25 @@ export function buildHostCommand(): Command {
     await store.load();
     const { runHostJob } = await import('../host/turn.js');
     const server = await startHostServer({ host: opts.bind, port, token, store, run: runHostJob });
+    setHostEnqueue((prompt, project) => store.add({ prompt, project }));
+    if (opts.bots !== false && deps.bootstrap) {
+      try {
+        const boot = await deps.bootstrap();
+        const { openBots } = await import('../bot/start.js');
+        const opened = await openBots({
+          config: boot.config,
+          router: boot.router,
+          registry: boot.registry,
+          permissions: boot.permissions,
+          cwd: process.cwd(),
+        });
+        for (const n of opened.notes) console.error(n);
+        if (opened.platforms.length) console.error(`bots: ${opened.platforms.join(', ')}`);
+        else if (!opened.notes.length) console.error('no bot platform is enabled — /goal works only in this process once a bot is configured');
+      } catch (e: any) {
+        console.error(`bots did not start: ${e?.message ?? e}`);
+      }
+    }
     console.error(`host listening on http://${opts.bind}:${server.port}`);
     console.error(loopback(opts.bind) ? 'loopback only' : 'not loopback — the token is the lock');
     console.error('cloud: false');

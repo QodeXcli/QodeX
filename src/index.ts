@@ -1931,7 +1931,7 @@ program.addCommand(buildResidentCommand({ bootstrap }));
 program.addCommand(buildDesktopCommand());
 program.addCommand(buildReCommand());
 program.addCommand(buildReaCommand());
-program.addCommand(buildHostCommand());
+program.addCommand(buildHostCommand({ bootstrap }));
 
 program.parseAsync(process.argv).catch(err => {
   console.error('Error:', err.message);
