@@ -4,7 +4,7 @@ import { handleShell, type ShellView } from '../src/desktop/shell.js';
 
 const view = (): ShellView => ({
   token: 'tok', tree: '', result: '', shot: false, gui: 'x11', access: 'none', note: 'n',
-  desks: 0, pending: 0, resident: 'off', controls: [], capped: false, waits: [], team: [], audit: [],
+  desks: 0, pending: 0, resident: 'off', controls: [], capped: false, waits: [], team: [], audit: [], host: [], windows: [],
 });
 
 const deps = (operate: (cmd: unknown) => Promise<{ content: string }>) => ({

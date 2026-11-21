@@ -18,6 +18,8 @@ import { readResidentStatus } from '../resident/loop.js';
 import { invokeNamed, readUiTree, typeNamed, type UiQuery } from '../tools/computer/access.js';
 import { ComputerUseScreenshotTool } from '../tools/computer/use.js';
 import { parseOperator, runOperator, type OperatorCommand } from './operator.js';
+import { focusTarget, hostJobRows, windowNames, type HostRow } from './presence.js';
+import { residentHome } from '../resident/paths.js';
 
 export interface ShellRoute {
   status: number;
@@ -73,6 +75,8 @@ export interface ShellView {
   waits: ShellWait[];
   team: ShellDesk[];
   audit: ShellAudit[];
+  host: HostRow[];
+  windows: string[];
 }
 
 const LIVE_GOAL = new Set(['running', 'needs-approval', 'approved', 'queued']);
@@ -106,6 +110,8 @@ export function liveSnapshot(view: ShellView): {
   audit: ShellAudit[];
   result: string;
   shot: boolean;
+  host: HostRow[];
+  windows: string[];
   controls: { app: string; role: string; name: string; enabled: boolean; value: string }[];
 } {
   return {
@@ -116,6 +122,8 @@ export function liveSnapshot(view: ShellView): {
     audit: view.audit,
     result: view.result,
     shot: view.shot,
+    host: view.host,
+    windows: view.windows,
     controls: view.controls.map(c => ({ app: c.app, role: c.role, name: c.name, enabled: c.enabled, value: c.value })),
   };
 }
@@ -210,6 +218,27 @@ function deskBlock(view: ShellView): string {
 function auditBlock(view: ShellView): string {
   if (view.audit.length === 0) return '<p class="muted">No audit yet.</p>';
   return view.audit.slice(-6).map(a => `<p class="goal"><span class="chip">${escapeHtml(a.kind)}</span> ${escapeHtml(a.detail)}</p>`).join('');
+}
+
+function hostBlock(view: ShellView): string {
+  if (view.host.length === 0) return '<p class="muted">No host jobs. Queue one with /goal or qodex host submit on the machine that stays on.</p>';
+  return view.host.map(job => {
+    const when = job.resumeAt ? ` · until ${escapeHtml(job.resumeAt)}` : '';
+    return `<p class="goal"><span class="chip">${escapeHtml(job.state)}</span> <code>${escapeHtml(job.id)}</code> ${job.turns}/${job.maxTurns}${when}<br/>${escapeHtml(job.prompt)}</p>`;
+  }).join('');
+}
+
+function windowBlock(view: ShellView): string {
+  if (view.windows.length === 0) return '';
+  return `<h2>Windows</h2><div id="windows">${view.windows.map(line => {
+    const app = focusTarget(line);
+    return `<form method="post" action="/act?k=${view.token}">
+      <input type="hidden" name="action" value="operate"/>
+      <input type="hidden" name="kind" value="focus"/>
+      <input type="hidden" name="app" value="${escapeHtml(app)}"/>
+      <button class="ghost" type="submit">${escapeHtml(line)}</button>
+    </form>`;
+  }).join('')}</div>`;
 }
 
 function waitRows(view: ShellView): string {
@@ -308,10 +337,13 @@ export function renderShellHtml(view: ShellView): string {
     <div id="waits">${waitRows(view)}</div>
     <p class="note">${escapeHtml(view.note)}</p>
     <p class="muted">Assign, allow, press, type, and Run next are you. Type sets that control's value. It does not send keys to whatever else is focused. A sensitive goal stays held until you allow it.</p>
+    <h2>Host</h2>
+    <div id="host">${hostBlock(view)}</div>
     <h2>Audit</h2>
     <div id="audit">${auditBlock(view)}</div>
   </aside>
   <section style="padding:16px 18px">
+    ${windowBlock(view)}
     <h2>Controls <span id="shown">${view.controls.length}</span></h2>
     <form class="stack" method="post" action="/act?k=${view.token}">
       <input type="hidden" name="action" value="operate"/>
@@ -521,6 +553,20 @@ export function renderShellHtml(view: ShellView): string {
     var res = document.getElementById('resident-pill');
     if (res) res.textContent = data.resident || '';
     var audit = document.getElementById('audit');
+    var host = document.getElementById('host');
+    if (host) {
+      host.textContent = '';
+      if (!data.host || !data.host.length) host.appendChild(el('p', 'No host jobs. Queue one with /goal or qodex host submit on the machine that stays on.', 'muted'));
+      (data.host || []).forEach(function (job) {
+        var p = el('p', null, 'goal');
+        p.appendChild(el('span', job.state || '', 'chip'));
+        p.appendChild(document.createTextNode(' ' + (job.id || '') + ' ' + (job.turns || 0) + '/' + (job.maxTurns || 0)));
+        if (job.resumeAt) p.appendChild(document.createTextNode(' until ' + job.resumeAt));
+        p.appendChild(document.createElement('br'));
+        p.appendChild(document.createTextNode(job.prompt || ''));
+        host.appendChild(p);
+      });
+    }
     if (audit) {
       audit.textContent = '';
       if (!data.audit || !data.audit.length) audit.appendChild(el('p', 'No audit yet.', 'muted'));
@@ -661,7 +707,11 @@ export async function handleShell(opts: {
       if (!parsed.ok) view = { ...view, result: `refused: ${parsed.error}` };
       else {
         const ran = await opts.deps.operate(parsed.command);
-        view = { ...view, result: ran.content };
+        view = {
+          ...view,
+          result: ran.content,
+          windows: parsed.command.kind === 'windows' && !ran.isError ? windowNames(ran.content) : view.windows,
+        };
       }
     } else if (form.action === 'shot') {
       const shot = await opts.deps.shoot();
@@ -753,7 +803,7 @@ export interface DesktopShell { url: string; port: number; token: string; close:
 
 export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell> {
   const token = randomBytes(16).toString('hex');
-  const state = { shot: null as string | null, tree: '', result: '', controls: [] as ShellControl[], capped: false };
+  const state = { shot: null as string | null, tree: '', result: '', controls: [] as ShellControl[], capped: false, windows: [] as string[] };
   const deps = defaultShellDeps(state);
   const server = http.createServer((req, res) => {
     void (async () => {
@@ -767,6 +817,9 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
         const pending = await listPending().catch(() => []);
         const audit = await readAudit(6).catch(() => []);
         const resident = await readResidentStatus().catch(() => null);
+        const host = await fs.readFile(path.join(residentHome(), 'host', 'jobs.json'), 'utf8')
+          .then(text => hostJobRows(JSON.parse(text)))
+          .catch(() => []);
         const view: ShellView = {
           token,
           tree: state.tree,
@@ -783,6 +836,8 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
           waits: pending.map(p => ({ id: p.id, kind: p.kind, reason: p.reason, prompt: p.prompt })),
           team: deskRows(board?.desks ?? []),
           audit: audit.map(a => ({ ts: a.ts, kind: a.kind, detail: a.detail })),
+          host,
+          windows: state.windows,
         };
         const handled = await handleShell({
           method: req.method ?? 'GET',
@@ -796,6 +851,7 @@ export async function startDesktopShell(preferredPort = 0): Promise<DesktopShell
         state.result = handled.view.result;
         state.controls = handled.view.controls;
         state.capped = handled.view.capped;
+        state.windows = handled.view.windows;
         const headers: Record<string, string> = {
           'content-type': handled.route.contentType,
           'cache-control': 'no-store',

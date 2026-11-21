@@ -3,6 +3,7 @@
 
 mod api;
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -78,8 +79,6 @@ struct App {
     live: Live,
     status: String,
     top: bool,
-    goal: String,
-    typed: String,
     click_x: String,
     click_y: String,
     keys: String,
@@ -88,6 +87,10 @@ struct App {
     shot: Option<egui::TextureHandle>,
     shot_at: Option<Instant>,
     last_poll: Instant,
+    themed: bool,
+    filter: String,
+    goal_draft: HashMap<String, String>,
+    type_draft: HashMap<String, String>,
 }
 
 impl App {
@@ -99,8 +102,6 @@ impl App {
             live: Live::default(),
             status: "Connecting to this machine…".into(),
             top: false,
-            goal: String::new(),
-            typed: String::new(),
             click_x: String::new(),
             click_y: String::new(),
             keys: String::new(),
@@ -109,6 +110,10 @@ impl App {
             shot: None,
             shot_at: None,
             last_poll: Instant::now(),
+            themed: false,
+            filter: String::new(),
+            goal_draft: HashMap::new(),
+            type_draft: HashMap::new(),
         }
     }
 
@@ -123,8 +128,45 @@ impl App {
     }
 }
 
+fn apply_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals = egui::Visuals::dark();
+    let ink = egui::Color32::from_rgb(244, 241, 234);
+    let panel = egui::Color32::from_rgb(24, 26, 22);
+    let bg = egui::Color32::from_rgb(16, 17, 15);
+    let accent = egui::Color32::from_rgb(228, 255, 87);
+    style.visuals.window_fill = bg;
+    style.visuals.panel_fill = bg;
+    style.visuals.extreme_bg_color = egui::Color32::from_rgb(13, 14, 12);
+    style.visuals.faint_bg_color = panel;
+    style.visuals.override_text_color = Some(ink);
+    style.visuals.widgets.noninteractive.bg_fill = panel;
+    style.visuals.widgets.inactive.bg_fill = panel;
+    style.visuals.widgets.inactive.fg_stroke.color = ink;
+    style.visuals.widgets.hovered.bg_fill = accent;
+    style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(26, 28, 12);
+    style.visuals.widgets.active.bg_fill = accent;
+    style.visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(26, 28, 12);
+    style.visuals.selection.bg_fill = egui::Color32::from_rgb(60, 70, 20);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    ctx.set_style(style);
+}
+
+fn status_color(status: &str) -> egui::Color32 {
+    match status {
+        "needs-approval" | "paused" | "held" => egui::Color32::from_rgb(240, 195, 106),
+        "running" | "queued" => egui::Color32::from_rgb(200, 240, 138),
+        "error" => egui::Color32::from_rgb(255, 143, 122),
+        _ => egui::Color32::from_rgb(156, 152, 142),
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.themed {
+            apply_theme(ctx);
+            self.themed = true;
+        }
         while let Ok(ev) = self.worker.rx.try_recv() {
             self.worker.busy = false;
             match ev {
@@ -191,7 +233,7 @@ impl eframe::App for App {
                 ui.label(egui::RichText::new(&desk.name).strong());
                 for goal in &desk.goals {
                     ui.horizontal(|ui| {
-                        ui.label(&goal.status);
+                        ui.colored_label(status_color(&goal.status), &goal.status);
                         ui.label(&goal.text);
                     });
                     if goal.status == "needs-approval" {
@@ -205,17 +247,38 @@ impl eframe::App for App {
                         });
                     }
                 }
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.goal).hint_text("Assign a goal").desired_width(150.0));
-                    if ui.button("Assign").clicked() && !self.goal.trim().is_empty() {
-                        let text = self.goal.trim().to_string();
-                        self.act(&[("action", "goal"), ("deskId", &desk.id), ("text", &text)]);
-                        self.goal.clear();
-                    }
-                });
+                let desk_id = desk.id.clone();
+                let mut draft = self.goal_draft.remove(&desk_id).unwrap_or_default();
+                let assign = ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut draft).hint_text("Assign a goal").desired_width(150.0));
+                    ui.button("Assign").clicked()
+                }).inner;
+                if assign && !draft.trim().is_empty() {
+                    let text = draft.trim().to_string();
+                    draft.clear();
+                    self.goal_draft.insert(desk_id.clone(), draft);
+                    self.act(&[("action", "goal"), ("deskId", &desk_id), ("text", &text)]);
+                } else {
+                    self.goal_draft.insert(desk_id, draft);
+                }
                 if desk.runnable && ui.button("Run next").clicked() {
                     self.act(&[("action", "run"), ("deskId", &desk.id)]);
                 }
+            }
+            ui.add_space(12.0);
+            ui.heading("Host");
+            if self.live.host.is_empty() {
+                ui.label("No host jobs. /goal or qodex host submit, on the machine that stays on.");
+            }
+            for job in self.live.host.clone() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.colored_label(status_color(&job.state), &job.state);
+                    ui.label(&job.id);
+                    ui.label(format!("{}/{}", job.turns, job.max_turns));
+                });
+                if !job.resume_at.is_empty() { ui.label(format!("until {}", job.resume_at)); }
+                ui.label(&job.prompt);
             }
             ui.add_space(12.0);
             ui.heading("Waiting");
@@ -282,30 +345,53 @@ impl eframe::App for App {
                 }
             });
             ui.separator();
+            if !self.live.windows.is_empty() {
+                ui.heading("Windows");
+                for line in self.live.windows.clone() {
+                    let app = line.split(':').next().unwrap_or(line.as_str()).trim().to_string();
+                    if ui.button(&line).clicked() && !app.is_empty() {
+                        self.act(&[("action", "operate"), ("kind", "focus"), ("app", &app)]);
+                    }
+                }
+                ui.separator();
+            }
             ui.heading(format!("Controls  {}", self.live.controls.len()));
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter names").desired_width(240.0));
+            let want = self.filter.trim().to_lowercase();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.live.controls.is_empty() {
+                let shown: Vec<_> = self.live.controls.iter().filter(|c| {
+                    want.is_empty() || format!("{} {} {}", c.name, c.role, c.app).to_lowercase().contains(&want)
+                }).cloned().collect();
+                if shown.is_empty() {
                     ui.label("Read the tree. Rows appear only for names the accessibility backend returned.");
                 }
-                for control in self.live.controls.clone() {
+                for control in shown {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(&control.role);
                         ui.label(egui::RichText::new(&control.name).strong());
-                        if !control.enabled { ui.label("disabled"); }
+                        if !control.enabled { ui.colored_label(status_color("error"), "disabled"); }
                     });
                     ui.label(format!("{}   {}", control.app, control.value));
-                    ui.horizontal(|ui| {
-                        if ui.button("Press").clicked() {
-                            self.act(&[("action", "invoke"), ("name", &control.name), ("role", &control.role), ("app", &control.app)]);
-                        }
-                        ui.add(egui::TextEdit::singleline(&mut self.typed).hint_text("One line").desired_width(160.0));
-                        if ui.button("Type").clicked() && !self.typed.is_empty() {
-                            let text = self.typed.clone();
-                            self.act(&[("action", "type"), ("name", &control.name), ("role", &control.role), ("app", &control.app), ("text", &text)]);
-                            self.typed.clear();
-                        }
-                    });
+                    let key = format!("{}\u{1}{}\u{1}{}", control.app, control.role, control.name);
+                    let mut draft = self.type_draft.remove(&key).unwrap_or_default();
+                    let (press, typed) = ui.horizontal(|ui| {
+                        let press = ui.button("Press").clicked();
+                        ui.add(egui::TextEdit::singleline(&mut draft).hint_text("One line").desired_width(160.0));
+                        let typed = ui.button("Type").clicked();
+                        (press, typed)
+                    }).inner;
+                    if press {
+                        self.type_draft.insert(key, draft);
+                        self.act(&[("action", "invoke"), ("name", &control.name), ("role", &control.role), ("app", &control.app)]);
+                    } else if typed && !draft.is_empty() {
+                        let text = draft.clone();
+                        draft.clear();
+                        self.type_draft.insert(key, draft);
+                        self.act(&[("action", "type"), ("name", &control.name), ("role", &control.role), ("app", &control.app), ("text", &text)]);
+                    } else {
+                        self.type_draft.insert(key, draft);
+                    }
                 }
             });
         });

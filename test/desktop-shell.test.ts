@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
+import { hostJobRows, windowNames, focusTarget } from '../src/desktop/presence.js';
 import { handleShell, renderShellHtml, resultTone, deskRows, liveSnapshot, type ShellView } from '../src/desktop/shell.js';
 import { appWindowLaunch, isLoopbackAppUrl, nativeWindowLaunch } from '../src/desktop/window.js';
 
@@ -21,6 +22,8 @@ const view = (over: Partial<ShellView> = {}): ShellView => ({
   waits: [],
   team: [],
   audit: [],
+  host: [],
+  windows: [],
   ...over,
 });
 
@@ -117,6 +120,21 @@ describe('desktop shell', () => {
       method: 'GET', pathname: '/live', tokenOk: false, rawBody: '', view: page, deps: deps(),
     });
     expect(denied.route.status).toBe(401);
+  });
+
+  it('shows host jobs and window names without inventing either', () => {
+    expect(hostJobRows({ nope: true })).toEqual([]);
+    const rows = hostJobRows([
+      { id: 'aaaabbbb', state: 'done', turns: 2, maxTurns: 16, prompt: 'old' },
+      { id: 'ccccdddd', state: 'paused', turns: 1, maxTurns: 16, prompt: 'keep going', resumeAt: '2026-11-21T12:00:00.000Z' },
+    ]);
+    expect(rows[0]?.state).toBe('paused');
+    expect(windowNames('Notes: hello\n[COMPUTER_USE_ERROR] no\n  - Mail\n')).toEqual(['Notes: hello', 'Mail']);
+    expect(focusTarget('Notes: hello')).toBe('Notes');
+    const page = view({ host: rows, windows: ['Notes: hello'] });
+    expect(liveSnapshot(page).windows).toEqual(['Notes: hello']);
+    expect(renderShellHtml(page)).toContain('ccccdddd');
+    expect(renderShellHtml(page)).toContain('value="Notes"');
   });
 
   it('allows a waiting call only with a real id', async () => {

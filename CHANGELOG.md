@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.39.0 — 2026-11-21
+
+**The desktop is the console for this machine.**
+
+The native window keeps a separate goal draft per desk and a separate type draft per control. A filter narrows the accessibility rows. Host jobs (queued, paused, held, done) show on the window and on the page, including when a rate limit parked one. A window list can focus that app. The page and the OS window use the same dark console. Nothing here calls a model.
+
+```
+src/desktop/presence.ts
+native/desktop-ui/src/main.rs
+```
+
+
 ## v2.38.0 — 2026-11-18
 
 **A host job parks on a rate limit and continues the same session.**

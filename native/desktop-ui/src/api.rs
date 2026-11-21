@@ -68,6 +68,22 @@ pub struct Control {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+pub struct HostJob {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default, rename = "maxTurns")]
+    pub max_turns: u32,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default, rename = "resumeAt")]
+    pub resume_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Live {
     #[serde(default)]
     pub resident: String,
@@ -85,6 +101,10 @@ pub struct Live {
     pub audit: Vec<Audit>,
     #[serde(default)]
     pub controls: Vec<Control>,
+    #[serde(default)]
+    pub host: Vec<HostJob>,
+    #[serde(default)]
+    pub windows: Vec<String>,
 }
 
 /// `http://127.0.0.1:<port>/?k=<token>` only. No userinfo, no other host.
@@ -154,5 +174,9 @@ mod tests {
         assert!(live.shot);
         assert_eq!(live.desks[0].id, "research");
         assert_eq!(live.controls[0].name, "Allow");
+        let with_host = parse_live(r#"{"host":[{"id":"abcd","state":"paused","turns":1,"maxTurns":16,"prompt":"keep","resumeAt":"t"}],"windows":["Notes: hi"]}"#).unwrap();
+        assert_eq!(with_host.host[0].state, "paused");
+        assert_eq!(with_host.host[0].max_turns, 16);
+        assert_eq!(with_host.windows[0], "Notes: hi");
     }
 }
