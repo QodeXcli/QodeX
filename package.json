@@ -1,6 +1,6 @@
 {
   "name": "@qodex/cli",
-  "version": "2.39.0",
+  "version": "2.40.0",
   "description": "QodeX — Local-first agentic coding CLI for Qwen3-Coder, Claude, GPT, and DeepSeek",
   "license": "Apache-2.0",
   "author": "7 Seven",
@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@matrix-org/matrix-sdk-crypto-wasm": "^19.0.1",
     "better-sqlite3": "^11.5.0",
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",

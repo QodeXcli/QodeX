@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.40.0 — 2026-11-21
+
+**Matrix encrypted rooms are decrypted.**
+
+`qodex` loads the official WASM crypto engine when Matrix is enabled. It uploads device keys, takes room keys from sync, and decrypts `m.room.encrypted`. A missing key is not a message. Unverified devices are still decrypted, and the note says so. `MATRIX_E2EE=0` turns it off. The device id is reused from `~/.qodex/matrix/device-id`. Room keys already held are restored from disk. This is not a claim that every client will share a key with an unverified device.
+
+```
+src/bot/adapters/matrix-crypto.ts
+```
+
+
 ## v2.39.0 — 2026-11-21
 
 **The desktop is the console for this machine.**

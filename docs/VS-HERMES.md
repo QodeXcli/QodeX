@@ -11,7 +11,7 @@ shell). The distance that still mattered is below.
 
 | Gap | Why it matters |
 | --- | --- |
-| Messaging breadth | Hermes still reaches more odd channels. QodeX speaks Telegram, Discord, Slack, WhatsApp, Signal, Matrix, and email. Email is IMAP and SMTP on the server you name, not a Gmail login and not a scraped inbox. Matrix does not decrypt encrypted rooms. |
+| Messaging breadth | Hermes still reaches more odd channels. QodeX speaks Telegram, Discord, Slack, WhatsApp, Signal, Matrix, and email. Email is IMAP and SMTP on the server you name, not a Gmail login and not a scraped inbox. Matrix decrypts encrypted rooms with the official crypto engine. A missing key is not a message. Unverified devices are still decrypted. |
 | Always-on | Hermes Cloud is their server. QodeX does not host one. `qodex host` is the agent on a machine you leave on: a job survives the client leaving, a token locks the port, and a permission ask is not auto-approved. `qodex up --detach` is the same idea without the job API. A sleeping laptop still stops. |
 | Model-written skill evolution | Hermes rewrites a skill and keeps the version it prefers. `qodex skill rewrite` only stores a candidate. The active file is not replaced, and a model liking the prose is not a promotion. |
 

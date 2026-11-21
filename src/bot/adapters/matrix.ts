@@ -2,12 +2,14 @@
  * Matrix adapter — Transport over the Client-Server API. Zero extra dependencies.
  *
  * The homeserver is the one in MATRIX_HOMESERVER (https, or http on localhost).
- * The access token is the user's. This process does not run a homeserver and it
- * does not decrypt encrypted rooms. A backlog from the first sync is not replayed.
+ * The access token is the user's. This process does not run a homeserver.
+ * Encrypted rooms are decrypted when the crypto engine is loaded. A missing
+ * key is not a message. A backlog from the first sync is not replayed.
  */
 import { randomBytes } from 'crypto';
 import type { Transport, Incoming, MessageRef, Button } from '../types.js';
 import { logger } from '../../utils/logger.js';
+import type { MatrixCrypto } from './matrix-crypto.js';
 
 const API = '/_matrix/client/v3';
 
@@ -67,6 +69,25 @@ export function eventsFromSync(payload: unknown, selfId: string): Incoming[] {
   return out;
 }
 
+/** Encrypted timeline events. Decryption is separate; this does not invent plaintext. */
+export function encryptedFromSync(payload: unknown, selfId: string): { roomId: string; sender: string; event: unknown }[] {
+  const rooms = (payload as { rooms?: { join?: Record<string, unknown> } } | null)?.rooms?.join;
+  if (!rooms) return [];
+  const out: { roomId: string; sender: string; event: unknown }[] = [];
+  for (const [roomId, room] of Object.entries(rooms)) {
+    if (!isMatrixRoomId(roomId)) continue;
+    const events = (room as { timeline?: { events?: unknown[] } }).timeline?.events;
+    if (!Array.isArray(events)) continue;
+    for (const ev of events) {
+      const event = ev as { type?: string; sender?: string };
+      if (event.type !== 'm.room.encrypted') continue;
+      if (!event.sender || event.sender === selfId || !event.sender.startsWith('@')) continue;
+      out.push({ roomId, sender: event.sender, event: ev });
+    }
+  }
+  return out;
+}
+
 function choiceLine(buttons?: Button[][]): string {
   const labels = buttons?.flat().map(b => b.label).filter(Boolean) ?? [];
   return labels.length ? `\n\n${labels.join(' · ')}` : '';
@@ -98,14 +119,22 @@ export class MatrixTransport implements Transport {
   private running = false;
   private ac = new AbortController();
 
-  constructor(opts: { base: string; token: string; fetchImpl?: typeof fetch }) {
+  private crypto: MatrixCrypto | null = null;
+  private e2ee: boolean;
+  private e2eeNote = '';
+
+  constructor(opts: { base: string; token: string; fetchImpl?: typeof fetch; e2ee?: boolean }) {
     const base = matrixHomeserver(opts.base);
     if (!base) throw new Error('matrix base is not a homeserver origin');
     if (!opts.token.trim()) throw new Error('matrix access token is empty');
     this.base = base;
     this.token = opts.token.trim();
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.e2ee = opts.e2ee === true;
   }
+
+  /** Set after start. Empty when E2EE was not requested or did not load. */
+  get e2eeStatus(): string { return this.e2eeNote; }
 
   private async call(method: string, path: string, body?: unknown): Promise<any> {
     const res = await this.fetchImpl(`${this.base}${API}${path}`, {
@@ -136,7 +165,22 @@ export class MatrixTransport implements Transport {
       throw new Error('Matrix sync returned no next_batch');
     }
     this.since = first.next_batch;
-    logger.info('matrix bot online', { user: this.userId });
+    if (this.e2ee) {
+      try {
+        const { openMatrixCrypto } = await import('./matrix-crypto.js');
+        this.crypto = await openMatrixCrypto({
+          userId: this.userId,
+          deviceId: process.env.MATRIX_DEVICE_ID,
+          send: (method, path, body) => this.call(method, path, body),
+        });
+        this.e2eeNote = this.crypto.note;
+        await this.crypto.ingest(first).catch(() => {});
+      } catch (e: any) {
+        this.e2eeNote = `matrix e2ee not loaded: ${e?.message ?? e}`;
+        logger.warn('matrix e2ee unavailable', { err: e?.message });
+      }
+    }
+    logger.info('matrix bot online', { user: this.userId, e2ee: this.e2eeNote || 'off' });
     this.running = true;
     void this.loop(onMessage);
   }
@@ -144,6 +188,7 @@ export class MatrixTransport implements Transport {
   async stop(): Promise<void> {
     this.running = false;
     this.ac.abort();
+    this.crypto?.close();
   }
 
   private async loop(onMessage: (m: Incoming) => void): Promise<void> {
@@ -151,7 +196,12 @@ export class MatrixTransport implements Transport {
       try {
         const page = await this.call('GET', `/sync?timeout=30000&since=${encodeURIComponent(this.since)}`);
         if (typeof page?.next_batch === 'string') this.since = page.next_batch;
+        if (this.crypto) await this.crypto.ingest(page).catch(() => {});
         for (const m of eventsFromSync(page, this.userId)) onMessage(m);
+        for (const enc of encryptedFromSync(page, this.userId)) {
+          const text = this.crypto ? await this.crypto.decrypt(enc.event, enc.roomId) : null;
+          if (text) onMessage({ platform: 'matrix', chatId: enc.roomId, userId: enc.sender, text });
+        }
       } catch (e: any) {
         if (!this.running || e?.name === 'AbortError') return;
         logger.warn('matrix sync error', { err: e?.message });

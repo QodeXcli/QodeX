@@ -123,7 +123,9 @@ export async function openBots(deps: StartBotsDeps, opts: StartBotsOptions = {})
       try {
         const { MatrixTransport, resolveMatrixBase } = await import('./adapters/matrix.js');
         const base = await resolveMatrixBase(homeserver);
-        transports.push(new MatrixTransport({ base, token }));
+        transports.push(new MatrixTransport({ base, token, e2ee: process.env.MATRIX_E2EE !== '0' }));
+        if (process.env.MATRIX_E2EE === '0') notes.push('matrix e2ee is off (MATRIX_E2EE=0)');
+        else notes.push('matrix e2ee loads when the bot starts. A missing key is not a message.');
       } catch (e: any) { notes.push(e?.message ?? 'matrix transport failed'); }
     }
   }
